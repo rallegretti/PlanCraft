@@ -108,3 +108,47 @@ pub fn overallocated_tasks(p: &Project, over: &HashSet<ResourceId>) -> HashSet<T
     }
     p.assignments.iter().filter(|a| over.contains(&a.resource)).map(|a| a.task).collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::columns::{TaskCol, commit};
+
+    fn demo() -> Project {
+        plancraft_core::sample::demo_project(chrono::NaiveDate::from_ymd_opt(2026, 10, 19).unwrap())
+    }
+
+    #[test]
+    fn collapse_and_filter_rows() {
+        let p = demo();
+        let mut st = UiState::default();
+        assert_eq!(visible_rows(&p, &st).len(), p.tasks.len());
+        let planning = p.tasks[0].id;
+        st.collapsed.insert(planning);
+        assert_eq!(visible_rows(&p, &st).len(), p.tasks.len() - 3);
+        st.collapsed.clear();
+        st.filter = TaskFilter::Milestones;
+        let rows = visible_rows(&p, &st);
+        // 4 milestones plus their 4 summary parents.
+        assert_eq!(rows.len(), 8);
+        assert!(rows.iter().all(|&i| p.tasks[i].is_milestone() || p.tasks[i].sched.is_summary));
+    }
+
+    #[test]
+    fn column_commits_follow_ms_project_rules() {
+        let mut p = demo();
+        let id = p.tasks[1].id;
+        commit(TaskCol::Duration, &mut p, id, "4d").unwrap();
+        assert_eq!(p.task(id).unwrap().duration, 4 * 480);
+        // Typing a start date on an auto task sets a Start No Earlier Than constraint.
+        commit(TaskCol::Start, &mut p, id, "2026-11-02").unwrap();
+        assert_eq!(p.task(id).unwrap().constraint.kind, ConstraintKind::Snet);
+        assert!(commit(TaskCol::Duration, &mut p, id, "abc").is_err());
+        assert!(commit(TaskCol::Name, &mut p, id, "  ").is_err());
+        // Row 3 already depends on this task, so linking back is rejected.
+        assert!(commit(TaskCol::Predecessors, &mut p, id, "3").is_err());
+        let event = p.tasks[16].id;
+        commit(TaskCol::Predecessors, &mut p, event, "14FS+1d").unwrap();
+        assert_eq!(p.format_predecessors(event), "14FS+1 day");
+    }
+}

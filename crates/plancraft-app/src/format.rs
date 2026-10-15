@@ -71,11 +71,18 @@ pub fn slack(p: &Project, m: Minutes) -> String {
     p.format_duration(m, false)
 }
 
-pub fn estimate_label(e: &Option<Estimate>) -> String {
-    match e {
-        None => String::new(),
-        Some(Estimate::Complexity { points }) => format!("{points} pts"),
-        Some(Estimate::ThreePoint { .. }) => "3-point".into(),
-        Some(Estimate::Work { minutes }) => format_work(*minutes),
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn units_and_money() {
+        assert_eq!(parse_units("50%"), Some(0.5));
+        assert_eq!(parse_units("150"), Some(1.5));
+        assert_eq!(parse_units("0.25"), Some(0.25));
+        assert_eq!(parse_money("$1,200.50"), Some(1200.5));
+        let p = Project::new("x", chrono::NaiveDate::from_ymd_opt(2026, 1, 5).unwrap());
+        assert_eq!(money(&p, 1234567.891), "$1,234,567.89");
+        assert_eq!(money(&p, -5.0), "-$5.00");
     }
 }

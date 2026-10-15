@@ -150,9 +150,6 @@ pub struct GridConfig<'a> {
 
 pub struct GridOutput {
     pub events: Vec<GridEvent>,
-    pub body_rect: Rect,
-    pub hovered_row: Option<usize>,
-    pub content_height: f32,
 }
 
 const ROW_NUM_W: f32 = 34.0;
@@ -293,7 +290,6 @@ pub fn show(
     let visible = (body.height() / cfg.row_height).ceil() as usize + 1;
     let last = (first + visible).min(total_rows);
     let pointer = ui.input(|i| i.pointer.hover_pos());
-    let mut hovered_row = None;
     let cell_font = FontId::proportional(13.0);
     let mut edit_rect: Option<(Rect, usize, usize)> = None;
 
@@ -301,9 +297,6 @@ pub fn show(
         let y = body.top() + row as f32 * cfg.row_height - state.scroll_y;
         let row_rect = Rect::from_min_size(pos2(body.left(), y), vec2(body.width(), cfg.row_height));
         let data_row = row < cfg.row_count;
-        if pointer.is_some_and(|p| row_rect.contains(p) && body.contains(p)) {
-            hovered_row = Some(row);
-        }
         let selected = data_row && is_selected(row);
         if selected {
             body_painter.rect_filled(row_rect, 0.0, theme::SELECTION);
@@ -487,12 +480,11 @@ pub fn show(
                 if let Some(p) = area.inner.inner {
                     edit.text = p;
                     finished = Some((true, None));
-                } else if ui.input(|i| i.key_pressed(Key::Escape)) {
-                    finished = Some((false, None));
-                } else if edit.started
-                    && ui.input(|i| i.pointer.any_pressed())
-                    && !area.response.contains_pointer()
-                    && !ui.rect_contains_pointer(r)
+                } else if ui.input(|i| i.key_pressed(Key::Escape))
+                    || (edit.started
+                        && ui.input(|i| i.pointer.any_pressed())
+                        && !area.response.contains_pointer()
+                        && !ui.rect_contains_pointer(r))
                 {
                     finished = Some((false, None));
                 }
@@ -547,22 +539,22 @@ pub fn show(
         // Edited row scrolled away: commit.
         finished = Some((true, None));
     }
-    if let Some((commit, mv)) = finished {
-        if let Some(e) = state.editing.take() {
-            if commit {
-                events.push(GridEvent::Commit { row: e.row, col: e.col, text: e.text.trim().to_string() });
-            }
-            if let Some((dr, dc)) = mv {
-                let nr = (e.row as isize + dr).clamp(0, total_rows.saturating_sub(1) as isize) as usize;
-                let nc = (e.col as isize + dc).clamp(0, ncols as isize - 1) as usize;
-                state.cursor = Some((nr, nc));
-                state.scroll_to = Some(nr);
-                if dr != 0 && nr < cfg.row_count {
-                    events.push(GridEvent::CursorRow { row: nr, shift: false });
-                }
-            }
-            body_resp.request_focus();
+    if let Some((commit, mv)) = finished
+        && let Some(e) = state.editing.take()
+    {
+        if commit {
+            events.push(GridEvent::Commit { row: e.row, col: e.col, text: e.text.trim().to_string() });
         }
+        if let Some((dr, dc)) = mv {
+            let nr = (e.row as isize + dr).clamp(0, total_rows.saturating_sub(1) as isize) as usize;
+            let nc = (e.col as isize + dc).clamp(0, ncols as isize - 1) as usize;
+            state.cursor = Some((nr, nc));
+            state.scroll_to = Some(nr);
+            if dr != 0 && nr < cfg.row_count {
+                events.push(GridEvent::CursorRow { row: nr, shift: false });
+            }
+        }
+        body_resp.request_focus();
     }
 
     // ---- Keyboard (grid focused, not editing) ----
@@ -659,5 +651,5 @@ pub fn show(
         );
     }
 
-    GridOutput { events, body_rect: body, hovered_row, content_height: content_h }
+    GridOutput { events }
 }

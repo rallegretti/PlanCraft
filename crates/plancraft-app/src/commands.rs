@@ -65,7 +65,6 @@ pub enum Command {
     ZoomOut,
     ZoomEntire,
     ZoomSelected,
-    ShowTimelinePane,
     Filter(TaskFilter),
     Table(TaskTable),
     CollapseAll,

@@ -48,10 +48,8 @@ impl PlanCraftApp {
     pub fn new(cc: &eframe::CreationContext<'_>, ws: SharedWorkspace) -> Self {
         theme::install(&cc.egui_ctx);
         let settings = AppSettings::load();
-        let mut st = UiState::default();
-        st.table_width = settings.table_width;
         let has_doc = ws.lock().map(|w| !w.docs.is_empty()).unwrap_or(false);
-        st.backstage = !has_doc;
+        let st = UiState { table_width: settings.table_width, backstage: !has_doc, ..UiState::default() };
         let mut app = Self {
             ws,
             st,
@@ -272,7 +270,6 @@ impl PlanCraftApp {
             Command::Filter(f) => self.st.filter = f,
             Command::Table(t) => self.st.table = t,
             Command::History => self.dialogs.history = !self.dialogs.history,
-            Command::ShowTimelinePane => self.st.timeline_visible = !self.st.timeline_visible,
             other => {
                 let ws = self.ws.clone();
                 let mut ws = ws.lock().unwrap();

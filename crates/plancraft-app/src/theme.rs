@@ -31,7 +31,6 @@ pub const BAR_SUMMARY: Color32 = Color32::from_rgb(0x33, 0x38, 0x45);
 pub const BAR_MANUAL: Color32 = Color32::from_rgb(0x9B, 0xBC, 0xEB);
 pub const BAR_BASELINE: Color32 = Color32::from_rgb(0xA9, 0xAE, 0xB8);
 pub const BAR_SLACK: Color32 = Color32::from_rgb(0x2C, 0x9C, 0x8F);
-pub const BAR_EXTERNAL: Color32 = Color32::from_rgb(0xB5, 0xB9, 0xC2);
 pub const MILESTONE: Color32 = Color32::from_rgb(0x1B, 0x3A, 0x8C);
 pub const LINK: Color32 = Color32::from_rgb(0x3C, 0x4A, 0x66);
 pub const TODAY: Color32 = Color32::from_rgb(0xE0, 0x7B, 0x00);

@@ -55,10 +55,6 @@ impl ViewKind {
         }
     }
 
-    pub fn is_task_view(self) -> bool {
-        matches!(self, ViewKind::Gantt | ViewKind::TrackingGantt | ViewKind::TaskUsage | ViewKind::Milestones | ViewKind::Calendar)
-    }
-
     pub const ALL: [ViewKind; 10] = [
         ViewKind::Gantt,
         ViewKind::TrackingGantt,

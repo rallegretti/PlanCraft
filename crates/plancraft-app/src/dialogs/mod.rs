@@ -20,17 +20,3 @@ pub struct Dialogs {
     pub history: bool,
     pub mcp: bool,
 }
-
-impl Dialogs {
-    pub fn any_open(&self) -> bool {
-        self.task_info.is_some()
-            || self.resource_info.is_some()
-            || self.project_info.is_some()
-            || self.working_time.is_some()
-            || self.assign.is_some()
-            || self.external.is_some()
-            || self.stats
-            || self.about
-            || self.mcp
-    }
-}

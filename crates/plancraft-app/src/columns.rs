@@ -69,10 +69,11 @@ pub enum TaskTable {
     Estimates,
     Variance,
     Summary,
+    Details,
 }
 
 impl TaskTable {
-    pub const ALL: [TaskTable; 8] = [
+    pub const ALL: [TaskTable; 9] = [
         TaskTable::Entry,
         TaskTable::Schedule,
         TaskTable::Tracking,
@@ -81,6 +82,7 @@ impl TaskTable {
         TaskTable::Estimates,
         TaskTable::Variance,
         TaskTable::Summary,
+        TaskTable::Details,
     ];
 
     pub fn label(self) -> &'static str {
@@ -93,6 +95,7 @@ impl TaskTable {
             TaskTable::Estimates => "Estimates",
             TaskTable::Variance => "Variance",
             TaskTable::Summary => "Summary",
+            TaskTable::Details => "Details",
         }
     }
 
@@ -123,6 +126,9 @@ impl TaskTable {
             }
             TaskTable::Variance => vec![Indicators, Name, Start, Finish, BaselineStart, BaselineFinish, StartVariance, FinishVariance],
             TaskTable::Summary => vec![Indicators, Wbs, Name, Duration, Start, Finish, PercentComplete, Cost, Work, Milestones],
+            TaskTable::Details => {
+                vec![Indicators, UniqueId, Name, TaskType, Priority, EarlyStart, EarlyFinish, Predecessors, Successors, Deliverable, Notes]
+            }
         }
     }
 }

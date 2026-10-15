@@ -14,10 +14,6 @@ use crate::logo;
 use crate::state::{Selection, ToastKind, UiState};
 use crate::theme;
 
-fn ok_button(ui: &mut egui::Ui, label: &str) -> bool {
-    ui.add(egui::Button::new(RichText::new(label).color(egui::Color32::WHITE)).fill(theme::ACCENT)).clicked()
-}
-
 // ---------------------------------------------------------------------------
 // Assign Resources
 // ---------------------------------------------------------------------------
@@ -413,8 +409,4 @@ pub fn config_dir() -> Option<PathBuf> {
         let h = PathBuf::from(h);
         if cfg!(target_os = "macos") { h.join("Library/Application Support/PlanCraft") } else { h.join(".config/plancraft") }
     })
-}
-
-pub fn ok(ui: &mut egui::Ui, label: &str) -> bool {
-    ok_button(ui, label)
 }

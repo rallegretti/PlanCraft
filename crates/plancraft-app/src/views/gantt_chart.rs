@@ -37,7 +37,6 @@ pub struct ChartInput<'a> {
 
 #[derive(Clone, Copy)]
 struct BarGeom {
-    row: usize,
     y: f32,
     x0: f32,
     x1: f32,
@@ -165,7 +164,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
             continue;
         };
         let y = body.top() + r as f32 * rh - *scroll_y + rh / 2.0;
-        geom.insert(t.id, BarGeom { row: r, y, x0: g.x_of(chart_left, s), x1: g.x_of(chart_left, f) });
+        geom.insert(t.id, BarGeom { y, x0: g.x_of(chart_left, s), x1: g.x_of(chart_left, f) });
     }
 
     // ---- Links ----
@@ -308,7 +307,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
                 theme::MILESTONE
             };
             diamond(&bp, pos2(x0, yc), 6.5, fill, Stroke::new(1.0, Color32::WHITE));
-            let label = format!("{}", t.sched.finish.map(|f| f.format("%-m/%-d").to_string()).unwrap_or_default());
+            let label = t.sched.finish.map(|f| f.format("%-m/%-d").to_string()).unwrap_or_default().to_string();
             bp.text(pos2(x0 + 10.0, yc), Align2::LEFT_CENTER, label, label_font.clone(), theme::TEXT);
             if t.deadline.is_some_and(|dl| t.sched.finish.is_some_and(|f| f > dl)) {
                 bp.text(pos2(x0 - 10.0, yc), Align2::RIGHT_CENTER, "⚠", label_font.clone(), theme::ERROR);
@@ -421,18 +420,18 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
         Some(_) => ui.ctx().set_cursor_icon(CursorIcon::Grab),
         None => {}
     }
-    if resp.drag_started() {
-        if let Some((tid, zone)) = hovered {
-            let t = p.task(tid).unwrap();
-            let grab_x = resp.interact_pointer_pos().map(|pp| pp.x).unwrap_or(0.0);
-            let start = t.sched.start.unwrap_or(p.start);
-            g.drag = Some(match zone {
-                "end" => BarDrag::Resize { task: tid },
-                "progress" => BarDrag::Progress { task: tid },
-                _ if t.sched.is_summary => BarDrag::Link { from: tid },
-                _ => BarDrag::Move { task: tid, grab_dx: grab_x - g.x_of(chart_left, start), origin_start: start },
-            });
-        }
+    if resp.drag_started()
+        && let Some((tid, zone)) = hovered
+    {
+        let t = p.task(tid).unwrap();
+        let grab_x = resp.interact_pointer_pos().map(|pp| pp.x).unwrap_or(0.0);
+        let start = t.sched.start.unwrap_or(p.start);
+        g.drag = Some(match zone {
+            "end" => BarDrag::Resize { task: tid },
+            "progress" => BarDrag::Progress { task: tid },
+            _ if t.sched.is_summary => BarDrag::Link { from: tid },
+            _ => BarDrag::Move { task: tid, grab_dx: grab_x - g.x_of(chart_left, start), origin_start: start },
+        });
     }
     let snap = |t: NaiveDateTime| -> NaiveDateTime {
         if g.px_per_day >= 72.0 {

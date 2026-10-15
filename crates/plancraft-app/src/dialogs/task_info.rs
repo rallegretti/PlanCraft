@@ -30,7 +30,6 @@ struct ResRow {
     resource: ResourceId,
     units: String,
     work: String,
-    existing: Option<AssignmentId>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -121,7 +120,7 @@ impl TaskInfo {
                 .collect(),
             resources: p
                 .assignments_for_task(id)
-                .map(|a| ResRow { resource: a.resource, units: format::units(a.units), work: format_work(a.work), existing: Some(a.id) })
+                .map(|a| ResRow { resource: a.resource, units: format::units(a.units), work: format_work(a.work) })
                 .collect(),
             constraint: t.constraint.kind,
             constraint_date: format::iso(t.constraint.date),
@@ -523,12 +522,11 @@ impl TaskInfo {
                         continue;
                     }
                     if ui.selectable_label(false, format!("{} ({})", r.name, r.category.label())).clicked() {
-                        self.resources.push(ResRow { resource: r.id, units: "100%".into(), work: String::new(), existing: None });
+                        self.resources.push(ResRow { resource: r.id, units: "100%".into(), work: String::new() });
                     }
                 }
             });
         });
-        let _ = self.resources.iter().map(|r| r.existing).count();
         ui.label(
             RichText::new("Leave Work empty to derive it from the duration (or the estimate for a first assignment).")
                 .small()

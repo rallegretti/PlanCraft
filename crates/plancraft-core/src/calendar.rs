@@ -219,7 +219,7 @@ impl Calendar {
     }
 }
 
-fn exception_ranges<'a>(exceptions: &'a [CalendarException], d: NaiveDate) -> Option<&'a [TimeRange]> {
+fn exception_ranges(exceptions: &[CalendarException], d: NaiveDate) -> Option<&[TimeRange]> {
     // Later exceptions win, so users can override an earlier broad exception.
     exceptions.iter().rev().find(|e| e.covers(d)).map(|e| e.working.as_slice())
 }
