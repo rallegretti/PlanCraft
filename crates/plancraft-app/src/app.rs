@@ -86,7 +86,8 @@ impl PlanCraftApp {
     // ------------------------------------------------------------------
 
     fn shortcuts(&mut self, ctx: &egui::Context, out: &mut Vec<Command>) {
-        let typing = ctx.egui_wants_keyboard_input();
+        // Only a focused text field should swallow shortcuts (the task grid holds focus too).
+        let typing = ctx.text_edit_focused();
         let cmd = Modifiers::COMMAND;
         let map: Vec<(KeyboardShortcut, Command, bool)> = vec![
             (KeyboardShortcut::new(cmd, Key::N), Command::NewProject, true),
@@ -1159,5 +1160,109 @@ impl eframe::App for PlanCraftApp {
             self.exec(&ctx, c);
         }
         let _ = NaiveDate::MIN;
+    }
+}
+
+#[cfg(test)]
+mod ui_tests {
+    use super::*;
+    use egui_kittest::Harness;
+
+    fn harness() -> Harness<'static, PlanCraftApp> {
+        let mut ws = Workspace::default();
+        ws.add(plancraft_core::sample::demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+        let shared = ws.shared();
+        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).build_eframe(move |cc| PlanCraftApp::new(cc, shared));
+        h.run_steps(3);
+        h
+    }
+
+    fn focus_task_grid(h: &mut Harness<'static, PlanCraftApp>) {
+        let id = egui::Id::new(("task_grid", "Entry")).with("body");
+        h.ctx.memory_mut(|m| m.request_focus(id));
+        h.run_steps(2);
+    }
+
+    fn tasks(h: &Harness<'static, PlanCraftApp>) -> Vec<String> {
+        let ws = h.state().ws.lock().unwrap();
+        ws.active_doc().unwrap().project.tasks.iter().map(|t| t.name.clone()).collect()
+    }
+
+    #[test]
+    fn typing_into_blank_row_creates_task_and_undo_removes_it() {
+        let mut h = harness();
+        let n = tasks(&h).len();
+        // Put the cursor on the first blank row, Task Name column, and type.
+        h.state_mut().st.task_grid.cursor = Some((n, 2));
+        focus_task_grid(&mut h);
+        h.event(egui::Event::Text("Write release notes".into()));
+        h.run_steps(2);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(3);
+        let names = tasks(&h);
+        assert_eq!(names.len(), n + 1, "{names:?}");
+        assert_eq!(names.last().unwrap(), "Write release notes");
+
+        h.key_press_modifiers(Modifiers::COMMAND, egui::Key::Z);
+        h.run_steps(3);
+        assert_eq!(tasks(&h).len(), n);
+    }
+
+    #[test]
+    fn insert_key_adds_task_and_edits_its_name() {
+        let mut h = harness();
+        let n = tasks(&h).len();
+        let target = { h.state().ws.lock().unwrap().active_doc().unwrap().project.tasks[2].id };
+        h.state_mut().st.sel.select_task(target);
+        h.state_mut().st.task_grid.cursor = Some((2, 2));
+        focus_task_grid(&mut h);
+        h.key_press(egui::Key::Insert);
+        h.run_steps(3);
+        h.event(egui::Event::Text("Inserted step".into()));
+        h.run_steps(2);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(3);
+        let names = tasks(&h);
+        assert_eq!(names.len(), n + 1);
+        assert_eq!(names[2], "Inserted step", "{names:?}");
+    }
+
+    #[test]
+    fn outline_and_link_shortcuts_work_while_grid_has_focus() {
+        let mut h = harness();
+        // Rows 17 and 18 ("Launch event", "Product live") under the Launch summary.
+        let (a, b, level) = {
+            let ws = h.state().ws.lock().unwrap();
+            let p = &ws.active_doc().unwrap().project;
+            (p.tasks[15].id, p.tasks[16].id, p.tasks[16].outline_level)
+        };
+        h.state_mut().st.sel.select_task(b);
+        focus_task_grid(&mut h);
+        h.key_press_modifiers(Modifiers::ALT | Modifiers::SHIFT, egui::Key::ArrowRight);
+        h.run_steps(3);
+        {
+            let ws = h.state().ws.lock().unwrap();
+            assert_eq!(ws.active_doc().unwrap().project.task(b).unwrap().outline_level, level + 1);
+        }
+        h.key_press_modifiers(Modifiers::ALT | Modifiers::SHIFT, egui::Key::ArrowLeft);
+        h.run_steps(3);
+        h.state_mut().st.sel.tasks = [a, b].into_iter().collect();
+        h.key_press_modifiers(Modifiers::COMMAND, egui::Key::F2);
+        h.run_steps(3);
+        let ws = h.state().ws.lock().unwrap();
+        let p = &ws.active_doc().unwrap().project;
+        assert_eq!(p.task(b).unwrap().outline_level, level);
+        assert!(p.task(b).unwrap().predecessors.iter().any(|d| d.predecessor == plancraft_core::model::TaskRef::Local(a)));
+    }
+
+    #[test]
+    fn every_view_renders() {
+        let mut h = harness();
+        for v in ViewKind::ALL {
+            h.state_mut().st.view = v;
+            h.run_steps(2);
+        }
+        h.state_mut().st.backstage = true;
+        h.run_steps(2);
     }
 }
