@@ -14,7 +14,7 @@ use crate::backstage;
 use crate::commands::Command;
 use crate::dialogs::{self, Dialogs};
 use crate::mcp_host::McpHost;
-use crate::ribbon::{self, RibbonInfo};
+use crate::menubar::{self, MenuInfo};
 use crate::settings::AppSettings;
 use crate::state::{ToastKind, UiState, ViewKind};
 use crate::theme;
@@ -65,6 +65,11 @@ impl PlanCraftApp {
             shot: std::env::var_os("PLANCRAFT_SCREENSHOT").map(|p| (PathBuf::from(p), 0)),
             last_active: None,
         };
+        if let Ok(v) = std::env::var("PLANCRAFT_TAB")
+            && let Some(tab) = crate::state::MenuTab::ALL.into_iter().find(|t| t.label().eq_ignore_ascii_case(&v))
+        {
+            app.st.menu_tab = tab;
+        }
         if let Ok(v) = std::env::var("PLANCRAFT_VIEW") {
             let key = v.to_lowercase().replace([' ', '_', '-'], "");
             if let Some(view) = ViewKind::ALL.into_iter().find(|k| k.label().to_lowercase().replace(' ', "") == key) {
@@ -258,6 +263,10 @@ impl PlanCraftApp {
                 }
             }
             Command::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Command::StartPage => {
+                self.backstage_page = backstage::Page::Home;
+                self.st.backstage = true;
+            }
             Command::ExportCsv => self.export_csv(),
             Command::McpPanel => {
                 self.dialogs.mcp = true;
@@ -594,9 +603,7 @@ impl PlanCraftApp {
                 }
             }
             Command::ClearLeveling => doc.edit("Clear Leveling", clear_leveling),
-            Command::ProjectInfo | Command::Options => {
-                self.dialogs.project_info = Some(dialogs::project_info::ProjectInfo::new(&doc.project))
-            }
+            Command::ProjectInfo => self.dialogs.project_info = Some(dialogs::project_info::ProjectInfo::new(&doc.project)),
             Command::ChangeWorkingTime => self.dialogs.working_time = Some(dialogs::working_time::WorkingTime::new(&doc.project)),
             Command::SetBaseline => {
                 doc.edit("Set Baseline", |p| p.set_baseline(&[]));
@@ -652,9 +659,9 @@ impl PlanCraftApp {
     // Layout pieces
     // ------------------------------------------------------------------
 
-    fn ribbon_info(&self, ws: &Workspace) -> RibbonInfo {
+    fn menu_info(&self, ws: &Workspace) -> MenuInfo {
         let doc = ws.active_doc();
-        RibbonInfo {
+        MenuInfo {
             has_doc: doc.is_some(),
             title: doc.map(|d| d.title()).unwrap_or_default(),
             can_undo: doc.is_some_and(|d| d.can_undo()),
@@ -919,6 +926,14 @@ impl PlanCraftApp {
                         self.st.gantt.show_critical = true;
                         continue;
                     }
+                    "FileMenu" => {
+                        egui::Popup::open_id(ctx, egui::Id::new("tab_file").with("popup"));
+                        continue;
+                    }
+                    "ViewMenu" => {
+                        egui::Popup::open_id(ctx, egui::Id::new("view_selector").with("popup"));
+                        continue;
+                    }
                     "Backstage" => {
                         self.st.backstage = true;
                         continue;
@@ -1031,7 +1046,7 @@ impl eframe::App for PlanCraftApp {
             self.last_title = title;
         }
 
-        let info = self.ribbon_info(&ws);
+        let info = self.menu_info(&ws);
         let backstage_open = self.st.backstage;
 
         if backstage_open {
@@ -1051,16 +1066,8 @@ impl eframe::App for PlanCraftApp {
             });
         } else {
             egui::Panel::top("title").frame(egui::Frame::new().fill(theme::BG)).show(ui, |ui| {
-                ribbon::title_bar(ui, &info, &mut out);
-                ribbon::tabs(ui, &mut self.st, &info, &mut out);
-                if !self.st.ribbon_collapsed {
-                    egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin { left: 4, right: 4, top: 4, bottom: 2 }).show(ui, |ui| {
-                        ui.set_min_width(ui.available_width());
-                        ribbon::body(ui, &mut self.st, &info, &mut out);
-                    });
-                    let r = ui.max_rect();
-                    ui.painter().hline(r.x_range(), ui.cursor().top(), Stroke::new(1.0, theme::GRID_LINE_STRONG));
-                }
+                menubar::title_bar(ui, &info, &mut out);
+                menubar::command_bar(ui, &mut self.st, &info, &self.settings, &mut out);
                 self.doc_tabs(ui, &mut ws, &mut out);
             });
             egui::Panel::bottom("status")

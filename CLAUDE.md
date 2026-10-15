@@ -8,3 +8,4 @@
 - egui 0.36: `App::ui(&mut self, ui, frame)`, `egui::Panel::top/bottom`, `Popup::menu`, `zoom_delta()` for Ctrl+wheel. Many emoji glyphs are missing from the default fonts; check new icon glyphs visually.
 - Test: `cargo test --workspace`. Visual check: `PLANCRAFT_VIEW="Gantt Chart" PLANCRAFT_CMD=TaskInfo PLANCRAFT_SCREENSHOT=out.png cargo run -p plancraft-app -- --demo` writes a PNG and exits.
 - Formatting: `cargo fmt --all` (rustfmt.toml: max_width 140).
+- UI chrome: a two-row command bar (`menubar.rs`): plain tabs plus one compact toolbar row, with the view selector spanning both rows. Do NOT reintroduce a Microsoft-Ribbon-style UI (large icon buttons, stacked small buttons, group captions under button groups); the owner explicitly wants to avoid resembling the Ribbon.

@@ -50,8 +50,11 @@
 PlanCraft follows the layout of a familiar desktop scheduler without copying it:
 
 - a deep-blue title band with quick-access save, undo and redo
-- a **File** backstage for New, Open, Recent, Save and Export
-- ribbon tabs: **Task**, **Resource**, **Report**, **Project**, **View** and **Format**
+- a two-row command bar:
+  - a **view selector** on the left that spans both rows
+  - plain tabs: a **File** menu, then **Task**, **Resource**, **Project**, **Report**, **View** and **Format**
+  - one compact toolbar row of icon-and-label buttons for the active tab
+- a **Start Page** for New, Open and Recent
 - a **Timeline** strip, a vertical view label, and a split **task sheet + Gantt chart**
 - a status bar with view shortcuts and a zoom slider
 
@@ -138,7 +141,7 @@ Agents get tools for:
 crates/
   plancraft-core/   model, calendars, CPM scheduler, workload, leveling, reports, file I/O, undo workspace
   plancraft-mcp/    MCP server: JSON-RPC 2.0 over stdio and Streamable HTTP (tiny_http), 67 tools
-  plancraft-app/    desktop app (egui/eframe): ribbon, views, dialogs, live MCP host
+  plancraft-app/    desktop app (egui/eframe): command bar, views, dialogs, live MCP host
 docs/               architecture, MCP reference, roadmap, screenshots
 assets/             logo (SVG) and icon (PNG)
 ```

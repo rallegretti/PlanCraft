@@ -11,7 +11,7 @@
 - **Cross-file dependencies:** links to tasks in other documents, with cached snapshots and refresh
 - **Workload:** estimates (complexity points, three-point PERT and work), time-phased workload, overallocation detection and resource leveling
 - **Tracking:** time entries, the weekly timesheet, progress from tracked time, baselines, variance and earned value
-- **Desktop app:** ribbon UI, ten views, the major dialogs, undo/redo with history, multiple open documents, CSV export
+- **Desktop app:** two-row command bar, ten views, the major dialogs, undo/redo with history, multiple open documents, CSV export
 - **MCP server:** 67 tools, resources and prompts over stdio and Streamable HTTP. A live mode works inside the running app, and the app binary has a headless `plancraft mcp` mode.
 
 ## Next
@@ -31,5 +31,5 @@
   - `notifications/resources/updated` subscriptions
   - an optional bearer token for the HTTP server
   - per-tool read-only mode
-- **Theming:** a dark theme and high-contrast mode, keyboard-only navigation of the ribbon, and accessibility labels.
+- **Theming:** a dark theme and high-contrast mode, keyboard-only navigation of the menu bar and toolbar, and accessibility labels.
 - **Packaging:** release builds for Linux, Windows and macOS, a `.plancraft` file association, and app icons in all sizes.

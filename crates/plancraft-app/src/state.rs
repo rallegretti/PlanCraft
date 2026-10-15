@@ -70,7 +70,7 @@ impl ViewKind {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RibbonTab {
+pub enum MenuTab {
     Task,
     Resource,
     Report,
@@ -79,17 +79,16 @@ pub enum RibbonTab {
     Format,
 }
 
-impl RibbonTab {
-    pub const ALL: [RibbonTab; 6] =
-        [RibbonTab::Task, RibbonTab::Resource, RibbonTab::Report, RibbonTab::Project, RibbonTab::View, RibbonTab::Format];
+impl MenuTab {
+    pub const ALL: [MenuTab; 6] = [MenuTab::Task, MenuTab::Resource, MenuTab::Project, MenuTab::Report, MenuTab::View, MenuTab::Format];
     pub fn label(self) -> &'static str {
         match self {
-            RibbonTab::Task => "Task",
-            RibbonTab::Resource => "Resource",
-            RibbonTab::Report => "Report",
-            RibbonTab::Project => "Project",
-            RibbonTab::View => "View",
-            RibbonTab::Format => "Format",
+            MenuTab::Task => "Task",
+            MenuTab::Resource => "Resource",
+            MenuTab::Report => "Report",
+            MenuTab::Project => "Project",
+            MenuTab::View => "View",
+            MenuTab::Format => "Format",
         }
     }
 }
@@ -258,8 +257,7 @@ impl Selection {
 
 pub struct UiState {
     pub view: ViewKind,
-    pub ribbon_tab: RibbonTab,
-    pub ribbon_collapsed: bool,
+    pub menu_tab: MenuTab,
     pub backstage: bool,
     pub sel: Selection,
     pub task_grid: GridState,
@@ -290,8 +288,7 @@ impl Default for UiState {
         let monday = today - Duration::days(today.weekday().num_days_from_monday() as i64);
         Self {
             view: ViewKind::Gantt,
-            ribbon_tab: RibbonTab::Task,
-            ribbon_collapsed: false,
+            menu_tab: MenuTab::Task,
             backstage: false,
             sel: Selection::default(),
             task_grid: GridState::default(),

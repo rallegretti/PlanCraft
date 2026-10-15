@@ -104,9 +104,10 @@ The MCP server is a hand-rolled JSON-RPC 2.0 server. It has no async runtime, wh
 
 The desktop app uses egui and eframe 0.36 with the wgpu renderer.
 
-- **`app`:** layout (title band, tabs, ribbon, document tabs, status bar, vertical view label), keyboard shortcuts, command execution, dialogs, the unsaved-changes prompt, and agent-change detection.
-- **`ribbon`, `backstage`:** command surfaces.
-- **`commands`:** the `Command` enum shared by the ribbon, menus and shortcuts.
+- **`app`:** layout (title band, command bar, document tabs, status bar, vertical view label), keyboard shortcuts, command execution, dialogs, the unsaved-changes prompt, and agent-change detection.
+- **`menubar`:** the title band and the two-row command bar (a view selector spanning both rows, plain tabs with a File dropdown, and a single toolbar row).
+- **`backstage`:** the Start Page (New, Open, Recent, Info).
+- **`commands`:** the `Command` enum shared by the menu bar, toolbar, context menus and shortcuts.
 - **`widgets::grid`:** a virtualized spreadsheet grid with in-place text and choice editors, column resizing, keyboard navigation, and blank rows for entering new items.
 - **`widgets::timescale`:** the two-tier timescale.
 - **`views/*`:** the ten views. The Gantt view combines the task grid with `gantt_chart`, which draws bars, links, milestone connectors and baselines and handles drag-to-move, resize, progress and link.

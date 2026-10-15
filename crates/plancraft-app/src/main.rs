@@ -13,7 +13,7 @@ mod dialogs;
 mod format;
 mod logo;
 mod mcp_host;
-mod ribbon;
+mod menubar;
 mod settings;
 mod state;
 mod theme;

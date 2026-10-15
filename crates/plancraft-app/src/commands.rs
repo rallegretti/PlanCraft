@@ -1,4 +1,4 @@
-//! User commands issued from the ribbon, menus, keyboard shortcuts and views.
+//! User commands issued from the menu bar, toolbar, menus, keyboard shortcuts and views.
 
 use plancraft_core::model::ScheduleMode;
 
@@ -19,6 +19,7 @@ pub enum Command {
     Redo,
     ExportCsv,
     Quit,
+    StartPage,
     // Tasks
     InsertTask,
     InsertMilestone,
@@ -57,7 +58,6 @@ pub enum Command {
     ExternalLinks,
     RefreshExternal,
     Statistics,
-    Options,
     McpPanel,
     // View
     SetView(ViewKind),
