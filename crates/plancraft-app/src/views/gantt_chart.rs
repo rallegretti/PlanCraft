@@ -246,6 +246,27 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
         }
     }
 
+    // Milestone membership: dashed connectors from member tasks to their milestone.
+    if g.show_links {
+        let stroke = Stroke::new(1.0, Color32::from_rgb(0xC8, 0x96, 0x1E));
+        for &idx in input.rows {
+            let t = &p.tasks[idx];
+            if !t.is_milestone() || t.members.is_empty() {
+                continue;
+            }
+            let Some(mg) = geom.get(&t.id).copied() else { continue };
+            for m in &t.members {
+                let Some(gm) = m.local().and_then(|id| geom.get(&id)).copied() else { continue };
+                if (gm.y < body.top() && mg.y < body.top()) || (gm.y > body.bottom() && mg.y > body.bottom()) {
+                    continue;
+                }
+                let xm = mg.x0.max(gm.x1 + 4.0);
+                let pts = [pos2(gm.x1, gm.y), pos2(xm, gm.y), pos2(xm, mg.y + if mg.y > gm.y { -7.0 } else { 7.0 })];
+                bp.extend(Shape::dashed_line(&pts, stroke, 3.0, 3.0));
+            }
+        }
+    }
+
     // ---- Bars ----
     let label_font = FontId::proportional(11.5);
     let mut hovered: Option<(TaskId, &'static str)> = None;
