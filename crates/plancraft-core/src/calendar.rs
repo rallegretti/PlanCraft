@@ -30,7 +30,10 @@ impl TimeRange {
         Self { start, end }
     }
     pub const fn hours(start_h: u32, end_h: u32) -> Self {
-        Self { start: start_h * 60, end: end_h * 60 }
+        Self {
+            start: start_h * 60,
+            end: end_h * 60,
+        }
     }
     pub fn len(&self) -> u32 {
         self.end.saturating_sub(self.start)
@@ -77,7 +80,9 @@ impl Serialize for TimeRange {
 impl<'de> Deserialize<'de> for TimeRange {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         let s = String::deserialize(d)?;
-        TimeRange::parse(&s).ok_or_else(|| serde::de::Error::custom(format!("invalid time range '{s}', expected HH:MM-HH:MM")))
+        TimeRange::parse(&s).ok_or_else(|| {
+            serde::de::Error::custom(format!("invalid time range '{s}', expected HH:MM-HH:MM"))
+        })
     }
 }
 
@@ -148,7 +153,12 @@ impl WorkWeek {
     pub fn weekly_minutes(&self) -> Minutes {
         WEEKDAYS
             .iter()
-            .map(|wd| self.day(*wd).iter().map(|r| r.len() as Minutes).sum::<Minutes>())
+            .map(|wd| {
+                self.day(*wd)
+                    .iter()
+                    .map(|r| r.len() as Minutes)
+                    .sum::<Minutes>()
+            })
             .sum()
     }
 }
@@ -181,7 +191,13 @@ pub struct CalendarException {
 
 impl CalendarException {
     pub fn non_working(name: impl Into<String>, start: NaiveDate, end: NaiveDate) -> Self {
-        Self { name: name.into(), start, end, working: Vec::new(), yearly: false }
+        Self {
+            name: name.into(),
+            start,
+            end,
+            working: Vec::new(),
+            yearly: false,
+        }
     }
 
     pub fn covers(&self, d: NaiveDate) -> bool {
@@ -190,7 +206,11 @@ impl CalendarException {
         }
         let key = |x: NaiveDate| (x.month(), x.day());
         let (s, e, k) = (key(self.start), key(self.end), key(d));
-        if s <= e { k >= s && k <= e } else { k >= s || k <= e }
+        if s <= e {
+            k >= s && k <= e
+        } else {
+            k >= s || k <= e
+        }
     }
 }
 
@@ -218,7 +238,12 @@ impl Calendar {
     /// Every day, around the clock.
     pub fn twenty_four_hours(id: CalendarId) -> Self {
         let all = [TimeRange::new(0, 1440)];
-        Self { id, name: "24 Hours".into(), week: WorkWeek::uniform(&all, &all), exceptions: Vec::new() }
+        Self {
+            id,
+            name: "24 Hours".into(),
+            week: WorkWeek::uniform(&all, &all),
+            exceptions: Vec::new(),
+        }
     }
 
     /// Monday–Friday night shift, 23:00–08:00 with a break at 03:00.
@@ -233,13 +258,25 @@ impl Calendar {
             *week.day_mut(wd) = v;
         }
         week.saturday = night_end.to_vec();
-        Self { id, name: "Night Shift".into(), week, exceptions: Vec::new() }
+        Self {
+            id,
+            name: "Night Shift".into(),
+            week,
+            exceptions: Vec::new(),
+        }
     }
 }
 
-fn exception_ranges<'a>(exceptions: &'a [CalendarException], d: NaiveDate) -> Option<&'a [TimeRange]> {
+fn exception_ranges<'a>(
+    exceptions: &'a [CalendarException],
+    d: NaiveDate,
+) -> Option<&'a [TimeRange]> {
     // Later exceptions win, so users can override an earlier broad exception.
-    exceptions.iter().rev().find(|e| e.covers(d)).map(|e| e.working.as_slice())
+    exceptions
+        .iter()
+        .rev()
+        .find(|e| e.covers(d))
+        .map(|e| e.working.as_slice())
 }
 
 /// One layer of working time: a base calendar plus personal exceptions.
@@ -296,7 +333,9 @@ fn minute_of_day(dt: NaiveDateTime) -> u32 {
 
 impl<'a> WorkCal<'a> {
     pub fn single(calendar: &'a Calendar) -> Self {
-        Self { layers: vec![CalLayer::new(calendar, &[])] }
+        Self {
+            layers: vec![CalLayer::new(calendar, &[])],
+        }
     }
 
     pub fn from_layers(layers: Vec<CalLayer<'a>>) -> Self {
@@ -384,7 +423,11 @@ impl<'a> WorkCal<'a> {
     /// Placement of a zero-length event: kept at the end of a working range, otherwise snapped forward.
     pub fn snap_event(&self, dt: NaiveDateTime) -> NaiveDateTime {
         let m = minute_of_day(dt);
-        let (d, m) = if m == 0 { (dt.date().pred_opt().unwrap_or(dt.date()), 1440) } else { (dt.date(), m) };
+        let (d, m) = if m == 0 {
+            (dt.date().pred_opt().unwrap_or(dt.date()), 1440)
+        } else {
+            (dt.date(), m)
+        };
         if self.ranges(d).iter().any(|r| r.end == m) {
             return dt;
         }
@@ -499,7 +542,12 @@ impl<'a> WorkCal<'a> {
     }
 
     /// Working minutes on day `d` that fall inside `[a, b)`.
-    pub fn working_minutes_within(&self, d: NaiveDate, a: NaiveDateTime, b: NaiveDateTime) -> Minutes {
+    pub fn working_minutes_within(
+        &self,
+        d: NaiveDate,
+        a: NaiveDateTime,
+        b: NaiveDateTime,
+    ) -> Minutes {
         let day_start = at(d, 0);
         let day_end = day_start + Duration::days(1);
         let lo = a.max(day_start);
@@ -513,7 +561,10 @@ mod tests {
     use super::*;
 
     fn dt(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> NaiveDateTime {
-        NaiveDate::from_ymd_opt(y, mo, d).unwrap().and_hms_opt(h, mi, 0).unwrap()
+        NaiveDate::from_ymd_opt(y, mo, d)
+            .unwrap()
+            .and_hms_opt(h, mi, 0)
+            .unwrap()
     }
 
     #[test]
@@ -532,31 +583,56 @@ mod tests {
         // Monday 2026-10-19 08:00 + 1 day = Monday 17:00
         assert_eq!(wc.add(dt(2026, 10, 19, 8, 0), 480), dt(2026, 10, 19, 17, 0));
         // Friday 13:00 + 1 day crosses the weekend: Monday 12:00
-        assert_eq!(wc.add(dt(2026, 10, 23, 13, 0), 480), dt(2026, 10, 26, 12, 0));
+        assert_eq!(
+            wc.add(dt(2026, 10, 23, 13, 0), 480),
+            dt(2026, 10, 26, 12, 0)
+        );
         // Start snapping from 17:00 Friday to Monday 08:00
-        assert_eq!(wc.snap_forward(dt(2026, 10, 23, 17, 0)), dt(2026, 10, 26, 8, 0));
+        assert_eq!(
+            wc.snap_forward(dt(2026, 10, 23, 17, 0)),
+            dt(2026, 10, 26, 8, 0)
+        );
         // Backward: Monday 17:00 - 1 day = Monday 08:00
         assert_eq!(wc.sub(dt(2026, 10, 19, 17, 0), 480), dt(2026, 10, 19, 8, 0));
         // Monday 08:00 snapped backward is Friday 17:00
-        assert_eq!(wc.snap_backward(dt(2026, 10, 26, 8, 0)), dt(2026, 10, 23, 17, 0));
-        assert_eq!(wc.between(dt(2026, 10, 19, 8, 0), dt(2026, 10, 23, 17, 0)), 5 * 480);
-        assert_eq!(wc.between(dt(2026, 10, 23, 17, 0), dt(2026, 10, 19, 8, 0)), -5 * 480);
-        assert_eq!(wc.snap_event(dt(2026, 10, 19, 17, 0)), dt(2026, 10, 19, 17, 0));
+        assert_eq!(
+            wc.snap_backward(dt(2026, 10, 26, 8, 0)),
+            dt(2026, 10, 23, 17, 0)
+        );
+        assert_eq!(
+            wc.between(dt(2026, 10, 19, 8, 0), dt(2026, 10, 23, 17, 0)),
+            5 * 480
+        );
+        assert_eq!(
+            wc.between(dt(2026, 10, 23, 17, 0), dt(2026, 10, 19, 8, 0)),
+            -5 * 480
+        );
+        assert_eq!(
+            wc.snap_event(dt(2026, 10, 19, 17, 0)),
+            dt(2026, 10, 19, 17, 0)
+        );
     }
 
     #[test]
     fn exceptions_and_layers() {
         let mut cal = Calendar::standard(CalendarId(1));
         let wed = NaiveDate::from_ymd_opt(2026, 10, 21).unwrap();
-        cal.exceptions.push(CalendarException::non_working("Holiday", wed, wed));
+        cal.exceptions
+            .push(CalendarException::non_working("Holiday", wed, wed));
         let wc = WorkCal::single(&cal);
         // Tue 08:00 + 2 days skips Wednesday
         assert_eq!(wc.add(dt(2026, 10, 20, 8, 0), 960), dt(2026, 10, 22, 17, 0));
 
         let thu = NaiveDate::from_ymd_opt(2026, 10, 22).unwrap();
         let vacation = [CalendarException::non_working("Vacation", thu, thu)];
-        let both = WorkCal::from_layers(vec![CalLayer::new(&cal, &[]), CalLayer::new(&cal, &vacation)]);
-        assert_eq!(both.add(dt(2026, 10, 20, 8, 0), 960), dt(2026, 10, 23, 17, 0));
+        let both = WorkCal::from_layers(vec![
+            CalLayer::new(&cal, &[]),
+            CalLayer::new(&cal, &vacation),
+        ]);
+        assert_eq!(
+            both.add(dt(2026, 10, 20, 8, 0), 960),
+            dt(2026, 10, 23, 17, 0)
+        );
 
         let xmas = CalendarException {
             name: "Christmas".into(),

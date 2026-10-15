@@ -52,11 +52,15 @@ fn link_types_and_lags() {
     let sf = task(&mut p, "SF", 1);
     let lead = task(&mut p, "FS-1d", 2);
     let pct = task(&mut p, "FS+40%", 1);
-    p.link(a.into(), ss, LinkType::SS, Lag::Working(2 * DAY)).unwrap();
+    p.link(a.into(), ss, LinkType::SS, Lag::Working(2 * DAY))
+        .unwrap();
     p.link(a.into(), ff, LinkType::FF, Lag::None).unwrap();
-    p.link(a.into(), sf, LinkType::SF, Lag::Working(2 * DAY)).unwrap();
-    p.link(a.into(), lead, LinkType::FS, Lag::Working(-DAY)).unwrap();
-    p.link(a.into(), pct, LinkType::FS, Lag::Percent(40)).unwrap();
+    p.link(a.into(), sf, LinkType::SF, Lag::Working(2 * DAY))
+        .unwrap();
+    p.link(a.into(), lead, LinkType::FS, Lag::Working(-DAY))
+        .unwrap();
+    p.link(a.into(), pct, LinkType::FS, Lag::Percent(40))
+        .unwrap();
     recalculate(&mut p);
     // A: Mon 19 -> Fri 23
     assert_eq!(start(&p, ss), dt(2026, 10, 21, 8));
@@ -74,7 +78,8 @@ fn elapsed_lag_ignores_calendar() {
     let mut p = project();
     let a = task(&mut p, "A", 5); // finishes Fri 23 17:00
     let b = task(&mut p, "B", 1);
-    p.link(a.into(), b, LinkType::FS, Lag::Elapsed(2 * 24 * 60)).unwrap(); // Sun 17:00
+    p.link(a.into(), b, LinkType::FS, Lag::Elapsed(2 * 24 * 60))
+        .unwrap(); // Sun 17:00
     recalculate(&mut p);
     assert_eq!(start(&p, b), dt(2026, 10, 26, 8));
 }
@@ -94,7 +99,10 @@ fn milestones_and_members() {
     recalculate(&mut p);
     assert_eq!(start(&p, c), dt(2026, 10, 23, 8));
     // Members can't create cycles.
-    assert_eq!(p.add_milestone_members(m, &[c.into()]), Err(PlanError::CircularDependency));
+    assert_eq!(
+        p.add_milestone_members(m, &[c.into()]),
+        Err(PlanError::CircularDependency)
+    );
 }
 
 #[test]
@@ -118,7 +126,10 @@ fn summaries_roll_up_and_pass_links_to_children() {
     assert_eq!(p.task(s1).unwrap().sched.duration, 3 * DAY);
     assert_eq!(p.wbs(p.task_index(c).unwrap()), "2.1");
     // Linking a task to its own summary is rejected.
-    assert_eq!(p.link(s1.into(), a, LinkType::FS, Lag::None), Err(PlanError::SelfLink));
+    assert_eq!(
+        p.link(s1.into(), a, LinkType::FS, Lag::None),
+        Err(PlanError::SelfLink)
+    );
 }
 
 #[test]
@@ -127,7 +138,10 @@ fn cycles_are_rejected_and_reported() {
     let a = task(&mut p, "A", 1);
     let b = task(&mut p, "B", 1);
     p.link(a.into(), b, LinkType::FS, Lag::None).unwrap();
-    assert_eq!(p.link(b.into(), a, LinkType::FS, Lag::None), Err(PlanError::CircularDependency));
+    assert_eq!(
+        p.link(b.into(), a, LinkType::FS, Lag::None),
+        Err(PlanError::CircularDependency)
+    );
     // Force a cycle through the raw model and make sure scheduling terminates with a warning.
     p.task_mut(a).unwrap().predecessors.push(Dependency::fs(b));
     let report = recalculate(&mut p);
@@ -138,9 +152,15 @@ fn cycles_are_rejected_and_reported() {
 fn constraints() {
     let mut p = project();
     let a = task(&mut p, "SNET", 2);
-    p.task_mut(a).unwrap().constraint = Constraint { kind: ConstraintKind::Snet, date: Some(dt(2026, 10, 21, 8)) };
+    p.task_mut(a).unwrap().constraint = Constraint {
+        kind: ConstraintKind::Snet,
+        date: Some(dt(2026, 10, 21, 8)),
+    };
     let b = task(&mut p, "MFO", 2);
-    p.task_mut(b).unwrap().constraint = Constraint { kind: ConstraintKind::Mfo, date: Some(dt(2026, 10, 30, 17)) };
+    p.task_mut(b).unwrap().constraint = Constraint {
+        kind: ConstraintKind::Mfo,
+        date: Some(dt(2026, 10, 30, 17)),
+    };
     let c = task(&mut p, "ALAP", 1);
     p.task_mut(c).unwrap().constraint.kind = ConstraintKind::Alap;
     let e = task(&mut p, "succ of ALAP", 1);
@@ -171,7 +191,14 @@ fn resource_calendars_and_vacation_push_tasks() {
     let mut p = project();
     let a = task(&mut p, "A", 3);
     let r = p.add_resource("Ana");
-    p.resource_mut(r).unwrap().exceptions.push(CalendarException::non_working("Vacation", d(2026, 10, 20), d(2026, 10, 20)));
+    p.resource_mut(r)
+        .unwrap()
+        .exceptions
+        .push(CalendarException::non_working(
+            "Vacation",
+            d(2026, 10, 20),
+            d(2026, 10, 20),
+        ));
     p.assign(a, r, None, None).unwrap();
     recalculate(&mut p);
     // Mon, (Tue off), Wed, Thu
@@ -214,7 +241,11 @@ fn estimates_drive_work_and_duration() {
     // 20h at 50% = 40h duration = 5 days
     assert_eq!(p.task(a).unwrap().duration, 5 * DAY);
     let b = p.add_task("PERT", None);
-    p.task_mut(b).unwrap().estimate = Some(Estimate::ThreePoint { optimistic: 600, most_likely: 1200, pessimistic: 3000 });
+    p.task_mut(b).unwrap().estimate = Some(Estimate::ThreePoint {
+        optimistic: 600,
+        most_likely: 1200,
+        pessimistic: 3000,
+    });
     recalculate(&mut p);
     assert_eq!(p.task(b).unwrap().sched.work, 1400);
 }
@@ -317,10 +348,20 @@ fn save_load_and_external_links() {
 
     let mut p = project();
     let ui = task(&mut p, "UI integration", 2);
-    let ext = plancraft_core::io::add_external_project(&mut p, Some(&main_path), &other_path).unwrap();
+    let ext =
+        plancraft_core::io::add_external_project(&mut p, Some(&main_path), &other_path).unwrap();
     assert_eq!(p.external_projects[0].path, "platform.plancraft");
     plancraft_core::io::ensure_external_task(&mut p, Some(&main_path), ext, api).unwrap();
-    p.link(TaskRef::External { project: ext, task: api }, ui, LinkType::FS, Lag::None).unwrap();
+    p.link(
+        TaskRef::External {
+            project: ext,
+            task: api,
+        },
+        ui,
+        LinkType::FS,
+        Lag::None,
+    )
+    .unwrap();
     recalculate(&mut p);
     // API: Oct 19 - Oct 30, so UI starts Nov 2.
     assert_eq!(start(&p, ui), dt(2026, 11, 2, 8));
@@ -344,7 +385,11 @@ fn save_load_and_external_links() {
 #[test]
 fn demo_project_is_consistent() {
     let p = plancraft_core::sample::demo_project(d(2026, 10, 19));
-    assert!(p.sched.warnings.iter().all(|w| !w.contains("Circular")), "{:?}", p.sched.warnings);
+    assert!(
+        p.sched.warnings.iter().all(|w| !w.contains("Circular")),
+        "{:?}",
+        p.sched.warnings
+    );
     assert!(p.sched.finish.is_some());
     let stats = plancraft_core::report::project_stats(&p);
     assert_eq!(stats.milestones, 4);

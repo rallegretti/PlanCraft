@@ -30,7 +30,10 @@ pub mod workspace;
 
 pub mod prelude {
     pub use crate::calendar::{Calendar, CalendarException, TimeRange, WorkCal, WorkWeek};
-    pub use crate::duration::{DurationUnit, Lag, Minutes, TimeSettings, format_duration, format_work, parse_duration, parse_work};
+    pub use crate::duration::{
+        DurationUnit, Lag, Minutes, TimeSettings, format_duration, format_work, parse_duration,
+        parse_work,
+    };
     pub use crate::ids::*;
     pub use crate::model::*;
     pub use crate::ops::{PlanError, PlanResult};

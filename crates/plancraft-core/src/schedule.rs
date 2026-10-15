@@ -26,7 +26,11 @@ enum PredSource {
     /// A summary used as SS/SF predecessor: start = min of leaves' starts.
     SummaryStart(Vec<usize>),
     /// Fixed dates of an external task.
-    Fixed { start: NaiveDateTime, finish: NaiveDateTime, duration: Minutes },
+    Fixed {
+        start: NaiveDateTime,
+        finish: NaiveDateTime,
+        duration: Minutes,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -62,15 +66,24 @@ pub struct ScheduleReport {
 /// personal exceptions); the task is scheduled in time common to all of them.
 pub fn task_calendar(p: &Project, idx: usize) -> WorkCal<'_> {
     let task = &p.tasks[idx];
-    let base = task.calendar.and_then(|c| p.calendar(c)).unwrap_or_else(|| p.base_calendar());
+    let base = task
+        .calendar
+        .and_then(|c| p.calendar(c))
+        .unwrap_or_else(|| p.base_calendar());
     let mut layers = Vec::new();
     if task.calendar.is_some() {
         layers.push(CalLayer::new(base, &[]));
     }
     if p.settings.use_resource_calendars && !task.ignore_resource_calendars {
         for a in p.assignments_for_task(task.id) {
-            if let Some(r) = p.resource(a.resource).filter(|r| r.kind == ResourceType::Work) {
-                let cal = r.calendar.and_then(|c| p.calendar(c)).unwrap_or_else(|| p.base_calendar());
+            if let Some(r) = p
+                .resource(a.resource)
+                .filter(|r| r.kind == ResourceType::Work)
+            {
+                let cal = r
+                    .calendar
+                    .and_then(|c| p.calendar(c))
+                    .unwrap_or_else(|| p.base_calendar());
                 layers.push(CalLayer::new(cal, &r.exceptions));
             }
         }
@@ -90,7 +103,12 @@ pub fn project_calendar(p: &Project) -> WorkCal<'_> {
     WorkCal::single(p.base_calendar())
 }
 
-fn apply_lag(cal: &WorkCal, base: NaiveDateTime, lag: Lag, pred_duration: Minutes) -> NaiveDateTime {
+fn apply_lag(
+    cal: &WorkCal,
+    base: NaiveDateTime,
+    lag: Lag,
+    pred_duration: Minutes,
+) -> NaiveDateTime {
     match lag {
         Lag::None => base,
         Lag::Working(0) => base,
@@ -103,7 +121,12 @@ fn apply_lag(cal: &WorkCal, base: NaiveDateTime, lag: Lag, pred_duration: Minute
     }
 }
 
-fn unapply_lag(cal: &WorkCal, base: NaiveDateTime, lag: Lag, pred_duration: Minutes) -> NaiveDateTime {
+fn unapply_lag(
+    cal: &WorkCal,
+    base: NaiveDateTime,
+    lag: Lag,
+    pred_duration: Minutes,
+) -> NaiveDateTime {
     match lag {
         Lag::None => base,
         Lag::Working(0) => base,
@@ -157,14 +180,18 @@ impl<'a> Engine<'a> {
         if self.is_leaf[idx] {
             return vec![idx];
         }
-        self.p.descendants_range(idx).filter(|&i| self.is_leaf[i]).collect()
+        self.p
+            .descendants_range(idx)
+            .filter(|&i| self.is_leaf[i])
+            .collect()
     }
 
     fn resolve_pred(&mut self, r: &TaskRef, kind: LinkType, succ_name: &str) -> Vec<PredSource> {
         match r {
             TaskRef::Local(id) => {
                 let Some(pi) = self.p.task_index(*id) else {
-                    self.warnings.push(format!("'{succ_name}' references missing predecessor {id}"));
+                    self.warnings
+                        .push(format!("'{succ_name}' references missing predecessor {id}"));
                     return Vec::new();
                 };
                 if !self.p.tasks[pi].active {
@@ -182,14 +209,23 @@ impl<'a> Engine<'a> {
                 let snap = self.p.external(*project).and_then(|e| e.task(*task));
                 match snap {
                     Some(s) => match (s.start, s.finish) {
-                        (Some(start), Some(finish)) => vec![PredSource::Fixed { start, finish, duration: s.duration }],
+                        (Some(start), Some(finish)) => vec![PredSource::Fixed {
+                            start,
+                            finish,
+                            duration: s.duration,
+                        }],
                         _ => {
-                            self.warnings.push(format!("External predecessor '{}' of '{succ_name}' has no dates", s.name));
+                            self.warnings.push(format!(
+                                "External predecessor '{}' of '{succ_name}' has no dates",
+                                s.name
+                            ));
                             Vec::new()
                         }
                     },
                     None => {
-                        self.warnings.push(format!("'{succ_name}' references unknown external task {task}"));
+                        self.warnings.push(format!(
+                            "'{succ_name}' references unknown external task {task}"
+                        ));
                         Vec::new()
                     }
                 }
@@ -220,11 +256,18 @@ impl<'a> Engine<'a> {
                     let e = self.edges.len();
                     match &src {
                         PredSource::Leaf(pi) => self.outgoing[*pi].push(e),
-                        PredSource::SummaryStart(ls) => ls.iter().for_each(|pi| self.outgoing[*pi].push(e)),
+                        PredSource::SummaryStart(ls) => {
+                            ls.iter().for_each(|pi| self.outgoing[*pi].push(e))
+                        }
                         PredSource::Fixed { .. } => {}
                     }
                     self.incoming[succ].push(e);
-                    self.edges.push(Edge { pred: src, succ, kind: d.kind, lag: d.lag });
+                    self.edges.push(Edge {
+                        pred: src,
+                        succ,
+                        kind: d.kind,
+                        lag: d.lag,
+                    });
                 }
             }
         }
@@ -245,7 +288,12 @@ impl<'a> Engine<'a> {
         for e in &self.edges {
             indeg[e.succ] += Self::pred_leaves(e).len();
         }
-        let mut ready: std::collections::VecDeque<usize> = self.leaves.iter().copied().filter(|&i| indeg[i] == 0).collect();
+        let mut ready: std::collections::VecDeque<usize> = self
+            .leaves
+            .iter()
+            .copied()
+            .filter(|&i| indeg[i] == 0)
+            .collect();
         let mut done = vec![false; n];
         let mut order = Vec::with_capacity(self.leaves.len());
         loop {
@@ -267,7 +315,9 @@ impl<'a> Engine<'a> {
                 break;
             }
             // Cycle: force the first remaining leaf.
-            let Some(&stuck) = self.leaves.iter().find(|&&i| !done[i]) else { break };
+            let Some(&stuck) = self.leaves.iter().find(|&&i| !done[i]) else {
+                break;
+            };
             let cycle_names: Vec<String> = self
                 .leaves
                 .iter()
@@ -275,7 +325,10 @@ impl<'a> Engine<'a> {
                 .take(6)
                 .map(|&i| self.p.tasks[i].name.clone())
                 .collect();
-            self.warnings.push(format!("Circular dependency involving: {}", cycle_names.join(", ")));
+            self.warnings.push(format!(
+                "Circular dependency involving: {}",
+                cycle_names.join(", ")
+            ));
             indeg[stuck] = 0;
             ready.push_back(stuck);
         }
@@ -293,13 +346,21 @@ impl<'a> Engine<'a> {
                 let finish = v.iter().filter_map(|i| self.dates[*i].ef).max()?;
                 Some((start, finish, self.proj_cal.between(start, finish)))
             }
-            PredSource::Fixed { start, finish, duration } => Some((*start, *finish, *duration)),
+            PredSource::Fixed {
+                start,
+                finish,
+                duration,
+            } => Some((*start, *finish, *duration)),
         }
     }
 
     fn duration_of(&self, i: usize) -> Minutes {
         let t = &self.p.tasks[i];
-        if t.is_milestone() { 0 } else { t.duration.max(0) }
+        if t.is_milestone() {
+            0
+        } else {
+            t.duration.max(0)
+        }
     }
 
     fn forward(&mut self, alap_pins: &HashMap<usize, NaiveDateTime>, warn: bool) {
@@ -323,7 +384,10 @@ impl<'a> Engine<'a> {
 
             if t.mode == ScheduleMode::Manual {
                 let start = t.manual_start.or(t.actual_start).unwrap_or(project_start);
-                let finish = t.actual_finish.or(t.manual_finish).unwrap_or_else(|| if dur > 0 { cal.add(start, dur) } else { start });
+                let finish = t
+                    .actual_finish
+                    .or(t.manual_finish)
+                    .unwrap_or_else(|| if dur > 0 { cal.add(start, dur) } else { start });
                 self.dates[i].es = Some(start);
                 self.dates[i].ef = Some(finish.max(start));
                 continue;
@@ -333,7 +397,9 @@ impl<'a> Engine<'a> {
             let mut driven_by_link = false;
             for &e in &self.incoming[i] {
                 let edge = &self.edges[e];
-                let Some((ps, pf, pdur)) = self.pred_dates(&edge.pred) else { continue };
+                let Some((ps, pf, pdur)) = self.pred_dates(&edge.pred) else {
+                    continue;
+                };
                 let cand_start = match edge.kind {
                     LinkType::FS => apply_lag(&self.proj_cal, pf, edge.lag, pdur),
                     LinkType::SS => apply_lag(&self.proj_cal, ps, edge.lag, pdur),
@@ -353,21 +419,30 @@ impl<'a> Engine<'a> {
                     ConstraintKind::Fnet => es = es.max(cal.sub(date, dur)),
                     ConstraintKind::Mso => {
                         if warn && driven_by_link && place(es).0 > place(date).0 {
-                            self.warnings.push(format!("'{}': links require a later start than its Must Start On date", t.name));
+                            self.warnings.push(format!(
+                                "'{}': links require a later start than its Must Start On date",
+                                t.name
+                            ));
                         }
                         es = date;
                     }
                     ConstraintKind::Mfo => {
                         let s = if dur > 0 { cal.sub(date, dur) } else { date };
                         if warn && driven_by_link && place(es).0 > place(s).0 {
-                            self.warnings.push(format!("'{}': links require a later finish than its Must Finish On date", t.name));
+                            self.warnings.push(format!(
+                                "'{}': links require a later finish than its Must Finish On date",
+                                t.name
+                            ));
                         }
                         es = s;
                     }
                     ConstraintKind::Snlt => {
                         if place(es).0 > date {
                             if warn {
-                                self.warnings.push(format!("'{}' cannot start by its Start No Later Than date", t.name));
+                                self.warnings.push(format!(
+                                    "'{}' cannot start by its Start No Later Than date",
+                                    t.name
+                                ));
                             }
                             es = date;
                         }
@@ -375,7 +450,10 @@ impl<'a> Engine<'a> {
                     ConstraintKind::Fnlt => {
                         if finish_of(es) > date {
                             if warn {
-                                self.warnings.push(format!("'{}' cannot finish by its Finish No Later Than date", t.name));
+                                self.warnings.push(format!(
+                                    "'{}' cannot finish by its Finish No Later Than date",
+                                    t.name
+                                ));
                             }
                             es = if dur > 0 { cal.sub(date, dur) } else { date };
                         }
@@ -424,7 +502,9 @@ impl<'a> Engine<'a> {
             let t = &p.tasks[i];
             let cal = &self.cals[i];
             let dur = self.duration_of(i);
-            let (Some(es), Some(ef)) = (self.dates[i].es, self.dates[i].ef) else { continue };
+            let (Some(es), Some(ef)) = (self.dates[i].es, self.dates[i].ef) else {
+                continue;
+            };
 
             if t.mode == ScheduleMode::Manual || t.actual_finish.is_some() {
                 self.dates[i].ls = Some(es);
@@ -439,7 +519,9 @@ impl<'a> Engine<'a> {
             for &e in &self.outgoing[i] {
                 let edge = &self.edges[e];
                 let s = edge.succ;
-                let (Some(sls), Some(slf)) = (self.dates[s].ls, self.dates[s].lf) else { continue };
+                let (Some(sls), Some(slf)) = (self.dates[s].ls, self.dates[s].lf) else {
+                    continue;
+                };
                 let cand_lf = match edge.kind {
                     LinkType::FS => unapply_lag(&self.proj_cal, sls, edge.lag, dur),
                     LinkType::FF => unapply_lag(&self.proj_cal, slf, edge.lag, dur),
@@ -450,7 +532,9 @@ impl<'a> Engine<'a> {
             }
             if let Some(date) = t.constraint.date.filter(|_| t.constraint.kind.needs_date()) {
                 match t.constraint.kind {
-                    ConstraintKind::Snlt => lf = lf.min(if dur > 0 { cal.add(date, dur) } else { date }),
+                    ConstraintKind::Snlt => {
+                        lf = lf.min(if dur > 0 { cal.add(date, dur) } else { date })
+                    }
                     ConstraintKind::Fnlt => lf = lf.min(date),
                     ConstraintKind::Mso => lf = ef,
                     ConstraintKind::Mfo => lf = ef,
@@ -485,7 +569,9 @@ fn rollup_tracking(p: &mut Project) {
         let mut cost = p.tasks[i].fixed_cost;
         let mut has_work_assignment = false;
         for a in p.assignments.iter().filter(|a| a.task == id) {
-            let Some(r) = p.resources.iter().find(|r| r.id == a.resource) else { continue };
+            let Some(r) = p.resources.iter().find(|r| r.id == a.resource) else {
+                continue;
+            };
             actual += a.actual_work;
             match r.kind {
                 ResourceType::Work => {
@@ -504,11 +590,12 @@ fn rollup_tracking(p: &mut Project) {
         t.sched.work = work;
         t.sched.actual_work = actual;
         t.sched.cost = cost;
-        t.sched.percent_complete = if settings.progress_from_time && work > 0 && t.actual_finish.is_none() {
-            ((actual as f64 / work as f64) * 100.0).min(99.0) as f32
-        } else {
-            t.percent_complete as f32
-        };
+        t.sched.percent_complete =
+            if settings.progress_from_time && work > 0 && t.actual_finish.is_none() {
+                ((actual as f64 / work as f64) * 100.0).min(99.0) as f32
+            } else {
+                t.percent_complete as f32
+            };
     }
 }
 
@@ -539,7 +626,9 @@ pub fn recalculate(p: &mut Project) -> ScheduleReport {
             .copied()
             .filter(|&i| {
                 let t = &p.tasks[i];
-                t.mode == ScheduleMode::Auto && t.constraint.kind == ConstraintKind::Alap && t.actual_start.is_none()
+                t.mode == ScheduleMode::Auto
+                    && t.constraint.kind == ConstraintKind::Alap
+                    && t.actual_start.is_none()
             })
             .filter_map(|i| eng.dates[i].ls.map(|ls| (i, ls)))
             .collect();
@@ -559,22 +648,44 @@ pub fn recalculate(p: &mut Project) -> ScheduleReport {
                     let edge = &eng.edges[e];
                     let sd = eng.dates[edge.succ];
                     let dur = eng.duration_of(i);
-                    let (Some(ses), Some(sef)) = (sd.es, sd.ef) else { continue };
+                    let (Some(ses), Some(sef)) = (sd.es, sd.ef) else {
+                        continue;
+                    };
                     let gap = match edge.kind {
-                        LinkType::FS => cal.between(apply_lag(&eng.proj_cal, ef, edge.lag, dur), ses),
-                        LinkType::SS => cal.between(apply_lag(&eng.proj_cal, es, edge.lag, dur), ses),
-                        LinkType::FF => cal.between(apply_lag(&eng.proj_cal, ef, edge.lag, dur), sef),
-                        LinkType::SF => cal.between(apply_lag(&eng.proj_cal, es, edge.lag, dur), sef),
+                        LinkType::FS => {
+                            cal.between(apply_lag(&eng.proj_cal, ef, edge.lag, dur), ses)
+                        }
+                        LinkType::SS => {
+                            cal.between(apply_lag(&eng.proj_cal, es, edge.lag, dur), ses)
+                        }
+                        LinkType::FF => {
+                            cal.between(apply_lag(&eng.proj_cal, ef, edge.lag, dur), sef)
+                        }
+                        LinkType::SF => {
+                            cal.between(apply_lag(&eng.proj_cal, es, edge.lag, dur), sef)
+                        }
                     };
                     fs = fs.min(gap);
                 }
-                free_slack[i] = if fs == Minutes::MAX { ts } else { fs.max(0).min(ts.max(0)) };
+                free_slack[i] = if fs == Minutes::MAX {
+                    ts
+                } else {
+                    fs.max(0).min(ts.max(0))
+                };
             }
         }
-        (eng.dates.clone(), eng.warnings.clone(), total_slack, free_slack)
+        (
+            eng.dates.clone(),
+            eng.warnings.clone(),
+            total_slack,
+            free_slack,
+        )
     };
 
-    let mut report = ScheduleReport { warnings: order_warn, ..Default::default() };
+    let mut report = ScheduleReport {
+        warnings: order_warn,
+        ..Default::default()
+    };
     let crit = p.settings.critical_slack;
 
     for i in 0..n {
@@ -593,11 +704,15 @@ pub fn recalculate(p: &mut Project) -> ScheduleReport {
         t.sched.total_slack = total_slack[i];
         t.sched.free_slack = free_slack[i];
         t.sched.duration = if t.is_milestone() { 0 } else { t.duration };
-        t.sched.critical = t.active && !t.is_complete() && t.mode == ScheduleMode::Auto && total_slack[i] <= crit;
+        t.sched.critical =
+            t.active && !t.is_complete() && t.mode == ScheduleMode::Auto && total_slack[i] <= crit;
         if let (Some(dl), Some(f)) = (t.deadline, d.ef)
             && f > dl
         {
-            warnings.push(format!("Finishes after its deadline ({})", dl.format("%Y-%m-%d")));
+            warnings.push(format!(
+                "Finishes after its deadline ({})",
+                dl.format("%Y-%m-%d")
+            ));
         }
         t.sched.warnings = warnings;
     }
@@ -606,7 +721,9 @@ pub fn recalculate(p: &mut Project) -> ScheduleReport {
 
     // Project-level rollup.
     let proj_cal_finish = {
-        let leaves: Vec<usize> = (0..n).filter(|&i| !p.tasks[i].sched.is_summary && p.tasks[i].active).collect();
+        let leaves: Vec<usize> = (0..n)
+            .filter(|&i| !p.tasks[i].sched.is_summary && p.tasks[i].active)
+            .collect();
         let start = leaves.iter().filter_map(|&i| p.tasks[i].sched.start).min();
         let finish = leaves.iter().filter_map(|&i| p.tasks[i].sched.finish).max();
         let work: Minutes = leaves.iter().map(|&i| p.tasks[i].sched.work).sum();
@@ -617,7 +734,14 @@ pub fn recalculate(p: &mut Project) -> ScheduleReport {
             let w = t.duration.max(1) as f64;
             (n + w * t.sched.percent_complete as f64, d + w)
         });
-        (start, finish, work, actual, cost, if den > 0.0 { (num / den) as f32 } else { 0.0 })
+        (
+            start,
+            finish,
+            work,
+            actual,
+            cost,
+            if den > 0.0 { (num / den) as f32 } else { 0.0 },
+        )
     };
     let (start, finish, work, actual, cost, pct) = proj_cal_finish;
     for t in &p.tasks {
@@ -627,7 +751,12 @@ pub fn recalculate(p: &mut Project) -> ScheduleReport {
     }
     report.start = start;
     report.finish = finish;
-    report.critical_tasks = p.tasks.iter().filter(|t| t.sched.critical && !t.sched.is_summary).map(|t| t.id).collect();
+    report.critical_tasks = p
+        .tasks
+        .iter()
+        .filter(|t| t.sched.critical && !t.sched.is_summary)
+        .map(|t| t.id)
+        .collect();
     p.sched = ProjectSchedule {
         start,
         finish,
@@ -661,19 +790,44 @@ fn rollup_summaries(p: &mut Project) {
         }
         let range = p.descendants_range(i);
         let direct: Vec<usize> = range.filter(|&c| p.parent_index(c) == Some(i)).collect();
-        let active: Vec<usize> = direct.iter().copied().filter(|&c| p.tasks[c].active).collect();
+        let active: Vec<usize> = direct
+            .iter()
+            .copied()
+            .filter(|&c| p.tasks[c].active)
+            .collect();
         let src = if active.is_empty() { &direct } else { &active };
         let start = src.iter().filter_map(|&c| p.tasks[c].sched.start).min();
         let finish = src.iter().filter_map(|&c| p.tasks[c].sched.finish).max();
         let work: Minutes = src.iter().map(|&c| p.tasks[c].sched.work).sum();
         let actual: Minutes = src.iter().map(|&c| p.tasks[c].sched.actual_work).sum();
-        let cost: f64 = src.iter().map(|&c| p.tasks[c].sched.cost).sum::<f64>() + p.tasks[i].fixed_cost;
-        let es = src.iter().filter_map(|&c| p.tasks[c].sched.early_start).min();
-        let ef = src.iter().filter_map(|&c| p.tasks[c].sched.early_finish).max();
-        let ls = src.iter().filter_map(|&c| p.tasks[c].sched.late_start).min();
-        let lf = src.iter().filter_map(|&c| p.tasks[c].sched.late_finish).max();
-        let slack = src.iter().map(|&c| p.tasks[c].sched.total_slack).min().unwrap_or(0);
-        let free = src.iter().map(|&c| p.tasks[c].sched.free_slack).min().unwrap_or(0);
+        let cost: f64 =
+            src.iter().map(|&c| p.tasks[c].sched.cost).sum::<f64>() + p.tasks[i].fixed_cost;
+        let es = src
+            .iter()
+            .filter_map(|&c| p.tasks[c].sched.early_start)
+            .min();
+        let ef = src
+            .iter()
+            .filter_map(|&c| p.tasks[c].sched.early_finish)
+            .max();
+        let ls = src
+            .iter()
+            .filter_map(|&c| p.tasks[c].sched.late_start)
+            .min();
+        let lf = src
+            .iter()
+            .filter_map(|&c| p.tasks[c].sched.late_finish)
+            .max();
+        let slack = src
+            .iter()
+            .map(|&c| p.tasks[c].sched.total_slack)
+            .min()
+            .unwrap_or(0);
+        let free = src
+            .iter()
+            .map(|&c| p.tasks[c].sched.free_slack)
+            .min()
+            .unwrap_or(0);
         let critical = src.iter().any(|&c| p.tasks[c].sched.critical);
         let (num, den) = src.iter().fold((0.0f64, 0.0f64), |(nn, d), &c| {
             let t = &p.tasks[c];

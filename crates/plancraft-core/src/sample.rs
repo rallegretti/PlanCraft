@@ -110,30 +110,47 @@ pub fn demo_project(start: NaiveDate) -> Project {
 
     // Links.
     p.link_chain(&[scope, research]).unwrap();
-    p.add_milestone_members(plan_ok, &[scope.into(), research.into()]).unwrap();
+    p.add_milestone_members(plan_ok, &[scope.into(), research.into()])
+        .unwrap();
     p.link(plan_ok.into(), ux, LinkType::FS, Lag::None).unwrap();
-    p.link(ux.into(), visual, LinkType::SS, Lag::Working(3 * day)).unwrap();
-    p.add_milestone_members(design_ok, &[ux.into(), visual.into()]).unwrap();
-    p.link(design_ok.into(), backend, LinkType::FS, Lag::None).unwrap();
-    p.link(design_ok.into(), frontend, LinkType::FS, Lag::None).unwrap();
-    p.link(plan_ok.into(), infra, LinkType::FS, Lag::Working(5 * day)).unwrap();
-    p.link(backend.into(), testing, LinkType::FS, Lag::None).unwrap();
-    p.link(frontend.into(), testing, LinkType::FS, Lag::None).unwrap();
-    p.link(infra.into(), testing, LinkType::FS, Lag::None).unwrap();
+    p.link(ux.into(), visual, LinkType::SS, Lag::Working(3 * day))
+        .unwrap();
+    p.add_milestone_members(design_ok, &[ux.into(), visual.into()])
+        .unwrap();
+    p.link(design_ok.into(), backend, LinkType::FS, Lag::None)
+        .unwrap();
+    p.link(design_ok.into(), frontend, LinkType::FS, Lag::None)
+        .unwrap();
+    p.link(plan_ok.into(), infra, LinkType::FS, Lag::Working(5 * day))
+        .unwrap();
+    p.link(backend.into(), testing, LinkType::FS, Lag::None)
+        .unwrap();
+    p.link(frontend.into(), testing, LinkType::FS, Lag::None)
+        .unwrap();
+    p.link(infra.into(), testing, LinkType::FS, Lag::None)
+        .unwrap();
     p.add_milestone_members(beta, &[testing.into()]).unwrap();
-    p.link(beta.into(), marketing, LinkType::SS, Lag::Percent(0)).unwrap();
-    p.link(marketing.into(), event, LinkType::FF, Lag::None).unwrap();
-    p.add_milestone_members(golive, &[marketing.into(), event.into()]).unwrap();
+    p.link(beta.into(), marketing, LinkType::SS, Lag::Percent(0))
+        .unwrap();
+    p.link(marketing.into(), event, LinkType::FF, Lag::None)
+        .unwrap();
+    p.add_milestone_members(golive, &[marketing.into(), event.into()])
+        .unwrap();
 
     p.task_mut(plan_ok).unwrap().deliverable = "Signed project charter".into();
     p.task_mut(design_ok).unwrap().deliverable = "Approved UI kit and prototypes".into();
     p.task_mut(beta).unwrap().deliverable = "Feature-complete beta build".into();
     p.task_mut(golive).unwrap().deliverable = "Public release".into();
-    p.task_mut(golive).unwrap().deadline = p.parse_datetime(&(start + chrono::Duration::days(70)).to_string(), true);
+    p.task_mut(golive).unwrap().deadline =
+        p.parse_datetime(&(start + chrono::Duration::days(70)).to_string(), true);
     for id in [plan_ok, design_ok, beta, golive] {
         p.task_mut(id).unwrap().show_on_timeline = true;
     }
-    p.task_mut(research).unwrap().estimate = Some(Estimate::ThreePoint { optimistic: 24 * 60, most_likely: 40 * 60, pessimistic: 64 * 60 });
+    p.task_mut(research).unwrap().estimate = Some(Estimate::ThreePoint {
+        optimistic: 24 * 60,
+        most_likely: 40 * 60,
+        pessimistic: 64 * 60,
+    });
     p.task_mut(backend).unwrap().estimate = Some(Estimate::Complexity { points: 21.0 });
     p.task_mut(frontend).unwrap().estimate = Some(Estimate::Complexity { points: 26.0 });
 
@@ -161,7 +178,13 @@ pub fn demo_project(start: NaiveDate) -> Project {
     p.set_percent_complete(scope, 100).unwrap();
     let s = p.task(scope).unwrap().sched.start.unwrap().date();
     for i in 0..3 {
-        let _ = p.log_time(scope, ana, s + chrono::Duration::days(i), 8 * 60, "Scoping workshop");
+        let _ = p.log_time(
+            scope,
+            ana,
+            s + chrono::Duration::days(i),
+            8 * 60,
+            "Scoping workshop",
+        );
     }
     p.set_percent_complete(research, 40).unwrap();
     let _ = planning;

@@ -45,7 +45,16 @@ pub struct Document {
 
 impl Document {
     pub fn new(handle: u64, project: Project, path: Option<PathBuf>) -> Self {
-        Self { handle, path, project, dirty: false, revision: 1, last_change: None, undo: Vec::new(), redo: Vec::new() }
+        Self {
+            handle,
+            path,
+            project,
+            dirty: false,
+            revision: 1,
+            last_change: None,
+            undo: Vec::new(),
+            redo: Vec::new(),
+        }
     }
 
     /// Window/tab title: file name or project name, with `*` when modified.
@@ -60,7 +69,11 @@ impl Document {
     }
 
     fn push_undo(&mut self, label: &str, source: ChangeSource) {
-        self.undo.push(Snapshot { label: label.into(), source, project: self.project.clone() });
+        self.undo.push(Snapshot {
+            label: label.into(),
+            source,
+            project: self.project.clone(),
+        });
         if self.undo.len() > UNDO_LIMIT {
             self.undo.remove(0);
         }
@@ -78,7 +91,12 @@ impl Document {
         self.edit_as(label, ChangeSource::User, f)
     }
 
-    pub fn edit_as<R>(&mut self, label: &str, source: ChangeSource, f: impl FnOnce(&mut Project) -> R) -> R {
+    pub fn edit_as<R>(
+        &mut self,
+        label: &str,
+        source: ChangeSource,
+        f: impl FnOnce(&mut Project) -> R,
+    ) -> R {
         self.push_undo(label, source);
         let r = f(&mut self.project);
         recalculate(&mut self.project);
@@ -87,11 +105,20 @@ impl Document {
     }
 
     /// Applies a fallible edit; on error the project is restored and no undo step is recorded.
-    pub fn try_edit<R, E>(&mut self, label: &str, source: ChangeSource, f: impl FnOnce(&mut Project) -> Result<R, E>) -> Result<R, E> {
+    pub fn try_edit<R, E>(
+        &mut self,
+        label: &str,
+        source: ChangeSource,
+        f: impl FnOnce(&mut Project) -> Result<R, E>,
+    ) -> Result<R, E> {
         let before = self.project.clone();
         match f(&mut self.project) {
             Ok(r) => {
-                self.undo.push(Snapshot { label: label.into(), source, project: before });
+                self.undo.push(Snapshot {
+                    label: label.into(),
+                    source,
+                    project: before,
+                });
                 if self.undo.len() > UNDO_LIMIT {
                     self.undo.remove(0);
                 }
@@ -122,21 +149,37 @@ impl Document {
 
     /// Labels of undoable steps, most recent first, with their source.
     pub fn history(&self) -> Vec<(String, ChangeSource)> {
-        self.undo.iter().rev().map(|s| (s.label.clone(), s.source)).collect()
+        self.undo
+            .iter()
+            .rev()
+            .map(|s| (s.label.clone(), s.source))
+            .collect()
     }
 
     pub fn undo(&mut self) -> bool {
-        let Some(s) = self.undo.pop() else { return false };
+        let Some(s) = self.undo.pop() else {
+            return false;
+        };
         let current = std::mem::replace(&mut self.project, s.project);
-        self.redo.push(Snapshot { label: s.label.clone(), source: s.source, project: current });
+        self.redo.push(Snapshot {
+            label: s.label.clone(),
+            source: s.source,
+            project: current,
+        });
         self.touched(&format!("Undo {}", s.label), ChangeSource::User);
         true
     }
 
     pub fn redo(&mut self) -> bool {
-        let Some(s) = self.redo.pop() else { return false };
+        let Some(s) = self.redo.pop() else {
+            return false;
+        };
         let current = std::mem::replace(&mut self.project, s.project);
-        self.undo.push(Snapshot { label: s.label.clone(), source: s.source, project: current });
+        self.undo.push(Snapshot {
+            label: s.label.clone(),
+            source: s.source,
+            project: current,
+        });
         self.touched(&format!("Redo {}", s.label), ChangeSource::User);
         true
     }
@@ -146,7 +189,10 @@ impl Document {
         let Some(path) = self.path.clone() else {
             return Err(io::FileError::Io {
                 path: PathBuf::new(),
-                source: std::io::Error::new(std::io::ErrorKind::NotFound, "document has no file path; use save as"),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "document has no file path; use save as",
+                ),
             });
         };
         io::save(&self.project, &path)?;
@@ -159,11 +205,23 @@ impl Document {
         let path = path.as_ref().to_path_buf();
         let old = self.path.clone();
         let new_dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
-        let new_dir = if new_dir.is_absolute() { new_dir } else { std::env::current_dir().map(|c| c.join(&new_dir)).unwrap_or(new_dir) };
+        let new_dir = if new_dir.is_absolute() {
+            new_dir
+        } else {
+            std::env::current_dir()
+                .map(|c| c.join(&new_dir))
+                .unwrap_or(new_dir)
+        };
         for e in &mut self.project.external_projects {
             let abs = io::resolve_external_path(&e.path, old.as_deref());
-            let abs = if abs.is_absolute() { abs } else { std::env::current_dir().map(|c| c.join(&abs)).unwrap_or(abs) };
-            e.path = io::relative_path(&abs, &new_dir).to_string_lossy().replace('\\', "/");
+            let abs = if abs.is_absolute() {
+                abs
+            } else {
+                std::env::current_dir().map(|c| c.join(&abs)).unwrap_or(abs)
+            };
+            e.path = io::relative_path(&abs, &new_dir)
+                .to_string_lossy()
+                .replace('\\', "/");
         }
         io::save(&self.project, &path)?;
         self.path = Some(path);
@@ -216,7 +274,11 @@ impl Workspace {
     pub fn open(&mut self, path: impl AsRef<Path>) -> FileResult<u64> {
         let path = path.as_ref();
         let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
-        if let Some(i) = self.docs.iter().position(|d| d.path.as_ref().is_some_and(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()) == abs)) {
+        if let Some(i) = self.docs.iter().position(|d| {
+            d.path
+                .as_ref()
+                .is_some_and(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()) == abs)
+        }) {
             self.active = Some(i);
             return Ok(self.docs[i].handle);
         }
@@ -225,7 +287,9 @@ impl Workspace {
     }
 
     pub fn close(&mut self, handle: u64) -> bool {
-        let Some(i) = self.index_of(handle) else { return false };
+        let Some(i) = self.index_of(handle) else {
+            return false;
+        };
         self.docs.remove(i);
         self.active = match self.active {
             _ if self.docs.is_empty() => None,
@@ -258,7 +322,9 @@ impl Workspace {
         }
         self.docs.iter().position(|d| {
             d.path.as_ref().is_some_and(|p| {
-                p.to_string_lossy() == key || p.file_name().is_some_and(|f| f.to_string_lossy() == key) || p.file_stem().is_some_and(|f| f.to_string_lossy() == key)
+                p.to_string_lossy() == key
+                    || p.file_name().is_some_and(|f| f.to_string_lossy() == key)
+                    || p.file_stem().is_some_and(|f| f.to_string_lossy() == key)
             }) || d.project.name.eq_ignore_ascii_case(key)
                 || d.project.id.to_string() == key
         })
@@ -273,7 +339,10 @@ mod tests {
     #[test]
     fn undo_redo_and_failed_edits() {
         let mut ws = Workspace::default();
-        let h = ws.add(Project::new("P", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+        let h = ws.add(
+            Project::new("P", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()),
+            None,
+        );
         let i = ws.index_of(h).unwrap();
         let doc = &mut ws.docs[i];
         doc.edit("Add task", |p| p.add_task("A", None));
