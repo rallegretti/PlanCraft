@@ -1,0 +1,17 @@
+[package]
+name = "plancraft-core"
+description = "PlanCraft project model, calendar math, scheduling engine and workload analysis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

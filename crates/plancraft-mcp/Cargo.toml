@@ -1,0 +1,5 @@
+[package]
+name="plancraft-mcp"
+version.workspace=true
+edition.workspace=true
+[dependencies]

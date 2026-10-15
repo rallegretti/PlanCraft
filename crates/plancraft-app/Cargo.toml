@@ -1,0 +1,5 @@
+[package]
+name="plancraft-app"
+version.workspace=true
+edition.workspace=true
+[dependencies]

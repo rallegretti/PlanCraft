@@ -1,0 +1,27 @@
+[workspace]
+resolver = "3"
+members = ["crates/plancraft-core", "crates/plancraft-mcp", "crates/plancraft-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+authors = ["rallegretti <rob.allegretti@gmail.com>"]
+repository = "https://github.com/rallegretti/PlanCraft"
+rust-version = "1.90"
+
+[workspace.dependencies]
+plancraft-core = { path = "crates/plancraft-core" }
+plancraft-mcp = { path = "crates/plancraft-mcp" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+thiserror = "2"
+anyhow = "1"
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
