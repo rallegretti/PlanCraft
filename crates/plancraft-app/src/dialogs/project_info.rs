@@ -57,44 +57,31 @@ impl ProjectInfo {
     }
 
     fn apply(&self, p: &mut Project) -> Result<(), String> {
-        let num = |s: &str, what: &str| {
-            s.trim()
-                .parse::<f64>()
-                .map_err(|_| format!("{what} must be a number"))
-        };
+        let num = |s: &str, what: &str| s.trim().parse::<f64>().map_err(|_| format!("{what} must be a number"));
         p.name = self.name.trim().to_string();
         p.manager = self.manager.clone();
         p.company = self.company.clone();
         p.author = self.author.clone();
         p.notes = self.notes.clone();
-        p.start = p
-            .parse_datetime(&self.start, false)
-            .ok_or("Start date must look like YYYY-MM-DD")?;
+        p.start = p.parse_datetime(&self.start, false).ok_or("Start date must look like YYYY-MM-DD")?;
         p.status_date = if self.status_date.trim().is_empty() {
             None
         } else {
-            Some(
-                NaiveDate::parse_from_str(self.status_date.trim(), "%Y-%m-%d")
-                    .map_err(|_| "Status date must look like YYYY-MM-DD")?,
-            )
+            Some(NaiveDate::parse_from_str(self.status_date.trim(), "%Y-%m-%d").map_err(|_| "Status date must look like YYYY-MM-DD")?)
         };
         p.calendar = self.calendar;
         let s = &mut p.settings;
         s.currency = self.currency.clone();
         s.time.minutes_per_day = (num(&self.hours_per_day, "Hours per day")? * 60.0).round() as i64;
-        s.time.minutes_per_week =
-            (num(&self.hours_per_week, "Hours per week")? * 60.0).round() as i64;
+        s.time.minutes_per_week = (num(&self.hours_per_week, "Hours per week")? * 60.0).round() as i64;
         s.time.days_per_month = num(&self.days_per_month, "Days per month")?.round() as i64;
-        s.minutes_per_point =
-            (num(&self.hours_per_point, "Hours per point")? * 60.0).round() as i64;
+        s.minutes_per_point = (num(&self.hours_per_point, "Hours per point")? * 60.0).round() as i64;
         s.duration_unit = self.unit;
         s.new_tasks_auto = self.new_auto;
         s.use_resource_calendars = self.use_res_cal;
         s.progress_from_time = self.progress_from_time;
         let ts = s.time.clone();
-        s.critical_slack = parse_duration(&self.critical_slack, DurationUnit::Days, &ts)
-            .map(|(m, _)| m)
-            .ok_or("Invalid critical slack")?;
+        s.critical_slack = parse_duration(&self.critical_slack, DurationUnit::Days, &ts).map(|(m, _)| m).ok_or("Invalid critical slack")?;
         if s.time.minutes_per_day <= 0 {
             return Err("Hours per day must be positive".into());
         }
@@ -106,6 +93,8 @@ impl ProjectInfo {
         let mut close = false;
         egui::Window::new(format!("Project Information for '{}'", doc.project.name))
             .id(egui::Id::new("project_info"))
+            .pivot(egui::Align2::CENTER_TOP)
+            .default_pos(ctx.content_rect().center_top() + egui::vec2(0.0, 120.0))
             .open(&mut open)
             .collapsible(false)
             .default_width(600.0)
@@ -140,35 +129,44 @@ impl ProjectInfo {
                 ui.label("Notes:");
                 ui.add(egui::TextEdit::multiline(&mut self.notes).desired_rows(3).desired_width(f32::INFINITY));
                 ui.add_space(6.0);
-                egui::CollapsingHeader::new(RichText::new("Options: schedule, calendar & estimates").strong()).default_open(true).show(ui, |ui| {
-                    egui::Grid::new("pi_opts").num_columns(4).spacing([12.0, 8.0]).show(ui, |ui| {
-                        ui.label("Hours per day:");
-                        ui.add(egui::TextEdit::singleline(&mut self.hours_per_day).desired_width(60.0));
-                        ui.label("Hours per week:");
-                        ui.add(egui::TextEdit::singleline(&mut self.hours_per_week).desired_width(60.0));
-                        ui.end_row();
-                        ui.label("Days per month:");
-                        ui.add(egui::TextEdit::singleline(&mut self.days_per_month).desired_width(60.0));
-                        ui.label("Hours per complexity point:");
-                        ui.add(egui::TextEdit::singleline(&mut self.hours_per_point).desired_width(60.0));
-                        ui.end_row();
-                        ui.label("Duration shown in:");
-                        egui::ComboBox::from_id_salt("pi_unit").selected_text(format!("{:?}", self.unit)).show_ui(ui, |ui| {
-                            for u in [DurationUnit::Minutes, DurationUnit::Hours, DurationUnit::Days, DurationUnit::Weeks, DurationUnit::Months] {
-                                ui.selectable_value(&mut self.unit, u, format!("{u:?}"));
-                            }
+                egui::CollapsingHeader::new(RichText::new("Options: schedule, calendar & estimates").strong()).default_open(true).show(
+                    ui,
+                    |ui| {
+                        egui::Grid::new("pi_opts").num_columns(4).spacing([12.0, 8.0]).show(ui, |ui| {
+                            ui.label("Hours per day:");
+                            ui.add(egui::TextEdit::singleline(&mut self.hours_per_day).desired_width(60.0));
+                            ui.label("Hours per week:");
+                            ui.add(egui::TextEdit::singleline(&mut self.hours_per_week).desired_width(60.0));
+                            ui.end_row();
+                            ui.label("Days per month:");
+                            ui.add(egui::TextEdit::singleline(&mut self.days_per_month).desired_width(60.0));
+                            ui.label("Hours per complexity point:");
+                            ui.add(egui::TextEdit::singleline(&mut self.hours_per_point).desired_width(60.0));
+                            ui.end_row();
+                            ui.label("Duration shown in:");
+                            egui::ComboBox::from_id_salt("pi_unit").selected_text(format!("{:?}", self.unit)).show_ui(ui, |ui| {
+                                for u in [
+                                    DurationUnit::Minutes,
+                                    DurationUnit::Hours,
+                                    DurationUnit::Days,
+                                    DurationUnit::Weeks,
+                                    DurationUnit::Months,
+                                ] {
+                                    ui.selectable_value(&mut self.unit, u, format!("{u:?}"));
+                                }
+                            });
+                            ui.label("Currency symbol:");
+                            ui.add(egui::TextEdit::singleline(&mut self.currency).desired_width(40.0));
+                            ui.end_row();
+                            ui.label("Critical if slack ≤");
+                            ui.add(egui::TextEdit::singleline(&mut self.critical_slack).desired_width(60.0));
+                            ui.end_row();
                         });
-                        ui.label("Currency symbol:");
-                        ui.add(egui::TextEdit::singleline(&mut self.currency).desired_width(40.0));
-                        ui.end_row();
-                        ui.label("Critical if slack ≤");
-                        ui.add(egui::TextEdit::singleline(&mut self.critical_slack).desired_width(60.0));
-                        ui.end_row();
-                    });
-                    ui.checkbox(&mut self.new_auto, "New tasks are auto scheduled");
-                    ui.checkbox(&mut self.use_res_cal, "Schedule assigned tasks on their resources' calendars (time off delays work)");
-                    ui.checkbox(&mut self.progress_from_time, "Derive % complete from tracked time");
-                });
+                        ui.checkbox(&mut self.new_auto, "New tasks are auto scheduled");
+                        ui.checkbox(&mut self.use_res_cal, "Schedule assigned tasks on their resources' calendars (time off delays work)");
+                        ui.checkbox(&mut self.progress_from_time, "Derive % complete from tracked time");
+                    },
+                );
                 if let Some(e) = &self.error {
                     ui.colored_label(theme::ERROR, e);
                 }

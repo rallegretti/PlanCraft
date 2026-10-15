@@ -3,8 +3,7 @@
 use serde_json::{Value, json};
 
 /// Protocol revisions this server understands, newest first.
-pub const SUPPORTED_PROTOCOL_VERSIONS: [&str; 4] =
-    ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
+pub const SUPPORTED_PROTOCOL_VERSIONS: [&str; 4] = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
 /// The newest supported protocol revision.
 pub const LATEST_PROTOCOL_VERSION: &str = SUPPORTED_PROTOCOL_VERSIONS[0];
@@ -22,10 +21,7 @@ pub const RESOURCE_NOT_FOUND: i64 = -32002;
 /// The client's version is echoed when supported, otherwise the newest
 /// version this server implements is returned.
 pub fn negotiate_version(requested: Option<&str>) -> &'static str {
-    requested
-        .and_then(|r| SUPPORTED_PROTOCOL_VERSIONS.iter().find(|v| **v == r))
-        .copied()
-        .unwrap_or(LATEST_PROTOCOL_VERSION)
+    requested.and_then(|r| SUPPORTED_PROTOCOL_VERSIONS.iter().find(|v| **v == r)).copied().unwrap_or(LATEST_PROTOCOL_VERSION)
 }
 
 /// A JSON-RPC error object.
@@ -38,11 +34,7 @@ pub struct RpcError {
 
 impl RpcError {
     pub fn new(code: i64, message: impl Into<String>) -> Self {
-        Self {
-            code,
-            message: message.into(),
-            data: None,
-        }
+        Self { code, message: message.into(), data: None }
     }
     pub fn invalid_params(message: impl Into<String>) -> Self {
         Self::new(INVALID_PARAMS, message)
@@ -71,10 +63,7 @@ pub fn error_response(id: Value, err: &RpcError) -> Value {
 
 /// Error response for a message that could not be parsed as JSON.
 pub fn parse_error(detail: impl std::fmt::Display) -> Value {
-    error_response(
-        Value::Null,
-        &RpcError::new(PARSE_ERROR, format!("Parse error: {detail}")),
-    )
+    error_response(Value::Null, &RpcError::new(PARSE_ERROR, format!("Parse error: {detail}")))
 }
 
 #[cfg(test)]
@@ -84,10 +73,7 @@ mod tests {
     #[test]
     fn version_negotiation() {
         assert_eq!(negotiate_version(Some("2025-03-26")), "2025-03-26");
-        assert_eq!(
-            negotiate_version(Some("2099-01-01")),
-            LATEST_PROTOCOL_VERSION
-        );
+        assert_eq!(negotiate_version(Some("2099-01-01")), LATEST_PROTOCOL_VERSION);
         assert_eq!(negotiate_version(None), LATEST_PROTOCOL_VERSION);
     }
 }

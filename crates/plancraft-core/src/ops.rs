@@ -54,16 +54,9 @@ impl Project {
     /// than the previous row).
     pub fn insert_task(&mut self, index: usize, mut task: Task) -> TaskId {
         let index = index.min(self.tasks.len());
-        let max_level = if index == 0 {
-            1
-        } else {
-            self.tasks[index - 1].outline_level + 1
-        };
+        let max_level = if index == 0 { 1 } else { self.tasks[index - 1].outline_level + 1 };
         task.outline_level = task.outline_level.clamp(1, max_level);
-        if task.mode == ScheduleMode::Auto
-            && !self.settings.new_tasks_auto
-            && task.manual_start.is_none()
-        {
+        if task.mode == ScheduleMode::Auto && !self.settings.new_tasks_auto && task.manual_start.is_none() {
             task.mode = ScheduleMode::Manual;
         }
         let id = task.id;
@@ -78,11 +71,7 @@ impl Project {
         let level = if index > 0 && index <= self.tasks.len() {
             // Inherit the level of the row above, unless it is a summary (then become its child).
             let above = &self.tasks[index - 1];
-            if self.has_children(index - 1) {
-                above.outline_level + 1
-            } else {
-                above.outline_level
-            }
+            if self.has_children(index - 1) { above.outline_level + 1 } else { above.outline_level }
         } else {
             1
         };
@@ -102,19 +91,10 @@ impl Project {
     }
 
     /// Inserts a summary task above the given contiguous tasks and indents them under it.
-    pub fn add_summary_over(
-        &mut self,
-        name: impl Into<String>,
-        ids: &[TaskId],
-    ) -> PlanResult<TaskId> {
-        let mut idxs: Vec<usize> = ids
-            .iter()
-            .map(|&id| self.require_task(id))
-            .collect::<PlanResult<_>>()?;
+    pub fn add_summary_over(&mut self, name: impl Into<String>, ids: &[TaskId]) -> PlanResult<TaskId> {
+        let mut idxs: Vec<usize> = ids.iter().map(|&id| self.require_task(id)).collect::<PlanResult<_>>()?;
         idxs.sort_unstable();
-        let first = *idxs
-            .first()
-            .ok_or_else(|| PlanError::Invalid("no tasks selected".into()))?;
+        let first = *idxs.first().ok_or_else(|| PlanError::Invalid("no tasks selected".into()))?;
         let level = self.tasks[first].outline_level;
         let sid = self.ids.next_task();
         let mut t = Task::new(sid, name, self.settings.time.minutes_per_day);
@@ -139,10 +119,8 @@ impl Project {
         }
         self.tasks.retain(|t| !doomed.contains(&t.id));
         for t in &mut self.tasks {
-            t.predecessors
-                .retain(|d| d.predecessor.local().is_none_or(|p| !doomed.contains(&p)));
-            t.members
-                .retain(|m| m.local().is_none_or(|p| !doomed.contains(&p)));
+            t.predecessors.retain(|d| d.predecessor.local().is_none_or(|p| !doomed.contains(&p)));
+            t.members.retain(|m| m.local().is_none_or(|p| !doomed.contains(&p)));
         }
         self.assignments.retain(|a| !doomed.contains(&a.task));
         self.time_entries.retain(|e| !doomed.contains(&e.task));
@@ -207,11 +185,7 @@ impl Project {
         }
         let target = target.min(self.tasks.len());
         let base_level = block[0].outline_level;
-        let max_level = if target == 0 {
-            1
-        } else {
-            self.tasks[target - 1].outline_level + 1
-        };
+        let max_level = if target == 0 { 1 } else { self.tasks[target - 1].outline_level + 1 };
         let new_level = base_level.min(max_level);
         let delta = base_level as i32 - new_level as i32;
         for (k, mut t) in block.into_iter().enumerate() {
@@ -227,10 +201,8 @@ impl Project {
         let idx = self.require_task(id)?;
         let level = self.tasks[idx].outline_level;
         if up {
-            let prev_sibling = (0..idx)
-                .rev()
-                .take_while(|&i| self.tasks[i].outline_level >= level)
-                .find(|&i| self.tasks[i].outline_level == level);
+            let prev_sibling =
+                (0..idx).rev().take_while(|&i| self.tasks[i].outline_level >= level).find(|&i| self.tasks[i].outline_level == level);
             match prev_sibling {
                 Some(p) => self.move_task(id, p),
                 None => invalid("task is already first in its group"),
@@ -279,11 +251,7 @@ impl Project {
                 return true;
             }
             for t in &self.tasks {
-                let preds = t
-                    .predecessors
-                    .iter()
-                    .map(|d| d.predecessor)
-                    .chain(t.members.iter().copied());
+                let preds = t.predecessors.iter().map(|d| d.predecessor).chain(t.members.iter().copied());
                 for p in preds {
                     if let Some(pid) = p.local()
                         && cur_group.contains(&pid)
@@ -300,20 +268,11 @@ impl Project {
     }
 
     /// Adds (or updates) a dependency `pred -> succ`.
-    pub fn link(
-        &mut self,
-        pred: TaskRef,
-        succ: TaskId,
-        kind: LinkType,
-        lag: Lag,
-    ) -> PlanResult<()> {
+    pub fn link(&mut self, pred: TaskRef, succ: TaskId, kind: LinkType, lag: Lag) -> PlanResult<()> {
         let si = self.require_task(succ)?;
         if let TaskRef::Local(pid) = pred {
             let pi = self.require_task(pid)?;
-            if pid == succ
-                || self.descendants_range(pi).contains(&si)
-                || self.descendants_range(si).contains(&pi)
-            {
+            if pid == succ || self.descendants_range(pi).contains(&si) || self.descendants_range(si).contains(&pi) {
                 return Err(PlanError::SelfLink);
             }
             if self.reaches(succ, pid) {
@@ -329,11 +288,7 @@ impl Project {
             d.kind = kind;
             d.lag = lag;
         } else {
-            t.predecessors.push(Dependency {
-                predecessor: pred,
-                kind,
-                lag,
-            });
+            t.predecessors.push(Dependency { predecessor: pred, kind, lag });
         }
         Ok(())
     }
@@ -350,9 +305,7 @@ impl Project {
     pub fn unlink(&mut self, pred: TaskRef, succ: TaskId) -> PlanResult<bool> {
         let si = self.require_task(succ)?;
         let before = self.tasks[si].predecessors.len();
-        self.tasks[si]
-            .predecessors
-            .retain(|d| d.predecessor != pred);
+        self.tasks[si].predecessors.retain(|d| d.predecessor != pred);
         Ok(before != self.tasks[si].predecessors.len())
     }
 
@@ -364,11 +317,7 @@ impl Project {
             let succ_in = set.contains(&t.id);
             t.predecessors.retain(|d| {
                 let pred_in = d.predecessor.local().is_some_and(|p| set.contains(&p));
-                if single {
-                    !(pred_in || succ_in)
-                } else {
-                    !(pred_in && succ_in)
-                }
+                if single { !(pred_in || succ_in) } else { !(pred_in && succ_in) }
             });
         }
     }
@@ -377,12 +326,7 @@ impl Project {
     pub fn successors(&self, id: TaskId) -> Vec<(TaskId, Dependency)> {
         self.tasks
             .iter()
-            .flat_map(|t| {
-                t.predecessors
-                    .iter()
-                    .filter(|d| d.predecessor == TaskRef::Local(id))
-                    .map(move |d| (t.id, *d))
-            })
+            .flat_map(|t| t.predecessors.iter().filter(|d| d.predecessor == TaskRef::Local(id)).map(move |d| (t.id, *d)))
             .collect()
     }
 
@@ -395,23 +339,13 @@ impl Project {
             .iter()
             .map(|d| {
                 let base = match d.predecessor {
-                    TaskRef::Local(p) => self
-                        .row_number(p)
-                        .map(|r| r.to_string())
-                        .unwrap_or_else(|| "?".into()),
+                    TaskRef::Local(p) => self.row_number(p).map(|r| r.to_string()).unwrap_or_else(|| "?".into()),
                     TaskRef::External { project, task } => {
-                        let name = self
-                            .external(project)
-                            .map(|e| e.name.clone())
-                            .unwrap_or_else(|| "?".into());
+                        let name = self.external(project).map(|e| e.name.clone()).unwrap_or_else(|| "?".into());
                         format!("{name}\\{}", task.0)
                     }
                 };
-                let kind = if d.kind == LinkType::FS && d.lag.is_zero() {
-                    String::new()
-                } else {
-                    d.kind.code().to_string()
-                };
+                let kind = if d.kind == LinkType::FS && d.lag.is_zero() { String::new() } else { d.kind.code().to_string() };
                 format!("{base}{kind}{}", d.lag.format(&self.settings.time))
             })
             .collect::<Vec<_>>()
@@ -430,30 +364,15 @@ impl Project {
                 let ext = self
                     .external_projects
                     .iter()
-                    .find(|e| {
-                        e.name.eq_ignore_ascii_case(proj.trim()) || e.id.to_string() == proj.trim()
-                    })
+                    .find(|e| e.name.eq_ignore_ascii_case(proj.trim()) || e.id.to_string() == proj.trim())
                     .ok_or_else(|| PlanError::ExternalNotFound(proj.to_string()))?;
                 let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
-                let tid: u32 = digits
-                    .parse()
-                    .map_err(|_| PlanError::Invalid(format!("bad external task id in '{part}'")))?;
-                (
-                    TaskRef::External {
-                        project: ext.id,
-                        task: TaskId(tid),
-                    },
-                    rest[digits.len()..].to_string(),
-                )
+                let tid: u32 = digits.parse().map_err(|_| PlanError::Invalid(format!("bad external task id in '{part}'")))?;
+                (TaskRef::External { project: ext.id, task: TaskId(tid) }, rest[digits.len()..].to_string())
             } else {
                 let digits: String = part.chars().take_while(|c| c.is_ascii_digit()).collect();
-                let row: usize = digits.parse().map_err(|_| {
-                    PlanError::Invalid(format!("'{part}' is not a valid predecessor"))
-                })?;
-                let t = self
-                    .tasks
-                    .get(row.wrapping_sub(1))
-                    .ok_or_else(|| PlanError::Invalid(format!("there is no task with ID {row}")))?;
+                let row: usize = digits.parse().map_err(|_| PlanError::Invalid(format!("'{part}' is not a valid predecessor")))?;
+                let t = self.tasks.get(row.wrapping_sub(1)).ok_or_else(|| PlanError::Invalid(format!("there is no task with ID {row}")))?;
                 (TaskRef::Local(t.id), part[digits.len()..].to_string())
             };
             let rest = rest.trim();
@@ -462,13 +381,8 @@ impl Project {
             } else {
                 (LinkType::FS, rest)
             };
-            let lag = Lag::parse(lag_text, &self.settings.time)
-                .ok_or_else(|| PlanError::Invalid(format!("invalid lag '{lag_text}'")))?;
-            out.push(Dependency {
-                predecessor: pred,
-                kind,
-                lag,
-            });
+            let lag = Lag::parse(lag_text, &self.settings.time).ok_or_else(|| PlanError::Invalid(format!("invalid lag '{lag_text}'")))?;
+            out.push(Dependency { predecessor: pred, kind, lag });
         }
         Ok(out)
     }
@@ -492,11 +406,7 @@ impl Project {
     // ------------------------------------------------------------------
 
     /// Adds tasks to a milestone's member list.
-    pub fn add_milestone_members(
-        &mut self,
-        milestone: TaskId,
-        members: &[TaskRef],
-    ) -> PlanResult<()> {
+    pub fn add_milestone_members(&mut self, milestone: TaskId, members: &[TaskRef]) -> PlanResult<()> {
         let mi = self.require_task(milestone)?;
         if !self.tasks[mi].is_milestone() {
             return invalid(format!("'{}' is not a milestone", self.tasks[mi].name));
@@ -519,11 +429,7 @@ impl Project {
         Ok(())
     }
 
-    pub fn remove_milestone_members(
-        &mut self,
-        milestone: TaskId,
-        members: &[TaskRef],
-    ) -> PlanResult<()> {
+    pub fn remove_milestone_members(&mut self, milestone: TaskId, members: &[TaskRef]) -> PlanResult<()> {
         let mi = self.require_task(milestone)?;
         self.tasks[mi].members.retain(|m| !members.contains(m));
         Ok(())
@@ -531,11 +437,7 @@ impl Project {
 
     /// Milestones that a task contributes to.
     pub fn milestones_of(&self, id: TaskId) -> Vec<TaskId> {
-        self.tasks
-            .iter()
-            .filter(|t| t.members.contains(&TaskRef::Local(id)))
-            .map(|t| t.id)
-            .collect()
+        self.tasks.iter().filter(|t| t.members.contains(&TaskRef::Local(id))).map(|t| t.id).collect()
     }
 
     // ------------------------------------------------------------------
@@ -546,12 +448,7 @@ impl Project {
         self.assignments
             .iter()
             .enumerate()
-            .filter(|(_, a)| {
-                a.task == task
-                    && self
-                        .resource(a.resource)
-                        .is_some_and(|r| r.kind == ResourceType::Work)
-            })
+            .filter(|(_, a)| a.task == task && self.resource(a.resource).is_some_and(|r| r.kind == ResourceType::Work))
             .map(|(i, _)| i)
             .collect()
     }
@@ -562,22 +459,13 @@ impl Project {
             .into_iter()
             .map(|ai| {
                 let a = &self.assignments[ai];
-                if a.units > 0.0 {
-                    (a.work as f64 / a.units).round() as Minutes
-                } else {
-                    0
-                }
+                if a.units > 0.0 { (a.work as f64 / a.units).round() as Minutes } else { 0 }
             })
             .max()
     }
 
     /// Sets a task's duration, adjusting assignments according to the task type.
-    pub fn set_duration(
-        &mut self,
-        id: TaskId,
-        minutes: Minutes,
-        estimated: bool,
-    ) -> PlanResult<()> {
+    pub fn set_duration(&mut self, id: TaskId, minutes: Minutes, estimated: bool) -> PlanResult<()> {
         let idx = self.require_task(id)?;
         if self.has_children(idx) {
             return invalid("the duration of a summary task is calculated from its subtasks");
@@ -597,9 +485,7 @@ impl Project {
         for ai in self.work_assignment_ids(id) {
             let a = &mut self.assignments[ai];
             match task_type {
-                TaskType::FixedUnits | TaskType::FixedDuration => {
-                    a.work = (minutes as f64 * a.units).round() as Minutes
-                }
+                TaskType::FixedUnits | TaskType::FixedDuration => a.work = (minutes as f64 * a.units).round() as Minutes,
                 TaskType::FixedWork => {
                     if minutes > 0 {
                         a.units = a.work as f64 / minutes as f64;
@@ -663,28 +549,15 @@ impl Project {
     /// * `work` sets the assignment work explicitly; otherwise work follows the
     ///   task's duration, or its estimate when this is the first assignment of an
     ///   estimated task.
-    pub fn assign(
-        &mut self,
-        task: TaskId,
-        resource: ResourceId,
-        units: Option<f64>,
-        work: Option<Minutes>,
-    ) -> PlanResult<AssignmentId> {
+    pub fn assign(&mut self, task: TaskId, resource: ResourceId, units: Option<f64>, work: Option<Minutes>) -> PlanResult<AssignmentId> {
         let ti = self.require_task(task)?;
         if self.has_children(ti) {
             return invalid("resources cannot be assigned to summary tasks");
         }
-        let r = self
-            .resource(resource)
-            .ok_or(PlanError::ResourceNotFound(resource))?
-            .clone();
+        let r = self.resource(resource).ok_or(PlanError::ResourceNotFound(resource))?.clone();
         let units = units.unwrap_or(1.0).max(0.0);
 
-        if let Some(existing) = self
-            .assignments
-            .iter()
-            .position(|a| a.task == task && a.resource == resource)
-        {
+        if let Some(existing) = self.assignments.iter().position(|a| a.task == task && a.resource == resource) {
             let aid = self.assignments[existing].id;
             if units != self.assignments[existing].units {
                 self.set_assignment_units(aid, units)?;
@@ -696,16 +569,7 @@ impl Project {
         }
 
         let id = self.ids.next_assignment();
-        let mut a = Assignment {
-            id,
-            task,
-            resource,
-            units,
-            work: 0,
-            actual_work: 0,
-            cost: 0.0,
-            contour: WorkContour::Flat,
-        };
+        let mut a = Assignment { id, task, resource, units, work: 0, actual_work: 0, cost: 0.0, contour: WorkContour::Flat };
         if r.kind != ResourceType::Work {
             self.assignments.push(a);
             return Ok(id);
@@ -731,10 +595,7 @@ impl Project {
             }
         } else if t.effort_driven && t.task_type != TaskType::FixedDuration {
             // Effort driven: total work stays the same and is redistributed by units.
-            let total: Minutes = existing_work
-                .iter()
-                .map(|&i| self.assignments[i].work)
-                .sum();
+            let total: Minutes = existing_work.iter().map(|&i| self.assignments[i].work).sum();
             self.assignments.push(a);
             let all = self.work_assignment_ids(task);
             let total_units: f64 = all.iter().map(|&i| self.assignments[i].units).sum();
@@ -762,56 +623,36 @@ impl Project {
     }
 
     pub fn unassign(&mut self, id: AssignmentId) -> PlanResult<()> {
-        let pos = self
-            .assignments
-            .iter()
-            .position(|a| a.id == id)
-            .ok_or(PlanError::AssignmentNotFound(id))?;
+        let pos = self.assignments.iter().position(|a| a.id == id).ok_or(PlanError::AssignmentNotFound(id))?;
         self.assignments.remove(pos);
         Ok(())
     }
 
     pub fn set_assignment_units(&mut self, id: AssignmentId, units: f64) -> PlanResult<()> {
-        let pos = self
-            .assignments
-            .iter()
-            .position(|a| a.id == id)
-            .ok_or(PlanError::AssignmentNotFound(id))?;
+        let pos = self.assignments.iter().position(|a| a.id == id).ok_or(PlanError::AssignmentNotFound(id))?;
         let units = units.max(0.0);
         let task = self.assignments[pos].task;
         let tt = self.task(task).map(|t| t.task_type).unwrap_or_default();
         let dur = self.task(task).map(|t| t.duration).unwrap_or(0);
-        let is_work = self
-            .resource(self.assignments[pos].resource)
-            .is_some_and(|r| r.kind == ResourceType::Work);
+        let is_work = self.resource(self.assignments[pos].resource).is_some_and(|r| r.kind == ResourceType::Work);
         self.assignments[pos].units = units;
         if is_work {
             match tt {
-                TaskType::FixedDuration => {
-                    self.assignments[pos].work = (dur as f64 * units).round() as Minutes
-                }
-                TaskType::FixedUnits | TaskType::FixedWork => {
-                    self.recompute_duration_from_work(task)
-                }
+                TaskType::FixedDuration => self.assignments[pos].work = (dur as f64 * units).round() as Minutes,
+                TaskType::FixedUnits | TaskType::FixedWork => self.recompute_duration_from_work(task),
             }
         }
         Ok(())
     }
 
     pub fn set_assignment_work(&mut self, id: AssignmentId, work: Minutes) -> PlanResult<()> {
-        let pos = self
-            .assignments
-            .iter()
-            .position(|a| a.id == id)
-            .ok_or(PlanError::AssignmentNotFound(id))?;
+        let pos = self.assignments.iter().position(|a| a.id == id).ok_or(PlanError::AssignmentNotFound(id))?;
         let task = self.assignments[pos].task;
         let tt = self.task(task).map(|t| t.task_type).unwrap_or_default();
         let dur = self.task(task).map(|t| t.duration).unwrap_or(0);
         self.assignments[pos].work = work.max(0);
         match tt {
-            TaskType::FixedDuration if dur > 0 => {
-                self.assignments[pos].units = work as f64 / dur as f64
-            }
+            TaskType::FixedDuration if dur > 0 => self.assignments[pos].units = work as f64 / dur as f64,
             _ => self.recompute_duration_from_work(task),
         }
         Ok(())
@@ -847,10 +688,7 @@ impl Project {
             let (name, units) = match part.split_once('[') {
                 Some((n, rest)) => {
                     let inner = rest.trim_end_matches(']').trim();
-                    let num: String = inner
-                        .chars()
-                        .take_while(|c| c.is_ascii_digit() || *c == '.')
-                        .collect();
+                    let num: String = inner.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
                     let v: f64 = num.parse().unwrap_or(100.0);
                     let units = if inner.contains('%') { v / 100.0 } else { v };
                     (n.trim(), units)
@@ -863,11 +701,8 @@ impl Project {
             };
             wanted.push((rid, units));
         }
-        let current: Vec<AssignmentId> = self
-            .assignments_for_task(task)
-            .filter(|a| !wanted.iter().any(|(r, _)| *r == a.resource))
-            .map(|a| a.id)
-            .collect();
+        let current: Vec<AssignmentId> =
+            self.assignments_for_task(task).filter(|a| !wanted.iter().any(|(r, _)| *r == a.resource)).map(|a| a.id).collect();
         for a in current {
             self.unassign(a)?;
         }
@@ -887,11 +722,7 @@ impl Project {
         let pct = pct.min(100);
         if self.has_children(idx) {
             // Apply to all leaf descendants.
-            let leaves: Vec<TaskId> = self
-                .descendants_range(idx)
-                .filter(|&i| !self.has_children(i))
-                .map(|i| self.tasks[i].id)
-                .collect();
+            let leaves: Vec<TaskId> = self.descendants_range(idx).filter(|&i| !self.has_children(i)).map(|i| self.tasks[i].id).collect();
             for l in leaves {
                 self.set_percent_complete(l, pct)?;
             }
@@ -930,20 +761,12 @@ impl Project {
         if self.has_children(ti) {
             return invalid("time cannot be logged against a summary task");
         }
-        self.resource(resource)
-            .ok_or(PlanError::ResourceNotFound(resource))?;
+        self.resource(resource).ok_or(PlanError::ResourceNotFound(resource))?;
         if minutes <= 0 {
             return invalid("logged time must be positive");
         }
         let id = self.ids.next_time_entry();
-        self.time_entries.push(TimeEntry {
-            id,
-            task,
-            resource,
-            date,
-            minutes,
-            note: note.into(),
-        });
+        self.time_entries.push(TimeEntry { id, task, resource, date, minutes, note: note.into() });
         // Starting work on a task records its actual start.
         let start_of_day = self.base_cal_day_start(date);
         let t = &mut self.tasks[ti];
@@ -958,11 +781,7 @@ impl Project {
     }
 
     pub fn delete_time_entry(&mut self, id: TimeEntryId) -> PlanResult<()> {
-        let pos = self
-            .time_entries
-            .iter()
-            .position(|e| e.id == id)
-            .ok_or(PlanError::TimeEntryNotFound(id))?;
+        let pos = self.time_entries.iter().position(|e| e.id == id).ok_or(PlanError::TimeEntryNotFound(id))?;
         self.time_entries.remove(pos);
         Ok(())
     }
@@ -971,16 +790,10 @@ impl Project {
     pub fn update_progress_from_time(&mut self) {
         crate::schedule::recalculate(self);
         for t in &mut self.tasks {
-            if t.sched.is_summary
-                || t.actual_finish.is_some()
-                || t.sched.work <= 0
-                || t.sched.actual_work <= 0
-            {
+            if t.sched.is_summary || t.actual_finish.is_some() || t.sched.work <= 0 || t.sched.actual_work <= 0 {
                 continue;
             }
-            let pct = (t.sched.actual_work as f64 / t.sched.work as f64 * 100.0)
-                .floor()
-                .min(99.0) as u8;
+            let pct = (t.sched.actual_work as f64 / t.sched.work as f64 * 100.0).floor().min(99.0) as u8;
             t.percent_complete = pct.max(t.percent_complete);
         }
     }
@@ -993,23 +806,14 @@ impl Project {
     pub fn set_baseline(&mut self, ids: &[TaskId]) {
         use chrono::Timelike;
         let now = chrono::Local::now().naive_local();
-        let now = now
-            .with_second(0)
-            .and_then(|n| n.with_nanosecond(0))
-            .unwrap_or(now);
+        let now = now.with_second(0).and_then(|n| n.with_nanosecond(0)).unwrap_or(now);
         for t in &mut self.tasks {
             if !ids.is_empty() && !ids.contains(&t.id) {
                 continue;
             }
             if let (Some(start), Some(finish)) = (t.sched.start, t.sched.finish) {
-                t.baseline = Some(Baseline {
-                    start,
-                    finish,
-                    duration: t.sched.duration,
-                    work: t.sched.work,
-                    cost: t.sched.cost,
-                    saved: now,
-                });
+                t.baseline =
+                    Some(Baseline { start, finish, duration: t.sched.duration, work: t.sched.work, cost: t.sched.cost, saved: now });
             }
         }
     }
@@ -1027,17 +831,10 @@ impl Project {
     // ------------------------------------------------------------------
 
     /// Creates a new calendar copied from `from` (or the standard week).
-    pub fn add_calendar(
-        &mut self,
-        name: impl Into<String>,
-        from: Option<CalendarId>,
-    ) -> PlanResult<CalendarId> {
+    pub fn add_calendar(&mut self, name: impl Into<String>, from: Option<CalendarId>) -> PlanResult<CalendarId> {
         let id = self.ids.next_calendar();
         let mut cal = match from {
-            Some(f) => self
-                .calendar(f)
-                .ok_or(PlanError::CalendarNotFound(f))?
-                .clone(),
+            Some(f) => self.calendar(f).ok_or(PlanError::CalendarNotFound(f))?.clone(),
             None => crate::calendar::Calendar::standard(id),
         };
         cal.id = id;
@@ -1070,34 +867,16 @@ impl Project {
     /// Dates without time use the start (or end when `finish` is set) of the project's working day.
     pub fn parse_datetime(&self, text: &str, finish: bool) -> Option<NaiveDateTime> {
         let t = text.trim();
-        for f in [
-            "%Y-%m-%d %H:%M",
-            "%Y-%m-%dT%H:%M",
-            "%Y-%m-%dT%H:%M:%S",
-            "%Y-%m-%d %H:%M:%S",
-            "%m/%d/%Y %H:%M",
-        ] {
+        for f in ["%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%m/%d/%Y %H:%M"] {
             if let Ok(dt) = NaiveDateTime::parse_from_str(t, f) {
                 return Some(dt);
             }
         }
-        let date = [
-            "%Y-%m-%d",
-            "%m/%d/%Y",
-            "%m/%d/%y",
-            "%a %m/%d/%y",
-            "%d %b %Y",
-            "%b %d %Y",
-            "%b %d, %Y",
-        ]
-        .iter()
-        .find_map(|f| NaiveDate::parse_from_str(t, f).ok())?;
+        let date = ["%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%a %m/%d/%y", "%d %b %Y", "%b %d %Y", "%b %d, %Y"]
+            .iter()
+            .find_map(|f| NaiveDate::parse_from_str(t, f).ok())?;
         let wc = crate::calendar::WorkCal::single(self.base_calendar());
-        Some(if finish {
-            wc.day_finish(date)
-        } else {
-            wc.day_start(date)
-        })
+        Some(if finish { wc.day_finish(date) } else { wc.day_start(date) })
     }
 
     /// Parses a duration with the project's default unit.
@@ -1106,12 +885,7 @@ impl Project {
     }
 
     pub fn format_duration(&self, minutes: Minutes, estimated: bool) -> String {
-        crate::duration::format_duration(
-            minutes,
-            self.settings.duration_unit,
-            &self.settings.time,
-            estimated,
-        )
+        crate::duration::format_duration(minutes, self.settings.duration_unit, &self.settings.time, estimated)
     }
 
     pub fn format_duration_unit(&self, minutes: Minutes, unit: DurationUnit) -> String {
@@ -1120,9 +894,5 @@ impl Project {
 }
 
 fn trim_f(v: f64) -> String {
-    if (v - v.round()).abs() < 1e-9 {
-        format!("{}", v.round() as i64)
-    } else {
-        format!("{v:.2}")
-    }
+    if (v - v.round()).abs() < 1e-9 { format!("{}", v.round() as i64) } else { format!("{v:.2}") }
 }

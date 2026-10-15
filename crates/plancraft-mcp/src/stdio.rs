@@ -14,11 +14,7 @@ pub fn run_stdio(server: &McpServer) -> io::Result<()> {
 }
 
 /// Serves MCP over arbitrary reader/writer streams (one JSON message per line).
-pub fn run_stdio_with<R: BufRead, W: Write>(
-    server: &McpServer,
-    mut reader: R,
-    mut writer: W,
-) -> io::Result<()> {
+pub fn run_stdio_with<R: BufRead, W: Write>(server: &McpServer, mut reader: R, mut writer: W) -> io::Result<()> {
     let mut buf = Vec::new();
     loop {
         buf.clear();

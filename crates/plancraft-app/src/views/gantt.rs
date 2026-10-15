@@ -28,16 +28,9 @@ pub fn task_table(
 ) -> grid::GridOutput {
     let cols: Vec<TaskCol> = st.table.columns();
     let defs: Vec<grid::ColumnDef> = cols.iter().map(|c| c.def(&doc.project)).collect();
-    let over_res: HashSet<ResourceId> = plancraft_core::workload::overallocations(&doc.project)
-        .into_iter()
-        .map(|(r, _)| r)
-        .collect();
+    let over_res: HashSet<ResourceId> = plancraft_core::workload::overallocations(&doc.project).into_iter().map(|(r, _)| r).collect();
     let over_tasks = super::overallocated_tasks(&doc.project, &over_res);
-    let blank = if st.filter == crate::state::TaskFilter::All && st.search.is_empty() {
-        BLANK_ROWS
-    } else {
-        0
-    };
+    let blank = if st.filter == crate::state::TaskFilter::All && st.search.is_empty() { BLANK_ROWS } else { 0 };
     let cfg = GridConfig {
         id: egui::Id::new(("task_grid", st.table.label())),
         columns: &defs,
@@ -53,9 +46,7 @@ pub fn task_table(
         let sel = &st.sel;
         let collapsed = &st.collapsed;
         let is_over = |id: TaskId| over_tasks.contains(&id);
-        let ctx = CellCtx {
-            overallocated: &is_over,
-        };
+        let ctx = CellCtx { overallocated: &is_over };
         let is_selected = |r: usize| sel.tasks.contains(&p.tasks[rows[r]].id);
         let mut cell = |r: usize, c: usize| {
             let idx = rows[r];
@@ -72,12 +63,8 @@ pub fn task_table(
 
     for ev in output.events.clone() {
         match ev {
-            GridEvent::Select { row, shift, ctrl } => {
-                super::select_row(&mut st.sel, &doc.project, rows, row, shift, ctrl)
-            }
-            GridEvent::CursorRow { row, shift } => {
-                super::select_row(&mut st.sel, &doc.project, rows, row, shift, false)
-            }
+            GridEvent::Select { row, shift, ctrl } => super::select_row(&mut st.sel, &doc.project, rows, row, shift, ctrl),
+            GridEvent::CursorRow { row, shift } => super::select_row(&mut st.sel, &doc.project, rows, row, shift, false),
             GridEvent::Activate { row, .. } => {
                 super::select_row(&mut st.sel, &doc.project, rows, row, false, false);
                 out.push(Command::TaskInfo);
@@ -93,19 +80,13 @@ pub fn task_table(
                 if row < rows.len() {
                     let id = doc.project.tasks[rows[row]].id;
                     let label = format!("Edit {}", defs[col].title);
-                    if let Err(e) = doc.try_edit(&label, ChangeSource::User, |p| {
-                        columns::commit(column, p, id, &text)
-                    }) {
+                    if let Err(e) = doc.try_edit(&label, ChangeSource::User, |p| columns::commit(column, p, id, &text)) {
                         st.toast(ToastKind::Error, e);
                     }
                 } else if !text.is_empty() {
                     // Typing into a blank row creates a task.
                     let r = doc.try_edit("New Task", ChangeSource::User, |p| {
-                        let name = if column == TaskCol::Name {
-                            text.clone()
-                        } else {
-                            "New Task".to_string()
-                        };
+                        let name = if column == TaskCol::Name { text.clone() } else { "New Task".to_string() };
                         let id = p.add_task(name, None);
                         if column != TaskCol::Name {
                             columns::commit(column, p, id, &text)?;
@@ -130,8 +111,7 @@ pub fn task_table(
 }
 
 fn st_context_menu(ui: &Ui, pos: egui::Pos2) {
-    ui.ctx()
-        .data_mut(|d| d.insert_temp(egui::Id::new("task_ctx_menu"), pos));
+    ui.ctx().data_mut(|d| d.insert_temp(egui::Id::new("task_ctx_menu"), pos));
 }
 
 /// Shows the floating context menu requested by the task table, if any.
@@ -141,21 +121,16 @@ pub fn context_menu_popup(ctx: &egui::Context, out: &mut Vec<Command>) {
         return;
     };
     let mut close = false;
-    let resp = egui::Area::new(id.with("area"))
-        .order(egui::Order::Foreground)
-        .fixed_pos(pos)
-        .show(ctx, |ui| {
-            egui::Frame::menu(ui.style()).show(ui, |ui| {
-                ui.set_min_width(200.0);
-                crate::commands::task_context_menu(ui, &mut |c| {
-                    out.push(c);
-                    close = true;
-                });
+    let resp = egui::Area::new(id.with("area")).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
+        egui::Frame::menu(ui.style()).show(ui, |ui| {
+            ui.set_min_width(200.0);
+            crate::commands::task_context_menu(ui, &mut |c| {
+                out.push(c);
+                close = true;
             });
         });
-    let clicked_outside = ctx.input(|i| i.pointer.any_pressed())
-        && !resp.response.contains_pointer()
-        && resp.response.rect.width() > 0.0;
+    });
+    let clicked_outside = ctx.input(|i| i.pointer.any_pressed()) && !resp.response.contains_pointer() && resp.response.rect.width() > 0.0;
     let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
     // The first frame after opening sees the opening click; ignore it.
     let fresh = ctx.data_mut(|d| {
@@ -181,26 +156,11 @@ pub fn splitter(ui: &mut Ui, x: f32, rect: Rect, width: &mut f32) {
     if resp.dragged() {
         *width = (*width + resp.drag_delta().x).clamp(120.0, rect.width() - 160.0);
     }
-    ui.painter().rect_filled(
-        Rect::from_min_max(pos2(x - 2.0, rect.top()), pos2(x + 2.0, rect.bottom())),
-        0.0,
-        theme::HEADER_BG,
-    );
-    ui.painter().vline(
-        x + 2.0,
-        rect.y_range(),
-        Stroke::new(1.0, theme::GRID_LINE_STRONG),
-    );
+    ui.painter().rect_filled(Rect::from_min_max(pos2(x - 2.0, rect.top()), pos2(x + 2.0, rect.bottom())), 0.0, theme::HEADER_BG);
+    ui.painter().vline(x + 2.0, rect.y_range(), Stroke::new(1.0, theme::GRID_LINE_STRONG));
 }
 
-pub fn show(
-    ui: &mut Ui,
-    rect: Rect,
-    doc: &mut Document,
-    st: &mut UiState,
-    tracking: bool,
-    out: &mut Vec<Command>,
-) {
+pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, tracking: bool, out: &mut Vec<Command>) {
     let rows = super::visible_rows(&doc.project, st);
     let table_w = st.table_width.min(rect.width() - 160.0).max(120.0);
     let table_rect = Rect::from_min_size(rect.min, vec2(table_w, rect.height()));
@@ -209,11 +169,7 @@ pub fn show(
     task_table(ui, table_rect, doc, st, &rows, false, out);
     splitter(ui, rect.left() + table_w + 2.0, rect, &mut st.table_width);
 
-    let blank = if st.filter == crate::state::TaskFilter::All && st.search.is_empty() {
-        BLANK_ROWS
-    } else {
-        0
-    };
+    let blank = if st.filter == crate::state::TaskFilter::All && st.search.is_empty() { BLANK_ROWS } else { 0 };
     let actions = {
         let sel = &st.sel;
         let is_sel = |id: TaskId| sel.tasks.contains(&id);
@@ -226,24 +182,12 @@ pub fn show(
             header_height: theme::HEADER_HEIGHT,
             blank_rows: blank,
         };
-        gantt_chart::show(
-            ui,
-            chart_rect,
-            &mut st.gantt,
-            &mut st.task_grid.scroll_y,
-            &input,
-        )
+        gantt_chart::show(ui, chart_rect, &mut st.gantt, &mut st.task_grid.scroll_y, &input)
     };
     apply_chart_actions(doc, st, &rows, actions, out);
 }
 
-pub fn apply_chart_actions(
-    doc: &mut Document,
-    st: &mut UiState,
-    rows: &[usize],
-    actions: Vec<ChartAction>,
-    out: &mut Vec<Command>,
-) {
+pub fn apply_chart_actions(doc: &mut Document, st: &mut UiState, rows: &[usize], actions: Vec<ChartAction>, out: &mut Vec<Command>) {
     for a in actions {
         match a {
             ChartAction::Select { task, shift, ctrl } => {
@@ -299,14 +243,10 @@ pub fn apply_chart_actions(
                 }
             }
             ChartAction::SetProgress { task, pct } => {
-                let _ = doc.try_edit("Update Progress", ChangeSource::User, |p| {
-                    p.set_percent_complete(task, pct)
-                });
+                let _ = doc.try_edit("Update Progress", ChangeSource::User, |p| p.set_percent_complete(task, pct));
             }
             ChartAction::Link { from, to } => {
-                let r = doc.try_edit("Link Tasks", ChangeSource::User, |p| {
-                    p.link(from.into(), to, LinkType::FS, Lag::None)
-                });
+                let r = doc.try_edit("Link Tasks", ChangeSource::User, |p| p.link(from.into(), to, LinkType::FS, Lag::None));
                 if let Err(e) = r {
                     st.toast(ToastKind::Warning, e.to_string());
                 }

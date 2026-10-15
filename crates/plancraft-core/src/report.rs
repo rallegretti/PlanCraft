@@ -77,12 +77,7 @@ pub fn status_moment(p: &Project) -> NaiveDateTime {
 }
 
 /// Fraction of the baseline (or current) span that should be complete at `at`.
-fn planned_fraction(
-    start: NaiveDateTime,
-    finish: NaiveDateTime,
-    at: NaiveDateTime,
-    p: &Project,
-) -> f64 {
+fn planned_fraction(start: NaiveDateTime, finish: NaiveDateTime, at: NaiveDateTime, p: &Project) -> f64 {
     if at <= start {
         return 0.0;
     }
@@ -91,11 +86,7 @@ fn planned_fraction(
     }
     let wc = project_calendar(p);
     let total = wc.between(start, finish);
-    if total <= 0 {
-        1.0
-    } else {
-        wc.between(start, at) as f64 / total as f64
-    }
+    if total <= 0 { 1.0 } else { wc.between(start, at) as f64 / total as f64 }
 }
 
 /// Whether a task is behind schedule at `at` (should have progressed further).
@@ -126,18 +117,13 @@ pub fn milestone_status(p: &Project, at: NaiveDateTime) -> Vec<MilestoneStatus> 
             for r in &m.members {
                 let (pct, w) = match r {
                     TaskRef::Local(id) => match p.task(*id) {
-                        Some(t) => (
-                            t.sched.percent_complete as f64,
-                            t.sched.work.max(t.sched.duration).max(1) as f64,
-                        ),
+                        Some(t) => (t.sched.percent_complete as f64, t.sched.work.max(t.sched.duration).max(1) as f64),
                         None => continue,
                     },
-                    TaskRef::External { project, task } => {
-                        match p.external(*project).and_then(|e| e.task(*task)) {
-                            Some(s) => (s.percent_complete as f64, s.duration.max(1) as f64),
-                            None => continue,
-                        }
-                    }
+                    TaskRef::External { project, task } => match p.external(*project).and_then(|e| e.task(*task)) {
+                        Some(s) => (s.percent_complete as f64, s.duration.max(1) as f64),
+                        None => continue,
+                    },
                 };
                 members += 1;
                 if pct >= 100.0 {
@@ -146,15 +132,9 @@ pub fn milestone_status(p: &Project, at: NaiveDateTime) -> Vec<MilestoneStatus> 
                 num += pct * w;
                 den += w;
             }
-            let progress = if den > 0.0 {
-                (num / den) as f32
-            } else {
-                m.sched.percent_complete
-            };
+            let progress = if den > 0.0 { (num / den) as f32 } else { m.sched.percent_complete };
             let complete = m.is_complete() || (members > 0 && done == members);
-            let late = !complete
-                && (m.deadline.zip(m.sched.finish).is_some_and(|(d, f)| f > d)
-                    || m.sched.finish.is_some_and(|f| f < at));
+            let late = !complete && (m.deadline.zip(m.sched.finish).is_some_and(|(d, f)| f > d) || m.sched.finish.is_some_and(|f| f < at));
             MilestoneStatus {
                 id: m.id,
                 name: m.name.clone(),
@@ -183,11 +163,8 @@ pub fn earned_value(p: &Project, at: NaiveDateTime) -> Option<EarnedValue> {
         ev.bcwp += b.cost * t.sched.percent_complete as f64 / 100.0;
         // Actual cost: work-based actual cost proportionally to actual work, plus fixed cost when started.
         let planned_work = t.sched.work.max(1) as f64;
-        let actual_ratio = if t.sched.work > 0 {
-            t.sched.actual_work as f64 / planned_work
-        } else {
-            t.sched.percent_complete as f64 / 100.0
-        };
+        let actual_ratio =
+            if t.sched.work > 0 { t.sched.actual_work as f64 / planned_work } else { t.sched.percent_complete as f64 / 100.0 };
         ev.acwp += t.sched.cost * actual_ratio;
     }
     if !any_baseline {
@@ -195,16 +172,8 @@ pub fn earned_value(p: &Project, at: NaiveDateTime) -> Option<EarnedValue> {
     }
     ev.sv = ev.bcwp - ev.bcws;
     ev.cv = ev.bcwp - ev.acwp;
-    ev.spi = if ev.bcws > 0.0 {
-        ev.bcwp / ev.bcws
-    } else {
-        1.0
-    };
-    ev.cpi = if ev.acwp > 0.0 {
-        ev.bcwp / ev.acwp
-    } else {
-        1.0
-    };
+    ev.spi = if ev.bcws > 0.0 { ev.bcwp / ev.bcws } else { 1.0 };
+    ev.cpi = if ev.acwp > 0.0 { ev.bcwp / ev.acwp } else { 1.0 };
     Some(ev)
 }
 
@@ -213,17 +182,8 @@ pub fn project_stats(p: &Project) -> ProjectStats {
     let at = status_moment(p);
     let wc = project_calendar(p);
     let leaves: Vec<&Task> = p.tasks.iter().filter(|t| !t.sched.is_summary).collect();
-    let baseline_finish = p
-        .tasks
-        .iter()
-        .filter_map(|t| t.baseline.map(|b| b.finish))
-        .max();
-    let baseline_cost = p
-        .tasks
-        .iter()
-        .filter(|t| !t.sched.is_summary)
-        .filter_map(|t| t.baseline.map(|b| b.cost))
-        .sum();
+    let baseline_finish = p.tasks.iter().filter_map(|t| t.baseline.map(|b| b.finish)).max();
+    let baseline_cost = p.tasks.iter().filter(|t| !t.sched.is_summary).filter_map(|t| t.baseline.map(|b| b.cost)).sum();
     let over = crate::workload::overallocations(p).len();
     ProjectStats {
         name: p.name.clone(),
@@ -248,10 +208,7 @@ pub fn project_stats(p: &Project) -> ProjectStats {
         summary_tasks: p.tasks.len() - leaves.len(),
         milestones: leaves.iter().filter(|t| t.is_milestone()).count(),
         completed_tasks: leaves.iter().filter(|t| t.is_complete()).count(),
-        in_progress_tasks: leaves
-            .iter()
-            .filter(|t| t.percent_complete > 0 && !t.is_complete())
-            .count(),
+        in_progress_tasks: leaves.iter().filter(|t| t.percent_complete > 0 && !t.is_complete()).count(),
         late_tasks: leaves.iter().filter(|t| is_late(t, at, p)).count(),
         critical_tasks: leaves.iter().filter(|t| t.sched.critical).count(),
         resources: p.resources.len(),

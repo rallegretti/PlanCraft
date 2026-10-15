@@ -97,12 +97,7 @@ fn trim_number(v: f64) -> String {
 }
 
 /// Formats a duration, e.g. `"5 days"`, `"0.5 days"`, `"3 days?"`.
-pub fn format_duration(
-    mins: Minutes,
-    unit: DurationUnit,
-    s: &TimeSettings,
-    estimated: bool,
-) -> String {
+pub fn format_duration(mins: Minutes, unit: DurationUnit, s: &TimeSettings, estimated: bool) -> String {
     let v = mins as f64 / unit.minutes(s) as f64;
     let plural = (v - 1.0).abs() > 1e-9;
     let mut out = format!("{} {}", trim_number(v), unit.label(plural));
@@ -123,11 +118,7 @@ pub fn format_work(mins: Minutes) -> String {
 ///
 /// A bare number uses `default_unit`.  Returns the minutes and whether the value
 /// was marked as an estimate with a trailing `?`.
-pub fn parse_duration(
-    text: &str,
-    default_unit: DurationUnit,
-    s: &TimeSettings,
-) -> Option<(Minutes, bool)> {
+pub fn parse_duration(text: &str, default_unit: DurationUnit, s: &TimeSettings) -> Option<(Minutes, bool)> {
     let mut t = text.trim().to_ascii_lowercase();
     let estimated = t.ends_with('?');
     if estimated {
@@ -137,11 +128,8 @@ pub fn parse_duration(
     if t.is_empty() {
         return None;
     }
-    let split = t
-        .char_indices()
-        .find(|(_, c)| !(c.is_ascii_digit() || *c == '.' || *c == '-' || *c == '+'))
-        .map(|(i, _)| i)
-        .unwrap_or(t.len());
+    let split =
+        t.char_indices().find(|(_, c)| !(c.is_ascii_digit() || *c == '.' || *c == '-' || *c == '+')).map(|(i, _)| i).unwrap_or(t.len());
     let (num, unit) = t.split_at(split);
     let value: f64 = num.trim().parse().ok()?;
     let unit = match unit.trim() {
@@ -153,10 +141,7 @@ pub fn parse_duration(
         "mo" | "mon" | "mons" | "month" | "months" => DurationUnit::Months,
         _ => return None,
     };
-    Some((
-        (value * unit.minutes(s) as f64).round() as Minutes,
-        estimated,
-    ))
+    Some(((value * unit.minutes(s) as f64).round() as Minutes, estimated))
 }
 
 /// Parses an amount of work. A bare number means hours.
@@ -181,10 +166,7 @@ pub enum Lag {
 
 impl Lag {
     pub fn is_zero(&self) -> bool {
-        matches!(
-            self,
-            Lag::None | Lag::Working(0) | Lag::Elapsed(0) | Lag::Percent(0)
-        )
+        matches!(self, Lag::None | Lag::Working(0) | Lag::Elapsed(0) | Lag::Percent(0))
     }
 
     /// Formats the lag with a leading sign, e.g. `"+2 days"`, `"-50%"`, `"+1 eday"`.
@@ -193,10 +175,7 @@ impl Lag {
             Lag::None => String::new(),
             Lag::Working(m) => {
                 let sign = if m < 0 { "-" } else { "+" };
-                format!(
-                    "{sign}{}",
-                    format_duration(m.abs(), best_unit(m.abs(), s), s, false)
-                )
+                format!("{sign}{}", format_duration(m.abs(), best_unit(m.abs(), s), s, false))
             }
             Lag::Elapsed(m) => {
                 let sign = if m < 0 { "-" } else { "+" };
@@ -247,35 +226,14 @@ mod tests {
     #[test]
     fn format_and_parse_round_trip() {
         let s = TimeSettings::default();
-        assert_eq!(
-            format_duration(480 * 5, DurationUnit::Days, &s, false),
-            "5 days"
-        );
+        assert_eq!(format_duration(480 * 5, DurationUnit::Days, &s, false), "5 days");
         assert_eq!(format_duration(480, DurationUnit::Days, &s, true), "1 day?");
-        assert_eq!(
-            format_duration(240, DurationUnit::Days, &s, false),
-            "0.5 days"
-        );
-        assert_eq!(
-            parse_duration("5", DurationUnit::Days, &s),
-            Some((2400, false))
-        );
-        assert_eq!(
-            parse_duration("2.5 days?", DurationUnit::Days, &s),
-            Some((1200, true))
-        );
-        assert_eq!(
-            parse_duration("4h", DurationUnit::Days, &s),
-            Some((240, false))
-        );
-        assert_eq!(
-            parse_duration("1w", DurationUnit::Days, &s),
-            Some((2400, false))
-        );
-        assert_eq!(
-            parse_duration("1mo", DurationUnit::Days, &s),
-            Some((9600, false))
-        );
+        assert_eq!(format_duration(240, DurationUnit::Days, &s, false), "0.5 days");
+        assert_eq!(parse_duration("5", DurationUnit::Days, &s), Some((2400, false)));
+        assert_eq!(parse_duration("2.5 days?", DurationUnit::Days, &s), Some((1200, true)));
+        assert_eq!(parse_duration("4h", DurationUnit::Days, &s), Some((240, false)));
+        assert_eq!(parse_duration("1w", DurationUnit::Days, &s), Some((2400, false)));
+        assert_eq!(parse_duration("1mo", DurationUnit::Days, &s), Some((9600, false)));
         assert_eq!(parse_duration("abc", DurationUnit::Days, &s), None);
         assert_eq!(format_work(2400), "40 hrs");
     }

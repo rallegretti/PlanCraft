@@ -99,16 +99,7 @@ impl TaskTable {
     pub fn columns(self) -> Vec<TaskCol> {
         use TaskCol::*;
         match self {
-            TaskTable::Entry => vec![
-                Indicators,
-                Mode,
-                Name,
-                Duration,
-                Start,
-                Finish,
-                Predecessors,
-                Resources,
-            ],
+            TaskTable::Entry => vec![Indicators, Mode, Name, Duration, Start, Finish, Predecessors, Resources],
             TaskTable::Schedule => vec![
                 Indicators,
                 Name,
@@ -122,70 +113,16 @@ impl TaskTable {
                 ConstraintDate,
                 Deadline,
             ],
-            TaskTable::Tracking => vec![
-                Indicators,
-                Name,
-                ActualStart,
-                ActualFinish,
-                PercentComplete,
-                Duration,
-                ActualWork,
-                RemainingWork,
-                Cost,
-            ],
-            TaskTable::Work => vec![
-                Indicators,
-                Name,
-                Work,
-                BaselineWork,
-                WorkVariance,
-                ActualWork,
-                RemainingWork,
-                PercentComplete,
-            ],
-            TaskTable::Cost => vec![
-                Indicators,
-                Name,
-                FixedCost,
-                Cost,
-                BaselineCost,
-                CostVariance,
-            ],
-            TaskTable::Estimates => vec![
-                Indicators,
-                Name,
-                EstimateMethod,
-                Points,
-                Optimistic,
-                MostLikely,
-                Pessimistic,
-                ExpectedWork,
-                Work,
-                Duration,
-                Resources,
-            ],
-            TaskTable::Variance => vec![
-                Indicators,
-                Name,
-                Start,
-                Finish,
-                BaselineStart,
-                BaselineFinish,
-                StartVariance,
-                FinishVariance,
-            ],
-            TaskTable::Summary => vec![
-                Indicators,
-                Wbs,
-                Name,
-                Duration,
-                Start,
-                Finish,
-                PercentComplete,
-                Cost,
-                Work,
-                Milestones,
-            ],
+            TaskTable::Tracking => {
+                vec![Indicators, Name, ActualStart, ActualFinish, PercentComplete, Duration, ActualWork, RemainingWork, Cost]
+            }
+            TaskTable::Work => vec![Indicators, Name, Work, BaselineWork, WorkVariance, ActualWork, RemainingWork, PercentComplete],
+            TaskTable::Cost => vec![Indicators, Name, FixedCost, Cost, BaselineCost, CostVariance],
+            TaskTable::Estimates => {
+                vec![Indicators, Name, EstimateMethod, Points, Optimistic, MostLikely, Pessimistic, ExpectedWork, Work, Duration, Resources]
+            }
+            TaskTable::Variance => vec![Indicators, Name, Start, Finish, BaselineStart, BaselineFinish, StartVariance, FinishVariance],
+            TaskTable::Summary => vec![Indicators, Wbs, Name, Duration, Start, Finish, PercentComplete, Cost, Work, Milestones],
         }
     }
 }
@@ -196,9 +133,7 @@ impl TaskCol {
         let _ = p;
         match self {
             Indicators => ColumnDef::new("ℹ", 34.0).read_only().center(),
-            Mode => ColumnDef::new("Mode", 46.0)
-                .center()
-                .choice(&["Auto Scheduled", "Manually Scheduled"]),
+            Mode => ColumnDef::new("Mode", 46.0).center().choice(&["Auto Scheduled", "Manually Scheduled"]),
             Wbs => ColumnDef::new("WBS", 50.0).read_only(),
             Name => ColumnDef::new("Task Name", 230.0),
             Duration => ColumnDef::new("Duration", 76.0).right(),
@@ -229,23 +164,12 @@ impl TaskCol {
             LateFinish => ColumnDef::new("Late Finish", 100.0).read_only(),
             FreeSlack => ColumnDef::new("Free Slack", 76.0).right().read_only(),
             TotalSlack => ColumnDef::new("Total Slack", 76.0).right().read_only(),
-            ConstraintType => {
-                ColumnDef::new("Constraint", 150.0).choice(&ConstraintKind::ALL.map(|c| c.label()))
-            }
+            ConstraintType => ColumnDef::new("Constraint", 150.0).choice(&ConstraintKind::ALL.map(|c| c.label())),
             ConstraintDate => ColumnDef::new("Constraint Date", 104.0),
             Deadline => ColumnDef::new("Deadline", 100.0),
             Priority => ColumnDef::new("Priority", 60.0).right(),
-            TaskType => ColumnDef::new("Type", 100.0).choice(&[
-                "Fixed Units",
-                "Fixed Duration",
-                "Fixed Work",
-            ]),
-            EstimateMethod => ColumnDef::new("Estimate", 96.0).choice(&[
-                "None",
-                "Complexity",
-                "Three-point",
-                "Work",
-            ]),
+            TaskType => ColumnDef::new("Type", 100.0).choice(&["Fixed Units", "Fixed Duration", "Fixed Work"]),
+            EstimateMethod => ColumnDef::new("Estimate", 96.0).choice(&["None", "Complexity", "Three-point", "Work"]),
             Points => ColumnDef::new("Points", 58.0).right(),
             Optimistic => ColumnDef::new("Optimistic", 80.0).right(),
             MostLikely => ColumnDef::new("Most Likely", 80.0).right(),
@@ -260,23 +184,11 @@ impl TaskCol {
 }
 
 fn var_text(p: &Project, m: Minutes) -> String {
-    if m == 0 {
-        p.format_duration(0, false)
-    } else {
-        format!(
-            "{}{}",
-            if m > 0 { "+" } else { "-" },
-            p.format_duration(m.abs(), false)
-        )
-    }
+    if m == 0 { p.format_duration(0, false) } else { format!("{}{}", if m > 0 { "+" } else { "-" }, p.format_duration(m.abs(), false)) }
 }
 
 /// Indicator glyphs for a task.
-pub fn indicators(
-    p: &Project,
-    t: &Task,
-    overallocated: &dyn Fn(TaskId) -> bool,
-) -> Vec<(String, egui::Color32, String)> {
+pub fn indicators(p: &Project, t: &Task, overallocated: &dyn Fn(TaskId) -> bool) -> Vec<(String, egui::Color32, String)> {
     let mut v = Vec::new();
     if t.is_complete() {
         v.push(("✔".into(), theme::OK, "This task was completed".into()));
@@ -284,42 +196,22 @@ pub fn indicators(
     if !t.sched.warnings.is_empty() {
         v.push(("⚠".into(), theme::ERROR, t.sched.warnings.join("\n")));
     } else if t.deadline.is_some() {
-        v.push((
-            "⚑".into(),
-            theme::DEADLINE,
-            format!("Deadline: {}", format::date(t.deadline)),
-        ));
+        v.push(("⚑".into(), theme::DEADLINE, format!("Deadline: {}", format::date(t.deadline))));
     }
     if t.constraint.kind.needs_date() {
         v.push((
             "📌".into(),
             theme::ACCENT_MID,
-            format!(
-                "{} constraint on {}",
-                t.constraint.kind.label(),
-                format::date(t.constraint.date)
-            ),
+            format!("{} constraint on {}", t.constraint.kind.label(), format::date(t.constraint.date)),
         ));
     }
     if overallocated(t.id) {
-        v.push((
-            "👤".into(),
-            theme::ERROR,
-            "A resource assigned to this task is overallocated".into(),
-        ));
+        v.push(("👤".into(), theme::ERROR, "A resource assigned to this task is overallocated".into()));
     }
-    if t.predecessors
-        .iter()
-        .any(|d| matches!(d.predecessor, TaskRef::External { .. }))
-        || t.members
-            .iter()
-            .any(|m| matches!(m, TaskRef::External { .. }))
+    if t.predecessors.iter().any(|d| matches!(d.predecessor, TaskRef::External { .. }))
+        || t.members.iter().any(|m| matches!(m, TaskRef::External { .. }))
     {
-        v.push((
-            "🔗".into(),
-            theme::ACCENT_MID,
-            "Linked to a task in another project".into(),
-        ));
+        v.push(("🔗".into(), theme::ACCENT_MID, "Linked to a task in another project".into()));
     }
     if !t.notes.is_empty() {
         v.push(("📝".into(), theme::TEXT_WEAK, t.notes.clone()));
@@ -343,10 +235,7 @@ pub fn cell(col: TaskCol, p: &Project, idx: usize, ctx: &CellCtx) -> Cell {
     let s = &t.sched;
     let summary = s.is_summary;
     let mut c = match col {
-        Indicators => Cell {
-            icons: indicators(p, t, ctx.overallocated),
-            ..Default::default()
-        },
+        Indicators => Cell { icons: indicators(p, t, ctx.overallocated), ..Default::default() },
         Mode => {
             let (g, tip) = match t.mode {
                 ScheduleMode::Auto => ("⟳", "Auto Scheduled"),
@@ -363,33 +252,14 @@ pub fn cell(col: TaskCol, p: &Project, idx: usize, ctx: &CellCtx) -> Cell {
         Wbs => Cell::weak(p.wbs(idx)),
         Name => {
             let indent = (t.outline_level.saturating_sub(1)) as f32 * 16.0;
-            Cell {
-                text: t.name.clone(),
-                bold: summary,
-                indent,
-                expander: if summary { Some(true) } else { None },
-                ..Default::default()
-            }
+            Cell { text: t.name.clone(), bold: summary, indent, expander: if summary { Some(true) } else { None }, ..Default::default() }
         }
         Duration => Cell::text(p.format_duration(s.duration, t.estimated && !summary)),
-        Start => Cell {
-            text: format::date(s.start),
-            edit_text: Some(format::iso_date(s.start)),
-            ..Default::default()
-        },
-        Finish => Cell {
-            text: format::date(s.finish),
-            edit_text: Some(format::iso_date(s.finish)),
-            ..Default::default()
-        },
+        Start => Cell { text: format::date(s.start), edit_text: Some(format::iso_date(s.start)), ..Default::default() },
+        Finish => Cell { text: format::date(s.finish), edit_text: Some(format::iso_date(s.finish)), ..Default::default() },
         Predecessors => Cell::text(p.format_predecessors(t.id)),
         Successors => Cell::text(
-            p.successors(t.id)
-                .iter()
-                .filter_map(|(sid, _)| p.row_number(*sid))
-                .map(|r| r.to_string())
-                .collect::<Vec<_>>()
-                .join(","),
+            p.successors(t.id).iter().filter_map(|(sid, _)| p.row_number(*sid)).map(|r| r.to_string()).collect::<Vec<_>>().join(","),
         ),
         Resources => Cell::text(p.format_resource_names(t.id)),
         PercentComplete => Cell::text(format::percent(s.percent_complete)),
@@ -398,59 +268,29 @@ pub fn cell(col: TaskCol, p: &Project, idx: usize, ctx: &CellCtx) -> Cell {
         RemainingWork => Cell::text(format_work((s.work - s.actual_work).max(0))),
         Cost => Cell::text(format::money(p, s.cost)),
         FixedCost => Cell::text(format::money(p, t.fixed_cost)),
-        BaselineStart => Cell::text(
-            t.baseline
-                .map(|b| format::date(Some(b.start)))
-                .unwrap_or_else(|| "NA".into()),
-        ),
-        BaselineFinish => Cell::text(
-            t.baseline
-                .map(|b| format::date(Some(b.finish)))
-                .unwrap_or_else(|| "NA".into()),
-        ),
+        BaselineStart => Cell::text(t.baseline.map(|b| format::date(Some(b.start))).unwrap_or_else(|| "NA".into())),
+        BaselineFinish => Cell::text(t.baseline.map(|b| format::date(Some(b.finish))).unwrap_or_else(|| "NA".into())),
         BaselineWork => Cell::text(t.baseline.map(|b| format_work(b.work)).unwrap_or_default()),
-        BaselineCost => Cell::text(
-            t.baseline
-                .map(|b| format::money(p, b.cost))
-                .unwrap_or_default(),
-        ),
+        BaselineCost => Cell::text(t.baseline.map(|b| format::money(p, b.cost)).unwrap_or_default()),
         StartVariance | FinishVariance => {
             let wc = plancraft_core::schedule::project_calendar(p);
             let v = match (t.baseline, s.start, s.finish) {
-                (Some(b), Some(st), Some(fi)) => Some(if col == StartVariance {
-                    wc.between(b.start, st)
-                } else {
-                    wc.between(b.finish, fi)
-                }),
+                (Some(b), Some(st), Some(fi)) => {
+                    Some(if col == StartVariance { wc.between(b.start, st) } else { wc.between(b.finish, fi) })
+                }
                 _ => None,
             };
             match v {
-                Some(m) => Cell {
-                    text: var_text(p, m),
-                    color: Some(if m > 0 { theme::ERROR } else { theme::TEXT }),
-                    ..Default::default()
-                },
+                Some(m) => Cell { text: var_text(p, m), color: Some(if m > 0 { theme::ERROR } else { theme::TEXT }), ..Default::default() },
                 None => Cell::default(),
             }
         }
-        WorkVariance => t
-            .baseline
-            .map(|b| Cell::text(format_work(s.work - b.work)))
-            .unwrap_or_default(),
-        CostVariance => t
-            .baseline
-            .map(|b| Cell::text(format::money(p, s.cost - b.cost)))
-            .unwrap_or_default(),
-        ActualStart => Cell {
-            text: format::date(t.actual_start),
-            edit_text: Some(format::iso_date(t.actual_start)),
-            ..Default::default()
-        },
-        ActualFinish => Cell {
-            text: format::date(t.actual_finish),
-            edit_text: Some(format::iso_date(t.actual_finish)),
-            ..Default::default()
-        },
+        WorkVariance => t.baseline.map(|b| Cell::text(format_work(s.work - b.work))).unwrap_or_default(),
+        CostVariance => t.baseline.map(|b| Cell::text(format::money(p, s.cost - b.cost))).unwrap_or_default(),
+        ActualStart => Cell { text: format::date(t.actual_start), edit_text: Some(format::iso_date(t.actual_start)), ..Default::default() },
+        ActualFinish => {
+            Cell { text: format::date(t.actual_finish), edit_text: Some(format::iso_date(t.actual_finish)), ..Default::default() }
+        }
         EarlyStart => Cell::text(format::date(s.early_start)),
         EarlyFinish => Cell::text(format::date(s.early_finish)),
         LateStart => Cell::text(format::date(s.late_start)),
@@ -458,24 +298,14 @@ pub fn cell(col: TaskCol, p: &Project, idx: usize, ctx: &CellCtx) -> Cell {
         FreeSlack => Cell::text(format::slack(p, s.free_slack)),
         TotalSlack => Cell {
             text: format::slack(p, s.total_slack),
-            color: if s.total_slack < 0 {
-                Some(theme::ERROR)
-            } else {
-                None
-            },
+            color: if s.total_slack < 0 { Some(theme::ERROR) } else { None },
             ..Default::default()
         },
         ConstraintType => Cell::text(t.constraint.kind.label()),
-        ConstraintDate => Cell {
-            text: format::date(t.constraint.date),
-            edit_text: Some(format::iso_date(t.constraint.date)),
-            ..Default::default()
-        },
-        Deadline => Cell {
-            text: format::date(t.deadline),
-            edit_text: Some(format::iso_date(t.deadline)),
-            ..Default::default()
-        },
+        ConstraintDate => {
+            Cell { text: format::date(t.constraint.date), edit_text: Some(format::iso_date(t.constraint.date)), ..Default::default() }
+        }
+        Deadline => Cell { text: format::date(t.deadline), edit_text: Some(format::iso_date(t.deadline)), ..Default::default() },
         Priority => Cell::text(t.priority.to_string()),
         TaskType => Cell::text(match t.task_type {
             plancraft_core::model::TaskType::FixedUnits => "Fixed Units",
@@ -493,30 +323,18 @@ pub fn cell(col: TaskCol, p: &Project, idx: usize, ctx: &CellCtx) -> Cell {
             _ => Cell::default(),
         },
         Optimistic | MostLikely | Pessimistic => match t.estimate {
-            Some(Estimate::ThreePoint {
-                optimistic,
-                most_likely,
-                pessimistic,
-            }) => Cell::text(format_work(match col {
+            Some(Estimate::ThreePoint { optimistic, most_likely, pessimistic }) => Cell::text(format_work(match col {
                 Optimistic => optimistic,
                 MostLikely => most_likely,
                 _ => pessimistic,
             })),
             _ => Cell::default(),
         },
-        ExpectedWork => t
-            .estimate
-            .map(|e| Cell::text(format_work(e.expected_work(&p.settings))))
-            .unwrap_or_default(),
+        ExpectedWork => t.estimate.map(|e| Cell::text(format_work(e.expected_work(&p.settings)))).unwrap_or_default(),
         Deliverable => Cell::text(t.deliverable.clone()),
-        Milestones => Cell::weak(
-            p.milestones_of(t.id)
-                .iter()
-                .filter_map(|m| p.task(*m))
-                .map(|m| m.name.clone())
-                .collect::<Vec<_>>()
-                .join(", "),
-        ),
+        Milestones => {
+            Cell::weak(p.milestones_of(t.id).iter().filter_map(|m| p.task(*m)).map(|m| m.name.clone()).collect::<Vec<_>>().join(", "))
+        }
         Notes => Cell::text(t.notes.lines().next().unwrap_or_default().to_string()),
         UniqueId => Cell::weak(t.id.0.to_string()),
     };
@@ -538,14 +356,11 @@ fn parse_date(p: &Project, text: &str, finish: bool) -> Result<Option<NaiveDateT
     if t.is_empty() || t.eq_ignore_ascii_case("na") {
         return Ok(None);
     }
-    p.parse_datetime(t, finish)
-        .map(Some)
-        .ok_or_else(|| format!("'{t}' is not a valid date (use YYYY-MM-DD)"))
+    p.parse_datetime(t, finish).map(Some).ok_or_else(|| format!("'{t}' is not a valid date (use YYYY-MM-DD)"))
 }
 
 fn parse_work_text(p: &Project, text: &str) -> Result<Minutes, String> {
-    parse_work(text, &p.settings.time)
-        .ok_or_else(|| format!("'{text}' is not a valid amount of work"))
+    parse_work(text, &p.settings.time).ok_or_else(|| format!("'{text}' is not a valid amount of work"))
 }
 
 /// Applies an edited value to a task. Runs inside an undoable edit.
@@ -562,11 +377,7 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
             p.tasks[idx].name = text.trim().to_string();
         }
         Mode => {
-            p.tasks[idx].mode = if text.starts_with('M') {
-                ScheduleMode::Manual
-            } else {
-                ScheduleMode::Auto
-            };
+            p.tasks[idx].mode = if text.starts_with('M') { ScheduleMode::Manual } else { ScheduleMode::Auto };
             if p.tasks[idx].mode == ScheduleMode::Manual {
                 let t = &mut p.tasks[idx];
                 t.manual_start = t.sched.start;
@@ -574,9 +385,7 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
             }
         }
         Duration => {
-            let (m, est) = p
-                .parse_duration(text)
-                .ok_or_else(|| format!("'{text}' is not a valid duration"))?;
+            let (m, est) = p.parse_duration(text).ok_or_else(|| format!("'{text}' is not a valid duration"))?;
             p.set_duration(id, m, est).map_err(err)?;
         }
         Start | Finish => {
@@ -595,14 +404,7 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
                     t.manual_finish = dur.map(|d| date + d);
                 }
             } else {
-                t.constraint = Constraint {
-                    kind: if finish {
-                        ConstraintKind::Fnet
-                    } else {
-                        ConstraintKind::Snet
-                    },
-                    date: Some(date),
-                };
+                t.constraint = Constraint { kind: if finish { ConstraintKind::Fnet } else { ConstraintKind::Snet }, date: Some(date) };
             }
         }
         Predecessors => {
@@ -611,14 +413,8 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
         }
         Resources => p.apply_resource_names(id, text).map_err(err)?,
         PercentComplete => {
-            let v: f64 = text
-                .trim()
-                .trim_end_matches('%')
-                .trim()
-                .parse()
-                .map_err(|_| format!("'{text}' is not a percentage"))?;
-            p.set_percent_complete(id, v.clamp(0.0, 100.0).round() as u8)
-                .map_err(err)?;
+            let v: f64 = text.trim().trim_end_matches('%').trim().parse().map_err(|_| format!("'{text}' is not a percentage"))?;
+            p.set_percent_complete(id, v.clamp(0.0, 100.0).round() as u8).map_err(err)?;
         }
         Work => {
             if summary {
@@ -627,10 +423,7 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
             let w = parse_work_text(p, text)?;
             let assignments: Vec<(AssignmentId, Minutes)> = p
                 .assignments_for_task(id)
-                .filter(|a| {
-                    p.resource(a.resource)
-                        .is_some_and(|r| r.kind == ResourceType::Work)
-                })
+                .filter(|a| p.resource(a.resource).is_some_and(|r| r.kind == ResourceType::Work))
                 .map(|a| (a.id, a.work))
                 .collect();
             if assignments.is_empty() {
@@ -638,13 +431,8 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
             } else {
                 let total: Minutes = assignments.iter().map(|(_, w)| w).sum();
                 for (aid, aw) in &assignments {
-                    let share = if total > 0 {
-                        *aw as f64 / total as f64
-                    } else {
-                        1.0 / assignments.len() as f64
-                    };
-                    p.set_assignment_work(*aid, (w as f64 * share).round() as Minutes)
-                        .map_err(err)?;
+                    let share = if total > 0 { *aw as f64 / total as f64 } else { 1.0 / assignments.len() as f64 };
+                    p.set_assignment_work(*aid, (w as f64 * share).round() as Minutes).map_err(err)?;
                 }
             }
         }
@@ -662,18 +450,11 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
             }
         }
         ConstraintType => {
-            let kind = ConstraintKind::ALL
-                .into_iter()
-                .find(|k| k.label() == text)
-                .unwrap_or_default();
+            let kind = ConstraintKind::ALL.into_iter().find(|k| k.label() == text).unwrap_or_default();
             let t = &mut p.tasks[idx];
             t.constraint.kind = kind;
             if kind.needs_date() && t.constraint.date.is_none() {
-                t.constraint.date = if kind.is_start_constraint() {
-                    t.sched.start
-                } else {
-                    t.sched.finish
-                };
+                t.constraint.date = if kind.is_start_constraint() { t.sched.start } else { t.sched.finish };
             }
             if !kind.needs_date() {
                 t.constraint.date = None;
@@ -692,13 +473,7 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
             }
         }
         Deadline => p.tasks[idx].deadline = parse_date(p, text, true)?,
-        Priority => {
-            p.tasks[idx].priority = text
-                .trim()
-                .parse::<u16>()
-                .map_err(|_| "priority must be 0-1000")?
-                .min(1000)
-        }
+        Priority => p.tasks[idx].priority = text.trim().parse::<u16>().map_err(|_| "priority must be 0-1000")?.min(1000),
         TaskType => {
             p.tasks[idx].task_type = match text {
                 "Fixed Duration" => plancraft_core::model::TaskType::FixedDuration,
@@ -711,14 +486,10 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
             let work_guess = t.sched.work.max(t.duration);
             t.estimate = match text {
                 "Complexity" => Some(Estimate::Complexity { points: 3.0 }),
-                "Three-point" => Some(Estimate::ThreePoint {
-                    optimistic: work_guess * 3 / 4,
-                    most_likely: work_guess,
-                    pessimistic: work_guess * 3 / 2,
-                }),
-                "Work" => Some(Estimate::Work {
-                    minutes: work_guess,
-                }),
+                "Three-point" => {
+                    Some(Estimate::ThreePoint { optimistic: work_guess * 3 / 4, most_likely: work_guess, pessimistic: work_guess * 3 / 2 })
+                }
+                "Work" => Some(Estimate::Work { minutes: work_guess }),
                 _ => None,
             };
         }
@@ -730,11 +501,7 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
             let w = parse_work_text(p, text)?;
             let t = &mut p.tasks[idx];
             let (mut o, mut m, mut pe) = match t.estimate {
-                Some(Estimate::ThreePoint {
-                    optimistic,
-                    most_likely,
-                    pessimistic,
-                }) => (optimistic, most_likely, pessimistic),
+                Some(Estimate::ThreePoint { optimistic, most_likely, pessimistic }) => (optimistic, most_likely, pessimistic),
                 _ => (w, w, w),
             };
             match col {
@@ -742,11 +509,7 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
                 MostLikely => m = w,
                 _ => pe = w,
             }
-            t.estimate = Some(Estimate::ThreePoint {
-                optimistic: o,
-                most_likely: m,
-                pessimistic: pe,
-            });
+            t.estimate = Some(Estimate::ThreePoint { optimistic: o, most_likely: m, pessimistic: pe });
         }
         Deliverable => p.tasks[idx].deliverable = text.to_string(),
         Notes => p.tasks[idx].notes = text.to_string(),

@@ -13,16 +13,7 @@ use crate::args::*;
 use crate::views;
 
 const KINDS: [&str; 3] = ["work", "material", "cost"];
-const CATEGORIES: [&str; 8] = [
-    "team_member",
-    "team",
-    "partner_company",
-    "vendor",
-    "contractor",
-    "equipment",
-    "facility",
-    "other",
-];
+const CATEGORIES: [&str; 8] = ["team_member", "team", "partner_company", "vendor", "contractor", "equipment", "facility", "other"];
 
 fn resource_field_props() -> Map<String, Value> {
     let v = json!({
@@ -162,24 +153,15 @@ pub fn tools() -> Vec<Tool> {
 }
 
 fn overallocated_set(p: &Project) -> HashSet<ResourceId> {
-    workload::overallocations(p)
-        .into_iter()
-        .map(|(r, _)| r)
-        .collect()
+    workload::overallocations(p).into_iter().map(|(r, _)| r).collect()
 }
 
 fn list_resources(ctx: &Ctx, a: &Args) -> ToolResult {
     ctx.read(a, |doc| {
         let p = &doc.project;
         let over = overallocated_set(p);
-        let kind: Option<ResourceType> = a
-            .get("kind")
-            .map(|v| parse_enum(v, "kind", &KINDS))
-            .transpose()?;
-        let cat: Option<ResourceCategory> = a
-            .get("category")
-            .map(|v| parse_enum(v, "category", &CATEGORIES))
-            .transpose()?;
+        let kind: Option<ResourceType> = a.get("kind").map(|v| parse_enum(v, "kind", &KINDS)).transpose()?;
+        let cat: Option<ResourceCategory> = a.get("category").map(|v| parse_enum(v, "category", &CATEGORIES)).transpose()?;
         let group = a.str("group")?;
         let only_over = a.bool("overallocated_only")?.unwrap_or(false);
         let list: Vec<Value> = p
@@ -199,11 +181,7 @@ pub fn resource_view(p: &Project, id: ResourceId) -> Value {
     let Some(r) = p.resource(id) else {
         return Value::Null;
     };
-    let days = workload::overallocations(p)
-        .into_iter()
-        .find(|(rid, _)| *rid == id)
-        .map(|(_, d)| d)
-        .unwrap_or_default();
+    let days = workload::overallocations(p).into_iter().find(|(rid, _)| *rid == id).map(|(_, d)| d).unwrap_or_default();
     views::resource_detail(p, r, &days)
 }
 
@@ -215,40 +193,21 @@ fn get_resource(ctx: &Ctx, a: &Args) -> ToolResult {
 }
 
 fn apply_resource_fields(p: &mut Project, id: ResourceId, a: &Args) -> ToolResult<()> {
-    let kind: Option<ResourceType> = a
-        .get("kind")
-        .map(|v| parse_enum(v, "kind", &KINDS))
-        .transpose()?;
-    let cat: Option<ResourceCategory> = a
-        .get("category")
-        .map(|v| parse_enum(v, "category", &CATEGORIES))
-        .transpose()?;
-    let max_units = a
-        .get("max_units")
-        .map(|v| parse_units_value(v, "max_units"))
-        .transpose()?;
-    let calendar = if a.is_clear("calendar") {
-        Some(None)
-    } else {
-        a.get("calendar")
-            .map(|v| resolve_calendar(p, v).map(Some))
-            .transpose()?
-    };
+    let kind: Option<ResourceType> = a.get("kind").map(|v| parse_enum(v, "kind", &KINDS)).transpose()?;
+    let cat: Option<ResourceCategory> = a.get("category").map(|v| parse_enum(v, "category", &CATEGORIES)).transpose()?;
+    let max_units = a.get("max_units").map(|v| parse_units_value(v, "max_units")).transpose()?;
+    let calendar =
+        if a.is_clear("calendar") { Some(None) } else { a.get("calendar").map(|v| resolve_calendar(p, v).map(Some)).transpose()? };
     if let Some(n) = a.str("name")? {
         let n = n.trim();
         if n.is_empty() {
             return err("'name' must not be empty");
         }
-        if p.resources
-            .iter()
-            .any(|r| r.id != id && r.name.eq_ignore_ascii_case(n))
-        {
+        if p.resources.iter().any(|r| r.id != id && r.name.eq_ignore_ascii_case(n)) {
             return err(format!("a resource named '{n}' already exists"));
         }
     }
-    let r = p
-        .resource_mut(id)
-        .ok_or_else(|| ToolError(format!("resource {} not found", id.0)))?;
+    let r = p.resource_mut(id).ok_or_else(|| ToolError(format!("resource {} not found", id.0)))?;
     if let Some(n) = a.str("name")? {
         r.name = n.trim().to_string();
     }
@@ -261,11 +220,9 @@ fn apply_resource_fields(p: &mut Project, id: ResourceId, a: &Args) -> ToolResul
     if let Some(u) = max_units {
         r.max_units = u;
     }
-    for (key, field) in [
-        ("standard_rate", &mut r.standard_rate),
-        ("overtime_rate", &mut r.overtime_rate),
-        ("cost_per_use", &mut r.cost_per_use),
-    ] {
+    for (key, field) in
+        [("standard_rate", &mut r.standard_rate), ("overtime_rate", &mut r.overtime_rate), ("cost_per_use", &mut r.cost_per_use)]
+    {
         if let Some(v) = a.f64(key)? {
             if v < 0.0 {
                 return err(format!("'{key}' must not be negative"));
@@ -299,10 +256,7 @@ fn create_resource(ctx: &Ctx, a: &Args) -> ToolResult {
         a,
         &format!("Add resource '{name}'"),
         |p, _| {
-            if p.resources
-                .iter()
-                .any(|r| r.name.eq_ignore_ascii_case(&name))
-            {
+            if p.resources.iter().any(|r| r.name.eq_ignore_ascii_case(&name)) {
                 return err(format!("a resource named '{name}' already exists"));
             }
             let id = p.add_resource(name.clone());
@@ -338,26 +292,17 @@ fn delete_resources(ctx: &Ctx, a: &Args) -> ToolResult {
             if ids.is_empty() {
                 return err("'resources' must not be empty");
             }
-            let names: Vec<String> = ids
-                .iter()
-                .filter_map(|id| p.resource(*id).map(|r| r.name.clone()))
-                .collect();
+            let names: Vec<String> = ids.iter().filter_map(|id| p.resource(*id).map(|r| r.name.clone())).collect();
             p.delete_resources(&ids)?;
             Ok(names)
         },
-        |doc, names| {
-            Ok(json!({ "deleted": names, "remaining_resources": doc.project.resources.len() }))
-        },
+        |doc, names| Ok(json!({ "deleted": names, "remaining_resources": doc.project.resources.len() })),
     )
 }
 
 /// Builds a calendar exception from `name/start/end/working_times/yearly` arguments.
 pub fn exception_from_args(a: &Args) -> ToolResult<CalendarException> {
-    let start = parse_date(
-        a.get("start")
-            .ok_or_else(|| ToolError("missing 'start'".into()))?,
-        "start",
-    )?;
+    let start = parse_date(a.get("start").ok_or_else(|| ToolError("missing 'start'".into()))?, "start")?;
     let end = match a.get("end") {
         Some(v) => parse_date(v, "end")?,
         None => start,
@@ -366,20 +311,9 @@ pub fn exception_from_args(a: &Args) -> ToolResult<CalendarException> {
         return err("'end' is before 'start'");
     }
     let working = parse_time_ranges(a.get("working_times"), "working_times")?;
-    let name = a.str("name")?.map(str::to_string).unwrap_or_else(|| {
-        if working.is_empty() {
-            "Time off".into()
-        } else {
-            "Altered hours".into()
-        }
-    });
-    Ok(CalendarException {
-        name,
-        start,
-        end,
-        working,
-        yearly: a.bool("yearly")?.unwrap_or(false),
-    })
+    let name =
+        a.str("name")?.map(str::to_string).unwrap_or_else(|| if working.is_empty() { "Time off".into() } else { "Altered hours".into() });
+    Ok(CalendarException { name, start, end, working, yearly: a.bool("yearly")?.unwrap_or(false) })
 }
 
 fn add_resource_exception(ctx: &Ctx, a: &Args) -> ToolResult {
@@ -409,16 +343,11 @@ fn remove_resource_exception(ctx: &Ctx, a: &Args) -> ToolResult {
             match (index, name) {
                 (Some(i), _) => {
                     if (i as usize) >= r.exceptions.len() {
-                        return err(format!(
-                            "exception index {i} out of range (resource has {})",
-                            r.exceptions.len()
-                        ));
+                        return err(format!("exception index {i} out of range (resource has {})", r.exceptions.len()));
                     }
                     r.exceptions.remove(i as usize);
                 }
-                (None, Some(n)) => r
-                    .exceptions
-                    .retain(|e| !e.name.eq_ignore_ascii_case(n.trim())),
+                (None, Some(n)) => r.exceptions.retain(|e| !e.name.eq_ignore_ascii_case(n.trim())),
                 (None, None) => return err("give 'index' or 'name'"),
             }
             if r.exceptions.len() == before {
@@ -436,10 +365,7 @@ fn set_resource_availability(ctx: &Ctx, a: &Args) -> ToolResult {
         "Set resource availability",
         |p, _| {
             let id = resource_arg(p, a, "resource")?;
-            let max_units = a
-                .get("max_units")
-                .map(|v| parse_units_value(v, "max_units"))
-                .transpose()?;
+            let max_units = a.get("max_units").map(|v| parse_units_value(v, "max_units")).transpose()?;
             let periods = match a.array("periods")? {
                 Some(items) => {
                     let mut out = Vec::new();
@@ -452,11 +378,8 @@ fn set_resource_availability(ctx: &Ctx, a: &Args) -> ToolResult {
                         {
                             return err("period 'to' is before 'from'");
                         }
-                        let units = parse_units_value(
-                            pa.get("units")
-                                .ok_or_else(|| ToolError("each period needs 'units'".into()))?,
-                            "units",
-                        )?;
+                        let units =
+                            parse_units_value(pa.get("units").ok_or_else(|| ToolError("each period needs 'units'".into()))?, "units")?;
                         out.push(AvailabilityPeriod { from, to, units });
                     }
                     Some(out)

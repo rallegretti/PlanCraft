@@ -40,7 +40,7 @@ pub fn tools() -> Vec<Tool> {
                     "level": { "type": "integer", "description": "Relative outline level (1 = top of batch) for flat lists instead of 'children'." },
                     "duration": { "type": ["string", "number"] },
                     "predecessors": { "type": ["array", "string"], "description": "Like create_task; may use batch keys." },
-                    "resources": { "type": "string", "description": "e.g. \"Ana[50%], Bob\"." },
+                    "resources": { "type": ["string", "array"], "description": "Text like \"Ana[50%], Bob\" or an array of names/ids/{resource, units}. Unknown names create resources." },
                     "milestone": { "type": "boolean" },
                     "members": { "type": "array", "description": "Milestone members: ids, names or batch keys." }
                 },
@@ -250,22 +250,14 @@ fn parse_color(v: &Value) -> ToolResult<Option<[u8; 3]>> {
             if h.len() != 6 {
                 return err("'bar_color' must look like \"#RRGGBB\"");
             }
-            let c = |i: usize| {
-                u8::from_str_radix(&h[i..i + 2], 16)
-                    .map_err(|_| ToolError("'bar_color' must look like \"#RRGGBB\"".into()))
-            };
+            let c = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).map_err(|_| ToolError("'bar_color' must look like \"#RRGGBB\"".into()));
             Ok(Some([c(0)?, c(2)?, c(4)?]))
         }
         other => err(format!("'bar_color' must be a string, got {other}")),
     }
 }
 
-fn opt_dt(
-    p: &Project,
-    a: &Args,
-    key: &str,
-    finish: bool,
-) -> ToolResult<Option<Option<chrono::NaiveDateTime>>> {
+fn opt_dt(p: &Project, a: &Args, key: &str, finish: bool) -> ToolResult<Option<Option<chrono::NaiveDateTime>>> {
     if a.is_clear(key) {
         return Ok(Some(None));
     }
@@ -276,8 +268,7 @@ fn opt_dt(
 }
 
 fn idx_of(p: &Project, id: TaskId) -> ToolResult<usize> {
-    p.task_index(id)
-        .ok_or_else(|| ToolError(format!("task {} not found", id.0)))
+    p.task_index(id).ok_or_else(|| ToolError(format!("task {} not found", id.0)))
 }
 
 /// Applies scalar fields (everything except links, resources, members and progress).
@@ -311,11 +302,7 @@ pub fn apply_task_fields(p: &mut Project, id: TaskId, a: &Args) -> ToolResult<()
         t.mode = mode;
     }
     if let Some(v) = a.get("task_type") {
-        let tt: TaskType = parse_enum(
-            v,
-            "task_type",
-            &["fixed_units", "fixed_duration", "fixed_work"],
-        )?;
+        let tt: TaskType = parse_enum(v, "task_type", &["fixed_units", "fixed_duration", "fixed_work"])?;
         let i = idx_of(p, id)?;
         p.tasks[i].task_type = tt;
     }
@@ -384,20 +371,10 @@ pub fn apply_task_fields(p: &mut Project, id: TaskId, a: &Args) -> ToolResult<()
     if let Some(v) = a.get("constraint_type") {
         let kind = parse_constraint_kind(v)?;
         let date = match a.get("constraint_date") {
-            Some(d) if kind.needs_date() => Some(parse_dt(
-                p,
-                d,
-                !kind.is_start_constraint(),
-                "constraint_date",
-            )?),
+            Some(d) if kind.needs_date() => Some(parse_dt(p, d, !kind.is_start_constraint(), "constraint_date")?),
             _ if kind.needs_date() => {
                 let existing = p.task(id).and_then(|t| t.constraint.date);
-                Some(existing.ok_or_else(|| {
-                    ToolError(format!(
-                        "constraint_type '{}' requires 'constraint_date'",
-                        constraint_code(kind)
-                    ))
-                })?)
+                Some(existing.ok_or_else(|| ToolError(format!("constraint_type '{}' requires 'constraint_date'", constraint_code(kind))))?)
             }
             _ => None,
         };
@@ -419,10 +396,7 @@ pub fn apply_task_fields(p: &mut Project, id: TaskId, a: &Args) -> ToolResult<()
         if manual {
             p.tasks[i].manual_start = Some(d);
         } else {
-            p.tasks[i].constraint = Constraint {
-                kind: ConstraintKind::Snet,
-                date: Some(d),
-            };
+            p.tasks[i].constraint = Constraint { kind: ConstraintKind::Snet, date: Some(d) };
         }
     }
     if let Some(v) = a.get("finish") {
@@ -431,19 +405,12 @@ pub fn apply_task_fields(p: &mut Project, id: TaskId, a: &Args) -> ToolResult<()
         if manual {
             p.tasks[i].manual_finish = Some(d);
         } else {
-            p.tasks[i].constraint = Constraint {
-                kind: ConstraintKind::Fnet,
-                date: Some(d),
-            };
+            p.tasks[i].constraint = Constraint { kind: ConstraintKind::Fnet, date: Some(d) };
         }
     }
-    for (key, finish) in [
-        ("deadline", true),
-        ("manual_start", false),
-        ("manual_finish", true),
-        ("actual_start", false),
-        ("actual_finish", true),
-    ] {
+    for (key, finish) in
+        [("deadline", true), ("manual_start", false), ("manual_finish", true), ("actual_start", false), ("actual_finish", true)]
+    {
         if let Some(val) = opt_dt(p, a, key, finish)? {
             let i = idx_of(p, id)?;
             let t = &mut p.tasks[i];
@@ -468,20 +435,14 @@ pub fn apply_task_fields(p: &mut Project, id: TaskId, a: &Args) -> ToolResult<()
 }
 
 /// Applies predecessors, resources and milestone members.
-pub fn apply_task_links(
-    p: &mut Project,
-    id: TaskId,
-    a: &Args,
-    keys: Option<&TaskKeys>,
-) -> ToolResult<()> {
+pub fn apply_task_links(p: &mut Project, id: TaskId, a: &Args, keys: Option<&TaskKeys>) -> ToolResult<()> {
     if a.present("predecessors") {
-        let deps =
-            parse_predecessor_list(p, a.map().get("predecessors").unwrap_or(&Value::Null), keys)
-                .map_err(|e| ToolError(format!("predecessors: {e}")))?;
+        let deps = parse_predecessor_list(p, a.map().get("predecessors").unwrap_or(&Value::Null), keys)
+            .map_err(|e| ToolError(format!("predecessors: {e}")))?;
         p.set_predecessors(id, deps)?;
     }
     if a.present("resources") {
-        let text = a.text("resources")?.unwrap_or_default();
+        let text = resources_text(p, a.map().get("resources").unwrap_or(&Value::Null))?;
         p.apply_resource_names(id, &text)?;
     }
     if let Some(members) = a.array("members")? {
@@ -530,10 +491,7 @@ pub fn insert_position(p: &mut Project, a: &Args) -> ToolResult<(usize, Option<u
         let pi = p.task_index(pid).expect("resolved");
         if p.tasks[pi].is_milestone() {
             if !p.tasks[pi].members.is_empty() {
-                return err(format!(
-                    "'{}' is a milestone with members and cannot become a summary task",
-                    p.tasks[pi].name
-                ));
+                return err(format!("'{}' is a milestone with members and cannot become a summary task", p.tasks[pi].name));
             }
             p.tasks[pi].kind = TaskKind::Task;
         }
@@ -558,13 +516,7 @@ pub fn insert_position(p: &mut Project, a: &Args) -> ToolResult<(usize, Option<u
 }
 
 /// Inserts a new task row.
-pub fn insert_new_task(
-    p: &mut Project,
-    name: &str,
-    index: usize,
-    level: Option<u16>,
-    milestone: bool,
-) -> TaskId {
+pub fn insert_new_task(p: &mut Project, name: &str, index: usize, level: Option<u16>, milestone: bool) -> TaskId {
     let id = match level {
         None => p.add_task(name, Some(index)),
         Some(level) => {
@@ -609,12 +561,7 @@ struct FlatItem<'a> {
 
 const ITEM_ONLY_KEYS: [&str; 5] = ["key", "level", "children", "milestone", "members"];
 
-fn flatten<'a>(
-    items: &'a [Value],
-    base_level: u16,
-    out: &mut Vec<FlatItem<'a>>,
-    allowed: &HashSet<String>,
-) -> ToolResult<()> {
+fn flatten<'a>(items: &'a [Value], base_level: u16, out: &mut Vec<FlatItem<'a>>, allowed: &HashSet<String>) -> ToolResult<()> {
     let mut prev_level = base_level.saturating_sub(1);
     for (n, item) in items.iter().enumerate() {
         let args = Args::from_value(item, "each task item")?;
@@ -647,9 +594,7 @@ fn flatten<'a>(
 }
 
 fn create_tasks(ctx: &Ctx, a: &Args) -> ToolResult {
-    let items = a
-        .array("tasks")?
-        .ok_or_else(|| ToolError("missing 'tasks'".into()))?;
+    let items = a.array("tasks")?.ok_or_else(|| ToolError("missing 'tasks'".into()))?;
     if items.is_empty() {
         return err("'tasks' must not be empty");
     }
@@ -680,7 +625,8 @@ fn create_tasks(ctx: &Ctx, a: &Args) -> ToolResult {
             let mut created = Vec::new();
             for it in &flat {
                 let name = it.args.str("name")?.unwrap_or("").trim().to_string();
-                let ms = it.args.bool("is_milestone")?.or(it.args.bool("milestone")?).unwrap_or(false) || it.args.array("members")?.is_some_and(|m| !m.is_empty());
+                let ms = it.args.bool("is_milestone")?.or(it.args.bool("milestone")?).unwrap_or(false)
+                    || it.args.array("members")?.is_some_and(|m| !m.is_empty());
                 let id = insert_new_task(p, &name, index, Some(base + it.level - 1), ms);
                 index += 1;
                 if let Some(k) = it.args.text("key")?
@@ -694,12 +640,17 @@ fn create_tasks(ctx: &Ctx, a: &Args) -> ToolResult {
             for (it, &id) in flat.iter().zip(&created) {
                 let has_kids = p.task_index(id).is_some_and(|i| p.has_children(i));
                 if has_kids && it.args.get("duration").is_some() {
-                    return err(format!("'{}' has children, so its duration is calculated; remove 'duration' from it", p.task(id).map(|t| t.name.clone()).unwrap_or_default()));
+                    return err(format!(
+                        "'{}' has children, so its duration is calculated; remove 'duration' from it",
+                        p.task(id).map(|t| t.name.clone()).unwrap_or_default()
+                    ));
                 }
-                apply_task_fields(p, id, &it.args).map_err(|e| ToolError(format!("task '{}': {e}", p.task(id).map(|t| t.name.clone()).unwrap_or_default())))?;
+                apply_task_fields(p, id, &it.args)
+                    .map_err(|e| ToolError(format!("task '{}': {e}", p.task(id).map(|t| t.name.clone()).unwrap_or_default())))?;
             }
             for (it, &id) in flat.iter().zip(&created) {
-                apply_task_links(p, id, &it.args, Some(&keys)).map_err(|e| ToolError(format!("task '{}': {e}", p.task(id).map(|t| t.name.clone()).unwrap_or_default())))?;
+                apply_task_links(p, id, &it.args, Some(&keys))
+                    .map_err(|e| ToolError(format!("task '{}': {e}", p.task(id).map(|t| t.name.clone()).unwrap_or_default())))?;
             }
             if flat.iter().any(|it| it.args.get("percent_complete").is_some()) {
                 recalculate(p);
@@ -751,9 +702,7 @@ fn update_task(ctx: &Ctx, a: &Args) -> ToolResult {
 }
 
 fn update_tasks(ctx: &Ctx, a: &Args) -> ToolResult {
-    let updates = a
-        .array("updates")?
-        .ok_or_else(|| ToolError("missing 'updates'".into()))?;
+    let updates = a.array("updates")?.ok_or_else(|| ToolError("missing 'updates'".into()))?;
     let mut allowed: HashSet<String> = task_field_props().keys().cloned().collect();
     allowed.insert("task".into());
     let mut parsed = Vec::new();
@@ -805,7 +754,10 @@ fn delete_tasks(ctx: &Ctx, a: &Args) -> ToolResult {
             let names: Vec<(TaskId, String)> = p.tasks.iter().map(|t| (t.id, t.name.clone())).collect();
             let mut deleted = p.delete_tasks(&ids)?;
             deleted.sort();
-            Ok(deleted.into_iter().map(|d| json!({ "id": d.0, "name": names.iter().find(|(i, _)| *i == d).map(|(_, n)| n.clone()) })).collect::<Vec<_>>())
+            Ok(deleted
+                .into_iter()
+                .map(|d| json!({ "id": d.0, "name": names.iter().find(|(i, _)| *i == d).map(|(_, n)| n.clone()) }))
+                .collect::<Vec<_>>())
         },
         |doc, deleted| Ok(json!({ "deleted": deleted, "remaining_tasks": doc.project.tasks.len() })),
     )
@@ -819,10 +771,7 @@ fn move_task(ctx: &Ctx, a: &Args) -> ToolResult {
             let id = task_arg(p, a, "task")?;
             let idx = p.task_index(id).expect("resolved");
             let block_len = p.descendants_range(idx).len() + 1;
-            let in_block = |p: &Project, other: TaskId| {
-                p.task_index(other)
-                    .is_some_and(|o| o >= idx && o < idx + block_len)
-            };
+            let in_block = |p: &Project, other: TaskId| p.task_index(other).is_some_and(|o| o >= idx && o < idx + block_len);
             let (target, level) = if let Some(v) = a.get("before") {
                 let o = resolve_task(p, v)?;
                 if in_block(p, o) {
@@ -849,10 +798,7 @@ fn move_task(ctx: &Ctx, a: &Args) -> ToolResult {
                     }
                     p.tasks[oi].kind = TaskKind::Task;
                 }
-                (
-                    p.descendants_range(oi).end,
-                    Some(p.tasks[oi].outline_level + 1),
-                )
+                (p.descendants_range(oi).end, Some(p.tasks[oi].outline_level + 1))
             } else if let Some(i) = a.u64("index")? {
                 ((i.max(1) as usize) - 1, None)
             } else {
@@ -927,4 +873,33 @@ fn outdent_tasks(ctx: &Ctx, a: &Args) -> ToolResult {
         },
         |doc, ids| Ok(json!({ "tasks": ids.iter().filter_map(|id| doc.project.task_index(*id)).map(|i| views::task_row(&doc.project, i)).collect::<Vec<_>>() })),
     )
+}
+
+/// Accepts resources as text (`"Ana[50%], Bob"`) or as an array of names, ids or
+/// `{resource, units}` objects, and returns the text form understood by the core.
+fn resources_text(p: &Project, v: &Value) -> ToolResult<String> {
+    let item = |x: &Value| -> ToolResult<String> {
+        match x {
+            Value::String(s) => Ok(s.clone()),
+            Value::Number(_) => {
+                let rid = resolve_resource(p, x)?;
+                Ok(p.resource(rid).map(|r| r.name.clone()).unwrap_or_default())
+            }
+            Value::Object(o) => {
+                let r = o.get("resource").or_else(|| o.get("name")).ok_or_else(|| ToolError("resource objects need 'resource'".into()))?;
+                let rid = resolve_resource(p, r)?;
+                let name = p.resource(rid).map(|r| r.name.clone()).unwrap_or_default();
+                match o.get("units") {
+                    Some(u) => Ok(format!("{name}[{}]", pct_text(parse_units_value(u, "units")?))),
+                    None => Ok(name),
+                }
+            }
+            other => err(format!("invalid resource entry {other}")),
+        }
+    };
+    match v {
+        Value::Null => Ok(String::new()),
+        Value::Array(items) => Ok(items.iter().map(item).collect::<ToolResult<Vec<_>>>()?.join(",")),
+        other => item(other),
+    }
 }

@@ -5,10 +5,7 @@
 //! Vertical scrolling is exposed through [`GridState::scroll_y`] so a chart
 //! next to the grid can stay in sync.
 
-use egui::{
-    Align, Align2, Color32, CursorIcon, EventFilter, FontId, Id, Key, Pos2, Rect, Sense, Stroke,
-    StrokeKind, Ui, pos2, vec2,
-};
+use egui::{Align, Align2, Color32, CursorIcon, EventFilter, FontId, Id, Key, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 
 use crate::theme;
 
@@ -30,12 +27,7 @@ pub struct ColumnDef {
 
 impl ColumnDef {
     pub fn new(title: impl Into<String>, width: f32) -> Self {
-        Self {
-            title: title.into(),
-            width,
-            align: Align::Min,
-            editor: Editor::Text,
-        }
+        Self { title: title.into(), width, align: Align::Min, editor: Editor::Text }
     }
     pub fn right(mut self) -> Self {
         self.align = Align::Max;
@@ -75,17 +67,10 @@ pub struct Cell {
 
 impl Cell {
     pub fn text(t: impl Into<String>) -> Self {
-        Self {
-            text: t.into(),
-            ..Default::default()
-        }
+        Self { text: t.into(), ..Default::default() }
     }
     pub fn weak(t: impl Into<String>) -> Self {
-        Self {
-            text: t.into(),
-            color: Some(theme::TEXT_WEAK),
-            ..Default::default()
-        }
+        Self { text: t.into(), color: Some(theme::TEXT_WEAK), ..Default::default() }
     }
 }
 
@@ -111,12 +96,7 @@ pub struct GridState {
 impl GridState {
     pub fn begin_edit(&mut self, row: usize, col: usize, text: String) {
         self.cursor = Some((row, col));
-        self.editing = Some(Edit {
-            row,
-            col,
-            text,
-            started: false,
-        });
+        self.editing = Some(Edit { row, col, text, started: false });
     }
 }
 
@@ -180,64 +160,34 @@ const HSCROLL_H: f32 = 12.0;
 const VSCROLL_W: f32 = 12.0;
 
 /// Paints a scrollbar. Returns the new offset.
-pub fn scrollbar(
-    ui: &mut Ui,
-    id: Id,
-    track: Rect,
-    vertical: bool,
-    offset: f32,
-    content: f32,
-    viewport: f32,
-) -> f32 {
+pub fn scrollbar(ui: &mut Ui, id: Id, track: Rect, vertical: bool, offset: f32, content: f32, viewport: f32) -> f32 {
     let painter = ui.painter_at(track);
     painter.rect_filled(track, 0.0, theme::PANEL_BG);
     if content <= viewport + 0.5 {
         return 0.0;
     }
-    let len = if vertical {
-        track.height()
-    } else {
-        track.width()
-    };
+    let len = if vertical { track.height() } else { track.width() };
     let thumb_len = (len * viewport / content).max(24.0).min(len);
     let max_off = content - viewport;
     let t = (offset / max_off).clamp(0.0, 1.0);
     let start = t * (len - thumb_len);
     let thumb = if vertical {
-        Rect::from_min_size(
-            pos2(track.left() + 2.0, track.top() + start),
-            vec2(track.width() - 4.0, thumb_len),
-        )
+        Rect::from_min_size(pos2(track.left() + 2.0, track.top() + start), vec2(track.width() - 4.0, thumb_len))
     } else {
-        Rect::from_min_size(
-            pos2(track.left() + start, track.top() + 2.0),
-            vec2(thumb_len, track.height() - 4.0),
-        )
+        Rect::from_min_size(pos2(track.left() + start, track.top() + 2.0), vec2(thumb_len, track.height() - 4.0))
     };
     let resp = ui.interact(track, id, Sense::click_and_drag());
     let mut new = offset;
     if resp.dragged() {
-        let d = if vertical {
-            resp.drag_delta().y
-        } else {
-            resp.drag_delta().x
-        };
+        let d = if vertical { resp.drag_delta().y } else { resp.drag_delta().x };
         new += d * max_off / (len - thumb_len).max(1.0);
     } else if resp.clicked()
         && let Some(p) = resp.interact_pointer_pos()
     {
-        let pos = if vertical {
-            p.y - track.top()
-        } else {
-            p.x - track.left()
-        };
+        let pos = if vertical { p.y - track.top() } else { p.x - track.left() };
         new = ((pos - thumb_len / 2.0) / (len - thumb_len).max(1.0)) * max_off;
     }
-    let color = if resp.hovered() || resp.dragged() {
-        theme::GRID_LINE_STRONG
-    } else {
-        Color32::from_rgb(0xD0, 0xD4, 0xDB)
-    };
+    let color = if resp.hovered() || resp.dragged() { theme::GRID_LINE_STRONG } else { Color32::from_rgb(0xD0, 0xD4, 0xDB) };
     painter.rect_filled(thumb, 4.0, color);
     new.clamp(0.0, max_off)
 }
@@ -260,10 +210,7 @@ pub fn show(
     let total_cols_w: f32 = state.widths.iter().sum();
     let vs_w = if cfg.show_vscroll { VSCROLL_W } else { 0.0 };
     let header = Rect::from_min_size(rect.min, vec2(rect.width() - vs_w, cfg.header_height));
-    let body = Rect::from_min_max(
-        pos2(rect.left(), header.bottom()),
-        pos2(rect.right() - vs_w, rect.bottom() - HSCROLL_H),
-    );
+    let body = Rect::from_min_max(pos2(rect.left(), header.bottom()), pos2(rect.right() - vs_w, rect.bottom() - HSCROLL_H));
     let cols_view_w = (body.width() - rn_w).max(0.0);
     let total_rows = cfg.row_count + cfg.blank_rows;
     let content_h = total_rows as f32 * cfg.row_height;
@@ -287,12 +234,8 @@ pub fn show(
             state.scroll_y = top + cfg.row_height - body.height();
         }
     }
-    state.scroll_y = state
-        .scroll_y
-        .clamp(0.0, (content_h - body.height() + cfg.row_height).max(0.0));
-    state.scroll_x = state
-        .scroll_x
-        .clamp(0.0, (total_cols_w - cols_view_w).max(0.0));
+    state.scroll_y = state.scroll_y.clamp(0.0, (content_h - body.height() + cfg.row_height).max(0.0));
+    state.scroll_x = state.scroll_x.clamp(0.0, (total_cols_w - cols_view_w).max(0.0));
 
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, theme::BG);
@@ -308,18 +251,11 @@ pub fn show(
 
     // ---- Header ----
     painter.rect_filled(header, 0.0, theme::HEADER_BG);
-    let hdr_painter = painter.with_clip_rect(Rect::from_min_max(
-        pos2(header.left() + rn_w, header.top()),
-        header.max,
-    ));
+    let hdr_painter = painter.with_clip_rect(Rect::from_min_max(pos2(header.left() + rn_w, header.top()), header.max));
     let font = FontId::proportional(12.5);
     for c in 0..ncols {
         let r = Rect::from_x_y_ranges(col_x[c]..=col_x[c + 1], header.y_range());
-        hdr_painter.vline(
-            r.right() - 0.5,
-            header.y_range(),
-            Stroke::new(1.0, theme::GRID_LINE),
-        );
+        hdr_painter.vline(r.right() - 0.5, header.y_range(), Stroke::new(1.0, theme::GRID_LINE));
         let text_pos = match cfg.columns[c].align {
             Align::Max => pos2(r.right() - 6.0, r.center().y),
             Align::Center => r.center(),
@@ -331,18 +267,9 @@ pub fn show(
             Align::Min => Align2::LEFT_CENTER,
         };
         let hp = hdr_painter.with_clip_rect(r.shrink2(vec2(2.0, 0.0)).intersect(header));
-        hp.text(
-            text_pos,
-            anchor,
-            &cfg.columns[c].title,
-            font.clone(),
-            theme::TEXT,
-        );
+        hp.text(text_pos, anchor, &cfg.columns[c].title, font.clone(), theme::TEXT);
         // Resize handle.
-        let handle = Rect::from_center_size(
-            pos2(r.right(), header.center().y),
-            vec2(6.0, header.height()),
-        );
+        let handle = Rect::from_center_size(pos2(r.right(), header.center().y), vec2(6.0, header.height()));
         if handle.left() > header.left() + rn_w && handle.right() < header.right() + 3.0 {
             let hr = ui.interact(handle, cfg.id.with(("resize", c)), Sense::drag());
             if hr.hovered() || hr.dragged() {
@@ -356,17 +283,9 @@ pub fn show(
     if cfg.row_numbers {
         let r = Rect::from_min_size(header.min, vec2(rn_w, header.height()));
         painter.rect_filled(r, 0.0, theme::HEADER_BG);
-        painter.vline(
-            r.right() - 0.5,
-            header.y_range(),
-            Stroke::new(1.0, theme::GRID_LINE_STRONG),
-        );
+        painter.vline(r.right() - 0.5, header.y_range(), Stroke::new(1.0, theme::GRID_LINE_STRONG));
     }
-    painter.hline(
-        header.x_range(),
-        header.bottom() - 0.5,
-        Stroke::new(1.0, theme::GRID_LINE_STRONG),
-    );
+    painter.hline(header.x_range(), header.bottom() - 0.5, Stroke::new(1.0, theme::GRID_LINE_STRONG));
 
     // ---- Body ----
     let body_painter = painter.with_clip_rect(body);
@@ -380,8 +299,7 @@ pub fn show(
 
     for row in first..last {
         let y = body.top() + row as f32 * cfg.row_height - state.scroll_y;
-        let row_rect =
-            Rect::from_min_size(pos2(body.left(), y), vec2(body.width(), cfg.row_height));
+        let row_rect = Rect::from_min_size(pos2(body.left(), y), vec2(body.width(), cfg.row_height));
         let data_row = row < cfg.row_count;
         if pointer.is_some_and(|p| row_rect.contains(p) && body.contains(p)) {
             hovered_row = Some(row);
@@ -395,33 +313,18 @@ pub fn show(
             if r.right() < body.left() + rn_w || r.left() > body.right() {
                 continue;
             }
-            let clip = r.intersect(Rect::from_min_max(
-                pos2(body.left() + rn_w, body.top()),
-                body.max,
-            ));
+            let clip = r.intersect(Rect::from_min_max(pos2(body.left() + rn_w, body.top()), body.max));
             let cp = body_painter.with_clip_rect(clip);
             let cursor_here = state.cursor == Some((row, c));
-            let content = if data_row {
-                cell(row, c)
-            } else {
-                Cell::default()
-            };
+            let content = if data_row { cell(row, c) } else { Cell::default() };
             if let Some(bg) = content.bg {
                 cp.rect_filled(r, 0.0, bg);
             }
             if cursor_here {
                 cp.rect_filled(r, 0.0, theme::SELECTION_CELL);
             }
-            cp.vline(
-                r.right() - 0.5,
-                r.y_range(),
-                Stroke::new(1.0, theme::GRID_LINE),
-            );
-            if state
-                .editing
-                .as_ref()
-                .is_some_and(|e| e.row == row && e.col == c)
-            {
+            cp.vline(r.right() - 0.5, r.y_range(), Stroke::new(1.0, theme::GRID_LINE));
+            if state.editing.as_ref().is_some_and(|e| e.row == row && e.col == c) {
                 edit_rect = Some((r, row, c));
                 continue;
             }
@@ -429,55 +332,25 @@ pub fn show(
             if let Some(expanded) = content.expander {
                 let tri_c = pos2(tx + 5.0, r.center().y);
                 let pts = if expanded {
-                    vec![
-                        tri_c + vec2(-4.0, -2.0),
-                        tri_c + vec2(4.0, -2.0),
-                        tri_c + vec2(0.0, 3.0),
-                    ]
+                    vec![tri_c + vec2(-4.0, -2.0), tri_c + vec2(4.0, -2.0), tri_c + vec2(0.0, 3.0)]
                 } else {
-                    vec![
-                        tri_c + vec2(-2.0, -4.0),
-                        tri_c + vec2(3.0, 0.0),
-                        tri_c + vec2(-2.0, 4.0),
-                    ]
+                    vec![tri_c + vec2(-2.0, -4.0), tri_c + vec2(3.0, 0.0), tri_c + vec2(-2.0, 4.0)]
                 };
-                cp.add(egui::Shape::convex_polygon(
-                    pts,
-                    theme::TEXT_WEAK,
-                    Stroke::NONE,
-                ));
+                cp.add(egui::Shape::convex_polygon(pts, theme::TEXT_WEAK, Stroke::NONE));
                 let tr = Rect::from_center_size(tri_c, vec2(14.0, 14.0));
-                if ui
-                    .interact(
-                        tr.intersect(clip),
-                        cfg.id.with(("exp", row)),
-                        Sense::click(),
-                    )
-                    .clicked()
-                {
+                if ui.interact(tr.intersect(clip), cfg.id.with(("exp", row)), Sense::click()).clicked() {
                     events.push(GridEvent::ToggleExpand(row));
                 }
                 tx += 14.0;
             }
             for (glyph, color, tip) in &content.icons {
                 let ir = Rect::from_min_size(pos2(tx, r.top()), vec2(16.0, r.height()));
-                cp.text(
-                    ir.center(),
-                    Align2::CENTER_CENTER,
-                    glyph,
-                    FontId::proportional(12.0),
-                    *color,
-                );
+                cp.text(ir.center(), Align2::CENTER_CENTER, glyph, FontId::proportional(12.0), *color);
                 if !tip.is_empty() && pointer.is_some_and(|p| ir.intersect(clip).contains(p)) {
-                    egui::Tooltip::always_open(
-                        ui.ctx().clone(),
-                        ui.layer_id(),
-                        cfg.id.with(("tip", row, c)),
-                        egui::PopupAnchor::Pointer,
-                    )
-                    .show(|ui| {
-                        ui.label(tip);
-                    });
+                    egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), cfg.id.with(("tip", row, c)), egui::PopupAnchor::Pointer)
+                        .show(|ui| {
+                            ui.label(tip);
+                        });
                 }
                 tx += 16.0;
             }
@@ -501,54 +374,24 @@ pub fn show(
                 }
             }
             if cursor_here {
-                cp.rect_stroke(
-                    r.shrink(0.5),
-                    0.0,
-                    Stroke::new(1.5, theme::ACCENT_MID),
-                    StrokeKind::Inside,
-                );
+                cp.rect_stroke(r.shrink(0.5), 0.0, Stroke::new(1.5, theme::ACCENT_MID), StrokeKind::Inside);
             }
             if let Some(t) = &content.tooltip
                 && pointer.is_some_and(|p| clip.contains(p))
                 && !t.is_empty()
             {
-                egui::Tooltip::always_open(
-                    ui.ctx().clone(),
-                    ui.layer_id(),
-                    cfg.id.with(("ctip", row, c)),
-                    egui::PopupAnchor::Pointer,
-                )
-                .show(|ui| {
-                    ui.label(t);
-                });
+                egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), cfg.id.with(("ctip", row, c)), egui::PopupAnchor::Pointer)
+                    .show(|ui| {
+                        ui.label(t);
+                    });
             }
         }
-        body_painter.hline(
-            row_rect.x_range(),
-            row_rect.bottom() - 0.5,
-            Stroke::new(1.0, theme::GRID_LINE),
-        );
+        body_painter.hline(row_rect.x_range(), row_rect.bottom() - 0.5, Stroke::new(1.0, theme::GRID_LINE));
         if cfg.row_numbers {
             let rr = Rect::from_min_size(row_rect.min, vec2(rn_w, cfg.row_height));
-            body_painter.rect_filled(
-                rr,
-                0.0,
-                if selected {
-                    theme::ACCENT_LIGHT
-                } else {
-                    theme::HEADER_BG
-                },
-            );
-            body_painter.vline(
-                rr.right() - 0.5,
-                rr.y_range(),
-                Stroke::new(1.0, theme::GRID_LINE_STRONG),
-            );
-            body_painter.hline(
-                rr.x_range(),
-                rr.bottom() - 0.5,
-                Stroke::new(1.0, theme::GRID_LINE),
-            );
+            body_painter.rect_filled(rr, 0.0, if selected { theme::ACCENT_LIGHT } else { theme::HEADER_BG });
+            body_painter.vline(rr.right() - 0.5, rr.y_range(), Stroke::new(1.0, theme::GRID_LINE_STRONG));
+            body_painter.hline(rr.x_range(), rr.bottom() - 0.5, Stroke::new(1.0, theme::GRID_LINE));
             if data_row {
                 body_painter.text(
                     pos2(rr.right() - 6.0, rr.center().y),
@@ -568,8 +411,7 @@ pub fn show(
             return None;
         }
         let row = ((p.y - body.top() + state.scroll_y) / cfg.row_height).floor() as usize;
-        let col = (0..ncols)
-            .find(|&c| p.x >= col_x[c] && p.x < col_x[c + 1] && p.x >= body.left() + rn_w);
+        let col = (0..ncols).find(|&c| p.x >= col_x[c] && p.x < col_x[c + 1] && p.x >= body.left() + rn_w);
         Some((row, col))
     };
     if body_resp.clicked() || body_resp.double_clicked() || body_resp.secondary_clicked() {
@@ -607,11 +449,7 @@ pub fn show(
         }
         if body_resp.secondary_clicked() && row < cfg.row_count {
             if !is_selected(row) {
-                events.push(GridEvent::Select {
-                    row,
-                    shift: false,
-                    ctrl: false,
-                });
+                events.push(GridEvent::Select { row, shift: false, ctrl: false });
             }
             if let Some(c) = col {
                 state.cursor = Some((row, c));
@@ -629,19 +467,8 @@ pub fn show(
         match editor {
             Editor::Choice(options) => {
                 body_painter.rect_filled(r, 0.0, theme::BG);
-                body_painter.rect_stroke(
-                    r.shrink(0.5),
-                    0.0,
-                    Stroke::new(1.5, theme::ACCENT),
-                    StrokeKind::Inside,
-                );
-                body_painter.text(
-                    pos2(r.left() + 5.0, r.center().y),
-                    Align2::LEFT_CENTER,
-                    &edit.text,
-                    cell_font.clone(),
-                    theme::TEXT,
-                );
+                body_painter.rect_stroke(r.shrink(0.5), 0.0, Stroke::new(1.5, theme::ACCENT), StrokeKind::Inside);
+                body_painter.text(pos2(r.left() + 5.0, r.center().y), Align2::LEFT_CENTER, &edit.text, cell_font.clone(), theme::TEXT);
                 let area = egui::Area::new(cfg.id.with("choice"))
                     .order(egui::Order::Foreground)
                     .fixed_pos(pos2(r.left(), r.bottom()))
@@ -673,11 +500,7 @@ pub fn show(
             }
             _ => {
                 let id = cfg.id.with(("edit", row, c));
-                let mut child = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(r)
-                        .layout(egui::Layout::left_to_right(Align::Center)),
-                );
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r).layout(egui::Layout::left_to_right(Align::Center)));
                 child.set_clip_rect(clip);
                 body_painter.rect_filled(r, 0.0, theme::BG);
                 let te = egui::TextEdit::singleline(&mut edit.text)
@@ -688,12 +511,7 @@ pub fn show(
                     .desired_width(r.width() - 4.0)
                     .horizontal_align(cfg.columns[c].align);
                 let resp = child.add(te);
-                body_painter.rect_stroke(
-                    r.shrink(0.5),
-                    0.0,
-                    Stroke::new(1.5, theme::ACCENT),
-                    StrokeKind::Inside,
-                );
+                body_painter.rect_stroke(r.shrink(0.5), 0.0, Stroke::new(1.5, theme::ACCENT), StrokeKind::Inside);
                 if !edit.started {
                     resp.request_focus();
                     edit.started = true;
@@ -732,23 +550,15 @@ pub fn show(
     if let Some((commit, mv)) = finished {
         if let Some(e) = state.editing.take() {
             if commit {
-                events.push(GridEvent::Commit {
-                    row: e.row,
-                    col: e.col,
-                    text: e.text.trim().to_string(),
-                });
+                events.push(GridEvent::Commit { row: e.row, col: e.col, text: e.text.trim().to_string() });
             }
             if let Some((dr, dc)) = mv {
-                let nr =
-                    (e.row as isize + dr).clamp(0, total_rows.saturating_sub(1) as isize) as usize;
+                let nr = (e.row as isize + dr).clamp(0, total_rows.saturating_sub(1) as isize) as usize;
                 let nc = (e.col as isize + dc).clamp(0, ncols as isize - 1) as usize;
                 state.cursor = Some((nr, nc));
                 state.scroll_to = Some(nr);
                 if dr != 0 && nr < cfg.row_count {
-                    events.push(GridEvent::CursorRow {
-                        row: nr,
-                        shift: false,
-                    });
+                    events.push(GridEvent::CursorRow { row: nr, shift: false });
                 }
             }
             body_resp.request_focus();
@@ -758,15 +568,7 @@ pub fn show(
     // ---- Keyboard (grid focused, not editing) ----
     if body_resp.has_focus() && state.editing.is_none() {
         ui.memory_mut(|m| {
-            m.set_focus_lock_filter(
-                body_resp.id,
-                EventFilter {
-                    tab: true,
-                    horizontal_arrows: true,
-                    vertical_arrows: true,
-                    escape: false,
-                },
-            )
+            m.set_focus_lock_filter(body_resp.id, EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: false })
         });
         let (mut dr, mut dc) = (0isize, 0isize);
         let mut typed: Option<String> = None;
@@ -776,12 +578,7 @@ pub fn show(
         ui.input(|i| {
             for ev in &i.events {
                 match ev {
-                    egui::Event::Key {
-                        key,
-                        pressed: true,
-                        modifiers,
-                        ..
-                    } if !modifiers.alt && !modifiers.command => match key {
+                    egui::Event::Key { key, pressed: true, modifiers, .. } if !modifiers.alt && !modifiers.command => match key {
                         Key::ArrowUp => dr -= 1,
                         Key::ArrowDown | Key::Enter => dr += 1,
                         Key::ArrowLeft => dc -= 1,
@@ -793,9 +590,7 @@ pub fn show(
                         Key::PageUp => dr -= (body.height() / cfg.row_height) as isize,
                         _ => {}
                     },
-                    egui::Event::Text(t) if !i.modifiers.command && !i.modifiers.alt => {
-                        typed = Some(typed.take().unwrap_or_default() + t)
-                    }
+                    egui::Event::Text(t) if !i.modifiers.command && !i.modifiers.alt => typed = Some(typed.take().unwrap_or_default() + t),
                     _ => {}
                 }
             }
@@ -827,11 +622,8 @@ pub fn show(
                         // Place cursor at end of the typed text.
                         let id = cfg.id.with(("edit", r, c));
                         let len = e.text.chars().count();
-                        let mut st =
-                            egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
-                        st.cursor.set_char_range(Some(egui::text::CCursorRange::one(
-                            egui::text::CCursor::new(len),
-                        )));
+                        let mut st = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
+                        st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(len))));
                         st.store(ui.ctx(), id);
                     }
                 }
@@ -848,57 +640,24 @@ pub fn show(
     }
 
     // ---- Scrollbars ----
-    let hs = Rect::from_min_max(
-        pos2(body.left() + rn_w, body.bottom()),
-        pos2(body.right(), rect.bottom()),
-    );
-    state.scroll_x = scrollbar(
-        ui,
-        cfg.id.with("hscroll"),
-        hs,
-        false,
-        state.scroll_x,
-        total_cols_w,
-        cols_view_w,
-    );
+    let hs = Rect::from_min_max(pos2(body.left() + rn_w, body.bottom()), pos2(body.right(), rect.bottom()));
+    state.scroll_x = scrollbar(ui, cfg.id.with("hscroll"), hs, false, state.scroll_x, total_cols_w, cols_view_w);
     if cfg.row_numbers {
         painter.rect_filled(
-            Rect::from_min_max(
-                pos2(body.left(), body.bottom()),
-                pos2(body.left() + rn_w, rect.bottom()),
-            ),
+            Rect::from_min_max(pos2(body.left(), body.bottom()), pos2(body.left() + rn_w, rect.bottom())),
             0.0,
             theme::PANEL_BG,
         );
     }
     if cfg.show_vscroll {
-        let vs = Rect::from_min_max(
-            pos2(rect.right() - VSCROLL_W, body.top()),
-            pos2(rect.right(), body.bottom()),
-        );
-        state.scroll_y = scrollbar(
-            ui,
-            cfg.id.with("vscroll"),
-            vs,
-            true,
-            state.scroll_y,
-            content_h + cfg.row_height,
-            body.height(),
-        );
+        let vs = Rect::from_min_max(pos2(rect.right() - VSCROLL_W, body.top()), pos2(rect.right(), body.bottom()));
+        state.scroll_y = scrollbar(ui, cfg.id.with("vscroll"), vs, true, state.scroll_y, content_h + cfg.row_height, body.height());
         painter.rect_filled(
-            Rect::from_min_max(
-                pos2(rect.right() - VSCROLL_W, rect.top()),
-                pos2(rect.right(), header.bottom()),
-            ),
+            Rect::from_min_max(pos2(rect.right() - VSCROLL_W, rect.top()), pos2(rect.right(), header.bottom())),
             0.0,
             theme::HEADER_BG,
         );
     }
 
-    GridOutput {
-        events,
-        body_rect: body,
-        hovered_row,
-        content_height: content_h,
-    }
+    GridOutput { events, body_rect: body, hovered_row, content_height: content_h }
 }

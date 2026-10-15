@@ -129,10 +129,7 @@ impl ConstraintKind {
 
     /// Whether the constraint date refers to the start (otherwise the finish).
     pub fn is_start_constraint(self) -> bool {
-        matches!(
-            self,
-            ConstraintKind::Snet | ConstraintKind::Snlt | ConstraintKind::Mso
-        )
+        matches!(self, ConstraintKind::Snet | ConstraintKind::Snlt | ConstraintKind::Mso)
     }
 }
 
@@ -224,11 +221,7 @@ pub struct Dependency {
 
 impl Dependency {
     pub fn fs(pred: impl Into<TaskRef>) -> Self {
-        Self {
-            predecessor: pred.into(),
-            kind: LinkType::FS,
-            lag: Lag::None,
-        }
+        Self { predecessor: pred.into(), kind: LinkType::FS, lag: Lag::None }
     }
 }
 
@@ -239,11 +232,7 @@ pub enum Estimate {
     /// Relative complexity in points; converted with `ProjectSettings::minutes_per_point`.
     Complexity { points: f64 },
     /// Three-point (PERT) estimate of work in minutes.
-    ThreePoint {
-        optimistic: Minutes,
-        most_likely: Minutes,
-        pessimistic: Minutes,
-    },
+    ThreePoint { optimistic: Minutes, most_likely: Minutes, pessimistic: Minutes },
     /// Direct work estimate in minutes.
     Work { minutes: Minutes },
 }
@@ -252,14 +241,10 @@ impl Estimate {
     /// Expected work in minutes.
     pub fn expected_work(&self, settings: &ProjectSettings) -> Minutes {
         match *self {
-            Estimate::Complexity { points } => {
-                (points * settings.minutes_per_point as f64).round() as Minutes
+            Estimate::Complexity { points } => (points * settings.minutes_per_point as f64).round() as Minutes,
+            Estimate::ThreePoint { optimistic, most_likely, pessimistic } => {
+                ((optimistic + 4 * most_likely + pessimistic) as f64 / 6.0).round() as Minutes
             }
-            Estimate::ThreePoint {
-                optimistic,
-                most_likely,
-                pessimistic,
-            } => ((optimistic + 4 * most_likely + pessimistic) as f64 / 6.0).round() as Minutes,
             Estimate::Work { minutes } => minutes,
         }
     }
@@ -267,11 +252,7 @@ impl Estimate {
     /// Standard deviation of a three-point estimate (0 for other methods).
     pub fn std_dev(&self) -> Minutes {
         match *self {
-            Estimate::ThreePoint {
-                optimistic,
-                pessimistic,
-                ..
-            } => ((pessimistic - optimistic) as f64 / 6.0).round() as Minutes,
+            Estimate::ThreePoint { optimistic, pessimistic, .. } => ((pessimistic - optimistic) as f64 / 6.0).round() as Minutes,
             _ => 0,
         }
     }
@@ -566,12 +547,7 @@ pub struct Resource {
 impl Resource {
     pub fn new(id: ResourceId, name: impl Into<String>) -> Self {
         let name = name.into();
-        let initials = name
-            .split_whitespace()
-            .filter_map(|w| w.chars().next())
-            .take(3)
-            .collect::<String>()
-            .to_uppercase();
+        let initials = name.split_whitespace().filter_map(|w| w.chars().next()).take(3).collect::<String>().to_uppercase();
         Self {
             id,
             name,
@@ -619,12 +595,7 @@ pub enum WorkContour {
 }
 
 impl WorkContour {
-    pub const ALL: [WorkContour; 4] = [
-        WorkContour::Flat,
-        WorkContour::FrontLoaded,
-        WorkContour::BackLoaded,
-        WorkContour::Bell,
-    ];
+    pub const ALL: [WorkContour; 4] = [WorkContour::Flat, WorkContour::FrontLoaded, WorkContour::BackLoaded, WorkContour::Bell];
 
     /// Relative intensity at position `x` in `[0, 1]` across the assignment.
     pub fn weight(self, x: f64) -> f64 {
@@ -817,8 +788,7 @@ impl Project {
         let h24 = ids.next_calendar();
         let night = ids.next_calendar();
         let settings = ProjectSettings::default();
-        let start_time = start.and_hms_opt(0, 0, 0).unwrap()
-            + chrono::Duration::minutes(settings.time.default_start_time as i64);
+        let start_time = start.and_hms_opt(0, 0, 0).unwrap() + chrono::Duration::minutes(settings.time.default_start_time as i64);
         Self {
             format: FILE_FORMAT.into(),
             version: FILE_VERSION,
@@ -832,11 +802,7 @@ impl Project {
             status_date: None,
             calendar: std_id,
             settings,
-            calendars: vec![
-                Calendar::standard(std_id),
-                Calendar::twenty_four_hours(h24),
-                Calendar::night_shift(night),
-            ],
+            calendars: vec![Calendar::standard(std_id), Calendar::twenty_four_hours(h24), Calendar::night_shift(night)],
             tasks: Vec::new(),
             resources: Vec::new(),
             assignments: Vec::new(),
@@ -853,9 +819,7 @@ impl Project {
 
     /// The project's base calendar (falls back to the first calendar).
     pub fn base_calendar(&self) -> &Calendar {
-        self.calendar(self.calendar)
-            .or_else(|| self.calendars.first())
-            .expect("project has no calendars")
+        self.calendar(self.calendar).or_else(|| self.calendars.first()).expect("project has no calendars")
     }
 
     pub fn task_index(&self, id: TaskId) -> Option<usize> {
@@ -880,10 +844,7 @@ impl Project {
 
     pub fn resource_by_name(&self, name: &str) -> Option<&Resource> {
         let n = name.trim();
-        self.resources.iter().find(|r| {
-            r.name.eq_ignore_ascii_case(n)
-                || (!r.initials.is_empty() && r.initials.eq_ignore_ascii_case(n))
-        })
+        self.resources.iter().find(|r| r.name.eq_ignore_ascii_case(n) || (!r.initials.is_empty() && r.initials.eq_ignore_ascii_case(n)))
     }
 
     pub fn assignment(&self, id: AssignmentId) -> Option<&Assignment> {
@@ -920,15 +881,12 @@ impl Project {
     /// Index of the parent summary of the task at `idx`.
     pub fn parent_index(&self, idx: usize) -> Option<usize> {
         let level = self.tasks[idx].outline_level;
-        (0..idx)
-            .rev()
-            .find(|&i| self.tasks[i].outline_level < level)
+        (0..idx).rev().find(|&i| self.tasks[i].outline_level < level)
     }
 
     /// Whether the task at `idx` has children.
     pub fn has_children(&self, idx: usize) -> bool {
-        idx + 1 < self.tasks.len()
-            && self.tasks[idx + 1].outline_level > self.tasks[idx].outline_level
+        idx + 1 < self.tasks.len() && self.tasks[idx + 1].outline_level > self.tasks[idx].outline_level
     }
 
     /// Outline number like "1.2.3" for the task at `idx`.
@@ -942,28 +900,15 @@ impl Project {
             }
             counters[lvl - 1] += 1;
         }
-        counters
-            .iter()
-            .map(|c| c.to_string())
-            .collect::<Vec<_>>()
-            .join(".")
+        counters.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(".")
     }
 
     /// Display name of a task reference, e.g. `"Design"` or `"Website\Launch"`.
     pub fn task_ref_name(&self, r: &TaskRef) -> String {
         match r {
-            TaskRef::Local(id) => self
-                .task(*id)
-                .map(|t| t.name.clone())
-                .unwrap_or_else(|| format!("<missing {id}>")),
+            TaskRef::Local(id) => self.task(*id).map(|t| t.name.clone()).unwrap_or_else(|| format!("<missing {id}>")),
             TaskRef::External { project, task } => match self.external(*project) {
-                Some(e) => format!(
-                    "{}\\{}",
-                    e.name,
-                    e.task(*task)
-                        .map(|t| t.name.clone())
-                        .unwrap_or_else(|| task.to_string())
-                ),
+                Some(e) => format!("{}\\{}", e.name, e.task(*task).map(|t| t.name.clone()).unwrap_or_else(|| task.to_string())),
                 None => format!("<external {task}>"),
             },
         }

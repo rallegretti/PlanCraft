@@ -27,11 +27,7 @@ fn main() -> anyhow::Result<()> {
     if args.first().map(String::as_str) == Some("mcp") {
         // Headless MCP server: `plancraft mcp [FILE...] [--http ADDR]`.
         let code = plancraft_mcp::cli::run(args[1..].to_vec());
-        std::process::exit(if code == std::process::ExitCode::SUCCESS {
-            0
-        } else {
-            1
-        });
+        std::process::exit(if code == std::process::ExitCode::SUCCESS { 0 } else { 1 });
     }
     if args.first().map(String::as_str) == Some("--version") {
         println!("plancraft {}", env!("CARGO_PKG_VERSION"));
@@ -40,13 +36,8 @@ fn main() -> anyhow::Result<()> {
     if args.first().map(String::as_str) == Some("--write-icon") {
         // Developer helper: writes the rasterized logo as a PNG file.
         let size = 512u32;
-        let img =
-            image::RgbaImage::from_raw(size, size, logo::rasterize(size)).expect("icon buffer");
-        img.save(
-            args.get(1)
-                .map(String::as_str)
-                .unwrap_or("plancraft-icon.png"),
-        )?;
+        let img = image::RgbaImage::from_raw(size, size, logo::rasterize(size)).expect("icon buffer");
+        img.save(args.get(1).map(String::as_str).unwrap_or("plancraft-icon.png"))?;
         return Ok(());
     }
 
@@ -61,10 +52,7 @@ fn main() -> anyhow::Result<()> {
     }
     if args.iter().any(|a| a == "--demo") {
         let today = chrono::Local::now().date_naive();
-        let monday = today
-            - chrono::Duration::days(
-                chrono::Datelike::weekday(&today).num_days_from_monday() as i64 + 14,
-            );
+        let monday = today - chrono::Duration::days(chrono::Datelike::weekday(&today).num_days_from_monday() as i64 + 14);
         ws.add(plancraft_core::sample::demo_project(monday), None);
     }
     let shared = ws.shared();
@@ -78,10 +66,6 @@ fn main() -> anyhow::Result<()> {
             .with_icon(logo::icon_data()),
         ..Default::default()
     };
-    eframe::run_native(
-        "PlanCraft",
-        options,
-        Box::new(move |cc| Ok(Box::new(app::PlanCraftApp::new(cc, shared)))),
-    )
-    .map_err(|e| anyhow::anyhow!("{e}"))
+    eframe::run_native("PlanCraft", options, Box::new(move |cc| Ok(Box::new(app::PlanCraftApp::new(cc, shared)))))
+        .map_err(|e| anyhow::anyhow!("{e}"))
 }

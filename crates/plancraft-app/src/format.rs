@@ -4,13 +4,11 @@ use chrono::{NaiveDate, NaiveDateTime};
 use plancraft_core::prelude::*;
 
 pub fn date(dt: Option<NaiveDateTime>) -> String {
-    dt.map(|d| d.format("%a %m/%d/%y").to_string())
-        .unwrap_or_else(|| "NA".into())
+    dt.map(|d| d.format("%a %m/%d/%y").to_string()).unwrap_or_else(|| "NA".into())
 }
 
 pub fn date_long(dt: Option<NaiveDateTime>) -> String {
-    dt.map(|d| d.format("%a %b %-d, %Y %H:%M").to_string())
-        .unwrap_or_else(|| "NA".into())
+    dt.map(|d| d.format("%a %b %-d, %Y %H:%M").to_string()).unwrap_or_else(|| "NA".into())
 }
 
 pub fn day(d: NaiveDate) -> String {
@@ -18,13 +16,11 @@ pub fn day(d: NaiveDate) -> String {
 }
 
 pub fn iso(dt: Option<NaiveDateTime>) -> String {
-    dt.map(|d| d.format("%Y-%m-%d %H:%M").to_string())
-        .unwrap_or_default()
+    dt.map(|d| d.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default()
 }
 
 pub fn iso_date(dt: Option<NaiveDateTime>) -> String {
-    dt.map(|d| d.format("%Y-%m-%d").to_string())
-        .unwrap_or_default()
+    dt.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default()
 }
 
 pub fn money(p: &Project, v: f64) -> String {
@@ -38,20 +34,12 @@ pub fn money(p: &Project, v: f64) -> String {
         s.insert(i as usize, ',');
         i -= 3;
     }
-    format!(
-        "{}{}{s}.{frac:02}",
-        if neg { "-" } else { "" },
-        p.currency()
-    )
+    format!("{}{}{s}.{frac:02}", if neg { "-" } else { "" }, p.currency())
 }
 
 pub fn hours(mins: f64) -> String {
     let h = mins / 60.0;
-    if (h - h.round()).abs() < 0.05 {
-        format!("{}h", h.round() as i64)
-    } else {
-        format!("{h:.1}h")
-    }
+    if (h - h.round()).abs() < 0.05 { format!("{}h", h.round() as i64) } else { format!("{h:.1}h") }
 }
 
 pub fn percent(v: f32) -> String {
@@ -70,19 +58,12 @@ pub fn parse_units(text: &str) -> Option<f64> {
     }
     let v: f64 = t.parse().ok()?;
     // Bare numbers are percentages ("50" = 50%) unless written as a small fraction ("0.5", "1.5").
-    Some(if t.contains('.') && v <= 10.0 {
-        v
-    } else {
-        v / 100.0
-    })
+    Some(if t.contains('.') && v <= 10.0 { v } else { v / 100.0 })
 }
 
 /// Parses money like "$1,200.50".
 pub fn parse_money(text: &str) -> Option<f64> {
-    let cleaned: String = text
-        .chars()
-        .filter(|c| c.is_ascii_digit() || *c == '.' || *c == '-')
-        .collect();
+    let cleaned: String = text.chars().filter(|c| c.is_ascii_digit() || *c == '.' || *c == '-').collect();
     cleaned.parse().ok()
 }
 

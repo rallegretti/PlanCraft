@@ -13,19 +13,13 @@ use crate::theme;
 pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: &mut Vec<Command>) {
     let p = &doc.project;
     let month = st.calendar_month.with_day(1).unwrap_or(st.calendar_month);
-    let mut bar = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(
-        rect.min + vec2(8.0, 4.0),
-        vec2(rect.width() - 16.0, 26.0),
-    )));
+    let mut bar =
+        ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(rect.min + vec2(8.0, 4.0), vec2(rect.width() - 16.0, 26.0))));
     bar.horizontal(|ui| {
         if ui.button("⏴").clicked() {
             st.calendar_month = (month - Duration::days(1)).with_day(1).unwrap();
         }
-        ui.label(
-            egui::RichText::new(month.format("%B %Y").to_string())
-                .size(16.0)
-                .strong(),
-        );
+        ui.label(egui::RichText::new(month.format("%B %Y").to_string()).size(16.0).strong());
         if ui.button("⏵").clicked() {
             st.calendar_month = (month + Duration::days(32)).with_day(1).unwrap();
         }
@@ -36,40 +30,17 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
             st.calendar_month = p.sched.start.unwrap_or(p.start).date().with_day(1).unwrap();
         }
     });
-    let area = Rect::from_min_max(
-        pos2(rect.left() + 8.0, rect.top() + 36.0),
-        rect.max - vec2(8.0, 8.0),
-    );
+    let area = Rect::from_min_max(pos2(rect.left() + 8.0, rect.top() + 36.0), rect.max - vec2(8.0, 8.0));
     let painter = ui.painter_at(area);
     let header_h = 22.0;
     let first = month - Duration::days(month.weekday().num_days_from_monday() as i64);
     let weeks = 6;
     let cell_w = area.width() / 7.0;
     let cell_h = (area.height() - header_h) / weeks as f32;
-    for (i, name) in [
-        "Monday",
-        "Tuesday",
-        "Wednesday",
-        "Thursday",
-        "Friday",
-        "Saturday",
-        "Sunday",
-    ]
-    .iter()
-    .enumerate()
-    {
-        let r = Rect::from_min_size(
-            pos2(area.left() + i as f32 * cell_w, area.top()),
-            vec2(cell_w, header_h),
-        );
+    for (i, name) in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].iter().enumerate() {
+        let r = Rect::from_min_size(pos2(area.left() + i as f32 * cell_w, area.top()), vec2(cell_w, header_h));
         painter.rect_filled(r, 0.0, theme::HEADER_BG);
-        painter.text(
-            r.center(),
-            Align2::CENTER_CENTER,
-            *name,
-            FontId::proportional(12.0),
-            theme::TEXT,
-        );
+        painter.text(r.center(), Align2::CENTER_CENTER, *name, FontId::proportional(12.0), theme::TEXT);
     }
     let cal = project_calendar(p);
     let today = chrono::Local::now().date_naive();
@@ -80,53 +51,17 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
         let wy = area.top() + header_h + w as f32 * cell_h;
         for dcol in 0..7 {
             let day = week_start + Duration::days(dcol);
-            let r = Rect::from_min_size(
-                pos2(area.left() + dcol as f32 * cell_w, wy),
-                vec2(cell_w, cell_h),
-            );
-            let fill = if !cal.is_working_day(day) {
-                theme::NONWORKING
-            } else {
-                theme::BG
-            };
+            let r = Rect::from_min_size(pos2(area.left() + dcol as f32 * cell_w, wy), vec2(cell_w, cell_h));
+            let fill = if !cal.is_working_day(day) { theme::NONWORKING } else { theme::BG };
             painter.rect_filled(r, 0.0, fill);
-            painter.rect_stroke(
-                r,
-                0.0,
-                Stroke::new(1.0, theme::GRID_LINE),
-                egui::StrokeKind::Inside,
-            );
-            let color = if day.month() == month.month() {
-                theme::TEXT
-            } else {
-                theme::TEXT_WEAK
-            };
-            let label = if day.day() == 1 {
-                day.format("%b %-d").to_string()
-            } else {
-                day.day().to_string()
-            };
+            painter.rect_stroke(r, 0.0, Stroke::new(1.0, theme::GRID_LINE), egui::StrokeKind::Inside);
+            let color = if day.month() == month.month() { theme::TEXT } else { theme::TEXT_WEAK };
+            let label = if day.day() == 1 { day.format("%b %-d").to_string() } else { day.day().to_string() };
             if day == today {
-                painter.rect_filled(
-                    Rect::from_min_size(r.right_top() + vec2(-34.0, 3.0), vec2(30.0, 16.0)),
-                    8.0,
-                    theme::ACCENT,
-                );
-                painter.text(
-                    r.right_top() + vec2(-19.0, 11.0),
-                    Align2::CENTER_CENTER,
-                    &label,
-                    FontId::proportional(11.5),
-                    Color32::WHITE,
-                );
+                painter.rect_filled(Rect::from_min_size(r.right_top() + vec2(-34.0, 3.0), vec2(30.0, 16.0)), 8.0, theme::ACCENT);
+                painter.text(r.right_top() + vec2(-19.0, 11.0), Align2::CENTER_CENTER, &label, FontId::proportional(11.5), Color32::WHITE);
             } else {
-                painter.text(
-                    r.right_top() + vec2(-6.0, 11.0),
-                    Align2::RIGHT_CENTER,
-                    &label,
-                    FontId::proportional(11.5),
-                    color,
-                );
+                painter.text(r.right_top() + vec2(-6.0, 11.0), Align2::RIGHT_CENTER, &label, FontId::proportional(11.5), color);
             }
         }
         // Task bars for this week, stacked.
@@ -138,14 +73,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
             let (Some(s), Some(f)) = (t.sched.start, t.sched.finish) else {
                 continue;
             };
-            let (sd, fd) = (
-                s.date(),
-                if t.is_milestone() {
-                    s.date()
-                } else {
-                    (f - Duration::minutes(1)).date()
-                },
-            );
+            let (sd, fd) = (s.date(), if t.is_milestone() { s.date() } else { (f - Duration::minutes(1)).date() });
             if fd < week_start || sd >= week_end {
                 continue;
             }
@@ -156,10 +84,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
             let c0 = (sd.max(week_start) - week_start).num_days() as f32;
             let c1 = (fd.min(week_end - Duration::days(1)) - week_start).num_days() as f32 + 1.0;
             let y = wy + 22.0 + lane as f32 * 18.0;
-            let r = Rect::from_min_max(
-                pos2(area.left() + c0 * cell_w + 3.0, y),
-                pos2(area.left() + c1 * cell_w - 3.0, y + 15.0),
-            );
+            let r = Rect::from_min_max(pos2(area.left() + c0 * cell_w + 3.0, y), pos2(area.left() + c1 * cell_w - 3.0, y + 15.0));
             let selected = st.sel.tasks.contains(&t.id);
             let fill = if t.is_milestone() {
                 theme::GOLD
@@ -170,23 +95,10 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
             };
             painter.rect_filled(r, 3.0, fill);
             if selected {
-                painter.rect_stroke(
-                    r,
-                    3.0,
-                    Stroke::new(2.0, theme::ACCENT_DARK),
-                    egui::StrokeKind::Outside,
-                );
+                painter.rect_stroke(r, 3.0, Stroke::new(2.0, theme::ACCENT_DARK), egui::StrokeKind::Outside);
             }
-            let text_color = if t.is_milestone() {
-                theme::TEXT
-            } else {
-                Color32::WHITE
-            };
-            let label = if t.is_milestone() {
-                format!("♦ {}", t.name)
-            } else {
-                t.name.clone()
-            };
+            let text_color = if t.is_milestone() { theme::TEXT } else { Color32::WHITE };
+            let label = if t.is_milestone() { format!("♦ {}", t.name) } else { t.name.clone() };
             painter.with_clip_rect(r).text(
                 pos2(r.left() + 4.0, r.center().y),
                 Align2::LEFT_CENTER,
@@ -202,12 +114,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                 if resp.double_clicked() {
                     clicked_task = Some((t.id, true));
                 }
-                resp.on_hover_text(format!(
-                    "{}\n{} – {}",
-                    t.name,
-                    crate::format::date(t.sched.start),
-                    crate::format::date(t.sched.finish)
-                ));
+                resp.on_hover_text(format!("{}\n{} – {}", t.name, crate::format::date(t.sched.start), crate::format::date(t.sched.finish)));
             }
             lane += 1;
         }

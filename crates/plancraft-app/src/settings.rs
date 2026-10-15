@@ -15,12 +15,7 @@ pub struct AppSettings {
 
 impl Default for AppSettings {
     fn default() -> Self {
-        Self {
-            recent: Vec::new(),
-            mcp_port: 7878,
-            mcp_autostart: false,
-            table_width: 720.0,
-        }
+        Self { recent: Vec::new(), mcp_port: 7878, mcp_autostart: false, table_width: 720.0 }
     }
 }
 
@@ -30,10 +25,7 @@ fn path() -> Option<PathBuf> {
 
 impl AppSettings {
     pub fn load() -> Self {
-        path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        path().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
     }
 
     pub fn save(&self) {

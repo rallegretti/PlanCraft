@@ -43,23 +43,8 @@ impl std::fmt::Debug for Tool {
 }
 
 impl Tool {
-    pub fn new(
-        name: &'static str,
-        title: &'static str,
-        description: &'static str,
-        input_schema: Value,
-        handler: Handler,
-    ) -> Self {
-        Self {
-            name,
-            title,
-            description,
-            input_schema,
-            read_only: false,
-            destructive: false,
-            text_field: None,
-            handler,
-        }
+    pub fn new(name: &'static str, title: &'static str, description: &'static str, input_schema: Value, handler: Handler) -> Self {
+        Self { name, title, description, input_schema, read_only: false, destructive: false, text_field: None, handler }
     }
 
     pub fn read_only(mut self) -> Self {
@@ -94,23 +79,13 @@ impl Tool {
 
     /// Checks for unknown and missing required arguments.
     pub fn validate(&self, args: &Map<String, Value>) -> ToolResult<()> {
-        let props = self
-            .input_schema
-            .get("properties")
-            .and_then(Value::as_object);
+        let props = self.input_schema.get("properties").and_then(Value::as_object);
         if let Some(props) = props {
-            let unknown: Vec<&String> = args
-                .keys()
-                .filter(|k| !props.contains_key(k.as_str()) && !k.starts_with('_'))
-                .collect();
+            let unknown: Vec<&String> = args.keys().filter(|k| !props.contains_key(k.as_str()) && !k.starts_with('_')).collect();
             if !unknown.is_empty() {
                 return Err(ToolError(format!(
                     "unknown argument(s) {} for tool '{}'; valid arguments: {}",
-                    unknown
-                        .iter()
-                        .map(|k| format!("'{k}'"))
-                        .collect::<Vec<_>>()
-                        .join(", "),
+                    unknown.iter().map(|k| format!("'{k}'")).collect::<Vec<_>>().join(", "),
                     self.name,
                     props.keys().cloned().collect::<Vec<_>>().join(", ")
                 )));
@@ -119,10 +94,7 @@ impl Tool {
         if let Some(req) = self.input_schema.get("required").and_then(Value::as_array) {
             for r in req.iter().filter_map(Value::as_str) {
                 if args.get(r).is_none_or(Value::is_null) {
-                    return Err(ToolError(format!(
-                        "missing required argument '{r}' for tool '{}'",
-                        self.name
-                    )));
+                    return Err(ToolError(format!("missing required argument '{r}' for tool '{}'", self.name)));
                 }
             }
         }

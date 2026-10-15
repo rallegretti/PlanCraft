@@ -5,10 +5,7 @@ use std::path::PathBuf;
 use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{Duration, NaiveDate};
-use egui::{
-    Align, Align2, Color32, FontId, Key, KeyboardShortcut, Layout, Modifiers, Rect, RichText,
-    Sense, Stroke, Ui, pos2, vec2,
-};
+use egui::{Align, Align2, Color32, FontId, Key, KeyboardShortcut, Layout, Modifiers, Rect, RichText, Sense, Stroke, Ui, pos2, vec2};
 use plancraft_core::leveling::{LevelingOptions, clear_leveling, level_resources};
 use plancraft_core::prelude::*;
 use plancraft_core::workspace::{ChangeSource, Document, SharedWorkspace, Workspace};
@@ -37,6 +34,8 @@ pub struct PlanCraftApp {
     last_title: String,
     /// Developer screenshot automation (`PLANCRAFT_SCREENSHOT=out.png`).
     shot: Option<(PathBuf, u32)>,
+    /// Handle of the active document last frame (agents may open or switch documents).
+    last_active: Option<u64>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -66,19 +65,16 @@ impl PlanCraftApp {
             allow_exit: false,
             last_title: String::new(),
             shot: std::env::var_os("PLANCRAFT_SCREENSHOT").map(|p| (PathBuf::from(p), 0)),
+            last_active: None,
         };
         if let Ok(v) = std::env::var("PLANCRAFT_VIEW") {
             let key = v.to_lowercase().replace([' ', '_', '-'], "");
-            if let Some(view) = ViewKind::ALL
-                .into_iter()
-                .find(|k| k.label().to_lowercase().replace(' ', "") == key)
-            {
+            if let Some(view) = ViewKind::ALL.into_iter().find(|k| k.label().to_lowercase().replace(' ', "") == key) {
                 app.st.view = view;
             }
         }
         if app.settings.mcp_autostart {
-            app.mcp
-                .start(app.ws.clone(), cc.egui_ctx.clone(), app.settings.mcp_port);
+            app.mcp.start(app.ws.clone(), cc.egui_ctx.clone(), app.settings.mcp_port);
         }
         app
     }
@@ -95,75 +91,23 @@ impl PlanCraftApp {
         let typing = ctx.egui_wants_keyboard_input();
         let cmd = Modifiers::COMMAND;
         let map: Vec<(KeyboardShortcut, Command, bool)> = vec![
-            (
-                KeyboardShortcut::new(cmd, Key::N),
-                Command::NewProject,
-                true,
-            ),
+            (KeyboardShortcut::new(cmd, Key::N), Command::NewProject, true),
             (KeyboardShortcut::new(cmd, Key::O), Command::Open, true),
-            (
-                KeyboardShortcut::new(cmd | Modifiers::SHIFT, Key::S),
-                Command::SaveAs,
-                true,
-            ),
+            (KeyboardShortcut::new(cmd | Modifiers::SHIFT, Key::S), Command::SaveAs, true),
             (KeyboardShortcut::new(cmd, Key::S), Command::Save, true),
-            (
-                KeyboardShortcut::new(cmd | Modifiers::SHIFT, Key::Z),
-                Command::Redo,
-                false,
-            ),
+            (KeyboardShortcut::new(cmd | Modifiers::SHIFT, Key::Z), Command::Redo, false),
             (KeyboardShortcut::new(cmd, Key::Z), Command::Undo, false),
             (KeyboardShortcut::new(cmd, Key::Y), Command::Redo, false),
-            (
-                KeyboardShortcut::new(Modifiers::ALT | Modifiers::SHIFT, Key::ArrowRight),
-                Command::Indent,
-                false,
-            ),
-            (
-                KeyboardShortcut::new(Modifiers::ALT | Modifiers::SHIFT, Key::ArrowLeft),
-                Command::Outdent,
-                false,
-            ),
-            (
-                KeyboardShortcut::new(Modifiers::ALT | Modifiers::SHIFT, Key::ArrowUp),
-                Command::MoveUp,
-                false,
-            ),
-            (
-                KeyboardShortcut::new(Modifiers::ALT | Modifiers::SHIFT, Key::ArrowDown),
-                Command::MoveDown,
-                false,
-            ),
-            (
-                KeyboardShortcut::new(cmd | Modifiers::SHIFT, Key::F2),
-                Command::UnlinkSelected,
-                false,
-            ),
-            (
-                KeyboardShortcut::new(cmd, Key::F2),
-                Command::LinkSelected,
-                false,
-            ),
-            (
-                KeyboardShortcut::new(Modifiers::SHIFT, Key::F2),
-                Command::TaskInfo,
-                false,
-            ),
-            (
-                KeyboardShortcut::new(cmd, Key::Plus),
-                Command::ZoomIn,
-                false,
-            ),
-            (
-                KeyboardShortcut::new(cmd, Key::Equals),
-                Command::ZoomIn,
-                false,
-            ),
-            (
-                KeyboardShortcut::new(cmd, Key::Minus),
-                Command::ZoomOut,
-                false,
-            ),
+            (KeyboardShortcut::new(Modifiers::ALT | Modifiers::SHIFT, Key::ArrowRight), Command::Indent, false),
+            (KeyboardShortcut::new(Modifiers::ALT | Modifiers::SHIFT, Key::ArrowLeft), Command::Outdent, false),
+            (KeyboardShortcut::new(Modifiers::ALT | Modifiers::SHIFT, Key::ArrowUp), Command::MoveUp, false),
+            (KeyboardShortcut::new(Modifiers::ALT | Modifiers::SHIFT, Key::ArrowDown), Command::MoveDown, false),
+            (KeyboardShortcut::new(cmd | Modifiers::SHIFT, Key::F2), Command::UnlinkSelected, false),
+            (KeyboardShortcut::new(cmd, Key::F2), Command::LinkSelected, false),
+            (KeyboardShortcut::new(Modifiers::SHIFT, Key::F2), Command::TaskInfo, false),
+            (KeyboardShortcut::new(cmd, Key::Plus), Command::ZoomIn, false),
+            (KeyboardShortcut::new(cmd, Key::Equals), Command::ZoomIn, false),
+            (KeyboardShortcut::new(cmd, Key::Minus), Command::ZoomOut, false),
             (KeyboardShortcut::new(cmd, Key::C), Command::Copy, false),
             (KeyboardShortcut::new(cmd, Key::X), Command::Cut, false),
             (KeyboardShortcut::new(cmd, Key::V), Command::Paste, false),
@@ -205,11 +149,7 @@ impl PlanCraftApp {
         };
         let path = if save_as || doc.path.is_none() {
             let name = format!("{}.{}", doc.project.name, FILE_EXTENSION);
-            match rfd::FileDialog::new()
-                .add_filter("PlanCraft project", &[FILE_EXTENSION])
-                .set_file_name(name)
-                .save_file()
-            {
+            match rfd::FileDialog::new().add_filter("PlanCraft project", &[FILE_EXTENSION]).set_file_name(name).save_file() {
                 Some(mut p) => {
                     if p.extension().is_none() {
                         p.set_extension(FILE_EXTENSION);
@@ -268,11 +208,7 @@ impl PlanCraftApp {
         }) else {
             return;
         };
-        if let Some(path) = rfd::FileDialog::new()
-            .add_filter("CSV", &["csv"])
-            .set_file_name(format!("{name}.csv"))
-            .save_file()
-        {
+        if let Some(path) = rfd::FileDialog::new().add_filter("CSV", &["csv"]).set_file_name(format!("{name}.csv")).save_file() {
             match std::fs::write(&path, csv) {
                 Ok(()) => self.set_status(format!("Exported {}", path.display())),
                 Err(e) => self.st.toast(ToastKind::Error, e.to_string()),
@@ -294,24 +230,14 @@ impl PlanCraftApp {
             }
             Command::NewDemo => {
                 let today = chrono::Local::now().date_naive();
-                let monday = today
-                    - Duration::days(
-                        chrono::Datelike::weekday(&today).num_days_from_monday() as i64
-                    )
-                    - Duration::days(7);
-                self.ws
-                    .lock()
-                    .unwrap()
-                    .add(plancraft_core::sample::demo_project(monday), None);
+                let monday = today - Duration::days(chrono::Datelike::weekday(&today).num_days_from_monday() as i64) - Duration::days(7);
+                self.ws.lock().unwrap().add(plancraft_core::sample::demo_project(monday), None);
                 self.st.backstage = false;
                 self.st.sel = Default::default();
                 self.st.view = ViewKind::Gantt;
             }
             Command::Open => {
-                if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("PlanCraft project", &[FILE_EXTENSION])
-                    .pick_file()
-                {
+                if let Some(path) = rfd::FileDialog::new().add_filter("PlanCraft project", &[FILE_EXTENSION]).pick_file() {
                     self.open_path(path);
                 }
             }
@@ -323,12 +249,7 @@ impl PlanCraftApp {
                 self.save(true);
             }
             Command::Close => {
-                let info = self
-                    .ws
-                    .lock()
-                    .unwrap()
-                    .active_doc()
-                    .map(|d| (d.handle, d.dirty));
+                let info = self.ws.lock().unwrap().active_doc().map(|d| (d.handle, d.dirty));
                 if let Some((h, dirty)) = info {
                     if dirty {
                         self.confirm_close = Some(CloseRequest::Document(h));
@@ -387,11 +308,7 @@ impl PlanCraftApp {
         match cmd {
             Command::Undo => {
                 if doc.undo() {
-                    let l = doc
-                        .last_change
-                        .as_ref()
-                        .map(|l| l.0.clone())
-                        .unwrap_or_default();
+                    let l = doc.last_change.as_ref().map(|l| l.0.clone()).unwrap_or_default();
                     self.status = Some((l, Instant::now()));
                 }
             }
@@ -401,30 +318,14 @@ impl PlanCraftApp {
             Command::InsertTask | Command::InsertMilestone => {
                 let milestone = cmd == Command::InsertMilestone;
                 let at = first_sel_index;
-                let id = doc.edit(
-                    if milestone {
-                        "Insert Milestone"
-                    } else {
-                        "Insert Task"
-                    },
-                    |p| {
-                        if milestone {
-                            p.add_milestone("<New Milestone>", at)
-                        } else {
-                            p.add_task("<New Task>", at)
-                        }
-                    },
-                );
+                let id = doc.edit(if milestone { "Insert Milestone" } else { "Insert Task" }, |p| {
+                    if milestone { p.add_milestone("<New Milestone>", at) } else { p.add_task("<New Task>", at) }
+                });
                 st.sel.select_task(id);
                 if let Some(r) = doc.project.task_index(id) {
                     let rows = views::visible_rows(&doc.project, st);
                     if let Some(row) = rows.iter().position(|&i| i == r) {
-                        let name_col = st
-                            .table
-                            .columns()
-                            .iter()
-                            .position(|c| *c == crate::columns::TaskCol::Name)
-                            .unwrap_or(0);
+                        let name_col = st.table.columns().iter().position(|c| *c == crate::columns::TaskCol::Name).unwrap_or(0);
                         st.task_grid.begin_edit(row, name_col, String::new());
                         st.task_grid.scroll_to = Some(row);
                     }
@@ -432,14 +333,10 @@ impl PlanCraftApp {
             }
             Command::InsertSummary => {
                 if sel.is_empty() {
-                    let id = doc.edit("Insert Summary Task", |p| {
-                        p.add_task("<New Summary Task>", None)
-                    });
+                    let id = doc.edit("Insert Summary Task", |p| p.add_task("<New Summary Task>", None));
                     st.sel.select_task(id);
                 } else {
-                    let r = doc.try_edit("Insert Summary Task", ChangeSource::User, |p| {
-                        p.add_summary_over("<New Summary Task>", &sel)
-                    });
+                    let r = doc.try_edit("Insert Summary Task", ChangeSource::User, |p| p.add_summary_over("<New Summary Task>", &sel));
                     match r {
                         Ok(id) => st.sel.select_task(id),
                         Err(e) => st.toast(ToastKind::Warning, e.to_string()),
@@ -452,15 +349,9 @@ impl PlanCraftApp {
                 }
                 if !sel.is_empty() {
                     let n = sel.len();
-                    let r = doc.try_edit(
-                        if n == 1 {
-                            "Delete Task"
-                        } else {
-                            "Delete Tasks"
-                        },
-                        ChangeSource::User,
-                        |p| p.delete_tasks(&sel).map(|_| ()),
-                    );
+                    let r = doc.try_edit(if n == 1 { "Delete Task" } else { "Delete Tasks" }, ChangeSource::User, |p| {
+                        p.delete_tasks(&sel).map(|_| ())
+                    });
                     report(st, r);
                     st.sel.tasks.clear();
                 }
@@ -483,30 +374,18 @@ impl PlanCraftApp {
                         true
                     })
                     .collect();
-                let r = doc.try_edit(
-                    if indent { "Indent" } else { "Outdent" },
-                    ChangeSource::User,
-                    |p| {
-                        for id in &tops {
-                            if indent {
-                                p.indent(*id)?
-                            } else {
-                                p.outdent(*id)?
-                            }
-                        }
-                        Ok(())
-                    },
-                );
+                let r = doc.try_edit(if indent { "Indent" } else { "Outdent" }, ChangeSource::User, |p| {
+                    for id in &tops {
+                        if indent { p.indent(*id)? } else { p.outdent(*id)? }
+                    }
+                    Ok(())
+                });
                 report(st, r);
             }
             Command::MoveUp | Command::MoveDown => {
                 if let Some(id) = sel.first().copied() {
                     let up = cmd == Command::MoveUp;
-                    let r = doc.try_edit(
-                        if up { "Move Up" } else { "Move Down" },
-                        ChangeSource::User,
-                        |p| p.shift_task(id, up),
-                    );
+                    let r = doc.try_edit(if up { "Move Up" } else { "Move Down" }, ChangeSource::User, |p| p.shift_task(id, up));
                     report(st, r);
                 }
             }
@@ -515,10 +394,7 @@ impl PlanCraftApp {
                     let r = doc.try_edit("Link Tasks", ChangeSource::User, |p| p.link_chain(&sel));
                     report(st, r);
                 } else {
-                    st.toast(
-                        ToastKind::Info,
-                        "Select two or more tasks to link them in order.",
-                    );
+                    st.toast(ToastKind::Info, "Select two or more tasks to link them in order.");
                 }
             }
             Command::UnlinkSelected => {
@@ -579,34 +455,22 @@ impl PlanCraftApp {
             }
             Command::SetMode(mode) => {
                 if !sel.is_empty() {
-                    doc.edit(
-                        if mode == ScheduleMode::Manual {
-                            "Manually Schedule"
-                        } else {
-                            "Auto Schedule"
-                        },
-                        |p| {
-                            for id in &sel {
-                                if let Some(t) = p.task_mut(*id) {
-                                    if mode == ScheduleMode::Manual && t.mode == ScheduleMode::Auto
-                                    {
-                                        t.manual_start = t.sched.start;
-                                        t.manual_finish = t.sched.finish;
-                                    }
-                                    t.mode = mode;
+                    doc.edit(if mode == ScheduleMode::Manual { "Manually Schedule" } else { "Auto Schedule" }, |p| {
+                        for id in &sel {
+                            if let Some(t) = p.task_mut(*id) {
+                                if mode == ScheduleMode::Manual && t.mode == ScheduleMode::Auto {
+                                    t.manual_start = t.sched.start;
+                                    t.manual_finish = t.sched.finish;
                                 }
+                                t.mode = mode;
                             }
-                        },
-                    );
+                        }
+                    });
                 }
             }
             Command::TaskInfo | Command::TaskNotes => {
                 if let Some(id) = st.sel.single_task().or(sel.first().copied()) {
-                    self.dialogs.task_info = dialogs::task_info::TaskInfo::new(
-                        &doc.project,
-                        id,
-                        cmd == Command::TaskNotes,
-                    );
+                    self.dialogs.task_info = dialogs::task_info::TaskInfo::new(&doc.project, id, cmd == Command::TaskNotes);
                 }
             }
             Command::ToggleTimeline => {
@@ -657,9 +521,7 @@ impl PlanCraftApp {
                     }
                     st.clipboard = copied;
                     if cmd == Command::Cut {
-                        let r = doc.try_edit("Cut Tasks", ChangeSource::User, |p| {
-                            p.delete_tasks(&sel).map(|_| ())
-                        });
+                        let r = doc.try_edit("Cut Tasks", ChangeSource::User, |p| p.delete_tasks(&sel).map(|_| ()));
                         report(st, r);
                         st.sel.tasks.clear();
                     }
@@ -671,11 +533,7 @@ impl PlanCraftApp {
                     let at = first_sel_index.unwrap_or(doc.project.tasks.len());
                     let ids = doc.edit("Paste Tasks", |p| {
                         let base = clip.iter().map(|t| t.outline_level).min().unwrap_or(1);
-                        let target_level = if at < p.tasks.len() {
-                            p.tasks[at].outline_level
-                        } else {
-                            1
-                        };
+                        let target_level = if at < p.tasks.len() { p.tasks[at].outline_level } else { 1 };
                         let mut ids = Vec::new();
                         for (k, t) in clip.iter().enumerate() {
                             let mut nt = t.clone();
@@ -709,24 +567,19 @@ impl PlanCraftApp {
             Command::DeleteResources => {
                 let ids: Vec<ResourceId> = st.sel.resources.iter().copied().collect();
                 if !ids.is_empty() {
-                    let r = doc.try_edit("Delete Resource", ChangeSource::User, |p| {
-                        p.delete_resources(&ids)
-                    });
+                    let r = doc.try_edit("Delete Resource", ChangeSource::User, |p| p.delete_resources(&ids));
                     report(st, r);
                     st.sel.resources.clear();
                 }
             }
             Command::ResourceInfo => {
                 if let Some(id) = st.sel.single_resource() {
-                    self.dialogs.resource_info =
-                        dialogs::resource_info::ResourceInfo::new(&doc.project, id);
+                    self.dialogs.resource_info = dialogs::resource_info::ResourceInfo::new(&doc.project, id);
                 }
             }
             Command::AssignResources => self.dialogs.assign = Some(Default::default()),
             Command::LevelAll => {
-                let r = doc.edit("Level Resources", |p| {
-                    level_resources(p, &LevelingOptions::default())
-                });
+                let r = doc.edit("Level Resources", |p| level_resources(p, &LevelingOptions::default()));
                 let msg = if r.delayed.is_empty() && r.unresolved.is_empty() {
                     "No overallocations needed leveling.".to_string()
                 } else {
@@ -744,22 +597,16 @@ impl PlanCraftApp {
             }
             Command::ClearLeveling => doc.edit("Clear Leveling", clear_leveling),
             Command::ProjectInfo | Command::Options => {
-                self.dialogs.project_info =
-                    Some(dialogs::project_info::ProjectInfo::new(&doc.project))
+                self.dialogs.project_info = Some(dialogs::project_info::ProjectInfo::new(&doc.project))
             }
-            Command::ChangeWorkingTime => {
-                self.dialogs.working_time =
-                    Some(dialogs::working_time::WorkingTime::new(&doc.project))
-            }
+            Command::ChangeWorkingTime => self.dialogs.working_time = Some(dialogs::working_time::WorkingTime::new(&doc.project)),
             Command::SetBaseline => {
                 doc.edit("Set Baseline", |p| p.set_baseline(&[]));
                 st.toast(ToastKind::Success, "Baseline saved for all tasks");
             }
             Command::ClearBaseline => doc.edit("Clear Baseline", |p| p.clear_baseline(&[])),
             Command::UpdateProgressFromTime => {
-                doc.edit("Update Progress from Time", |p| {
-                    p.update_progress_from_time()
-                });
+                doc.edit("Update Progress from Time", |p| p.update_progress_from_time());
                 st.toast(ToastKind::Success, "Progress updated from tracked time");
             }
             Command::ExternalLinks => self.dialogs.external = Some(Default::default()),
@@ -781,12 +628,8 @@ impl PlanCraftApp {
                 let (s, f) = if cmd == Command::ZoomEntire {
                     (doc.project.sched.start, doc.project.sched.finish)
                 } else {
-                    let ts: Vec<&Task> =
-                        sel.iter().filter_map(|id| doc.project.task(*id)).collect();
-                    (
-                        ts.iter().filter_map(|t| t.sched.start).min(),
-                        ts.iter().filter_map(|t| t.sched.finish).max(),
-                    )
+                    let ts: Vec<&Task> = sel.iter().filter_map(|id| doc.project.task(*id)).collect();
+                    (ts.iter().filter_map(|t| t.sched.start).min(), ts.iter().filter_map(|t| t.sched.finish).max())
                 };
                 if let (Some(s), Some(f)) = (s, f) {
                     let width = (ctx.content_rect().width() - st.table_width - 80.0).max(200.0);
@@ -833,11 +676,8 @@ impl PlanCraftApp {
         let rect = ui.available_rect_before_wrap();
         let rect = Rect::from_min_size(rect.min, vec2(rect.width(), 26.0));
         ui.painter().rect_filled(rect, 0.0, theme::PANEL_BG);
-        let mut child = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(rect.shrink2(vec2(8.0, 2.0)))
-                .layout(Layout::left_to_right(Align::Center)),
-        );
+        let mut child =
+            ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(8.0, 2.0))).layout(Layout::left_to_right(Align::Center)));
         let mut switch = None;
         let mut close = None;
         for (i, d) in ws.docs.iter().enumerate() {
@@ -884,63 +724,37 @@ impl PlanCraftApp {
                 let auto = doc.project.settings.new_tasks_auto;
                 let resp = ui.add(
                     egui::Label::new(
-                        RichText::new(if auto {
-                            "⟳ New Tasks: Auto Scheduled"
-                        } else {
-                            "📌 New Tasks: Manually Scheduled"
-                        })
-                        .size(12.0),
+                        RichText::new(if auto { "⟳ New Tasks: Auto Scheduled" } else { "📌 New Tasks: Manually Scheduled" }).size(12.0),
                     )
                     .sense(Sense::click()),
                 );
-                if resp
-                    .on_hover_text("Click to change how new tasks are scheduled")
-                    .clicked()
-                {
+                if resp.on_hover_text("Click to change how new tasks are scheduled").clicked() {
                     doc.edit("New Task Mode", |p| p.settings.new_tasks_auto = !auto);
                 }
                 if self.st.filter != crate::state::TaskFilter::All {
                     ui.separator();
-                    ui.label(
-                        RichText::new(format!("Filter: {}", self.st.filter.label()))
-                            .size(12.0)
-                            .color(theme::ACCENT_MID),
-                    );
+                    ui.label(RichText::new(format!("Filter: {}", self.st.filter.label())).size(12.0).color(theme::ACCENT_MID));
                 }
                 let warnings = doc.project.sched.warnings.len();
                 if warnings > 0 {
                     ui.separator();
                     let r = ui.add(
-                        egui::Label::new(
-                            RichText::new(format!("⚠ {warnings} scheduling issue(s)"))
-                                .size(12.0)
-                                .color(theme::ERROR),
-                        )
-                        .sense(Sense::click()),
+                        egui::Label::new(RichText::new(format!("⚠ {warnings} scheduling issue(s)")).size(12.0).color(theme::ERROR))
+                            .sense(Sense::click()),
                     );
-                    if r.on_hover_text(doc.project.sched.warnings.join("\n"))
-                        .clicked()
-                    {
+                    if r.on_hover_text(doc.project.sched.warnings.join("\n")).clicked() {
                         out.push(Command::Statistics);
                     }
                 }
                 if let Some((label, ChangeSource::Agent)) = &doc.last_change {
                     ui.separator();
-                    ui.label(
-                        RichText::new(format!("⚡ Last AI change: {label}"))
-                            .size(12.0)
-                            .color(theme::ACCENT_MID),
-                    );
+                    ui.label(RichText::new(format!("⚡ Last AI change: {label}")).size(12.0).color(theme::ACCENT_MID));
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let mut z = self.st.gantt.px_per_day;
                 if ui
-                    .add(
-                        egui::Slider::new(&mut z, 1.0..=140.0)
-                            .logarithmic(true)
-                            .show_value(false),
-                    )
+                    .add(egui::Slider::new(&mut z, 1.0..=140.0).logarithmic(true).show_value(false))
                     .on_hover_text("Timescale zoom")
                     .changed()
                 {
@@ -948,19 +762,9 @@ impl PlanCraftApp {
                 }
                 ui.label(RichText::new("🔍").size(12.0));
                 ui.separator();
-                for v in [
-                    ViewKind::Timesheet,
-                    ViewKind::ResourceSheet,
-                    ViewKind::TeamPlanner,
-                    ViewKind::TaskUsage,
-                    ViewKind::Gantt,
-                ] {
+                for v in [ViewKind::Timesheet, ViewKind::ResourceSheet, ViewKind::TeamPlanner, ViewKind::TaskUsage, ViewKind::Gantt] {
                     let active = self.st.view == v;
-                    if ui
-                        .selectable_label(active, RichText::new(v.icon()).size(13.0))
-                        .on_hover_text(v.label())
-                        .clicked()
-                    {
+                    if ui.selectable_label(active, RichText::new(v.icon()).size(13.0)).on_hover_text(v.label()).clicked() {
                         out.push(Command::SetView(v));
                     }
                 }
@@ -974,28 +778,19 @@ impl PlanCraftApp {
         let label = self.st.view.label().to_uppercase();
         let galley = p.layout_no_wrap(label, FontId::proportional(12.0), Color32::WHITE);
         let w = galley.size().x;
-        let pos = pos2(
-            rect.center().x - galley.size().y / 2.0,
-            rect.center().y + w / 2.0,
-        );
-        p.add(
-            egui::epaint::TextShape::new(pos, galley, Color32::WHITE)
-                .with_angle(-std::f32::consts::FRAC_PI_2),
-        );
+        let pos = pos2(rect.center().x - galley.size().y / 2.0, rect.center().y + w / 2.0);
+        p.add(egui::epaint::TextShape::new(pos, galley, Color32::WHITE).with_angle(-std::f32::consts::FRAC_PI_2));
     }
 
     fn toasts(&mut self, ctx: &egui::Context) {
-        self.st
-            .toasts
-            .retain(|t| t.at.elapsed() < StdDuration::from_secs(6));
+        self.st.toasts.retain(|t| t.at.elapsed() < StdDuration::from_secs(6));
         if self.st.toasts.is_empty() {
             return;
         }
         let screen = ctx.content_rect();
-        egui::Area::new(egui::Id::new("toasts"))
-            .order(egui::Order::Foreground)
-            .anchor(Align2::RIGHT_BOTTOM, vec2(-16.0, -36.0))
-            .show(ctx, |ui| {
+        egui::Area::new(egui::Id::new("toasts")).order(egui::Order::Foreground).anchor(Align2::RIGHT_BOTTOM, vec2(-16.0, -36.0)).show(
+            ctx,
+            |ui| {
                 ui.set_max_width(420.0f32.min(screen.width() - 40.0));
                 let mut dismiss = None;
                 for (i, t) in self.st.toasts.iter().enumerate() {
@@ -1021,7 +816,8 @@ impl PlanCraftApp {
                 if let Some(i) = dismiss {
                     self.st.toasts.remove(i);
                 }
-            });
+            },
+        );
         ctx.request_repaint_after(StdDuration::from_millis(500));
     }
 
@@ -1032,37 +828,18 @@ impl PlanCraftApp {
         let names: Vec<String> = {
             let ws = self.ws.lock().unwrap();
             match req {
-                CloseRequest::Document(h) => ws
-                    .docs
-                    .iter()
-                    .filter(|d| d.handle == h)
-                    .map(|d| d.project.name.clone())
-                    .collect(),
-                CloseRequest::App => ws
-                    .docs
-                    .iter()
-                    .filter(|d| d.dirty)
-                    .map(|d| d.project.name.clone())
-                    .collect(),
+                CloseRequest::Document(h) => ws.docs.iter().filter(|d| d.handle == h).map(|d| d.project.name.clone()).collect(),
+                CloseRequest::App => ws.docs.iter().filter(|d| d.dirty).map(|d| d.project.name.clone()).collect(),
             }
         };
         let mut choice = None;
         egui::Modal::new(egui::Id::new("confirm_close")).show(ctx, |ui| {
             ui.set_width(380.0);
             ui.heading("Save changes?");
-            ui.label(format!(
-                "Do you want to save changes to {}?",
-                names.join(", ")
-            ));
+            ui.label(format!("Do you want to save changes to {}?", names.join(", ")));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui
-                    .add(
-                        egui::Button::new(RichText::new("Save").color(Color32::WHITE))
-                            .fill(theme::ACCENT),
-                    )
-                    .clicked()
-                {
+                if ui.add(egui::Button::new(RichText::new("Save").color(Color32::WHITE)).fill(theme::ACCENT)).clicked() {
                     choice = Some(0);
                 }
                 if ui.button("Don't Save").clicked() {
@@ -1087,16 +864,7 @@ impl PlanCraftApp {
                 self.confirm_close = None;
             }
             (Some(0), CloseRequest::App) => {
-                let dirty: Vec<usize> = self
-                    .ws
-                    .lock()
-                    .unwrap()
-                    .docs
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, d)| d.dirty)
-                    .map(|(i, _)| i)
-                    .collect();
+                let dirty: Vec<usize> = self.ws.lock().unwrap().docs.iter().enumerate().filter(|(_, d)| d.dirty).map(|(i, _)| i).collect();
                 let mut all = true;
                 for i in dirty {
                     self.ws.lock().unwrap().active = Some(i);
@@ -1118,44 +886,60 @@ impl PlanCraftApp {
         }
     }
 
+    /// Developer automation used to capture screenshots of views and dialogs:
+    /// `PLANCRAFT_SCREENSHOT=out.png [PLANCRAFT_SELECT=row] [PLANCRAFT_CMD=TaskInfo,...]`.
     fn screenshot_hook(&mut self, ctx: &egui::Context) {
-        if std::env::var_os("PLANCRAFT_GLYPHCHECK").is_some() {
-            ctx.request_repaint();
-        }
-        if let Ok(chars) = std::env::var("PLANCRAFT_GLYPHCHECK") {
-            egui::Area::new(egui::Id::new("glyphs"))
-                .order(egui::Order::Debug)
-                .fixed_pos(pos2(0.0, 0.0))
-                .show(ctx, |ui| {
-                    egui::Frame::new().fill(Color32::WHITE).show(ui, |ui| {
-                        ui.set_width(1400.0);
-                        ui.horizontal_wrapped(|ui| {
-                            for (i, c) in chars.chars().enumerate() {
-                                ui.label(
-                                    RichText::new(format!("{i}:{c}"))
-                                        .size(22.0)
-                                        .color(Color32::BLACK),
-                                );
-                            }
-                        });
-                    });
-                });
+        if self.shot.as_ref().is_some_and(|(_, f)| *f == 3) {
+            let row: usize = std::env::var("PLANCRAFT_SELECT").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+            if let Ok(ws) = self.ws.lock()
+                && let Some(doc) = ws.active_doc()
+            {
+                if let Some(t) = doc.project.tasks.get(row.saturating_sub(1)) {
+                    self.st.sel.select_task(t.id);
+                }
+                if let Some(r) = doc.project.resources.first() {
+                    self.st.sel.select_resource(r.id);
+                }
+            }
+            for name in std::env::var("PLANCRAFT_CMD").unwrap_or_default().split(',').filter(|s| !s.is_empty()) {
+                let cmd = match name {
+                    "TaskInfo" => Command::TaskInfo,
+                    "ResourceInfo" => Command::ResourceInfo,
+                    "ProjectInfo" => Command::ProjectInfo,
+                    "WorkingTime" => Command::ChangeWorkingTime,
+                    "Statistics" => Command::Statistics,
+                    "Mcp" => Command::McpPanel,
+                    "Assign" => Command::AssignResources,
+                    "External" => Command::ExternalLinks,
+                    "About" => Command::About,
+                    "Level" => Command::LevelAll,
+                    "McpStart" => {
+                        self.mcp.start(self.ws.clone(), ctx.clone(), self.settings.mcp_port);
+                        continue;
+                    }
+                    "Critical" => {
+                        self.st.gantt.show_critical = true;
+                        continue;
+                    }
+                    "Backstage" => {
+                        self.st.backstage = true;
+                        continue;
+                    }
+                    _ => continue,
+                };
+                self.exec(ctx, cmd);
+            }
         }
         let Some((path, frame)) = &mut self.shot else {
             return;
         };
         *frame += 1;
-        if *frame == 40 {
+        let delay: u32 = std::env::var("PLANCRAFT_SHOT_DELAY").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        if *frame == 40 + delay * 60 {
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(Default::default()));
         }
         let shot = ctx.input(|i| {
-            i.events.iter().find_map(|e| {
-                if let egui::Event::Screenshot { image, .. } = e {
-                    Some(image.clone())
-                } else {
-                    None
-                }
-            })
+            i.events.iter().find_map(|e| if let egui::Event::Screenshot { image, .. } = e { Some(image.clone()) } else { None })
         });
         if let Some(img) = shot {
             let [w, h] = img.size;
@@ -1173,11 +957,7 @@ impl PlanCraftApp {
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
         child.vertical_centered(|ui| {
             ui.add_space(rect.height() * 0.3);
-            ui.label(
-                RichText::new("No project open")
-                    .size(18.0)
-                    .color(theme::TEXT_WEAK),
-            );
+            ui.label(RichText::new("No project open").size(18.0).color(theme::TEXT_WEAK));
             if ui.button("Create a new project").clicked() {
                 out.push(Command::NewProject);
             }
@@ -1189,6 +969,10 @@ impl PlanCraftApp {
 }
 
 impl eframe::App for PlanCraftApp {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        theme::BG.to_normalized_gamma_f32()
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         self.screenshot_hook(&ctx);
@@ -1196,11 +980,7 @@ impl eframe::App for PlanCraftApp {
 
         // Intercept window close when there are unsaved changes.
         if ctx.input(|i| i.viewport().close_requested()) && !self.allow_exit {
-            let dirty = self
-                .ws
-                .lock()
-                .map(|w| w.docs.iter().any(|d| d.dirty))
-                .unwrap_or(false);
+            let dirty = self.ws.lock().map(|w| w.docs.iter().any(|d| d.dirty)).unwrap_or(false);
             if dirty {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.confirm_close = Some(CloseRequest::App);
@@ -1229,6 +1009,16 @@ impl eframe::App for PlanCraftApp {
         for m in agent_msgs {
             self.set_status(m);
         }
+        // A document opened or activated elsewhere (e.g. by an agent) becomes the view.
+        let active = ws.active_doc().map(|d| d.handle);
+        if active != self.last_active {
+            if self.last_active.is_none() && active.is_some() {
+                self.st.backstage = false;
+            }
+            self.st.sel = Default::default();
+            self.st.gantt.initialized_for = None;
+            self.last_active = active;
+        }
         // Drop selections that no longer exist (e.g. deleted by an agent).
         if let Some(doc) = ws.active_doc() {
             let p = &doc.project;
@@ -1237,10 +1027,7 @@ impl eframe::App for PlanCraftApp {
         }
 
         // Window title.
-        let title = ws
-            .active_doc()
-            .map(|d| format!("{} - PlanCraft", d.title()))
-            .unwrap_or_else(|| "PlanCraft".into());
+        let title = ws.active_doc().map(|d| format!("{} - PlanCraft", d.title())).unwrap_or_else(|| "PlanCraft".into());
         if title != self.last_title {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
             self.last_title = title;
@@ -1250,18 +1037,11 @@ impl eframe::App for PlanCraftApp {
         let backstage_open = self.st.backstage;
 
         if backstage_open {
-            let stats = ws
-                .active_doc()
-                .map(|d| plancraft_core::report::project_stats(&d.project));
+            let stats = ws.active_doc().map(|d| plancraft_core::report::project_stats(&d.project));
             let binfo = backstage::BackstageInfo {
                 has_doc: info.has_doc,
-                doc_title: ws
-                    .active_doc()
-                    .map(|d| d.project.name.clone())
-                    .unwrap_or_default(),
-                doc_path: ws
-                    .active_doc()
-                    .and_then(|d| d.path.as_ref().map(|p| p.display().to_string())),
+                doc_title: ws.active_doc().map(|d| d.project.name.clone()).unwrap_or_default(),
+                doc_path: ws.active_doc().and_then(|d| d.path.as_ref().map(|p| p.display().to_string())),
                 stats,
                 settings: &self.settings,
                 can_close: info.has_doc,
@@ -1272,44 +1052,27 @@ impl eframe::App for PlanCraftApp {
                 }
             });
         } else {
-            egui::Panel::top("title")
-                .frame(egui::Frame::new().fill(theme::BG))
-                .show(ui, |ui| {
-                    ribbon::title_bar(ui, &info, &mut out);
-                    ribbon::tabs(ui, &mut self.st, &info, &mut out);
-                    if !self.st.ribbon_collapsed {
-                        egui::Frame::new()
-                            .fill(theme::BG)
-                            .inner_margin(egui::Margin {
-                                left: 4,
-                                right: 4,
-                                top: 4,
-                                bottom: 2,
-                            })
-                            .show(ui, |ui| {
-                                ui.set_min_width(ui.available_width());
-                                ribbon::body(ui, &mut self.st, &info, &mut out);
-                            });
-                        let r = ui.max_rect();
-                        ui.painter().hline(
-                            r.x_range(),
-                            ui.cursor().top(),
-                            Stroke::new(1.0, theme::GRID_LINE_STRONG),
-                        );
-                    }
-                    self.doc_tabs(ui, &mut ws, &mut out);
-                });
+            egui::Panel::top("title").frame(egui::Frame::new().fill(theme::BG)).show(ui, |ui| {
+                ribbon::title_bar(ui, &info, &mut out);
+                ribbon::tabs(ui, &mut self.st, &info, &mut out);
+                if !self.st.ribbon_collapsed {
+                    egui::Frame::new().fill(theme::BG).inner_margin(egui::Margin { left: 4, right: 4, top: 4, bottom: 2 }).show(ui, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        ribbon::body(ui, &mut self.st, &info, &mut out);
+                    });
+                    let r = ui.max_rect();
+                    ui.painter().hline(r.x_range(), ui.cursor().top(), Stroke::new(1.0, theme::GRID_LINE_STRONG));
+                }
+                self.doc_tabs(ui, &mut ws, &mut out);
+            });
             egui::Panel::bottom("status")
-                .frame(
-                    egui::Frame::new()
-                        .fill(theme::HEADER_BG)
-                        .inner_margin(egui::Margin::symmetric(10, 3)),
-                )
+                .frame(egui::Frame::new().fill(theme::HEADER_BG).inner_margin(egui::Margin::symmetric(10, 3)))
                 .show(ui, |ui| {
                     self.status_bar(ui, &mut ws, &mut out);
                 });
             egui::CentralPanel::no_frame().show(ui, |ui| {
                 let full = ui.max_rect();
+                ui.painter().rect_filled(full, 0.0, theme::BG);
                 let Some(doc) = ws.active_doc_mut() else {
                     self.welcome(ui, full, &mut out);
                     return;
@@ -1318,29 +1081,21 @@ impl eframe::App for PlanCraftApp {
                 self.view_bar(ui, bar);
                 let mut rect = Rect::from_min_max(pos2(full.left() + 22.0, full.top()), full.max);
                 let st = &mut self.st;
-                let show_timeline = st.timeline_visible
-                    && matches!(st.view, ViewKind::Gantt | ViewKind::TrackingGantt);
+                let show_timeline = st.timeline_visible && matches!(st.view, ViewKind::Gantt | ViewKind::TrackingGantt);
                 if show_timeline {
-                    let tl =
-                        Rect::from_min_size(rect.min, vec2(rect.width(), views::timeline::HEIGHT));
+                    let tl = Rect::from_min_size(rect.min, vec2(rect.width(), views::timeline::HEIGHT));
                     let chart_w = (rect.width() - st.table_width - 16.0).max(100.0);
                     views::timeline::show(ui, tl, &doc.project, &mut st.gantt, chart_w);
                     rect = Rect::from_min_max(pos2(rect.left(), tl.bottom()), rect.max);
                 }
                 match st.view {
                     ViewKind::Gantt => views::gantt::show(ui, rect, doc, st, false, &mut out),
-                    ViewKind::TrackingGantt => {
-                        views::gantt::show(ui, rect, doc, st, true, &mut out)
-                    }
+                    ViewKind::TrackingGantt => views::gantt::show(ui, rect, doc, st, true, &mut out),
                     ViewKind::TaskUsage => views::task_usage::show(ui, rect, doc, st, &mut out),
                     ViewKind::Milestones => views::milestones::show(ui, rect, doc, st, &mut out),
                     ViewKind::Calendar => views::calendar::show(ui, rect, doc, st, &mut out),
-                    ViewKind::ResourceSheet => {
-                        views::resource_sheet::show(ui, rect, doc, st, &mut out)
-                    }
-                    ViewKind::ResourceUsage => {
-                        views::resource_usage::show(ui, rect, doc, st, &mut out)
-                    }
+                    ViewKind::ResourceSheet => views::resource_sheet::show(ui, rect, doc, st, &mut out),
+                    ViewKind::ResourceUsage => views::resource_usage::show(ui, rect, doc, st, &mut out),
                     ViewKind::Workload => views::workload::show(ui, rect, doc, st),
                     ViewKind::TeamPlanner => views::team_planner::show(ui, rect, doc, st, &mut out),
                     ViewKind::Timesheet => views::timesheet::show(ui, rect, doc, st),
@@ -1398,13 +1153,7 @@ impl eframe::App for PlanCraftApp {
         }
         if self.dialogs.mcp {
             let ws = self.ws.clone();
-            dialogs::mcp_panel::show(
-                &ctx,
-                &mut self.dialogs.mcp,
-                &mut self.mcp,
-                &mut self.settings,
-                &ws,
-            );
+            dialogs::mcp_panel::show(&ctx, &mut self.dialogs.mcp, &mut self.mcp, &mut self.settings, &ws);
         }
         self.confirm_dialog(&ctx);
         self.toasts(&ctx);

@@ -14,10 +14,7 @@ use crate::views;
 fn week_schema() -> Value {
     let mut props = Map::new();
     for wd in WEEKDAYS {
-        props.insert(
-            views::weekday_name(wd).into(),
-            json!({ "type": "array", "items": { "type": "string" } }),
-        );
+        props.insert(views::weekday_name(wd).into(), json!({ "type": "array", "items": { "type": "string" } }));
     }
     json!({
         "type": "object",
@@ -165,12 +162,7 @@ fn get_calendar(ctx: &Ctx, a: &Args) -> ToolResult {
             let mut d = from;
             while d <= to {
                 let r = wc.ranges(d);
-                let exc = cal
-                    .exceptions
-                    .iter()
-                    .rev()
-                    .find(|e| e.covers(d))
-                    .map(|e| e.name.clone());
+                let exc = cal.exceptions.iter().rev().find(|e| e.covers(d)).map(|e| e.name.clone());
                 days.push(json!({
                     "date": d.format(DATE_FMT).to_string(),
                     "weekday": views::weekday_name(d.weekday()),
@@ -194,26 +186,12 @@ fn parse_days(v: &Value) -> ToolResult<Vec<Weekday>> {
     };
     let mut out = Vec::new();
     for it in items {
-        let s = it
-            .as_str()
-            .ok_or_else(|| ToolError("'days' must contain weekday names".into()))?
-            .trim()
-            .to_ascii_lowercase();
+        let s = it.as_str().ok_or_else(|| ToolError("'days' must contain weekday names".into()))?.trim().to_ascii_lowercase();
         let add: Vec<Weekday> = match s.as_str() {
-            "weekdays" | "workdays" => vec![
-                Weekday::Mon,
-                Weekday::Tue,
-                Weekday::Wed,
-                Weekday::Thu,
-                Weekday::Fri,
-            ],
+            "weekdays" | "workdays" => vec![Weekday::Mon, Weekday::Tue, Weekday::Wed, Weekday::Thu, Weekday::Fri],
             "weekend" | "weekends" => vec![Weekday::Sat, Weekday::Sun],
             "all" | "every day" | "everyday" => WEEKDAYS.to_vec(),
-            other => vec![
-                other
-                    .parse::<Weekday>()
-                    .map_err(|_| ToolError(format!("unknown weekday '{other}'")))?,
-            ],
+            other => vec![other.parse::<Weekday>().map_err(|_| ToolError(format!("unknown weekday '{other}'")))?],
         };
         for d in add {
             if !out.contains(&d) {
@@ -227,16 +205,10 @@ fn parse_days(v: &Value) -> ToolResult<Vec<Weekday>> {
 fn apply_week(p: &mut Project, id: CalendarId, week: &Args) -> ToolResult<()> {
     let mut updates = Vec::new();
     for (k, v) in week.map() {
-        let wd: Weekday = k
-            .parse()
-            .map_err(|_| ToolError(format!("unknown weekday '{k}' in 'week'")))?;
+        let wd: Weekday = k.parse().map_err(|_| ToolError(format!("unknown weekday '{k}' in 'week'")))?;
         updates.push((wd, parse_time_ranges(Some(v), k)?));
     }
-    let cal = p
-        .calendars
-        .iter_mut()
-        .find(|c| c.id == id)
-        .expect("resolved");
+    let cal = p.calendars.iter_mut().find(|c| c.id == id).expect("resolved");
     for (wd, r) in updates {
         *cal.week.day_mut(wd) = r;
     }
@@ -260,16 +232,10 @@ fn create_calendar(ctx: &Ctx, a: &Args) -> ToolResult {
         a,
         &format!("Add calendar '{name}'"),
         |p, _| {
-            if p.calendars
-                .iter()
-                .any(|c| c.name.eq_ignore_ascii_case(&name))
-            {
+            if p.calendars.iter().any(|c| c.name.eq_ignore_ascii_case(&name)) {
                 return err(format!("a calendar named '{name}' already exists"));
             }
-            let from = a
-                .get("copy_from")
-                .map(|v| resolve_calendar(p, v))
-                .transpose()?;
+            let from = a.get("copy_from").map(|v| resolve_calendar(p, v)).transpose()?;
             let id = p.add_calendar(name.clone(), from)?;
             if let Some(w) = a.object("week")? {
                 apply_week(p, id, &w)?;
@@ -280,12 +246,7 @@ fn create_calendar(ctx: &Ctx, a: &Args) -> ToolResult {
             }
             Ok(id)
         },
-        |doc, id| {
-            Ok(views::calendar_detail(
-                &doc.project,
-                doc.project.calendar(id).expect("exists"),
-            ))
-        },
+        |doc, id| Ok(views::calendar_detail(&doc.project, doc.project.calendar(id).expect("exists"))),
     )
 }
 
@@ -300,11 +261,7 @@ fn set_work_week(ctx: &Ctx, a: &Args) -> ToolResult {
                 if n.is_empty() {
                     return err("'name' must not be empty");
                 }
-                p.calendars
-                    .iter_mut()
-                    .find(|c| c.id == id)
-                    .expect("resolved")
-                    .name = n.to_string();
+                p.calendars.iter_mut().find(|c| c.id == id).expect("resolved").name = n.to_string();
             }
             if let Some(w) = a.object("week")? {
                 apply_week(p, id, &w)?;
@@ -313,11 +270,7 @@ fn set_work_week(ctx: &Ctx, a: &Args) -> ToolResult {
                 (Some(d), true) => {
                     let days = parse_days(d)?;
                     let ranges = parse_time_ranges(a.map().get("working_times"), "working_times")?;
-                    let cal = p
-                        .calendars
-                        .iter_mut()
-                        .find(|c| c.id == id)
-                        .expect("resolved");
+                    let cal = p.calendars.iter_mut().find(|c| c.id == id).expect("resolved");
                     for wd in days {
                         *cal.week.day_mut(wd) = ranges.clone();
                     }
@@ -335,22 +288,14 @@ fn set_work_week(ctx: &Ctx, a: &Args) -> ToolResult {
             check_not_empty(p, id)?;
             Ok(id)
         },
-        |doc, id| {
-            Ok(views::calendar_detail(
-                &doc.project,
-                doc.project.calendar(id).expect("exists"),
-            ))
-        },
+        |doc, id| Ok(views::calendar_detail(&doc.project, doc.project.calendar(id).expect("exists"))),
     )
 }
 
 fn add_calendar_exception(ctx: &Ctx, a: &Args) -> ToolResult {
     let exc = exception_from_args(a)?;
     let exc = if a.get("name").is_none() && exc.working.is_empty() {
-        plancraft_core::calendar::CalendarException {
-            name: "Holiday".into(),
-            ..exc
-        }
+        plancraft_core::calendar::CalendarException { name: "Holiday".into(), ..exc }
     } else {
         exc
     };
@@ -359,20 +304,10 @@ fn add_calendar_exception(ctx: &Ctx, a: &Args) -> ToolResult {
         &format!("Add calendar exception '{}'", exc.name),
         |p, _| {
             let id = cal_or_default(p, a)?;
-            p.calendars
-                .iter_mut()
-                .find(|c| c.id == id)
-                .expect("resolved")
-                .exceptions
-                .push(exc);
+            p.calendars.iter_mut().find(|c| c.id == id).expect("resolved").exceptions.push(exc);
             Ok(id)
         },
-        |doc, id| {
-            Ok(views::calendar_detail(
-                &doc.project,
-                doc.project.calendar(id).expect("exists"),
-            ))
-        },
+        |doc, id| Ok(views::calendar_detail(&doc.project, doc.project.calendar(id).expect("exists"))),
     )
 }
 
@@ -384,25 +319,16 @@ fn remove_calendar_exception(ctx: &Ctx, a: &Args) -> ToolResult {
             let id = cal_or_default(p, a)?;
             let index = a.u64("index")?;
             let name = a.str("name")?.map(str::to_string);
-            let cal = p
-                .calendars
-                .iter_mut()
-                .find(|c| c.id == id)
-                .expect("resolved");
+            let cal = p.calendars.iter_mut().find(|c| c.id == id).expect("resolved");
             let before = cal.exceptions.len();
             match (index, name) {
                 (Some(i), _) => {
                     if i as usize >= cal.exceptions.len() {
-                        return err(format!(
-                            "exception index {i} out of range (calendar has {})",
-                            cal.exceptions.len()
-                        ));
+                        return err(format!("exception index {i} out of range (calendar has {})", cal.exceptions.len()));
                     }
                     cal.exceptions.remove(i as usize);
                 }
-                (None, Some(n)) => cal
-                    .exceptions
-                    .retain(|e| !e.name.eq_ignore_ascii_case(n.trim())),
+                (None, Some(n)) => cal.exceptions.retain(|e| !e.name.eq_ignore_ascii_case(n.trim())),
                 (None, None) => return err("give 'index' or 'name'"),
             }
             if cal.exceptions.len() == before {
@@ -410,12 +336,7 @@ fn remove_calendar_exception(ctx: &Ctx, a: &Args) -> ToolResult {
             }
             Ok(id)
         },
-        |doc, id| {
-            Ok(views::calendar_detail(
-                &doc.project,
-                doc.project.calendar(id).expect("exists"),
-            ))
-        },
+        |doc, id| Ok(views::calendar_detail(&doc.project, doc.project.calendar(id).expect("exists"))),
     )
 }
 

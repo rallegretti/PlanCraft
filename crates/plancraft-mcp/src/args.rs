@@ -111,8 +111,7 @@ impl<'a> Args<'a> {
     }
 
     pub fn req_str(&self, key: &str) -> ToolResult<&'a str> {
-        self.str(key)?
-            .ok_or_else(|| ToolError(format!("missing required argument '{key}'")))
+        self.str(key)?.ok_or_else(|| ToolError(format!("missing required argument '{key}'")))
     }
 
     /// A string argument; numbers and booleans are converted to text.
@@ -143,11 +142,7 @@ impl<'a> Args<'a> {
         match self.get(key) {
             None => Ok(None),
             Some(Value::Number(n)) => Ok(n.as_f64()),
-            Some(Value::String(s)) => s
-                .trim()
-                .parse::<f64>()
-                .map(Some)
-                .map_err(|_| ToolError(format!("'{key}' must be a number"))),
+            Some(Value::String(s)) => s.trim().parse::<f64>().map(Some).map_err(|_| ToolError(format!("'{key}' must be a number"))),
             Some(other) => err(format!("'{key}' must be a number, got {other}")),
         }
     }
@@ -212,7 +207,8 @@ pub fn round2(v: f64) -> f64 {
     if !v.is_finite() {
         return 0.0;
     }
-    (v * 100.0).round() / 100.0
+    // `+ 0.0` turns -0.0 into 0.0.
+    (v * 100.0).round() / 100.0 + 0.0
 }
 
 /// Hours from minutes, rounded to two decimals.
@@ -223,11 +219,7 @@ pub fn hours(m: impl Into<f64>) -> f64 {
 /// Units as a percent string, e.g. `"50%"`.
 pub fn pct_text(units: f64) -> String {
     let p = units * 100.0;
-    if (p - p.round()).abs() < 1e-6 {
-        format!("{}%", p.round() as i64)
-    } else {
-        format!("{p:.1}%")
-    }
+    if (p - p.round()).abs() < 1e-6 { format!("{}%", p.round() as i64) } else { format!("{p:.1}%") }
 }
 
 // ---------------------------------------------------------------------------
@@ -239,16 +231,11 @@ pub fn parse_dt(p: &Project, v: &Value, finish: bool, key: &str) -> ToolResult<N
     let s = match v {
         Value::String(s) => s.as_str(),
         other => {
-            return err(format!(
-                "'{key}' must be a date string like \"2026-10-19\" or \"2026-10-19 13:00\", got {other}"
-            ));
+            return err(format!("'{key}' must be a date string like \"2026-10-19\" or \"2026-10-19 13:00\", got {other}"));
         }
     };
-    p.parse_datetime(s, finish).ok_or_else(|| {
-        ToolError(format!(
-            "'{key}': cannot parse date '{s}'; use \"YYYY-MM-DD\" or \"YYYY-MM-DD HH:MM\""
-        ))
-    })
+    p.parse_datetime(s, finish)
+        .ok_or_else(|| ToolError(format!("'{key}': cannot parse date '{s}'; use \"YYYY-MM-DD\" or \"YYYY-MM-DD HH:MM\"")))
 }
 
 /// Parses a calendar date (no time).
@@ -256,9 +243,7 @@ pub fn parse_date(v: &Value, key: &str) -> ToolResult<NaiveDate> {
     let s = match v {
         Value::String(s) => s.trim(),
         other => {
-            return err(format!(
-                "'{key}' must be a date string like \"2026-10-19\", got {other}"
-            ));
+            return err(format!("'{key}' must be a date string like \"2026-10-19\", got {other}"));
         }
     };
     let s = s.split([' ', 'T']).next().unwrap_or(s);
@@ -267,9 +252,7 @@ pub fn parse_date(v: &Value, key: &str) -> ToolResult<NaiveDate> {
             return Ok(d);
         }
     }
-    err(format!(
-        "'{key}': cannot parse date '{s}'; use \"YYYY-MM-DD\""
-    ))
+    err(format!("'{key}': cannot parse date '{s}'; use \"YYYY-MM-DD\""))
 }
 
 /// Parses a duration: text like `"3d"`, `"4h"`, `"2w"`, `"1.5 days"`, `"3d?"`, or a number of days.
@@ -282,21 +265,18 @@ pub fn parse_duration_value(p: &Project, v: &Value, key: &str) -> ToolResult<(Mi
             if d < 0.0 {
                 return err(format!("'{key}' must not be negative"));
             }
-            Ok((
-                (d * p.settings.time.minutes_per_day as f64).round() as Minutes,
-                false,
-            ))
+            Ok(((d * p.settings.time.minutes_per_day as f64).round() as Minutes, false))
         }
         Value::String(s) => {
-            let (m, est) = p.parse_duration(s).ok_or_else(|| ToolError(format!("'{key}': cannot parse duration '{s}'; use e.g. \"3d\", \"4h\", \"2w\", \"1.5 days\" or \"3d?\"")))?;
+            let (m, est) = p.parse_duration(s).ok_or_else(|| {
+                ToolError(format!("'{key}': cannot parse duration '{s}'; use e.g. \"3d\", \"4h\", \"2w\", \"1.5 days\" or \"3d?\""))
+            })?;
             if m < 0 {
                 return err(format!("'{key}' must not be negative"));
             }
             Ok((m, est))
         }
-        other => err(format!(
-            "'{key}' must be a duration string like \"3d\" or a number of days, got {other}"
-        )),
+        other => err(format!("'{key}' must be a duration string like \"3d\" or a number of days, got {other}")),
     }
 }
 
@@ -311,15 +291,14 @@ pub fn parse_work_value(p: &Project, v: &Value, key: &str) -> ToolResult<Minutes
             Ok((h * 60.0).round() as Minutes)
         }
         Value::String(s) => {
-            let m = parse_work(s, &p.settings.time).ok_or_else(|| ToolError(format!("'{key}': cannot parse work '{s}'; use e.g. \"16h\", \"2d\" or a number of hours")))?;
+            let m = parse_work(s, &p.settings.time)
+                .ok_or_else(|| ToolError(format!("'{key}': cannot parse work '{s}'; use e.g. \"16h\", \"2d\" or a number of hours")))?;
             if m < 0 {
                 return err(format!("'{key}' must not be negative"));
             }
             Ok(m)
         }
-        other => err(format!(
-            "'{key}' must be work like \"16h\" or a number of hours, got {other}"
-        )),
+        other => err(format!("'{key}' must be work like \"16h\" or a number of hours, got {other}")),
     }
 }
 
@@ -329,20 +308,11 @@ pub fn parse_lag_value(p: &Project, v: Option<&Value>, key: &str) -> ToolResult<
         None | Some(Value::Null) => Ok(Lag::None),
         Some(Value::Number(n)) => {
             let d = n.as_f64().unwrap_or(0.0);
-            Ok(if d == 0.0 {
-                Lag::None
-            } else {
-                Lag::Working((d * p.settings.time.minutes_per_day as f64).round() as Minutes)
-            })
+            Ok(if d == 0.0 { Lag::None } else { Lag::Working((d * p.settings.time.minutes_per_day as f64).round() as Minutes) })
         }
-        Some(Value::String(s)) => Lag::parse(s, &p.settings.time).ok_or_else(|| {
-            ToolError(format!(
-                "'{key}': cannot parse lag '{s}'; use e.g. \"2d\", \"-1d\", \"50%\" or \"3ed\""
-            ))
-        }),
-        Some(other) => err(format!(
-            "'{key}' must be a lag string like \"2d\", got {other}"
-        )),
+        Some(Value::String(s)) => Lag::parse(s, &p.settings.time)
+            .ok_or_else(|| ToolError(format!("'{key}': cannot parse lag '{s}'; use e.g. \"2d\", \"-1d\", \"50%\" or \"3ed\""))),
+        Some(other) => err(format!("'{key}' must be a lag string like \"2d\", got {other}")),
     }
 }
 
@@ -356,22 +326,13 @@ pub fn parse_units_value(v: &Value, key: &str) -> ToolResult<f64> {
         Value::String(s) => {
             let t = s.trim();
             if let Some(pct) = t.strip_suffix('%') {
-                pct.trim()
-                    .parse::<f64>()
-                    .map_err(|_| ToolError(format!("'{key}': cannot parse '{s}'")))?
-                    / 100.0
+                pct.trim().parse::<f64>().map_err(|_| ToolError(format!("'{key}': cannot parse '{s}'")))? / 100.0
             } else {
-                let x = t.parse::<f64>().map_err(|_| {
-                    ToolError(format!(
-                        "'{key}': cannot parse '{s}'; use e.g. \"50%\" or 0.5"
-                    ))
-                })?;
+                let x = t.parse::<f64>().map_err(|_| ToolError(format!("'{key}': cannot parse '{s}'; use e.g. \"50%\" or 0.5")))?;
                 if x > 10.0 { x / 100.0 } else { x }
             }
         }
-        other => err(format!(
-            "'{key}' must be a percentage like \"50%\" or a fraction like 0.5, got {other}"
-        ))?,
+        other => err(format!("'{key}' must be a percentage like \"50%\" or a fraction like 0.5, got {other}"))?,
     };
     if units < 0.0 || !units.is_finite() {
         return err(format!("'{key}' must not be negative"));
@@ -386,11 +347,7 @@ pub fn parse_time_ranges(v: Option<&Value>, key: &str) -> ToolResult<Vec<TimeRan
         Value::Null => return Ok(Vec::new()),
         Value::Array(a) => a.iter().collect(),
         Value::String(s) if s.contains(',') => {
-            return s
-                .split(',')
-                .filter(|x| !x.trim().is_empty())
-                .map(|x| parse_one_range(x, key))
-                .collect();
+            return s.split(',').filter(|x| !x.trim().is_empty()).map(|x| parse_one_range(x, key)).collect();
         }
         other => vec![other],
     };
@@ -399,9 +356,7 @@ pub fn parse_time_ranges(v: Option<&Value>, key: &str) -> ToolResult<Vec<TimeRan
         match it {
             Value::String(s) => out.push(parse_one_range(s, key)?),
             other => {
-                return err(format!(
-                    "'{key}' items must be strings like \"08:00-12:00\", got {other}"
-                ));
+                return err(format!("'{key}' items must be strings like \"08:00-12:00\", got {other}"));
             }
         }
     }
@@ -410,11 +365,8 @@ pub fn parse_time_ranges(v: Option<&Value>, key: &str) -> ToolResult<Vec<TimeRan
 }
 
 fn parse_one_range(s: &str, key: &str) -> ToolResult<TimeRange> {
-    TimeRange::parse(s).ok_or_else(|| {
-        ToolError(format!(
-            "'{key}': invalid time range '{s}', expected \"HH:MM-HH:MM\" (e.g. \"08:00-12:00\")"
-        ))
-    })
+    TimeRange::parse(s)
+        .ok_or_else(|| ToolError(format!("'{key}': invalid time range '{s}', expected \"HH:MM-HH:MM\" (e.g. \"08:00-12:00\")")))
 }
 
 /// Parses `"HH:MM"` to minutes after midnight.
@@ -439,37 +391,21 @@ pub fn parse_link_type(v: Option<&Value>) -> ToolResult<LinkType> {
                 "starttofinish" => "SF",
                 _ => s.trim(),
             };
-            LinkType::parse(code)
-                .ok_or_else(|| ToolError(format!("invalid link type '{s}'; use FS, SS, FF or SF")))
+            LinkType::parse(code).ok_or_else(|| ToolError(format!("invalid link type '{s}'; use FS, SS, FF or SF")))
         }
-        Some(other) => err(format!(
-            "link type must be one of FS, SS, FF, SF, got {other}"
-        )),
+        Some(other) => err(format!("link type must be one of FS, SS, FF, SF, got {other}")),
     }
 }
 
 /// Parses an enum value from snake_case text (also accepting spaces and dashes).
-pub fn parse_enum<T: serde::de::DeserializeOwned>(
-    v: &Value,
-    key: &str,
-    allowed: &[&str],
-) -> ToolResult<T> {
-    let s = v
-        .as_str()
-        .ok_or_else(|| ToolError(format!("'{key}' must be one of: {}", allowed.join(", "))))?;
+pub fn parse_enum<T: serde::de::DeserializeOwned>(v: &Value, key: &str, allowed: &[&str]) -> ToolResult<T> {
+    let s = v.as_str().ok_or_else(|| ToolError(format!("'{key}' must be one of: {}", allowed.join(", "))))?;
     let norm = s.trim().to_ascii_lowercase().replace([' ', '-'], "_");
-    serde_json::from_value(Value::String(norm)).map_err(|_| {
-        ToolError(format!(
-            "invalid {key} '{s}'; use one of: {}",
-            allowed.join(", ")
-        ))
-    })
+    serde_json::from_value(Value::String(norm)).map_err(|_| ToolError(format!("invalid {key} '{s}'; use one of: {}", allowed.join(", "))))
 }
 
 pub fn parse_constraint_kind(v: &Value) -> ToolResult<ConstraintKind> {
-    let s = v
-        .as_str()
-        .ok_or_else(|| ToolError("'constraint_type' must be a string".into()))?;
+    let s = v.as_str().ok_or_else(|| ToolError("'constraint_type' must be a string".into()))?;
     let norm = s.trim().to_ascii_lowercase().replace([' ', '-', '_'], "");
     let k = match norm.as_str() {
         "asap" | "assoonaspossible" => ConstraintKind::Asap,
@@ -481,9 +417,7 @@ pub fn parse_constraint_kind(v: &Value) -> ToolResult<ConstraintKind> {
         "mso" | "muststarton" => ConstraintKind::Mso,
         "mfo" | "mustfinishon" => ConstraintKind::Mfo,
         _ => {
-            return err(format!(
-                "invalid constraint_type '{s}'; use asap, alap, snet, snlt, fnet, fnlt, mso or mfo"
-            ));
+            return err(format!("invalid constraint_type '{s}'; use asap, alap, snet, snlt, fnet, fnlt, mso or mfo"));
         }
     };
     Ok(k)
@@ -531,11 +465,7 @@ pub fn resolve_task_with(p: &Project, v: &Value, keys: Option<&TaskKeys>) -> Too
     match v {
         Value::Number(_) => {
             let id = as_id(v).ok_or_else(|| ToolError(format!("invalid task id {v}")))?;
-            p.task(TaskId(id)).map(|t| t.id).ok_or_else(|| {
-                ToolError(format!(
-                    "no task with id {id} (use list_tasks to see task ids)"
-                ))
-            })
+            p.task(TaskId(id)).map(|t| t.id).ok_or_else(|| ToolError(format!("no task with id {id} (use list_tasks to see task ids)")))
         }
         Value::String(s) => {
             let t = s.trim();
@@ -545,15 +475,8 @@ pub fn resolve_task_with(p: &Project, v: &Value, keys: Option<&TaskKeys>) -> Too
                 return Ok(*id);
             }
             if let Some(row) = t.strip_prefix('#') {
-                let row: usize = row
-                    .trim()
-                    .parse()
-                    .map_err(|_| ToolError(format!("invalid row reference '{t}'")))?;
-                return p
-                    .tasks
-                    .get(row.wrapping_sub(1))
-                    .map(|t| t.id)
-                    .ok_or_else(|| ToolError(format!("there is no task in row {row}")));
+                let row: usize = row.trim().parse().map_err(|_| ToolError(format!("invalid row reference '{t}'")))?;
+                return p.tasks.get(row.wrapping_sub(1)).map(|t| t.id).ok_or_else(|| ToolError(format!("there is no task in row {row}")));
             }
             if let Ok(id) = t.parse::<u32>() {
                 if let Some(task) = p.task(TaskId(id)) {
@@ -562,26 +485,13 @@ pub fn resolve_task_with(p: &Project, v: &Value, keys: Option<&TaskKeys>) -> Too
                 return err(format!("no task with id {id}"));
             }
             let exact: Vec<&Task> = p.tasks.iter().filter(|x| x.name == t).collect();
-            let matches = if exact.is_empty() {
-                p.tasks
-                    .iter()
-                    .filter(|x| x.name.trim().eq_ignore_ascii_case(t))
-                    .collect()
-            } else {
-                exact
-            };
+            let matches = if exact.is_empty() { p.tasks.iter().filter(|x| x.name.trim().eq_ignore_ascii_case(t)).collect() } else { exact };
             match matches.len() {
                 1 => Ok(matches[0].id),
-                0 => err(format!(
-                    "no task named '{t}' (use list_tasks to find task ids)"
-                )),
+                0 => err(format!("no task named '{t}' (use list_tasks to find task ids)")),
                 _ => err(format!(
                     "task name '{t}' is ambiguous; matching ids: {}. Use the numeric id instead",
-                    matches
-                        .iter()
-                        .map(|x| x.id.0.to_string())
-                        .collect::<Vec<_>>()
-                        .join(", ")
+                    matches.iter().map(|x| x.id.0.to_string()).collect::<Vec<_>>().join(", ")
                 )),
             }
         }
@@ -589,19 +499,14 @@ pub fn resolve_task_with(p: &Project, v: &Value, keys: Option<&TaskKeys>) -> Too
             if let Some(id) = m.get("id") {
                 resolve_task_with(p, id, keys)
             } else if let Some(row) = m.get("row").and_then(as_id) {
-                p.tasks
-                    .get((row as usize).wrapping_sub(1))
-                    .map(|t| t.id)
-                    .ok_or_else(|| ToolError(format!("there is no task in row {row}")))
+                p.tasks.get((row as usize).wrapping_sub(1)).map(|t| t.id).ok_or_else(|| ToolError(format!("there is no task in row {row}")))
             } else if let Some(name) = m.get("name") {
                 resolve_task_with(p, name, keys)
             } else {
                 err("task reference object needs 'id', 'row' or 'name'")
             }
         }
-        other => err(format!(
-            "invalid task reference {other}; use the task's numeric id or exact name"
-        )),
+        other => err(format!("invalid task reference {other}; use the task's numeric id or exact name")),
     }
 }
 
@@ -611,9 +516,7 @@ pub fn resolve_task(p: &Project, v: &Value) -> ToolResult<TaskId> {
 
 /// Resolves a required task argument.
 pub fn task_arg(p: &Project, a: &Args, key: &str) -> ToolResult<TaskId> {
-    let v = a
-        .get(key)
-        .ok_or_else(|| ToolError(format!("missing required argument '{key}'")))?;
+    let v = a.get(key).ok_or_else(|| ToolError(format!("missing required argument '{key}'")))?;
     resolve_task(p, v).map_err(|e| ToolError(format!("'{key}': {e}")))
 }
 
@@ -634,9 +537,7 @@ pub fn resolve_resource(p: &Project, v: &Value) -> ToolResult<ResourceId> {
     match v {
         Value::Number(_) => {
             let id = as_id(v).ok_or_else(|| ToolError(format!("invalid resource id {v}")))?;
-            p.resource(ResourceId(id))
-                .map(|r| r.id)
-                .ok_or_else(|| ToolError(format!("no resource with id {id} (use list_resources)")))
+            p.resource(ResourceId(id)).map(|r| r.id).ok_or_else(|| ToolError(format!("no resource with id {id} (use list_resources)")))
         }
         Value::String(s) => {
             let t = s.trim();
@@ -648,26 +549,20 @@ pub fn resolve_resource(p: &Project, v: &Value) -> ToolResult<ResourceId> {
             if let Some(r) = p.resources.iter().find(|r| r.name == t) {
                 return Ok(r.id);
             }
-            p.resource_by_name(t).map(|r| r.id).ok_or_else(|| {
-                ToolError(format!(
-                    "no resource named '{t}' (use list_resources or create_resource)"
-                ))
-            })
+            p.resource_by_name(t)
+                .map(|r| r.id)
+                .ok_or_else(|| ToolError(format!("no resource named '{t}' (use list_resources or create_resource)")))
         }
         Value::Object(m) => match m.get("id").or_else(|| m.get("name")) {
             Some(x) => resolve_resource(p, x),
             None => err("resource reference object needs 'id' or 'name'"),
         },
-        other => err(format!(
-            "invalid resource reference {other}; use the resource's numeric id or name"
-        )),
+        other => err(format!("invalid resource reference {other}; use the resource's numeric id or name")),
     }
 }
 
 pub fn resource_arg(p: &Project, a: &Args, key: &str) -> ToolResult<ResourceId> {
-    let v = a
-        .get(key)
-        .ok_or_else(|| ToolError(format!("missing required argument '{key}'")))?;
+    let v = a.get(key).ok_or_else(|| ToolError(format!("missing required argument '{key}'")))?;
     resolve_resource(p, v).map_err(|e| ToolError(format!("'{key}': {e}")))
 }
 
@@ -686,18 +581,12 @@ pub fn resolve_calendar(p: &Project, v: &Value) -> ToolResult<CalendarId> {
     }
     err(format!(
         "no calendar {v}; available: {}",
-        p.calendars
-            .iter()
-            .map(|c| format!("{} ({})", c.id.0, c.name))
-            .collect::<Vec<_>>()
-            .join(", ")
+        p.calendars.iter().map(|c| format!("{} ({})", c.id.0, c.name)).collect::<Vec<_>>().join(", ")
     ))
 }
 
 pub fn calendar_arg(p: &Project, a: &Args, key: &str) -> ToolResult<CalendarId> {
-    let v = a
-        .get(key)
-        .ok_or_else(|| ToolError(format!("missing required argument '{key}'")))?;
+    let v = a.get(key).ok_or_else(|| ToolError(format!("missing required argument '{key}'")))?;
     resolve_calendar(p, v).map_err(|e| ToolError(format!("'{key}': {e}")))
 }
 
@@ -708,11 +597,7 @@ pub fn resolve_external(p: &Project, v: &Value) -> ToolResult<Uuid> {
         Value::Number(n) => n.to_string(),
         other => return err(format!("invalid external project reference {other}")),
     };
-    if let Some(e) = p
-        .external_projects
-        .iter()
-        .find(|e| e.id.to_string() == s || e.name.eq_ignore_ascii_case(&s))
-    {
+    if let Some(e) = p.external_projects.iter().find(|e| e.id.to_string() == s || e.name.eq_ignore_ascii_case(&s)) {
         return Ok(e.id);
     }
     if let Some(e) = p.external_projects.iter().find(|e| {
@@ -730,11 +615,7 @@ pub fn resolve_external(p: &Project, v: &Value) -> ToolResult<Uuid> {
     }
     err(format!(
         "no external project '{s}'; registered: [{}]. Use add_external_project first",
-        p.external_projects
-            .iter()
-            .map(|e| e.name.clone())
-            .collect::<Vec<_>>()
-            .join(", ")
+        p.external_projects.iter().map(|e| e.name.clone()).collect::<Vec<_>>().join(", ")
     ))
 }
 
@@ -751,10 +632,7 @@ pub fn resolve_task_ref(p: &Project, v: &Value, keys: Option<&TaskKeys>) -> Tool
             .or_else(|| m.get("id"))
             .and_then(as_id)
             .ok_or_else(|| ToolError("external reference needs a numeric 'task' id".into()))?;
-        return Ok(TaskRef::External {
-            project,
-            task: TaskId(task),
-        });
+        return Ok(TaskRef::External { project, task: TaskId(task) });
     }
     if let Value::Object(m) = v
         && let Some(t) = m.get("task")
@@ -770,11 +648,7 @@ pub fn resolve_task_ref(p: &Project, v: &Value, keys: Option<&TaskKeys>) -> Tool
 ///   (e.g. `"3,5SS+2d,Other\12"`).
 /// * An array holds unique ids / names, or objects `{task, type, lag}` (or
 ///   `{external_project, task, type, lag}`).
-pub fn parse_predecessor_list(
-    p: &Project,
-    v: &Value,
-    keys: Option<&TaskKeys>,
-) -> ToolResult<Vec<Dependency>> {
+pub fn parse_predecessor_list(p: &Project, v: &Value, keys: Option<&TaskKeys>) -> ToolResult<Vec<Dependency>> {
     match v {
         Value::Null => Ok(Vec::new()),
         Value::String(s) => Ok(p.parse_predecessors(s)?),
@@ -788,17 +662,9 @@ pub fn parse_predecessor_list(
                         let lag = parse_lag_value(p, m.get("lag"), "lag")?;
                         (pred, kind, lag)
                     }
-                    other => (
-                        TaskRef::Local(resolve_task_with(p, other, keys)?),
-                        LinkType::FS,
-                        Lag::None,
-                    ),
+                    other => (TaskRef::Local(resolve_task_with(p, other, keys)?), LinkType::FS, Lag::None),
                 };
-                out.push(Dependency {
-                    predecessor: pred,
-                    kind,
-                    lag,
-                });
+                out.push(Dependency { predecessor: pred, kind, lag });
             }
             Ok(out)
         }
@@ -813,34 +679,24 @@ pub fn parse_estimate(p: &Project, v: &Value) -> ToolResult<Option<Estimate>> {
         Value::Null => return Ok(None),
         Value::Object(m) => m,
         Value::Number(n) => {
-            return Ok(Some(Estimate::Complexity {
-                points: n.as_f64().unwrap_or(0.0),
-            }));
+            return Ok(Some(Estimate::Complexity { points: n.as_f64().unwrap_or(0.0) }));
         }
         other => return err(format!("'estimate' must be an object, got {other}")),
     };
     let a = Args::new(m);
-    let method = a
-        .str("method")?
-        .map(|s| s.to_ascii_lowercase().replace([' ', '-'], "_"));
+    let method = a.str("method")?.map(|s| s.to_ascii_lowercase().replace([' ', '-'], "_"));
     let method = match method.as_deref() {
         Some(x) => x.to_string(),
         None if a.present("points") => "complexity".into(),
-        None if a.present("most_likely") || a.present("optimistic") || a.present("pessimistic") => {
-            "three_point".into()
-        }
+        None if a.present("most_likely") || a.present("optimistic") || a.present("pessimistic") => "three_point".into(),
         None if a.present("work") || a.present("minutes") => "work".into(),
         None => {
-            return err(
-                "'estimate' needs 'points', 'optimistic'/'most_likely'/'pessimistic', or 'work'",
-            );
+            return err("'estimate' needs 'points', 'optimistic'/'most_likely'/'pessimistic', or 'work'");
         }
     };
     match method.as_str() {
         "complexity" | "points" | "story_points" => {
-            let points = a
-                .f64("points")?
-                .ok_or_else(|| ToolError("complexity estimate needs 'points'".into()))?;
+            let points = a.f64("points")?.ok_or_else(|| ToolError("complexity estimate needs 'points'".into()))?;
             if points < 0.0 {
                 return err("'points' must not be negative");
             }
@@ -848,36 +704,23 @@ pub fn parse_estimate(p: &Project, v: &Value) -> ToolResult<Option<Estimate>> {
         }
         "three_point" | "pert" => {
             let get = |k: &str| -> ToolResult<Minutes> {
-                let v = a
-                    .get(k)
-                    .ok_or_else(|| ToolError(format!("three-point estimate needs '{k}'")))?;
+                let v = a.get(k).ok_or_else(|| ToolError(format!("three-point estimate needs '{k}'")))?;
                 parse_work_value(p, v, k)
             };
             let (o, m, pe) = (get("optimistic")?, get("most_likely")?, get("pessimistic")?);
             if !(o <= m && m <= pe) {
-                return err(
-                    "three-point estimate requires optimistic <= most_likely <= pessimistic",
-                );
+                return err("three-point estimate requires optimistic <= most_likely <= pessimistic");
             }
-            Ok(Some(Estimate::ThreePoint {
-                optimistic: o,
-                most_likely: m,
-                pessimistic: pe,
-            }))
+            Ok(Some(Estimate::ThreePoint { optimistic: o, most_likely: m, pessimistic: pe }))
         }
         "work" => {
             let minutes = match a.get("work") {
                 Some(w) => parse_work_value(p, w, "work")?,
-                None => a
-                    .f64("minutes")?
-                    .map(|m| m.round() as Minutes)
-                    .ok_or_else(|| ToolError("work estimate needs 'work'".into()))?,
+                None => a.f64("minutes")?.map(|m| m.round() as Minutes).ok_or_else(|| ToolError("work estimate needs 'work'".into()))?,
             };
             Ok(Some(Estimate::Work { minutes }))
         }
-        other => err(format!(
-            "unknown estimate method '{other}'; use complexity, three_point or work"
-        )),
+        other => err(format!("unknown estimate method '{other}'; use complexity, three_point or work")),
     }
 }
 
@@ -896,31 +739,16 @@ mod tests {
     #[test]
     fn parses_values() {
         let p = p();
-        assert_eq!(
-            parse_duration_value(&p, &json!("3d?"), "d").unwrap(),
-            (1440, true)
-        );
-        assert_eq!(
-            parse_duration_value(&p, &json!(2), "d").unwrap(),
-            (960, false)
-        );
-        assert_eq!(
-            parse_duration_value(&p, &json!("1.5 days"), "d").unwrap(),
-            (720, false)
-        );
+        assert_eq!(parse_duration_value(&p, &json!("3d?"), "d").unwrap(), (1440, true));
+        assert_eq!(parse_duration_value(&p, &json!(2), "d").unwrap(), (960, false));
+        assert_eq!(parse_duration_value(&p, &json!("1.5 days"), "d").unwrap(), (720, false));
         assert_eq!(parse_work_value(&p, &json!(16), "w").unwrap(), 960);
         assert_eq!(parse_work_value(&p, &json!("2d"), "w").unwrap(), 960);
         assert_eq!(parse_units_value(&json!("50%"), "u").unwrap(), 0.5);
         assert_eq!(parse_units_value(&json!(150), "u").unwrap(), 1.5);
         assert_eq!(parse_units_value(&json!(2), "u").unwrap(), 2.0);
-        assert_eq!(
-            parse_lag_value(&p, Some(&json!("-1d")), "l").unwrap(),
-            Lag::Working(-480)
-        );
-        assert_eq!(
-            parse_link_type(Some(&json!("start-to-start"))).unwrap(),
-            LinkType::SS
-        );
+        assert_eq!(parse_lag_value(&p, Some(&json!("-1d")), "l").unwrap(), Lag::Working(-480));
+        assert_eq!(parse_link_type(Some(&json!("start-to-start"))).unwrap(), LinkType::SS);
     }
 
     #[test]

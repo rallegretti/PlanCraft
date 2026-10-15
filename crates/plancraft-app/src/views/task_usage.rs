@@ -22,10 +22,8 @@ enum Row {
 }
 
 pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: &mut Vec<Command>) {
-    let mut toolbar = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(
-        rect.min + vec2(8.0, 4.0),
-        vec2(rect.width() - 16.0, 24.0),
-    )));
+    let mut toolbar =
+        ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(rect.min + vec2(8.0, 4.0), vec2(rect.width() - 16.0, 24.0))));
     let from = period_toolbar(&mut toolbar, st, &doc.project);
     let rect = Rect::from_min_max(pos2(rect.left(), rect.top() + 32.0), rect.max);
     let p = &doc.project;
@@ -69,11 +67,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     }
     let task_values = |i: usize| -> Vec<f64> {
         let mut v = vec![0.0; nper];
-        let range = if p.has_children(i) {
-            p.descendants_range(i)
-        } else {
-            i..i + 1
-        };
+        let range = if p.has_children(i) { p.descendants_range(i) } else { i..i + 1 };
         for j in range {
             for a in p.assignments_for_task(p.tasks[j].id) {
                 if let Some(av) = per_assignment.get(&a.id) {
@@ -86,10 +80,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
         v
     };
 
-    let defs = vec![
-        ColumnDef::new("Task Name", 260.0).read_only(),
-        ColumnDef::new("Work", 80.0).right().read_only(),
-    ];
+    let defs = vec![ColumnDef::new("Task Name", 260.0).read_only(), ColumnDef::new("Work", 80.0).right().read_only()];
     let cfg = GridConfig {
         id: egui::Id::new("task_usage_grid"),
         columns: &defs,
@@ -103,8 +94,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     let left = Rect::from_min_size(rect.min, vec2(left_w, rect.height()));
     let output = {
         let sel = &st.sel;
-        let is_sel =
-            |r: usize| matches!(rows[r], Row::Task(i) if sel.tasks.contains(&p.tasks[i].id));
+        let is_sel = |r: usize| matches!(rows[r], Row::Task(i) if sel.tasks.contains(&p.tasks[i].id));
         let mut cell = |r: usize, c: usize| match rows[r] {
             Row::Task(i) => {
                 let t = &p.tasks[i];
@@ -116,20 +106,13 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                         ..Default::default()
                     }
                 } else {
-                    Cell {
-                        text: format_work(t.sched.work),
-                        bold: t.sched.is_summary,
-                        ..Default::default()
-                    }
+                    Cell { text: format_work(t.sched.work), bold: t.sched.is_summary, ..Default::default() }
                 }
             }
             Row::Assignment(i, aid) => {
                 let t = &p.tasks[i];
                 let a = p.assignment(aid);
-                let name = a
-                    .and_then(|a| p.resource(a.resource))
-                    .map(|r| r.name.clone())
-                    .unwrap_or_default();
+                let name = a.and_then(|a| p.resource(a.resource)).map(|r| r.name.clone()).unwrap_or_default();
                 if c == 0 {
                     Cell {
                         text: name,
@@ -168,10 +151,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     painter.rect_filled(right, 0.0, theme::BG);
     let header = Rect::from_min_size(right.min, vec2(right.width() - 12.0, theme::HEADER_HEIGHT));
     painter.rect_filled(header, 0.0, theme::HEADER_BG);
-    let body = Rect::from_min_max(
-        pos2(right.left(), header.bottom()),
-        pos2(right.right() - 12.0, right.bottom() - 12.0),
-    );
+    let body = Rect::from_min_max(pos2(right.left(), header.bottom()), pos2(right.right() - 12.0, right.bottom() - 12.0));
     let bp = painter.with_clip_rect(body);
     painter.text(
         pos2(header.left() + 6.0, header.top() + 10.0),
@@ -183,11 +163,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     for (k, pd) in periods.iter().enumerate() {
         let x = right.left() + k as f32 * PERIOD_W;
         let cr = Rect::from_min_size(pos2(x, header.top() + 20.0), vec2(PERIOD_W, 20.0));
-        painter.vline(
-            cr.right(),
-            header.y_range(),
-            Stroke::new(1.0, theme::GRID_LINE_STRONG),
-        );
+        painter.vline(cr.right(), header.y_range(), Stroke::new(1.0, theme::GRID_LINE_STRONG));
         painter.with_clip_rect(cr).text(
             cr.center(),
             Align2::CENTER_CENTER,
@@ -195,17 +171,9 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
             FontId::proportional(11.0),
             theme::TEXT,
         );
-        bp.vline(
-            cr.right(),
-            body.y_range(),
-            Stroke::new(1.0, theme::GRID_LINE),
-        );
+        bp.vline(cr.right(), body.y_range(), Stroke::new(1.0, theme::GRID_LINE));
     }
-    painter.hline(
-        header.x_range(),
-        header.bottom() - 0.5,
-        Stroke::new(1.0, theme::GRID_LINE_STRONG),
-    );
+    painter.hline(header.x_range(), header.bottom() - 0.5, Stroke::new(1.0, theme::GRID_LINE_STRONG));
     let rh = theme::ROW_HEIGHT;
     for (r, row) in rows.iter().enumerate() {
         let y = body.top() + r as f32 * rh - st.usage_grid.scroll_y;
@@ -214,16 +182,10 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
         }
         let (vals, is_task) = match row {
             Row::Task(i) => (task_values(*i), true),
-            Row::Assignment(_, aid) => {
-                (per_assignment.get(aid).cloned().unwrap_or_default(), false)
-            }
+            Row::Assignment(_, aid) => (per_assignment.get(aid).cloned().unwrap_or_default(), false),
         };
         if is_task {
-            bp.rect_filled(
-                Rect::from_min_max(pos2(body.left(), y), pos2(body.right(), y + rh)),
-                0.0,
-                theme::ACCENT_PALE,
-            );
+            bp.rect_filled(Rect::from_min_max(pos2(body.left(), y), pos2(body.right(), y + rh)), 0.0, theme::ACCENT_PALE);
         }
         for (k, v) in vals.iter().enumerate() {
             if *v > 0.5 {
@@ -237,29 +199,14 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                 );
             }
         }
-        bp.hline(
-            body.x_range(),
-            y + rh - 0.5,
-            Stroke::new(1.0, theme::GRID_LINE),
-        );
+        bp.hline(body.x_range(), y + rh - 0.5, Stroke::new(1.0, theme::GRID_LINE));
     }
-    let vs = Rect::from_min_max(
-        pos2(right.right() - 12.0, body.top()),
-        pos2(right.right(), body.bottom()),
-    );
-    st.usage_grid.scroll_y = scrollbar(
-        ui,
-        egui::Id::new("tu_vs"),
-        vs,
-        true,
-        st.usage_grid.scroll_y,
-        rows.len() as f32 * rh + rh,
-        body.height(),
-    );
+    let vs = Rect::from_min_max(pos2(right.right() - 12.0, body.top()), pos2(right.right(), body.bottom()));
+    st.usage_grid.scroll_y =
+        scrollbar(ui, egui::Id::new("tu_vs"), vs, true, st.usage_grid.scroll_y, rows.len() as f32 * rh + rh, body.height());
     if ui.rect_contains_pointer(body) {
         let dlt = ui.input(|i| i.smooth_scroll_delta.y);
-        st.usage_grid.scroll_y = (st.usage_grid.scroll_y - dlt)
-            .clamp(0.0, (rows.len() as f32 * rh - body.height() + rh).max(0.0));
+        st.usage_grid.scroll_y = (st.usage_grid.scroll_y - dlt).clamp(0.0, (rows.len() as f32 * rh - body.height() + rh).max(0.0));
     }
     let _ = Duration::days(0);
 }

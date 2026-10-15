@@ -62,10 +62,7 @@ pub struct McpServer {
 
 impl std::fmt::Debug for McpServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("McpServer")
-            .field("options", &self.options)
-            .field("tools", &self.tools.len())
-            .finish()
+        f.debug_struct("McpServer").field("options", &self.options).field("tools", &self.tools.len()).finish()
     }
 }
 
@@ -78,13 +75,7 @@ impl McpServer {
     pub fn with_options(workspace: SharedWorkspace, options: ServerOptions) -> Self {
         let tools = tools::all_tools();
         let tool_index = tools.iter().enumerate().map(|(i, t)| (t.name, i)).collect();
-        Self {
-            workspace,
-            on_change: None,
-            options,
-            tools,
-            tool_index,
-        }
+        Self { workspace, on_change: None, options, tools, tool_index }
     }
 
     /// Sets the callback run after every change made through the server
@@ -112,9 +103,7 @@ impl McpServer {
     }
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, Workspace> {
-        self.workspace
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.workspace.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     fn notify_change(&self) {
@@ -131,20 +120,10 @@ impl McpServer {
         match msg {
             Value::Array(items) => {
                 if items.is_empty() {
-                    return Some(error_response(
-                        Value::Null,
-                        &RpcError::new(INVALID_REQUEST, "Invalid Request: empty batch"),
-                    ));
+                    return Some(error_response(Value::Null, &RpcError::new(INVALID_REQUEST, "Invalid Request: empty batch")));
                 }
-                let out: Vec<Value> = items
-                    .into_iter()
-                    .filter_map(|m| self.handle_single(m))
-                    .collect();
-                if out.is_empty() {
-                    None
-                } else {
-                    Some(Value::Array(out))
-                }
+                let out: Vec<Value> = items.into_iter().filter_map(|m| self.handle_single(m)).collect();
+                if out.is_empty() { None } else { Some(Value::Array(out)) }
             }
             other => self.handle_single(other),
         }
@@ -160,20 +139,14 @@ impl McpServer {
 
     fn handle_single(&self, msg: Value) -> Option<Value> {
         let Value::Object(obj) = msg else {
-            return Some(error_response(
-                Value::Null,
-                &RpcError::new(INVALID_REQUEST, "Invalid Request: expected an object"),
-            ));
+            return Some(error_response(Value::Null, &RpcError::new(INVALID_REQUEST, "Invalid Request: expected an object")));
         };
         let id = obj.get("id").cloned();
         let Some(method) = obj.get("method").and_then(Value::as_str) else {
             if obj.contains_key("result") || obj.contains_key("error") {
                 return None; // a response to a server request; we never send any
             }
-            return Some(error_response(
-                id.unwrap_or(Value::Null),
-                &RpcError::new(INVALID_REQUEST, "Invalid Request: missing 'method'"),
-            ));
+            return Some(error_response(id.unwrap_or(Value::Null), &RpcError::new(INVALID_REQUEST, "Invalid Request: missing 'method'")));
         };
         let params = obj.get("params").cloned().unwrap_or(Value::Null);
         match id {
@@ -190,10 +163,7 @@ impl McpServer {
 
     fn handle_notification(&self, method: &str, _params: &Value) {
         match method {
-            "notifications/initialized"
-            | "notifications/cancelled"
-            | "notifications/roots/list_changed"
-            | "notifications/progress" => {}
+            "notifications/initialized" | "notifications/cancelled" | "notifications/roots/list_changed" | "notifications/progress" => {}
             other => eprintln!("plancraft-mcp: ignoring notification {other}"),
         }
     }
@@ -202,25 +172,18 @@ impl McpServer {
         match method {
             "initialize" => Ok(self.initialize(params)),
             "ping" => Ok(json!({})),
-            "tools/list" => {
-                Ok(json!({ "tools": self.tools.iter().map(Tool::to_json).collect::<Vec<_>>() }))
-            }
+            "tools/list" => Ok(json!({ "tools": self.tools.iter().map(Tool::to_json).collect::<Vec<_>>() })),
             "tools/call" => self.call_tool_request(params),
             "resources/list" => Ok(crate::resources::list(self)),
             "resources/templates/list" => Ok(crate::resources::templates()),
             "resources/read" => {
-                let uri = params
-                    .get("uri")
-                    .and_then(Value::as_str)
-                    .ok_or_else(|| RpcError::invalid_params("missing 'uri'"))?;
+                let uri = params.get("uri").and_then(Value::as_str).ok_or_else(|| RpcError::invalid_params("missing 'uri'"))?;
                 crate::resources::read(self, uri)
             }
             "prompts/list" => Ok(crate::prompts::list()),
             "prompts/get" => crate::prompts::get(params),
             "logging/setLevel" => Ok(json!({})),
-            "completion/complete" => {
-                Ok(json!({ "completion": { "values": [], "hasMore": false } }))
-            }
+            "completion/complete" => Ok(json!({ "completion": { "values": [], "hasMore": false } })),
             other => Err(RpcError::method_not_found(other)),
         }
     }
@@ -254,10 +217,7 @@ impl McpServer {
     }
 
     fn call_tool_request(&self, params: &Value) -> Result<Value, RpcError> {
-        let name = params
-            .get("name")
-            .and_then(Value::as_str)
-            .ok_or_else(|| RpcError::invalid_params("missing tool 'name'"))?;
+        let name = params.get("name").and_then(Value::as_str).ok_or_else(|| RpcError::invalid_params("missing tool 'name'"))?;
         let empty = Value::Object(Map::new());
         let arguments = match params.get("arguments") {
             None | Some(Value::Null) => &empty,
@@ -283,10 +243,7 @@ impl McpServer {
         if let Err(e) = tool.validate(map) {
             return tool_error_result(e.0);
         }
-        let ctx = Ctx {
-            server: self,
-            changed: Cell::new(false),
-        };
+        let ctx = Ctx { server: self, changed: Cell::new(false) };
         let args = Args::new(map);
         let outcome = catch_unwind(AssertUnwindSafe(|| (tool.handler)(&ctx, &args)));
         if ctx.changed.get() {
@@ -309,11 +266,7 @@ impl McpServer {
 
 fn render_text(v: &Value) -> String {
     let compact = serde_json::to_string(v).unwrap_or_default();
-    if compact.len() > 24_000 {
-        compact
-    } else {
-        serde_json::to_string_pretty(v).unwrap_or(compact)
-    }
+    if compact.len() > 24_000 { compact } else { serde_json::to_string_pretty(v).unwrap_or(compact) }
 }
 
 fn tool_success_result(tool: &Tool, value: Value) -> Value {
@@ -321,11 +274,7 @@ fn tool_success_result(tool: &Tool, value: Value) -> Value {
         Value::Object(_) => value,
         other => json!({ "result": other }),
     };
-    let text = match tool
-        .text_field
-        .and_then(|f| structured.get(f))
-        .and_then(Value::as_str)
-    {
+    let text = match tool.text_field.and_then(|f| structured.get(f)).and_then(Value::as_str) {
         Some(t) => t.to_string(),
         None => render_text(&structured),
     };
@@ -360,13 +309,7 @@ impl Ctx<'_> {
     }
 
     pub fn require_file_access(&self, what: &str) -> ToolResult<()> {
-        if self.allow_file_access() {
-            Ok(())
-        } else {
-            err(format!(
-                "{what} is disabled on this server (file access not permitted)"
-            ))
-        }
+        if self.allow_file_access() { Ok(()) } else { err(format!("{what} is disabled on this server (file access not permitted)")) }
     }
 
     /// Finds the document selected by the optional `document` argument.
@@ -375,28 +318,21 @@ impl Ctx<'_> {
             return err("no document is open; call new_project or open_project first");
         }
         match a.get("document") {
-            None => ws
-                .active
-                .filter(|&i| i < ws.docs.len())
-                .ok_or_else(|| ToolError("no active document; call set_active_document".into())),
+            None => {
+                ws.active.filter(|&i| i < ws.docs.len()).ok_or_else(|| ToolError("no active document; call set_active_document".into()))
+            }
             Some(v) => {
                 let key = match v {
                     Value::String(s) => s.clone(),
                     Value::Number(n) => n.to_string(),
                     other => {
-                        return err(format!(
-                            "'document' must be a handle number or a name/path string, got {other}"
-                        ));
+                        return err(format!("'document' must be a handle number or a name/path string, got {other}"));
                     }
                 };
                 ws.find(&key).ok_or_else(|| {
                     ToolError(format!(
                         "no open document matches '{key}'; open documents: {}",
-                        ws.docs
-                            .iter()
-                            .map(|d| format!("{} ({})", d.handle, d.project.name))
-                            .collect::<Vec<_>>()
-                            .join(", ")
+                        ws.docs.iter().map(|d| format!("{} ({})", d.handle, d.project.name)).collect::<Vec<_>>().join(", ")
                     ))
                 })
             }
@@ -404,10 +340,7 @@ impl Ctx<'_> {
     }
 
     /// Runs `f` with the whole workspace locked.
-    pub fn with_workspace<R>(
-        &self,
-        f: impl FnOnce(&mut Workspace) -> ToolResult<R>,
-    ) -> ToolResult<R> {
+    pub fn with_workspace<R>(&self, f: impl FnOnce(&mut Workspace) -> ToolResult<R>) -> ToolResult<R> {
         let mut ws = self.server.lock();
         f(&mut ws)
     }
@@ -420,11 +353,7 @@ impl Ctx<'_> {
     }
 
     /// Runs `f` on the selected document mutably, without undo support (e.g. save).
-    pub fn with_doc<R>(
-        &self,
-        a: &Args,
-        f: impl FnOnce(&mut Document) -> ToolResult<R>,
-    ) -> ToolResult<R> {
+    pub fn with_doc<R>(&self, a: &Args, f: impl FnOnce(&mut Document) -> ToolResult<R>) -> ToolResult<R> {
         let mut ws = self.server.lock();
         let i = Self::doc_index(&ws, a)?;
         f(&mut ws.docs[i])
@@ -446,11 +375,9 @@ impl Ctx<'_> {
         let i = Self::doc_index(&ws, a)?;
         let doc = &mut ws.docs[i];
         let path = doc.path.clone();
-        let r = doc.try_edit(label, ChangeSource::Agent, |p| {
-            match catch_unwind(AssertUnwindSafe(|| f(p, path.as_deref()))) {
-                Ok(r) => r,
-                Err(_) => err("internal error while applying the edit; the change was rolled back"),
-            }
+        let r = doc.try_edit(label, ChangeSource::Agent, |p| match catch_unwind(AssertUnwindSafe(|| f(p, path.as_deref()))) {
+            Ok(r) => r,
+            Err(_) => err("internal error while applying the edit; the change was rolled back"),
         })?;
         self.mark_changed();
         let mut out = view(doc, r)?;

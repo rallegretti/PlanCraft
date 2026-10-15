@@ -56,14 +56,7 @@ impl ViewKind {
     }
 
     pub fn is_task_view(self) -> bool {
-        matches!(
-            self,
-            ViewKind::Gantt
-                | ViewKind::TrackingGantt
-                | ViewKind::TaskUsage
-                | ViewKind::Milestones
-                | ViewKind::Calendar
-        )
+        matches!(self, ViewKind::Gantt | ViewKind::TrackingGantt | ViewKind::TaskUsage | ViewKind::Milestones | ViewKind::Calendar)
     }
 
     pub const ALL: [ViewKind; 10] = [
@@ -91,14 +84,8 @@ pub enum RibbonTab {
 }
 
 impl RibbonTab {
-    pub const ALL: [RibbonTab; 6] = [
-        RibbonTab::Task,
-        RibbonTab::Resource,
-        RibbonTab::Report,
-        RibbonTab::Project,
-        RibbonTab::View,
-        RibbonTab::Format,
-    ];
+    pub const ALL: [RibbonTab; 6] =
+        [RibbonTab::Task, RibbonTab::Resource, RibbonTab::Report, RibbonTab::Project, RibbonTab::View, RibbonTab::Format];
     pub fn label(self) -> &'static str {
         match self {
             RibbonTab::Task => "Task",
@@ -152,20 +139,10 @@ impl TaskFilter {
 /// Gantt-chart drag in progress.
 #[derive(Clone, Debug)]
 pub enum BarDrag {
-    Move {
-        task: TaskId,
-        grab_dx: f32,
-        origin_start: NaiveDateTime,
-    },
-    Resize {
-        task: TaskId,
-    },
-    Progress {
-        task: TaskId,
-    },
-    Link {
-        from: TaskId,
-    },
+    Move { task: TaskId, grab_dx: f32, origin_start: NaiveDateTime },
+    Resize { task: TaskId },
+    Progress { task: TaskId },
+    Link { from: TaskId },
 }
 
 #[derive(Clone, Debug)]
@@ -218,10 +195,7 @@ impl GanttState {
 
     pub fn zoom(&mut self, dir: i32, anchor_x: f32, chart_left: f32) {
         let anchor_t = self.time_at(chart_left, anchor_x);
-        let idx = Self::ZOOMS
-            .iter()
-            .position(|z| *z >= self.px_per_day - 0.01)
-            .unwrap_or(5) as i32;
+        let idx = Self::ZOOMS.iter().position(|z| *z >= self.px_per_day - 0.01).unwrap_or(5) as i32;
         let n = (idx + dir).clamp(0, Self::ZOOMS.len() as i32 - 1) as usize;
         self.px_per_day = Self::ZOOMS[n];
         // Keep the anchor time under the cursor.
@@ -265,11 +239,7 @@ pub struct Selection {
 
 impl Selection {
     pub fn single_task(&self) -> Option<TaskId> {
-        if self.tasks.len() == 1 {
-            self.tasks.iter().next().copied()
-        } else {
-            self.anchor.filter(|a| self.tasks.contains(a))
-        }
+        if self.tasks.len() == 1 { self.tasks.iter().next().copied() } else { self.anchor.filter(|a| self.tasks.contains(a)) }
     }
     pub fn select_task(&mut self, id: TaskId) {
         self.tasks.clear();
@@ -354,10 +324,6 @@ impl Default for UiState {
 
 impl UiState {
     pub fn toast(&mut self, kind: ToastKind, text: impl Into<String>) {
-        self.toasts.push(Toast {
-            text: text.into(),
-            kind,
-            at: Instant::now(),
-        });
+        self.toasts.push(Toast { text: text.into(), kind, at: Instant::now() });
     }
 }

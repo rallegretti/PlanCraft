@@ -31,17 +31,11 @@ pub fn period_label(g: Granularity, d: NaiveDate) -> String {
 
 /// Toolbar shared by the time-phased views. Returns the first period to show.
 pub fn period_toolbar(ui: &mut Ui, st: &mut UiState, p: &Project) -> NaiveDate {
-    let default_from = st
-        .granularity
-        .bucket_start(p.sched.start.unwrap_or(p.start).date());
+    let default_from = st.granularity.bucket_start(p.sched.start.unwrap_or(p.start).date());
     let mut from = st.usage_from.unwrap_or(default_from);
     ui.horizontal(|ui| {
         ui.label("Timescale:");
-        for (g, l) in [
-            (Granularity::Day, "Days"),
-            (Granularity::Week, "Weeks"),
-            (Granularity::Month, "Months"),
-        ] {
+        for (g, l) in [(Granularity::Day, "Days"), (Granularity::Week, "Weeks"), (Granularity::Month, "Months")] {
             if ui.selectable_label(st.granularity == g, l).clicked() {
                 st.granularity = g;
                 from = g.bucket_start(from);
@@ -55,16 +49,12 @@ pub fn period_toolbar(ui: &mut Ui, st: &mut UiState, p: &Project) -> NaiveDate {
             from = default_from;
         }
         if ui.button("Today").clicked() {
-            from = st
-                .granularity
-                .bucket_start(chrono::Local::now().date_naive());
+            from = st.granularity.bucket_start(chrono::Local::now().date_naive());
         }
         if ui.button("⏵").on_hover_text("Later").clicked() {
             from = step(st.granularity, from, 4);
         }
-        ui.label(
-            egui::RichText::new(format!("from {}", format::day(from))).color(theme::TEXT_WEAK),
-        );
+        ui.label(egui::RichText::new(format!("from {}", format::day(from))).color(theme::TEXT_WEAK));
     });
     from = st.granularity.bucket_start(from);
     st.usage_from = Some(from);
@@ -77,17 +67,14 @@ pub fn step(g: Granularity, d: NaiveDate, n: i32) -> NaiveDate {
         Granularity::Week => d + Duration::days(7 * n as i64),
         Granularity::Month => {
             let total = d.year() * 12 + d.month0() as i32 + n;
-            NaiveDate::from_ymd_opt(total.div_euclid(12), total.rem_euclid(12) as u32 + 1, 1)
-                .unwrap_or(d)
+            NaiveDate::from_ymd_opt(total.div_euclid(12), total.rem_euclid(12) as u32 + 1, 1).unwrap_or(d)
         }
     }
 }
 
 pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: &mut Vec<Command>) {
-    let mut toolbar = ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(
-        rect.min + vec2(8.0, 4.0),
-        vec2(rect.width() - 16.0, 24.0),
-    )));
+    let mut toolbar =
+        ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(rect.min + vec2(8.0, 4.0), vec2(rect.width() - 16.0, 24.0))));
     let from = period_toolbar(&mut toolbar, st, &doc.project);
     let rect = Rect::from_min_max(pos2(rect.left(), rect.top() + 32.0), rect.max);
 
@@ -113,10 +100,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     }
 
     // Left grid.
-    let defs = vec![
-        ColumnDef::new("Resource Name", 220.0).read_only(),
-        ColumnDef::new("Work", 80.0).right().read_only(),
-    ];
+    let defs = vec![ColumnDef::new("Resource Name", 220.0).read_only(), ColumnDef::new("Work", 80.0).right().read_only()];
     let cfg = GridConfig {
         id: egui::Id::new("usage_grid"),
         columns: &defs,
@@ -141,32 +125,17 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                     Cell {
                         text: res.name.clone(),
                         bold: true,
-                        expander: if rl.assignments.is_empty() {
-                            None
-                        } else {
-                            Some(!collapsed.contains(&res.id))
-                        },
+                        expander: if rl.assignments.is_empty() { None } else { Some(!collapsed.contains(&res.id)) },
                         indent: if rl.assignments.is_empty() { 14.0 } else { 0.0 },
                         icons: if over {
-                            vec![(
-                                "⚠".into(),
-                                theme::ERROR,
-                                format!(
-                                    "Overallocated on {} day(s) in view",
-                                    rl.overallocated_days.len()
-                                ),
-                            )]
+                            vec![("⚠".into(), theme::ERROR, format!("Overallocated on {} day(s) in view", rl.overallocated_days.len()))]
                         } else {
                             vec![]
                         },
                         ..Default::default()
                     }
                 } else {
-                    Cell {
-                        text: format_work(rl.total_work),
-                        bold: true,
-                        ..Default::default()
-                    }
+                    Cell { text: format_work(rl.total_work), bold: true, ..Default::default() }
                 };
                 if over {
                     cl.color = Some(theme::ERROR);
@@ -176,17 +145,9 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
             Row::Assignment(ri, ai) => {
                 let a = &report.resources[ri].assignments[ai];
                 if c == 0 {
-                    Cell {
-                        text: a.task_name.clone(),
-                        indent: 30.0,
-                        ..Default::default()
-                    }
+                    Cell { text: a.task_name.clone(), indent: 30.0, ..Default::default() }
                 } else {
-                    Cell::text(
-                        p.assignment(a.assignment)
-                            .map(|x| format_work(x.work))
-                            .unwrap_or_default(),
-                    )
+                    Cell::text(p.assignment(a.assignment).map(|x| format_work(x.work)).unwrap_or_default())
                 }
             }
         };
@@ -206,8 +167,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                 Row::Resource(ri) => st.sel.select_resource(p.resources[ri].id),
                 Row::Assignment(ri, ai) => {
                     st.sel.select_resource(p.resources[ri].id);
-                    st.sel
-                        .select_task(report.resources[ri].assignments[ai].task);
+                    st.sel.select_task(report.resources[ri].assignments[ai].task);
                 }
             },
             _ => {}
@@ -220,10 +180,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     painter.rect_filled(right, 0.0, theme::BG);
     let header = Rect::from_min_size(right.min, vec2(right.width() - 12.0, theme::HEADER_HEIGHT));
     painter.rect_filled(header, 0.0, theme::HEADER_BG);
-    let body = Rect::from_min_max(
-        pos2(right.left(), header.bottom()),
-        pos2(right.right() - 12.0, right.bottom() - 12.0),
-    );
+    let body = Rect::from_min_max(pos2(right.left(), header.bottom()), pos2(right.right() - 12.0, right.bottom() - 12.0));
     let bp = painter.with_clip_rect(body);
     painter.text(
         pos2(header.left() + 6.0, header.top() + 10.0),
@@ -235,11 +192,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     for (i, d) in report.periods.iter().enumerate() {
         let x = right.left() + i as f32 * PERIOD_W;
         let cr = Rect::from_min_size(pos2(x, header.top() + 20.0), vec2(PERIOD_W, 20.0));
-        painter.vline(
-            cr.right(),
-            header.y_range(),
-            Stroke::new(1.0, theme::GRID_LINE_STRONG),
-        );
+        painter.vline(cr.right(), header.y_range(), Stroke::new(1.0, theme::GRID_LINE_STRONG));
         painter.with_clip_rect(cr).text(
             cr.center(),
             Align2::CENTER_CENTER,
@@ -247,17 +200,9 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
             FontId::proportional(11.0),
             theme::TEXT,
         );
-        bp.vline(
-            cr.right(),
-            body.y_range(),
-            Stroke::new(1.0, theme::GRID_LINE),
-        );
+        bp.vline(cr.right(), body.y_range(), Stroke::new(1.0, theme::GRID_LINE));
     }
-    painter.hline(
-        header.x_range(),
-        header.bottom() - 0.5,
-        Stroke::new(1.0, theme::GRID_LINE_STRONG),
-    );
+    painter.hline(header.x_range(), header.bottom() - 0.5, Stroke::new(1.0, theme::GRID_LINE_STRONG));
     let rh = theme::ROW_HEIGHT;
     let font = FontId::proportional(12.0);
     for (r, row) in rows.iter().enumerate() {
@@ -273,9 +218,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                     let pl = &report.resources[*ri].periods[i];
                     (pl.load, Some(pl.utilization()), true)
                 }
-                Row::Assignment(ri, ai) => {
-                    (report.resources[*ri].assignments[*ai].load[i], None, false)
-                }
+                Row::Assignment(ri, ai) => (report.resources[*ri].assignments[*ai].load[i], None, false),
             };
             if let Some(u) = util {
                 bp.rect_filled(cr.shrink(0.5), 0.0, theme::utilization_color(u));
@@ -284,48 +227,21 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                 let over = util.is_some_and(|u| u > 1.0001);
                 let color = if over { theme::ERROR } else { theme::TEXT };
                 let t = format::hours(val);
-                bp.text(
-                    pos2(cr.right() - 5.0, cr.center().y),
-                    Align2::RIGHT_CENTER,
-                    &t,
-                    font.clone(),
-                    color,
-                );
+                bp.text(pos2(cr.right() - 5.0, cr.center().y), Align2::RIGHT_CENTER, &t, font.clone(), color);
                 if bold {
-                    bp.text(
-                        pos2(cr.right() - 4.5, cr.center().y),
-                        Align2::RIGHT_CENTER,
-                        &t,
-                        font.clone(),
-                        color,
-                    );
+                    bp.text(pos2(cr.right() - 4.5, cr.center().y), Align2::RIGHT_CENTER, &t, font.clone(), color);
                 }
             }
         }
-        bp.hline(
-            body.x_range(),
-            y + rh - 0.5,
-            Stroke::new(1.0, theme::GRID_LINE),
-        );
+        bp.hline(body.x_range(), y + rh - 0.5, Stroke::new(1.0, theme::GRID_LINE));
     }
     // Shared vertical scrollbar.
-    let vs = Rect::from_min_max(
-        pos2(right.right() - 12.0, body.top()),
-        pos2(right.right(), body.bottom()),
-    );
-    st.usage_grid.scroll_y = scrollbar(
-        ui,
-        egui::Id::new("usage_vs"),
-        vs,
-        true,
-        st.usage_grid.scroll_y,
-        rows.len() as f32 * rh + rh,
-        body.height(),
-    );
+    let vs = Rect::from_min_max(pos2(right.right() - 12.0, body.top()), pos2(right.right(), body.bottom()));
+    st.usage_grid.scroll_y =
+        scrollbar(ui, egui::Id::new("usage_vs"), vs, true, st.usage_grid.scroll_y, rows.len() as f32 * rh + rh, body.height());
     if ui.rect_contains_pointer(body) {
         let d = ui.input(|i| i.smooth_scroll_delta);
-        st.usage_grid.scroll_y = (st.usage_grid.scroll_y - d.y)
-            .clamp(0.0, (rows.len() as f32 * rh - body.height() + rh).max(0.0));
+        st.usage_grid.scroll_y = (st.usage_grid.scroll_y - d.y).clamp(0.0, (rows.len() as f32 * rh - body.height() + rh).max(0.0));
         if d.x.abs() > 20.0 {
             st.usage_from = Some(step(st.granularity, from, if d.x < 0.0 { 1 } else { -1 }));
         }

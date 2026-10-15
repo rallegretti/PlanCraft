@@ -89,11 +89,7 @@ pub fn workspace_from_files<P: AsRef<Path>>(paths: &[P]) -> Result<SharedWorkspa
         if p.exists() {
             ws.open(p).map_err(|e| e.to_string())?;
         } else {
-            let path: PathBuf = if p.extension().is_none() {
-                p.with_extension(FILE_EXTENSION)
-            } else {
-                p.to_path_buf()
-            };
+            let path: PathBuf = if p.extension().is_none() { p.with_extension(FILE_EXTENSION) } else { p.to_path_buf() };
             if path.exists() {
                 ws.open(&path).map_err(|e| e.to_string())?;
                 continue;
@@ -102,27 +98,11 @@ pub fn workspace_from_files<P: AsRef<Path>>(paths: &[P]) -> Result<SharedWorkspa
                 && !dir.as_os_str().is_empty()
                 && !dir.exists()
             {
-                return Err(format!(
-                    "cannot create {}: directory {} does not exist",
-                    path.display(),
-                    dir.display()
-                ));
+                return Err(format!("cannot create {}: directory {} does not exist", path.display(), dir.display()));
             }
-            let name = path
-                .file_stem()
-                .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "New Project".into());
-            let abs = if path.is_absolute() {
-                path
-            } else {
-                std::env::current_dir()
-                    .map(|c| c.join(&path))
-                    .unwrap_or(path)
-            };
-            let handle = ws.add(
-                Project::new(name, chrono::Local::now().date_naive()),
-                Some(abs),
-            );
+            let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "New Project".into());
+            let abs = if path.is_absolute() { path } else { std::env::current_dir().map(|c| c.join(&path)).unwrap_or(path) };
+            let handle = ws.add(Project::new(name, chrono::Local::now().date_naive()), Some(abs));
             if let Some(i) = ws.index_of(handle) {
                 // A brand-new document has unsaved content.
                 ws.docs[i].dirty = true;

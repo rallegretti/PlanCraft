@@ -75,11 +75,7 @@ pub fn tools() -> Vec<Tool> {
 }
 
 /// Resolves member references, refreshing snapshots of external tasks.
-fn resolve_members(
-    p: &mut Project,
-    doc_path: Option<&std::path::Path>,
-    items: &[Value],
-) -> ToolResult<Vec<TaskRef>> {
+fn resolve_members(p: &mut Project, doc_path: Option<&std::path::Path>, items: &[Value]) -> ToolResult<Vec<TaskRef>> {
     let mut refs = Vec::new();
     for m in items {
         let r = resolve_task_ref(p, m, None)?;
@@ -89,9 +85,7 @@ fn resolve_members(
                 return err(format!(
                     "task {} does not exist in external project '{}'",
                     task.0,
-                    p.external(project)
-                        .map(|e| e.name.clone())
-                        .unwrap_or_default()
+                    p.external(project).map(|e| e.name.clone()).unwrap_or_default()
                 ));
             }
         }
@@ -124,10 +118,7 @@ fn create_milestone(ctx: &Ctx, a: &Args) -> ToolResult {
             }
             if let Some(d) = a.get("date") {
                 let dt = parse_dt(p, d, true, "date")?;
-                p.task_mut(id).expect("inserted").constraint = Constraint {
-                    kind: ConstraintKind::Snet,
-                    date: Some(dt),
-                };
+                p.task_mut(id).expect("inserted").constraint = Constraint { kind: ConstraintKind::Snet, date: Some(dt) };
             }
             let fa = Args::new(&fields);
             apply_task_fields(p, id, &fa)?;

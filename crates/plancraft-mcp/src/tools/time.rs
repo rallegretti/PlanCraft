@@ -120,7 +120,12 @@ fn list_time_entries(ctx: &Ctx, a: &Args) -> ToolResult {
         let mut entries: Vec<_> = p
             .time_entries
             .iter()
-            .filter(|e| t.is_none_or(|t| e.task == t) && r.is_none_or(|r| e.resource == r) && from.is_none_or(|f| e.date >= f) && to.is_none_or(|x| e.date <= x))
+            .filter(|e| {
+                t.is_none_or(|t| e.task == t)
+                    && r.is_none_or(|r| e.resource == r)
+                    && from.is_none_or(|f| e.date >= f)
+                    && to.is_none_or(|x| e.date <= x)
+            })
             .collect();
         entries.sort_by_key(|e| (e.date, e.id));
         let total: Minutes = entries.iter().map(|e| e.minutes).sum();
@@ -128,9 +133,12 @@ fn list_time_entries(ctx: &Ctx, a: &Args) -> ToolResult {
         let mut by_task: BTreeMap<String, Minutes> = BTreeMap::new();
         for e in &entries {
             *by_resource.entry(p.resource(e.resource).map(|r| r.name.clone()).unwrap_or_default()).or_default() += e.minutes;
-            *by_task.entry(format!("{} (id {})", p.task(e.task).map(|t| t.name.clone()).unwrap_or_default(), e.task.0)).or_default() += e.minutes;
+            *by_task.entry(format!("{} (id {})", p.task(e.task).map(|t| t.name.clone()).unwrap_or_default(), e.task.0)).or_default() +=
+                e.minutes;
         }
-        let totals = |m: BTreeMap<String, Minutes>| -> Value { m.into_iter().map(|(k, v)| (k, json!(hours(v as f64)))).collect::<serde_json::Map<_, _>>().into() };
+        let totals = |m: BTreeMap<String, Minutes>| -> Value {
+            m.into_iter().map(|(k, v)| (k, json!(hours(v as f64)))).collect::<serde_json::Map<_, _>>().into()
+        };
         Ok(json!({
             "count": entries.len(),
             "total": format_work(total),
@@ -143,16 +151,8 @@ fn list_time_entries(ctx: &Ctx, a: &Args) -> ToolResult {
 }
 
 fn delete_time_entry(ctx: &Ctx, a: &Args) -> ToolResult {
-    let id = TimeEntryId(
-        a.u64("entry")?
-            .ok_or_else(|| ToolError("missing 'entry'".into()))? as u32,
-    );
-    ctx.edit(
-        a,
-        "Delete time entry",
-        |p, _| Ok(p.delete_time_entry(id)?),
-        |_, _| Ok(json!({ "deleted": id.0 })),
-    )
+    let id = TimeEntryId(a.u64("entry")?.ok_or_else(|| ToolError("missing 'entry'".into()))? as u32);
+    ctx.edit(a, "Delete time entry", |p, _| Ok(p.delete_time_entry(id)?), |_, _| Ok(json!({ "deleted": id.0 })))
 }
 
 fn update_progress_from_time(ctx: &Ctx, a: &Args) -> ToolResult {

@@ -159,10 +159,7 @@ pub fn task_row(p: &Project, idx: usize) -> Value {
                 format!(
                     "{} {}",
                     constraint_code(t.constraint.kind),
-                    t.constraint
-                        .date
-                        .map(|d| d.format(DATETIME_FMT).to_string())
-                        .unwrap_or_default()
+                    t.constraint.date.map(|d| d.format(DATETIME_FMT).to_string()).unwrap_or_default()
                 )
                 .trim()
             ),
@@ -181,11 +178,7 @@ pub fn estimate_json(p: &Project, e: &Estimate) -> Value {
             "method": "complexity", "points": points,
             "expected_work": format_work(expected), "expected_work_minutes": expected,
         }),
-        Estimate::ThreePoint {
-            optimistic,
-            most_likely,
-            pessimistic,
-        } => json!({
+        Estimate::ThreePoint { optimistic, most_likely, pessimistic } => json!({
             "method": "three_point",
             "optimistic": format_work(optimistic), "most_likely": format_work(most_likely), "pessimistic": format_work(pessimistic),
             "optimistic_minutes": optimistic, "most_likely_minutes": most_likely, "pessimistic_minutes": pessimistic,
@@ -213,12 +206,7 @@ pub fn assignment_cost(p: &Project, a: &Assignment) -> f64 {
 
 /// Actual work of an assignment: direct actual work plus tracked time.
 pub fn assignment_actual(p: &Project, a: &Assignment) -> Minutes {
-    a.actual_work
-        + p.time_entries
-            .iter()
-            .filter(|e| e.task == a.task && e.resource == a.resource)
-            .map(|e| e.minutes)
-            .sum::<Minutes>()
+    a.actual_work + p.time_entries.iter().filter(|e| e.task == a.task && e.resource == a.resource).map(|e| e.minutes).sum::<Minutes>()
 }
 
 pub fn assignment_json(p: &Project, a: &Assignment) -> Value {
@@ -288,9 +276,7 @@ pub fn task_detail(p: &Project, id: TaskId) -> Value {
     let mut v = task_row(p, idx);
     let m = v.as_object_mut().expect("object");
     let at = report::status_moment(p);
-    let parent = p
-        .parent_index(idx)
-        .map(|i| json!({ "id": p.tasks[i].id.0, "name": p.tasks[i].name }));
+    let parent = p.parent_index(idx).map(|i| json!({ "id": p.tasks[i].id.0, "name": p.tasks[i].name }));
     let children: Vec<Value> = if p.has_children(idx) {
         let lvl = t.outline_level;
         p.descendants_range(idx)
@@ -396,27 +382,15 @@ pub fn calendar_brief(p: &Project, c: &Calendar) -> Value {
 pub fn calendar_detail(p: &Project, c: &Calendar) -> Value {
     let mut v = calendar_brief(p, c);
     v["work_week"] = week_json(c);
-    v["exception_list"] = Value::Array(
-        c.exceptions
-            .iter()
-            .enumerate()
-            .map(|(i, e)| exception_json(i, e))
-            .collect(),
-    );
+    v["exception_list"] = Value::Array(c.exceptions.iter().enumerate().map(|(i, e)| exception_json(i, e)).collect());
     v
 }
 
 /// Resource summary with workload figures.
 pub fn resource_row(p: &Project, r: &Resource, over: &HashSet<ResourceId>) -> Value {
     let work: Minutes = p.assignments_for_resource(r.id).map(|a| a.work).sum();
-    let actual: Minutes = p
-        .assignments_for_resource(r.id)
-        .map(|a| assignment_actual(p, a))
-        .sum();
-    let cost: f64 = p
-        .assignments_for_resource(r.id)
-        .map(|a| assignment_cost(p, a))
-        .sum();
+    let actual: Minutes = p.assignments_for_resource(r.id).map(|a| assignment_actual(p, a)).sum();
+    let cost: f64 = p.assignments_for_resource(r.id).map(|a| assignment_cost(p, a)).sum();
     let mut v = json!({
         "id": r.id.0,
         "name": r.name,
@@ -444,11 +418,7 @@ pub fn resource_row(p: &Project, r: &Resource, over: &HashSet<ResourceId>) -> Va
 }
 
 pub fn resource_detail(p: &Project, r: &Resource, over_days: &[chrono::NaiveDate]) -> Value {
-    let over: HashSet<ResourceId> = if over_days.is_empty() {
-        HashSet::new()
-    } else {
-        [r.id].into_iter().collect()
-    };
+    let over: HashSet<ResourceId> = if over_days.is_empty() { HashSet::new() } else { [r.id].into_iter().collect() };
     let mut v = resource_row(p, r, &over);
     let extra = json!({
         "email": r.email,
@@ -604,19 +574,11 @@ pub fn schedule_table(p: &Project, rows: &[usize]) -> String {
     out.push_str(&format!(
         "{} — {} → {} ({} tasks)\n",
         p.name,
-        p.sched
-            .start
-            .map(|d| d.format(DATETIME_FMT).to_string())
-            .unwrap_or_default(),
-        p.sched
-            .finish
-            .map(|d| d.format(DATETIME_FMT).to_string())
-            .unwrap_or_default(),
+        p.sched.start.map(|d| d.format(DATETIME_FMT).to_string()).unwrap_or_default(),
+        p.sched.finish.map(|d| d.format(DATETIME_FMT).to_string()).unwrap_or_default(),
         p.tasks.len()
     ));
-    out.push_str(
-        "row | id | wbs | name | duration | start | finish | % | pred | resources | flags\n",
-    );
+    out.push_str("row | id | wbs | name | duration | start | finish | % | pred | resources | flags\n");
     for &i in rows {
         let t = &p.tasks[i];
         let indent = "  ".repeat(t.outline_level.saturating_sub(1) as usize);
@@ -639,10 +601,7 @@ pub fn schedule_table(p: &Project, rows: &[usize]) -> String {
         if !t.sched.warnings.is_empty() {
             flags.push("warning");
         }
-        let short = |d: Option<NaiveDateTime>| {
-            d.map(|d| d.format("%Y-%m-%d").to_string())
-                .unwrap_or_else(|| "-".into())
-        };
+        let short = |d: Option<NaiveDateTime>| d.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_else(|| "-".into());
         out.push_str(&format!(
             "{} | {} | {} | {}{} | {} | {} | {} | {}% | {} | {} | {}\n",
             i + 1,
@@ -669,20 +628,12 @@ pub fn summary_text(doc: &Document) -> String {
     let mut s = String::new();
     s.push_str(&format!("# {}\n\n", p.name));
     if let Some(path) = &doc.path {
-        s.push_str(&format!(
-            "File: {}{}\n",
-            path.display(),
-            if doc.dirty { " (unsaved changes)" } else { "" }
-        ));
+        s.push_str(&format!("File: {}{}\n", path.display(), if doc.dirty { " (unsaved changes)" } else { "" }));
     }
     s.push_str(&format!(
         "Schedule: {} → {} ({})\n",
-        st.start
-            .map(|d| d.format(DATETIME_FMT).to_string())
-            .unwrap_or_else(|| "-".into()),
-        st.finish
-            .map(|d| d.format(DATETIME_FMT).to_string())
-            .unwrap_or_else(|| "-".into()),
+        st.start.map(|d| d.format(DATETIME_FMT).to_string()).unwrap_or_else(|| "-".into()),
+        st.finish.map(|d| d.format(DATETIME_FMT).to_string()).unwrap_or_else(|| "-".into()),
         dur(p, st.duration)
     ));
     s.push_str(&format!(
@@ -695,20 +646,21 @@ pub fn summary_text(doc: &Document) -> String {
     ));
     s.push_str(&format!(
         "Tasks: {} ({} complete, {} in progress, {} late, {} critical), {} milestones, {} summaries; {} resources ({} overallocated)\n",
-        st.tasks, st.completed_tasks, st.in_progress_tasks, st.late_tasks, st.critical_tasks, st.milestones, st.summary_tasks, st.resources, st.overallocated_resources
+        st.tasks,
+        st.completed_tasks,
+        st.in_progress_tasks,
+        st.late_tasks,
+        st.critical_tasks,
+        st.milestones,
+        st.summary_tasks,
+        st.resources,
+        st.overallocated_resources
     ));
     if let Some(bf) = st.baseline_finish {
-        s.push_str(&format!(
-            "Baseline finish: {} (variance {})\n",
-            bf.format(DATETIME_FMT),
-            dur(p, st.finish_variance)
-        ));
+        s.push_str(&format!("Baseline finish: {} (variance {})\n", bf.format(DATETIME_FMT), dur(p, st.finish_variance)));
     }
     if let Some(ev) = &st.earned_value {
-        s.push_str(&format!(
-            "Earned value: SPI {:.2}, CPI {:.2}\n",
-            ev.spi, ev.cpi
-        ));
+        s.push_str(&format!("Earned value: SPI {:.2}, CPI {:.2}\n", ev.spi, ev.cpi));
     }
     if !st.milestone_status.is_empty() {
         s.push_str("\n## Milestones\n");
@@ -717,9 +669,7 @@ pub fn summary_text(doc: &Document) -> String {
                 "- {} (id {}): {} — {:.0}%{}{}\n",
                 m.name,
                 m.id.0,
-                m.date
-                    .map(|d| d.format("%Y-%m-%d").to_string())
-                    .unwrap_or_else(|| "-".into()),
+                m.date.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_else(|| "-".into()),
                 m.progress,
                 if m.complete { ", complete" } else { "" },
                 if m.late { ", LATE" } else { "" }
@@ -729,12 +679,7 @@ pub fn summary_text(doc: &Document) -> String {
     let warnings: Vec<String> = p
         .tasks
         .iter()
-        .flat_map(|t| {
-            t.sched
-                .warnings
-                .iter()
-                .map(move |w| format!("{} (id {}): {w}", t.name, t.id.0))
-        })
+        .flat_map(|t| t.sched.warnings.iter().map(move |w| format!("{} (id {}): {w}", t.name, t.id.0)))
         .chain(p.sched.warnings.iter().cloned())
         .collect();
     if !warnings.is_empty() {

@@ -52,17 +52,9 @@ pub fn utilization_color(u: f64) -> Color32 {
     }
     if u > 1.0001 {
         let t = ((u - 1.0) / 1.0).clamp(0.0, 1.0) as f32;
-        return lerp(
-            Color32::from_rgb(0xF6, 0xC6, 0xC6),
-            Color32::from_rgb(0xE0, 0x6A, 0x6A),
-            t,
-        );
+        return lerp(Color32::from_rgb(0xF6, 0xC6, 0xC6), Color32::from_rgb(0xE0, 0x6A, 0x6A), t);
     }
-    lerp(
-        Color32::from_rgb(0xEC, 0xF2, 0xFC),
-        Color32::from_rgb(0x8F, 0xB0, 0xE8),
-        u as f32,
-    )
+    lerp(Color32::from_rgb(0xEC, 0xF2, 0xFC), Color32::from_rgb(0x8F, 0xB0, 0xE8), u as f32)
 }
 
 pub fn lerp(a: Color32, b: Color32, t: f32) -> Color32 {
@@ -76,23 +68,11 @@ pub fn install(ctx: &egui::Context) {
     ctx.set_theme(egui::Theme::Light);
     ctx.all_styles_mut(|style| {
         style.text_styles = [
-            (
-                TextStyle::Small,
-                FontId::new(11.0, FontFamily::Proportional),
-            ),
+            (TextStyle::Small, FontId::new(11.0, FontFamily::Proportional)),
             (TextStyle::Body, FontId::new(13.0, FontFamily::Proportional)),
-            (
-                TextStyle::Button,
-                FontId::new(13.0, FontFamily::Proportional),
-            ),
-            (
-                TextStyle::Heading,
-                FontId::new(20.0, FontFamily::Proportional),
-            ),
-            (
-                TextStyle::Monospace,
-                FontId::new(12.5, FontFamily::Monospace),
-            ),
+            (TextStyle::Button, FontId::new(13.0, FontFamily::Proportional)),
+            (TextStyle::Heading, FontId::new(20.0, FontFamily::Proportional)),
+            (TextStyle::Monospace, FontId::new(12.5, FontFamily::Monospace)),
         ]
         .into();
         style.spacing.item_spacing = egui::vec2(6.0, 4.0);
@@ -118,6 +98,8 @@ pub fn install(ctx: &egui::Context) {
         v.widgets.inactive.weak_bg_fill = Color32::from_rgb(0xF3, 0xF4, 0xF7);
         v.widgets.inactive.bg_fill = Color32::from_rgb(0xF3, 0xF4, 0xF7);
         v.widgets.inactive.corner_radius = r;
+        v.widgets.inactive.bg_stroke = Stroke::new(1.0, GRID_LINE_STRONG);
+        v.text_edit_bg_color = Some(BG);
         v.widgets.hovered.weak_bg_fill = ACCENT_PALE;
         v.widgets.hovered.bg_fill = ACCENT_PALE;
         v.widgets.hovered.bg_stroke = Stroke::new(1.0, ACCENT_MID);

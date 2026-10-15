@@ -15,8 +15,7 @@ use crate::state::{Selection, ToastKind, UiState};
 use crate::theme;
 
 fn ok_button(ui: &mut egui::Ui, label: &str) -> bool {
-    ui.add(egui::Button::new(RichText::new(label).color(egui::Color32::WHITE)).fill(theme::ACCENT))
-        .clicked()
+    ui.add(egui::Button::new(RichText::new(label).color(egui::Color32::WHITE)).fill(theme::ACCENT)).clicked()
 }
 
 // ---------------------------------------------------------------------------
@@ -30,22 +29,13 @@ pub struct AssignResources {
 }
 
 impl AssignResources {
-    pub fn show(
-        &mut self,
-        ctx: &Context,
-        doc: &mut Document,
-        sel: &Selection,
-        st_toasts: &mut Vec<(ToastKind, String)>,
-    ) -> bool {
+    pub fn show(&mut self, ctx: &Context, doc: &mut Document, sel: &Selection, st_toasts: &mut Vec<(ToastKind, String)>) -> bool {
         let mut open = true;
-        let tasks: Vec<TaskId> = doc
-            .project
-            .tasks
-            .iter()
-            .filter(|t| sel.tasks.contains(&t.id) && !t.sched.is_summary)
-            .map(|t| t.id)
-            .collect();
-        egui::Window::new("Assign Resources").id(egui::Id::new("assign_resources")).open(&mut open).default_width(480.0).show(ctx, |ui| {
+        let tasks: Vec<TaskId> =
+            doc.project.tasks.iter().filter(|t| sel.tasks.contains(&t.id) && !t.sched.is_summary).map(|t| t.id).collect();
+        egui::Window::new("Assign Resources").id(egui::Id::new("assign_resources"))
+            .pivot(egui::Align2::CENTER_TOP)
+            .default_pos(ctx.content_rect().center_top() + egui::vec2(0.0, 120.0)).open(&mut open).default_width(480.0).show(ctx, |ui| {
             let label = match tasks.as_slice() {
                 [] => "Select one or more (non-summary) tasks.".to_string(),
                 [one] => format!("Task: {}", doc.project.task(*one).map(|t| t.name.as_str()).unwrap_or("")),
@@ -120,79 +110,101 @@ impl AssignResources {
 pub fn statistics(ctx: &Context, doc: &Document, open: &mut bool) {
     let p = &doc.project;
     let s = report::project_stats(p);
-    egui::Window::new(format!("Project Statistics for '{}'", p.name)).id(egui::Id::new("stats")).open(open).default_width(560.0).show(ctx, |ui| {
-        egui::Grid::new("stats_dates").striped(true).num_columns(3).spacing([24.0, 6.0]).show(ui, |ui| {
-            ui.label("");
-            ui.label(RichText::new("Start").strong());
-            ui.label(RichText::new("Finish").strong());
-            ui.end_row();
-            ui.label("Current");
-            ui.label(format::date(s.start));
-            ui.label(format::date(s.finish));
-            ui.end_row();
-            ui.label("Baseline");
-            ui.label(format::date(p.tasks.iter().filter_map(|t| t.baseline.map(|b| b.start)).min()));
-            ui.label(format::date(s.baseline_finish));
-            ui.end_row();
-            ui.label("Variance");
-            ui.label("");
-            ui.label(RichText::new(p.format_duration(s.finish_variance, false)).color(if s.finish_variance > 0 { theme::ERROR } else { theme::TEXT }));
-            ui.end_row();
-        });
-        ui.separator();
-        egui::Grid::new("stats_totals").striped(true).num_columns(4).spacing([24.0, 6.0]).show(ui, |ui| {
-            ui.label(RichText::new("Duration").strong());
-            ui.label(p.format_duration(s.duration, false));
-            ui.label(RichText::new("Work").strong());
-            ui.label(format!("{} ({} actual, {} remaining)", format_work(s.work), format_work(s.actual_work), format_work(s.remaining_work)));
-            ui.end_row();
-            ui.label(RichText::new("Cost").strong());
-            ui.label(format::money(p, s.cost));
-            ui.label(RichText::new("Baseline cost").strong());
-            ui.label(format::money(p, s.baseline_cost));
-            ui.end_row();
-            ui.label(RichText::new("Complete").strong());
-            ui.label(format::percent(s.percent_complete));
-            ui.label(RichText::new("Tasks").strong());
-            ui.label(format!("{} ({} done, {} in progress, {} late, {} critical)", s.tasks, s.completed_tasks, s.in_progress_tasks, s.late_tasks, s.critical_tasks));
-            ui.end_row();
-            ui.label(RichText::new("Milestones").strong());
-            ui.label(s.milestones.to_string());
-            ui.label(RichText::new("Resources").strong());
-            ui.label(format!("{} ({} overallocated)", s.resources, s.overallocated_resources));
-            ui.end_row();
-        });
-        if let Some(ev) = &s.earned_value {
-            ui.separator();
-            ui.label(RichText::new("Earned value (vs. baseline)").strong());
-            egui::Grid::new("stats_ev").num_columns(4).spacing([24.0, 4.0]).show(ui, |ui| {
-                ui.label("Planned value (BCWS)");
-                ui.label(format::money(p, ev.bcws));
-                ui.label("Schedule perf. (SPI)");
-                ui.label(RichText::new(format!("{:.2}", ev.spi)).color(if ev.spi < 0.95 { theme::ERROR } else { theme::OK }));
+    egui::Window::new(format!("Project Statistics for '{}'", p.name))
+        .id(egui::Id::new("stats"))
+        .pivot(egui::Align2::CENTER_TOP)
+        .default_pos(ctx.content_rect().center_top() + egui::vec2(0.0, 120.0))
+        .open(open)
+        .default_width(560.0)
+        .show(ctx, |ui| {
+            egui::Grid::new("stats_dates").striped(true).num_columns(3).spacing([24.0, 6.0]).show(ui, |ui| {
+                ui.label("");
+                ui.label(RichText::new("Start").strong());
+                ui.label(RichText::new("Finish").strong());
                 ui.end_row();
-                ui.label("Earned value (BCWP)");
-                ui.label(format::money(p, ev.bcwp));
-                ui.label("Cost perf. (CPI)");
-                ui.label(RichText::new(format!("{:.2}", ev.cpi)).color(if ev.cpi < 0.95 { theme::ERROR } else { theme::OK }));
+                ui.label("Current");
+                ui.label(format::date(s.start));
+                ui.label(format::date(s.finish));
                 ui.end_row();
-                ui.label("Actual cost (ACWP)");
-                ui.label(format::money(p, ev.acwp));
-                ui.label("SV / CV");
-                ui.label(format!("{} / {}", format::money(p, ev.sv), format::money(p, ev.cv)));
+                ui.label("Baseline");
+                ui.label(format::date(p.tasks.iter().filter_map(|t| t.baseline.map(|b| b.start)).min()));
+                ui.label(format::date(s.baseline_finish));
+                ui.end_row();
+                ui.label("Variance");
+                ui.label("");
+                ui.label(RichText::new(p.format_duration(s.finish_variance, false)).color(if s.finish_variance > 0 {
+                    theme::ERROR
+                } else {
+                    theme::TEXT
+                }));
                 ui.end_row();
             });
-        } else {
-            ui.label(RichText::new("Set a baseline (Project > Set Baseline) to track variance and earned value.").small().color(theme::TEXT_WEAK));
-        }
-        if !s.warnings.is_empty() {
             ui.separator();
-            ui.label(RichText::new("Scheduling warnings").strong().color(theme::ERROR));
-            for w in &s.warnings {
-                ui.label(RichText::new(format!("⚠ {w}")).color(theme::ERROR));
+            egui::Grid::new("stats_totals").striped(true).num_columns(4).spacing([24.0, 6.0]).show(ui, |ui| {
+                ui.label(RichText::new("Duration").strong());
+                ui.label(p.format_duration(s.duration, false));
+                ui.label(RichText::new("Work").strong());
+                ui.label(format!(
+                    "{} ({} actual, {} remaining)",
+                    format_work(s.work),
+                    format_work(s.actual_work),
+                    format_work(s.remaining_work)
+                ));
+                ui.end_row();
+                ui.label(RichText::new("Cost").strong());
+                ui.label(format::money(p, s.cost));
+                ui.label(RichText::new("Baseline cost").strong());
+                ui.label(format::money(p, s.baseline_cost));
+                ui.end_row();
+                ui.label(RichText::new("Complete").strong());
+                ui.label(format::percent(s.percent_complete));
+                ui.label(RichText::new("Tasks").strong());
+                ui.label(format!(
+                    "{} ({} done, {} in progress, {} late, {} critical)",
+                    s.tasks, s.completed_tasks, s.in_progress_tasks, s.late_tasks, s.critical_tasks
+                ));
+                ui.end_row();
+                ui.label(RichText::new("Milestones").strong());
+                ui.label(s.milestones.to_string());
+                ui.label(RichText::new("Resources").strong());
+                ui.label(format!("{} ({} overallocated)", s.resources, s.overallocated_resources));
+                ui.end_row();
+            });
+            if let Some(ev) = &s.earned_value {
+                ui.separator();
+                ui.label(RichText::new("Earned value (vs. baseline)").strong());
+                egui::Grid::new("stats_ev").num_columns(4).spacing([24.0, 4.0]).show(ui, |ui| {
+                    ui.label("Planned value (BCWS)");
+                    ui.label(format::money(p, ev.bcws));
+                    ui.label("Schedule perf. (SPI)");
+                    ui.label(RichText::new(format!("{:.2}", ev.spi)).color(if ev.spi < 0.95 { theme::ERROR } else { theme::OK }));
+                    ui.end_row();
+                    ui.label("Earned value (BCWP)");
+                    ui.label(format::money(p, ev.bcwp));
+                    ui.label("Cost perf. (CPI)");
+                    ui.label(RichText::new(format!("{:.2}", ev.cpi)).color(if ev.cpi < 0.95 { theme::ERROR } else { theme::OK }));
+                    ui.end_row();
+                    ui.label("Actual cost (ACWP)");
+                    ui.label(format::money(p, ev.acwp));
+                    ui.label("SV / CV");
+                    ui.label(format!("{} / {}", format::money(p, ev.sv), format::money(p, ev.cv)));
+                    ui.end_row();
+                });
+            } else {
+                ui.label(
+                    RichText::new("Set a baseline (Project > Set Baseline) to track variance and earned value.")
+                        .small()
+                        .color(theme::TEXT_WEAK),
+                );
             }
-        }
-    });
+            if !s.warnings.is_empty() {
+                ui.separator();
+                ui.label(RichText::new("Scheduling warnings").strong().color(theme::ERROR));
+                for w in &s.warnings {
+                    ui.label(RichText::new(format!("⚠ {w}")).color(theme::ERROR));
+                }
+            }
+        });
 }
 
 // ---------------------------------------------------------------------------
@@ -211,7 +223,9 @@ pub struct ExternalLinks {
 impl ExternalLinks {
     pub fn show(&mut self, ctx: &Context, doc: &mut Document, st: &mut UiState) -> bool {
         let mut open = true;
-        egui::Window::new("Links Between Projects").id(egui::Id::new("external_links")).open(&mut open).default_width(640.0).show(ctx, |ui| {
+        egui::Window::new("Links Between Projects").id(egui::Id::new("external_links"))
+            .pivot(egui::Align2::CENTER_TOP)
+            .default_pos(ctx.content_rect().center_top() + egui::vec2(0.0, 120.0)).open(&mut open).default_width(640.0).show(ctx, |ui| {
             ui.label("Tasks and milestones can depend on tasks stored in other PlanCraft files. Linked dates are cached in this file and refreshed when it opens.");
             if doc.path.is_none() {
                 ui.colored_label(theme::WARN, "Save this project first so links can be stored relative to its location.");
@@ -332,6 +346,8 @@ impl ExternalLinks {
 pub fn about(ctx: &Context, open: &mut bool) {
     egui::Window::new("About PlanCraft")
         .id(egui::Id::new("about"))
+        .pivot(egui::Align2::CENTER_TOP)
+        .default_pos(ctx.content_rect().center_top() + egui::vec2(0.0, 120.0))
         .open(open)
         .collapsible(false)
         .resizable(false)
@@ -353,6 +369,8 @@ pub fn about(ctx: &Context, open: &mut bool) {
 pub fn history(ctx: &Context, doc: &mut Document, open: &mut bool) {
     egui::Window::new("Undo History")
         .id(egui::Id::new("history"))
+        .pivot(egui::Align2::CENTER_TOP)
+        .default_pos(ctx.content_rect().center_top() + egui::vec2(0.0, 120.0))
         .open(open)
         .default_width(320.0)
         .show(ctx, |ui| {
@@ -361,30 +379,20 @@ pub fn history(ctx: &Context, doc: &mut Document, open: &mut bool) {
                 ui.label(RichText::new("No changes yet").color(theme::TEXT_WEAK));
             }
             let mut undo_to = None;
-            egui::ScrollArea::vertical()
-                .max_height(400.0)
-                .show(ui, |ui| {
-                    for (i, (label, src)) in items.iter().enumerate() {
-                        let tag = match src {
-                            plancraft_core::workspace::ChangeSource::Agent => {
-                                RichText::new("⚡ AI").color(theme::ACCENT_MID)
-                            }
-                            plancraft_core::workspace::ChangeSource::User => {
-                                RichText::new("👤").color(theme::TEXT_WEAK)
-                            }
-                        };
-                        ui.horizontal(|ui| {
-                            ui.label(tag);
-                            if ui
-                                .link(label)
-                                .on_hover_text("Undo back to before this change")
-                                .clicked()
-                            {
-                                undo_to = Some(i + 1);
-                            }
-                        });
-                    }
-                });
+            egui::ScrollArea::vertical().max_height(400.0).show(ui, |ui| {
+                for (i, (label, src)) in items.iter().enumerate() {
+                    let tag = match src {
+                        plancraft_core::workspace::ChangeSource::Agent => RichText::new("⚡ AI").color(theme::ACCENT_MID),
+                        plancraft_core::workspace::ChangeSource::User => RichText::new("👤").color(theme::TEXT_WEAK),
+                    };
+                    ui.horizontal(|ui| {
+                        ui.label(tag);
+                        if ui.link(label).on_hover_text("Undo back to before this change").clicked() {
+                            undo_to = Some(i + 1);
+                        }
+                    });
+                }
+            });
             if let Some(n) = undo_to {
                 for _ in 0..n {
                     doc.undo();
@@ -403,11 +411,7 @@ pub fn config_dir() -> Option<PathBuf> {
     }
     std::env::var_os("HOME").map(|h| {
         let h = PathBuf::from(h);
-        if cfg!(target_os = "macos") {
-            h.join("Library/Application Support/PlanCraft")
-        } else {
-            h.join(".config/plancraft")
-        }
+        if cfg!(target_os = "macos") { h.join("Library/Application Support/PlanCraft") } else { h.join(".config/plancraft") }
     })
 }
 

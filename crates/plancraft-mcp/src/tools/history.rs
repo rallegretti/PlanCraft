@@ -32,12 +32,7 @@ fn step(ctx: &Ctx, a: &Args, redo: bool) -> ToolResult {
     let out = ctx.with_doc(a, |doc| {
         let mut done = Vec::new();
         for _ in 0..steps {
-            let label = if redo {
-                doc.redo_label()
-            } else {
-                doc.undo_label()
-            }
-            .map(str::to_string);
+            let label = if redo { doc.redo_label() } else { doc.undo_label() }.map(str::to_string);
             let Some(label) = label else { break };
             let ok = if redo { doc.redo() } else { doc.undo() };
             if !ok {
@@ -46,11 +41,7 @@ fn step(ctx: &Ctx, a: &Args, redo: bool) -> ToolResult {
             done.push(label);
         }
         if done.is_empty() {
-            return err(if redo {
-                "nothing to redo"
-            } else {
-                "nothing to undo"
-            });
+            return err(if redo { "nothing to redo" } else { "nothing to undo" });
         }
         let mut v = json!({
             "can_undo": doc.can_undo(),

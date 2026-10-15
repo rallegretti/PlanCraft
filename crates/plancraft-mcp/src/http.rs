@@ -36,9 +36,7 @@ pub struct HttpHandle {
 
 impl std::fmt::Debug for HttpHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("HttpHandle")
-            .field("addr", &self.addr)
-            .finish()
+        f.debug_struct("HttpHandle").field("addr", &self.addr).finish()
     }
 }
 
@@ -85,60 +83,41 @@ impl Drop for HttpHandle {
 /// Starts serving MCP over HTTP on `addr` (e.g. `"127.0.0.1:7878"`, or port 0
 /// for an ephemeral port) on a background thread.
 pub fn serve_http(server: Arc<McpServer>, addr: &str) -> io::Result<HttpHandle> {
-    let http = Server::http(addr).map_err(|e| {
-        io::Error::new(
-            io::ErrorKind::AddrNotAvailable,
-            format!("cannot listen on {addr}: {e}"),
-        )
-    })?;
-    let bound = http
-        .server_addr()
-        .to_ip()
-        .ok_or_else(|| io::Error::other("server is not bound to an IP address"))?;
+    let http = Server::http(addr).map_err(|e| io::Error::new(io::ErrorKind::AddrNotAvailable, format!("cannot listen on {addr}: {e}")))?;
+    let bound = http.server_addr().to_ip().ok_or_else(|| io::Error::other("server is not bound to an IP address"))?;
     let http = Arc::new(http);
     let stop = Arc::new(AtomicBool::new(false));
     let loopback = bound.ip().is_loopback();
     let thread = {
         let http = Arc::clone(&http);
         let stop = Arc::clone(&stop);
-        std::thread::Builder::new()
-            .name("plancraft-mcp-http".into())
-            .spawn(move || {
-                while !stop.load(Ordering::SeqCst) {
-                    match http.recv_timeout(Duration::from_millis(250)) {
-                        Ok(Some(req)) => {
-                            let server = Arc::clone(&server);
-                            let spawned = std::thread::Builder::new()
-                                .name("plancraft-mcp-request".into())
-                                .spawn(move || handle(&server, req, loopback));
-                            if let Err(e) = spawned {
-                                eprintln!("plancraft-mcp: cannot spawn request thread: {e}");
-                            }
+        std::thread::Builder::new().name("plancraft-mcp-http".into()).spawn(move || {
+            while !stop.load(Ordering::SeqCst) {
+                match http.recv_timeout(Duration::from_millis(250)) {
+                    Ok(Some(req)) => {
+                        let server = Arc::clone(&server);
+                        let spawned =
+                            std::thread::Builder::new().name("plancraft-mcp-request".into()).spawn(move || handle(&server, req, loopback));
+                        if let Err(e) = spawned {
+                            eprintln!("plancraft-mcp: cannot spawn request thread: {e}");
                         }
-                        Ok(None) => {}
-                        Err(e) => {
-                            if !stop.load(Ordering::SeqCst) {
-                                eprintln!("plancraft-mcp: HTTP accept error: {e}");
-                                std::thread::sleep(Duration::from_millis(50));
-                            }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        if !stop.load(Ordering::SeqCst) {
+                            eprintln!("plancraft-mcp: HTTP accept error: {e}");
+                            std::thread::sleep(Duration::from_millis(50));
                         }
                     }
                 }
-            })?
+            }
+        })?
     };
-    Ok(HttpHandle {
-        addr: bound,
-        http,
-        stop,
-        thread: Some(thread),
-    })
+    Ok(HttpHandle { addr: bound, http, stop, thread: Some(thread) })
 }
 
 fn header<'a>(req: &'a Request, name: &str) -> Option<&'a str> {
-    req.headers()
-        .iter()
-        .find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name))
-        .map(|h| h.value.as_str())
+    req.headers().iter().find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name)).map(|h| h.value.as_str())
 }
 
 fn is_loopback_host(host: &str) -> bool {
@@ -147,19 +126,9 @@ fn is_loopback_host(host: &str) -> bool {
     let name = if let Some(rest) = h.strip_prefix('[') {
         rest.split(']').next().unwrap_or("")
     } else {
-        h.rsplit_once(':')
-            .map(|(n, port)| {
-                if port.chars().all(|c| c.is_ascii_digit()) {
-                    n
-                } else {
-                    h.as_str()
-                }
-            })
-            .unwrap_or(&h)
+        h.rsplit_once(':').map(|(n, port)| if port.chars().all(|c| c.is_ascii_digit()) { n } else { h.as_str() }).unwrap_or(&h)
     };
-    matches!(name, "localhost" | "127.0.0.1" | "::1")
-        || name.ends_with(".localhost")
-        || name.starts_with("127.")
+    matches!(name, "localhost" | "127.0.0.1" | "::1") || name.ends_with(".localhost") || name.starts_with("127.")
 }
 
 /// Whether an `Origin` header value is a localhost origin.
@@ -172,10 +141,7 @@ pub fn is_local_origin(origin: &str) -> bool {
         return false;
     }
     let authority = rest.split('/').next().unwrap_or("");
-    let authority = authority
-        .rsplit_once('@')
-        .map(|(_, a)| a)
-        .unwrap_or(authority);
+    let authority = authority.rsplit_once('@').map(|(_, a)| a).unwrap_or(authority);
     is_loopback_host(authority)
 }
 
@@ -190,41 +156,26 @@ fn json_response(status: u16, body: &Value) -> Response<io::Cursor<Vec<u8>>> {
 }
 
 fn text_response(status: u16, text: &str) -> Response<io::Cursor<Vec<u8>>> {
-    Response::from_string(text)
-        .with_status_code(StatusCode(status))
-        .with_header(h("Content-Type", "text/plain; charset=utf-8"))
+    Response::from_string(text).with_status_code(StatusCode(status)).with_header(h("Content-Type", "text/plain; charset=utf-8"))
 }
 
 fn contains_initialize(v: &Value) -> bool {
     match v {
         Value::Array(items) => items.iter().any(contains_initialize),
-        Value::Object(m) => {
-            m.get("method").and_then(Value::as_str) == Some("initialize") && m.get("id").is_some()
-        }
+        Value::Object(m) => m.get("method").and_then(Value::as_str) == Some("initialize") && m.get("id").is_some(),
         _ => false,
     }
 }
 
 fn handle(server: &McpServer, mut req: Request, loopback: bool) {
-    let path = req
-        .url()
-        .split('?')
-        .next()
-        .unwrap_or("")
-        .trim_end_matches('/')
-        .to_string();
+    let path = req.url().split('?').next().unwrap_or("").trim_end_matches('/').to_string();
     let response = route(server, &mut req, &path, loopback);
     if let Err(e) = req.respond(response) {
         eprintln!("plancraft-mcp: failed to send HTTP response: {e}");
     }
 }
 
-fn route(
-    server: &McpServer,
-    req: &mut Request,
-    path: &str,
-    loopback: bool,
-) -> Response<io::Cursor<Vec<u8>>> {
+fn route(server: &McpServer, req: &mut Request, path: &str, loopback: bool) -> Response<io::Cursor<Vec<u8>>> {
     if let Some(origin) = header(req, "Origin")
         && !is_local_origin(origin)
     {
@@ -243,11 +194,8 @@ fn route(
         Method::Post => {}
         Method::Delete => return text_response(200, ""),
         Method::Get => {
-            return text_response(
-                405,
-                "Method Not Allowed: this server does not offer an SSE stream; use POST",
-            )
-            .with_header(h("Allow", "POST, DELETE"));
+            return text_response(405, "Method Not Allowed: this server does not offer an SSE stream; use POST")
+                .with_header(h("Allow", "POST, DELETE"));
         }
         _ => {
             return text_response(405, "Method Not Allowed").with_header(h("Allow", "POST, DELETE"));
@@ -258,13 +206,7 @@ fn route(
         return json_response(400, &parse_error(format!("cannot read body: {e}")));
     }
     if body.len() as u64 > MAX_BODY {
-        return json_response(
-            413,
-            &error_response(
-                Value::Null,
-                &RpcError::new(INVALID_REQUEST, "request body too large"),
-            ),
-        );
+        return json_response(413, &error_response(Value::Null, &RpcError::new(INVALID_REQUEST, "request body too large")));
     }
     let msg: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,

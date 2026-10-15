@@ -46,17 +46,7 @@ impl WorkingTime {
     }
 
     fn load_week(&mut self, cal: &Calendar) {
-        self.week_text = WEEKDAYS
-            .iter()
-            .map(|wd| {
-                cal.week
-                    .day(*wd)
-                    .iter()
-                    .map(|r| r.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            })
-            .collect();
+        self.week_text = WEEKDAYS.iter().map(|wd| cal.week.day(*wd).iter().map(|r| r.to_string()).collect::<Vec<_>>().join(", ")).collect();
         self.week_loaded_for = Some(cal.id);
     }
 
@@ -76,10 +66,7 @@ impl WorkingTime {
         let painter = ui.painter_at(rect);
         for (i, d) in ["M", "T", "W", "T", "F", "S", "S"].iter().enumerate() {
             painter.text(
-                pos2(
-                    rect.left() + (i as f32 + 0.5) * cell,
-                    rect.top() + cell / 2.0,
-                ),
+                pos2(rect.left() + (i as f32 + 0.5) * cell, rect.top() + cell / 2.0),
                 Align2::CENTER_CENTER,
                 *d,
                 FontId::proportional(12.0),
@@ -90,10 +77,7 @@ impl WorkingTime {
         for k in 0..42 {
             let day = first + Duration::days(k);
             let r = Rect::from_min_size(
-                pos2(
-                    rect.left() + (k % 7) as f32 * cell,
-                    rect.top() + (k / 7 + 1) as f32 * cell,
-                ),
+                pos2(rect.left() + (k % 7) as f32 * cell, rect.top() + (k / 7 + 1) as f32 * cell),
                 vec2(cell - 2.0, cell - 2.0),
             );
             if r.bottom() > rect.bottom() + 1.0 {
@@ -102,36 +86,17 @@ impl WorkingTime {
             let is_exception = cal.exceptions.iter().any(|e| e.covers(day));
             let working = wc.is_working_day(day);
             let fill = if is_exception {
-                if working {
-                    Color32::from_rgb(0xC9, 0xE8, 0xD8)
-                } else {
-                    Color32::from_rgb(0xF4, 0xC7, 0xC7)
-                }
+                if working { Color32::from_rgb(0xC9, 0xE8, 0xD8) } else { Color32::from_rgb(0xF4, 0xC7, 0xC7) }
             } else if working {
                 Color32::WHITE
             } else {
                 theme::NONWORKING
             };
             painter.rect_filled(r, 3.0, fill);
-            let color = if day.month() == self.month.month() {
-                theme::TEXT
-            } else {
-                theme::GRID_LINE_STRONG
-            };
-            painter.text(
-                r.center(),
-                Align2::CENTER_CENTER,
-                day.day().to_string(),
-                FontId::proportional(12.0),
-                color,
-            );
+            let color = if day.month() == self.month.month() { theme::TEXT } else { theme::GRID_LINE_STRONG };
+            painter.text(r.center(), Align2::CENTER_CENTER, day.day().to_string(), FontId::proportional(12.0), color);
             if self.selected_day == Some(day) {
-                painter.rect_stroke(
-                    r,
-                    3.0,
-                    Stroke::new(2.0, theme::ACCENT),
-                    egui::StrokeKind::Inside,
-                );
+                painter.rect_stroke(r, 3.0, Stroke::new(2.0, theme::ACCENT), egui::StrokeKind::Inside);
             }
             let resp = ui.interact(r, egui::Id::new(("wt_day", day)), Sense::click());
             if resp.clicked() {
@@ -145,19 +110,11 @@ impl WorkingTime {
             let txt = if ranges.is_empty() {
                 "Nonworking".to_string()
             } else {
-                ranges
-                    .iter()
-                    .map(|r| r.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                ranges.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(", ")
             };
             ui.label(RichText::new(format!("{}: {txt}", format::day(d))).small());
             if let Some(e) = cal.exceptions.iter().rev().find(|e| e.covers(d)) {
-                ui.label(
-                    RichText::new(format!("Exception: {}", e.name))
-                        .small()
-                        .color(theme::ACCENT_MID),
-                );
+                ui.label(RichText::new(format!("Exception: {}", e.name)).small().color(theme::ACCENT_MID));
             }
         }
         ui.horizontal(|ui| {
@@ -169,12 +126,7 @@ impl WorkingTime {
             ] {
                 let (r, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
                 ui.painter().rect_filled(r, 2.0, c);
-                ui.painter().rect_stroke(
-                    r,
-                    2.0,
-                    Stroke::new(1.0, theme::GRID_LINE_STRONG),
-                    egui::StrokeKind::Inside,
-                );
+                ui.painter().rect_stroke(r, 2.0, Stroke::new(1.0, theme::GRID_LINE_STRONG), egui::StrokeKind::Inside);
                 ui.label(RichText::new(l).small());
             }
         });
@@ -194,6 +146,8 @@ impl WorkingTime {
         }
         egui::Window::new("Change Working Time")
             .id(egui::Id::new("working_time"))
+            .pivot(egui::Align2::CENTER_TOP)
+            .default_pos(ctx.content_rect().center_top() + egui::vec2(0.0, 120.0))
             .open(&mut open)
             .collapsible(false)
             .default_width(760.0)
@@ -202,7 +156,8 @@ impl WorkingTime {
                     ui.label("For calendar:");
                     egui::ComboBox::from_id_salt("wt_cal").selected_text(&cal.name).width(180.0).show_ui(ui, |ui| {
                         for c in &doc.project.calendars {
-                            let label = if c.id == doc.project.calendar { format!("{} (Project Calendar)", c.name) } else { c.name.clone() };
+                            let label =
+                                if c.id == doc.project.calendar { format!("{} (Project Calendar)", c.name) } else { c.name.clone() };
                             ui.selectable_value(&mut self.calendar, c.id, label);
                         }
                     });
@@ -246,7 +201,11 @@ impl WorkingTime {
                                         ui.label(if e.yearly { format!("{} (yearly)", e.name) } else { e.name.clone() });
                                         ui.label(format::day(e.start));
                                         ui.label(format::day(e.end));
-                                        ui.label(if e.working.is_empty() { "Nonworking".into() } else { e.working.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(", ") });
+                                        ui.label(if e.working.is_empty() {
+                                            "Nonworking".into()
+                                        } else {
+                                            e.working.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(", ")
+                                        });
                                         if ui.small_button("✖").clicked() {
                                             remove = Some(i);
                                         }
@@ -270,15 +229,28 @@ impl WorkingTime {
                                 ui.add(egui::TextEdit::singleline(&mut self.ex_end).desired_width(86.0).hint_text("YYYY-MM-DD"));
                             });
                             ui.horizontal(|ui| {
-                                ui.add(egui::TextEdit::singleline(&mut self.ex_hours).desired_width(190.0).hint_text("working times (empty = nonworking)"));
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.ex_hours)
+                                        .desired_width(190.0)
+                                        .hint_text("working times (empty = nonworking)"),
+                                );
                                 ui.checkbox(&mut self.ex_yearly, "Every year");
                                 if ui.button("Add Exception").clicked() {
                                     let parse = |s: &str| NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok();
-                                    let working: Option<Vec<TimeRange>> =
-                                        if self.ex_hours.trim().is_empty() { Some(vec![]) } else { self.ex_hours.split(',').map(TimeRange::parse).collect() };
+                                    let working: Option<Vec<TimeRange>> = if self.ex_hours.trim().is_empty() {
+                                        Some(vec![])
+                                    } else {
+                                        self.ex_hours.split(',').map(TimeRange::parse).collect()
+                                    };
                                     match (parse(&self.ex_start), parse(&self.ex_end).or(parse(&self.ex_start)), working) {
                                         (Some(s), Some(e), Some(w)) if e >= s => {
-                                            let ex = CalendarException { name: self.ex_name.clone(), start: s, end: e, working: w, yearly: self.ex_yearly };
+                                            let ex = CalendarException {
+                                                name: self.ex_name.clone(),
+                                                start: s,
+                                                end: e,
+                                                working: w,
+                                                yearly: self.ex_yearly,
+                                            };
                                             let id = cal.id;
                                             doc.edit("Add Calendar Exception", |p| {
                                                 if let Some(c) = p.calendars.iter_mut().find(|c| c.id == id) {
@@ -335,7 +307,9 @@ impl WorkingTime {
                                     let std = Calendar::standard(cal.id);
                                     self.load_week(&std);
                                 }
-                                ui.label(RichText::new(format!("{} per week", format_work(cal.week.weekly_minutes()))).color(theme::TEXT_WEAK));
+                                ui.label(
+                                    RichText::new(format!("{} per week", format_work(cal.week.weekly_minutes()))).color(theme::TEXT_WEAK),
+                                );
                             });
                         }
                     });

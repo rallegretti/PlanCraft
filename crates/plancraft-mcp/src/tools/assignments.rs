@@ -23,19 +23,10 @@ pub fn tools() -> Vec<Tool> {
         Value::Object(m) => m,
         _ => Default::default(),
     };
-    update.insert(
-        "units".into(),
-        units("Assignment units (for material resources: quantity)."),
-    );
+    update.insert("units".into(), units("Assignment units (for material resources: quantity)."));
     update.insert("work".into(), work("Planned work."));
-    update.insert(
-        "actual_work".into(),
-        work("Actual work entered directly (in addition to logged time)."),
-    );
-    update.insert(
-        "contour".into(),
-        string_enum("How work is spread over the task.", &CONTOURS),
-    );
+    update.insert("actual_work".into(), work("Actual work entered directly (in addition to logged time)."));
+    update.insert("contour".into(), string_enum("How work is spread over the task.", &CONTOURS));
     update.insert("cost".into(), number("Cost amount (for cost resources)."));
     vec![
         Tool::new(
@@ -83,10 +74,7 @@ pub fn tools() -> Vec<Tool> {
 fn find_assignment(p: &Project, a: &Args) -> ToolResult<AssignmentId> {
     if let Some(id) = a.u64("assignment")? {
         let id = AssignmentId(id as u32);
-        return p
-            .assignment(id)
-            .map(|x| x.id)
-            .ok_or_else(|| ToolError(format!("no assignment with id {}", id.0)));
+        return p.assignment(id).map(|x| x.id).ok_or_else(|| ToolError(format!("no assignment with id {}", id.0)));
     }
     if a.get("task").is_none() || a.get("resource").is_none() {
         return err("give 'assignment' or both 'task' and 'resource'");
@@ -101,20 +89,10 @@ fn find_assignment(p: &Project, a: &Args) -> ToolResult<AssignmentId> {
 }
 
 fn apply_assignment_extras(p: &mut Project, id: AssignmentId, a: &Args) -> ToolResult<()> {
-    let actual = a
-        .get("actual_work")
-        .map(|v| parse_work_value(p, v, "actual_work"))
-        .transpose()?;
-    let contour: Option<WorkContour> = a
-        .get("contour")
-        .map(|v| parse_enum(v, "contour", &CONTOURS))
-        .transpose()?;
+    let actual = a.get("actual_work").map(|v| parse_work_value(p, v, "actual_work")).transpose()?;
+    let contour: Option<WorkContour> = a.get("contour").map(|v| parse_enum(v, "contour", &CONTOURS)).transpose()?;
     let cost = a.f64("cost")?;
-    let asg = p
-        .assignments
-        .iter_mut()
-        .find(|x| x.id == id)
-        .ok_or_else(|| ToolError("assignment vanished".into()))?;
+    let asg = p.assignments.iter_mut().find(|x| x.id == id).ok_or_else(|| ToolError("assignment vanished".into()))?;
     if let Some(m) = actual {
         asg.actual_work = m;
     }
@@ -134,14 +112,8 @@ fn assign_resource(ctx: &Ctx, a: &Args) -> ToolResult {
         |p, _| {
             let t = task_arg(p, a, "task")?;
             let r = resource_arg(p, a, "resource")?;
-            let units = a
-                .get("units")
-                .map(|v| parse_units_value(v, "units"))
-                .transpose()?;
-            let work = a
-                .get("work")
-                .map(|v| parse_work_value(p, v, "work"))
-                .transpose()?;
+            let units = a.get("units").map(|v| parse_units_value(v, "units")).transpose()?;
+            let work = a.get("work").map(|v| parse_work_value(p, v, "work")).transpose()?;
             let id = p.assign(t, r, units, work)?;
             apply_assignment_extras(p, id, a)?;
             Ok(id)
@@ -206,22 +178,15 @@ fn list_assignments(ctx: &Ctx, a: &Args) -> ToolResult {
     ctx.read(a, |doc| {
         let p = &doc.project;
         let t = a.get("task").map(|v| resolve_task(p, v)).transpose()?;
-        let r = a
-            .get("resource")
-            .map(|v| resolve_resource(p, v))
-            .transpose()?;
+        let r = a.get("resource").map(|v| resolve_resource(p, v)).transpose()?;
         let list: Vec<Value> = p
             .assignments
             .iter()
             .filter(|x| t.is_none_or(|t| x.task == t) && r.is_none_or(|r| x.resource == r))
             .map(|x| views::assignment_json(p, x))
             .collect();
-        let total_work: i64 = p
-            .assignments
-            .iter()
-            .filter(|x| t.is_none_or(|t| x.task == t) && r.is_none_or(|r| x.resource == r))
-            .map(|x| x.work)
-            .sum();
+        let total_work: i64 =
+            p.assignments.iter().filter(|x| t.is_none_or(|t| x.task == t) && r.is_none_or(|r| x.resource == r)).map(|x| x.work).sum();
         Ok(json!({
             "count": list.len(),
             "total_work": plancraft_core::duration::format_work(total_work),

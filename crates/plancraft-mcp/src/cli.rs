@@ -7,9 +7,7 @@
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use crate::{
-    DEFAULT_HTTP_ADDR, McpServer, ServerOptions, run_stdio, serve_http, workspace_from_files,
-};
+use crate::{DEFAULT_HTTP_ADDR, McpServer, ServerOptions, run_stdio, serve_http, workspace_from_files};
 
 const USAGE: &str = "\
 plancraft-mcp — Model Context Protocol server for PlanCraft projects
@@ -42,11 +40,7 @@ struct Cli {
 }
 
 fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Cli>, String> {
-    let mut cli = Cli {
-        files: Vec::new(),
-        http: None,
-        file_access: true,
-    };
+    let mut cli = Cli { files: Vec::new(), http: None, file_access: true };
     let mut args = args.peekable();
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -60,11 +54,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Cli>, String>
             }
             "--http" => {
                 let addr = match args.peek() {
-                    Some(next)
-                        if !next.starts_with('-')
-                            && !next.ends_with(".plancraft")
-                            && next.contains(':') =>
-                    {
+                    Some(next) if !next.starts_with('-') && !next.ends_with(".plancraft") && next.contains(':') => {
                         args.next().expect("peeked")
                     }
                     _ => DEFAULT_HTTP_ADDR.to_string(),
@@ -100,18 +90,11 @@ pub fn run(args: Vec<String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let options = ServerOptions {
-        allow_file_access: cli.file_access,
-        ..ServerOptions::default()
-    };
+    let options = ServerOptions { allow_file_access: cli.file_access, ..ServerOptions::default() };
     let server = McpServer::with_options(ws, options);
     match cli.http {
         None => {
-            eprintln!(
-                "plancraft-mcp {}: serving MCP on stdio ({} document(s) open)",
-                env!("CARGO_PKG_VERSION"),
-                cli.files.len()
-            );
+            eprintln!("plancraft-mcp {}: serving MCP on stdio ({} document(s) open)", env!("CARGO_PKG_VERSION"), cli.files.len());
             if let Err(e) = run_stdio(&server) {
                 eprintln!("plancraft-mcp: stdio error: {e}");
                 return ExitCode::FAILURE;
@@ -122,15 +105,8 @@ pub fn run(args: Vec<String>) -> ExitCode {
             let server = Arc::new(server);
             match serve_http(server, &addr) {
                 Ok(handle) => {
-                    eprintln!(
-                        "plancraft-mcp {}: serving MCP at {}",
-                        env!("CARGO_PKG_VERSION"),
-                        handle.url()
-                    );
-                    eprintln!(
-                        "connect with: claude mcp add --transport http plancraft {}",
-                        handle.url()
-                    );
+                    eprintln!("plancraft-mcp {}: serving MCP at {}", env!("CARGO_PKG_VERSION"), handle.url());
+                    eprintln!("connect with: claude mcp add --transport http plancraft {}", handle.url());
                     while handle.is_running() {
                         std::thread::sleep(std::time::Duration::from_millis(500));
                     }

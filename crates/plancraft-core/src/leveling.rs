@@ -30,11 +30,7 @@ pub struct LevelingOptions {
 
 impl Default for LevelingOptions {
     fn default() -> Self {
-        Self {
-            clear_existing: true,
-            max_delay_days: 260,
-            resources: Vec::new(),
-        }
+        Self { clear_existing: true, max_delay_days: 260, resources: Vec::new() }
     }
 }
 
@@ -65,19 +61,13 @@ fn task_loads(p: &Project, idx: usize, delay: Minutes, filter: &HashSet<Resource
         return out;
     };
     let cal = task_calendar(p, idx);
-    let start = if delay > 0 {
-        cal.snap_forward(cal.add(s, delay))
-    } else {
-        s
-    };
+    let start = if delay > 0 { cal.snap_forward(cal.add(s, delay)) } else { s };
     let finish = cal.add(start, t.duration);
     for a in p.assignments_for_task(t.id) {
         if !filter.is_empty() && !filter.contains(&a.resource) {
             continue;
         }
-        if p.resource(a.resource)
-            .is_none_or(|r| r.kind != ResourceType::Work)
-        {
+        if p.resource(a.resource).is_none_or(|r| r.kind != ResourceType::Work) {
             continue;
         }
         let e = out.entry(a.resource).or_default();
@@ -88,24 +78,13 @@ fn task_loads(p: &Project, idx: usize, delay: Minutes, filter: &HashSet<Resource
     out
 }
 
-fn fits(
-    p: &Project,
-    committed: &Load,
-    candidate: &Load,
-    caps: &mut HashMap<(ResourceId, NaiveDate), f64>,
-) -> bool {
+fn fits(p: &Project, committed: &Load, candidate: &Load, caps: &mut HashMap<(ResourceId, NaiveDate), f64>) -> bool {
     for (rid, days) in candidate {
         let Some(r) = p.resource(*rid) else { continue };
         let cal = resource_calendar(p, r);
         for (d, w) in days {
-            let cap = *caps
-                .entry((*rid, *d))
-                .or_insert_with(|| capacity_on(&cal, r, *d));
-            let used = committed
-                .get(rid)
-                .and_then(|m| m.get(d))
-                .copied()
-                .unwrap_or(0.0);
+            let cap = *caps.entry((*rid, *d)).or_insert_with(|| capacity_on(&cal, r, *d));
+            let used = committed.get(rid).and_then(|m| m.get(d)).copied().unwrap_or(0.0);
             if used + w > cap + 0.5 {
                 return false;
             }
@@ -131,10 +110,7 @@ pub fn level_resources(p: &mut Project, opts: &LevelingOptions) -> LevelingRepor
         }
     }
     recalculate(p);
-    let mut report = LevelingReport {
-        finish_before: p.sched.finish,
-        ..Default::default()
-    };
+    let mut report = LevelingReport { finish_before: p.sched.finish, ..Default::default() };
     let filter: HashSet<ResourceId> = opts.resources.iter().copied().collect();
     let day = p.settings.time.minutes_per_day.max(1);
 
@@ -156,12 +132,8 @@ pub fn level_resources(p: &mut Project, opts: &LevelingOptions) -> LevelingRepor
         }
     }
 
-    let mut order: Vec<TaskId> = p
-        .tasks
-        .iter()
-        .filter(|t| movable(t) && p.assignments_for_task(t.id).next().is_some())
-        .map(|t| t.id)
-        .collect();
+    let mut order: Vec<TaskId> =
+        p.tasks.iter().filter(|t| movable(t) && p.assignments_for_task(t.id).next().is_some()).map(|t| t.id).collect();
     let mut placed: Vec<TaskId> = Vec::new();
     let mut caps = HashMap::new();
     let mut delays: HashMap<TaskId, Minutes> = HashMap::new();
@@ -192,10 +164,7 @@ pub fn level_resources(p: &mut Project, opts: &LevelingOptions) -> LevelingRepor
 
         let alone = task_loads(p, idx, 0, &filter);
         if !fits(p, &HashMap::new(), &alone, &mut caps) {
-            report.unresolved.push(format!(
-                "'{}' needs more units than its resources can provide",
-                p.tasks[idx].name
-            ));
+            report.unresolved.push(format!("'{}' needs more units than its resources can provide", p.tasks[idx].name));
             placed.push(id);
             continue;
         }
@@ -210,10 +179,7 @@ pub fn level_resources(p: &mut Project, opts: &LevelingOptions) -> LevelingRepor
             delay += day;
         }
         if !found {
-            report.unresolved.push(format!(
-                "'{}' could not be leveled within {} days",
-                p.tasks[idx].name, opts.max_delay_days
-            ));
+            report.unresolved.push(format!("'{}' could not be leveled within {} days", p.tasks[idx].name, opts.max_delay_days));
             delay = 0;
         }
         if delay > 0 {

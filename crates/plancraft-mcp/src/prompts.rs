@@ -30,28 +30,16 @@ pub fn list() -> Value {
 }
 
 fn arg<'a>(params: &'a Value, name: &str) -> Option<&'a str> {
-    params
-        .get("arguments")
-        .and_then(|a| a.get(name))
-        .and_then(Value::as_str)
-        .filter(|s| !s.trim().is_empty())
+    params.get("arguments").and_then(|a| a.get(name)).and_then(Value::as_str).filter(|s| !s.trim().is_empty())
 }
 
 pub fn get(params: &Value) -> Result<Value, RpcError> {
-    let name = params
-        .get("name")
-        .and_then(Value::as_str)
-        .ok_or_else(|| RpcError::invalid_params("missing prompt 'name'"))?;
+    let name = params.get("name").and_then(Value::as_str).ok_or_else(|| RpcError::invalid_params("missing prompt 'name'"))?;
     let (description, text) = match name {
         "plan_project" => {
-            let goal = arg(params, "goal")
-                .ok_or_else(|| RpcError::invalid_params("missing argument 'goal'"))?;
-            let start = arg(params, "start")
-                .map(|s| format!(" starting {s}"))
-                .unwrap_or_default();
-            let team = arg(params, "team")
-                .map(|t| format!("\nAvailable team: {t}."))
-                .unwrap_or_default();
+            let goal = arg(params, "goal").ok_or_else(|| RpcError::invalid_params("missing argument 'goal'"))?;
+            let start = arg(params, "start").map(|s| format!(" starting {s}")).unwrap_or_default();
+            let team = arg(params, "team").map(|t| format!("\nAvailable team: {t}.")).unwrap_or_default();
             (
                 "Plan a new project",
                 format!(
@@ -70,9 +58,7 @@ pub fn get(params: &Value) -> Result<Value, RpcError> {
             )
         }
         "status_report" => {
-            let doc = arg(params, "document")
-                .map(|d| format!(" (document '{d}')"))
-                .unwrap_or_default();
+            let doc = arg(params, "document").map(|d| format!(" (document '{d}')")).unwrap_or_default();
             (
                 "Project status report",
                 format!(
@@ -85,9 +71,7 @@ pub fn get(params: &Value) -> Result<Value, RpcError> {
             )
         }
         other => {
-            return Err(RpcError::invalid_params(format!(
-                "unknown prompt '{other}'"
-            )));
+            return Err(RpcError::invalid_params(format!("unknown prompt '{other}'")));
         }
     };
     Ok(json!({

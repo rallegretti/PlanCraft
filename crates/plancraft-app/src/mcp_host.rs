@@ -22,10 +22,7 @@ impl McpHost {
     }
 
     pub fn url(&self) -> Option<String> {
-        self.handle
-            .as_ref()
-            .filter(|h| h.is_running())
-            .map(|h| h.url())
+        self.handle.as_ref().filter(|h| h.is_running()).map(|h| h.url())
     }
 
     /// Number of change notifications received from agents.
@@ -44,21 +41,16 @@ impl McpHost {
             ),
             ..ServerOptions::default()
         };
-        let server =
-            McpServer::with_options(ws, options).with_change_callback(Arc::new(move || {
-                changes.fetch_add(1, Ordering::Relaxed);
-                ctx.request_repaint();
-            }));
+        let server = McpServer::with_options(ws, options).with_change_callback(Arc::new(move || {
+            changes.fetch_add(1, Ordering::Relaxed);
+            ctx.request_repaint();
+        }));
         match serve_http(Arc::new(server), &format!("127.0.0.1:{port}")) {
             Ok(h) => {
                 self.handle = Some(h);
                 self.error = None;
             }
-            Err(e) => {
-                self.error = Some(format!(
-                    "Could not start the MCP server on port {port}: {e}"
-                ))
-            }
+            Err(e) => self.error = Some(format!("Could not start the MCP server on port {port}: {e}")),
         }
     }
 

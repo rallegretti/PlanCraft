@@ -61,6 +61,8 @@ impl ResourceInfo {
         let mut close = false;
         egui::Window::new("Resource Information")
             .id(egui::Id::new("resource_info"))
+            .pivot(egui::Align2::CENTER_TOP)
+            .default_pos(ctx.content_rect().center_top() + egui::vec2(0.0, 120.0))
             .open(&mut open)
             .collapsible(false)
             .default_width(560.0)

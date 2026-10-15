@@ -143,16 +143,8 @@ fn today() -> chrono::NaiveDate {
 /// Adds the `.plancraft` extension when missing and makes the path absolute.
 fn with_extension(path: &str) -> PathBuf {
     let p = PathBuf::from(path);
-    let p = if p.extension().is_none() {
-        p.with_extension(FILE_EXTENSION)
-    } else {
-        p
-    };
-    if p.is_absolute() {
-        p
-    } else {
-        std::env::current_dir().map(|c| c.join(&p)).unwrap_or(p)
-    }
+    let p = if p.extension().is_none() { p.with_extension(FILE_EXTENSION) } else { p };
+    if p.is_absolute() { p } else { std::env::current_dir().map(|c| c.join(&p)).unwrap_or(p) }
 }
 
 fn new_project(ctx: &Ctx, a: &Args) -> ToolResult {
@@ -169,10 +161,7 @@ fn new_project(ctx: &Ctx, a: &Args) -> ToolResult {
             ctx.require_file_access("Saving to a file path")?;
             let p = with_extension(p.trim());
             if p.exists() && !a.bool("overwrite")?.unwrap_or(false) {
-                return err(format!(
-                    "{} already exists; use open_project to open it, or pass overwrite: true",
-                    p.display()
-                ));
+                return err(format!("{} already exists; use open_project to open it, or pass overwrite: true", p.display()));
             }
             Some(p)
         }
@@ -226,9 +215,8 @@ fn save_project(ctx: &Ctx, a: &Args) -> ToolResult {
     let out = ctx.with_doc(a, |doc| {
         match &new_path {
             Some(p) => {
-                let same = doc.path.as_ref().is_some_and(|cur| {
-                    std::fs::canonicalize(cur).ok() == std::fs::canonicalize(p).ok() && p.exists()
-                });
+                let same =
+                    doc.path.as_ref().is_some_and(|cur| std::fs::canonicalize(cur).ok() == std::fs::canonicalize(p).ok() && p.exists());
                 if !same {
                     ctx.require_file_access("Saving to a new path")?;
                 }
@@ -257,10 +245,7 @@ fn close_project(ctx: &Ctx, a: &Args) -> ToolResult {
         let i = Ctx::doc_index(ws, a)?;
         let doc = &ws.docs[i];
         if doc.dirty && !discard {
-            return err(format!(
-                "'{}' has unsaved changes; call save_project first or pass discard_changes: true",
-                doc.title()
-            ));
+            return err(format!("'{}' has unsaved changes; call save_project first or pass discard_changes: true", doc.title()));
         }
         let handle = doc.handle;
         let name = doc.project.name.clone();
@@ -348,11 +333,8 @@ fn update_project(ctx: &Ctx, a: &Args) -> ToolResult {
                 p.settings.time.default_finish_time = parse_hhmm(t, "default_finish_time")?;
             }
             if let Some(v) = a.get("duration_unit") {
-                p.settings.duration_unit = parse_enum::<DurationUnit>(
-                    v,
-                    "duration_unit",
-                    &["minutes", "hours", "days", "weeks", "months"],
-                )?;
+                p.settings.duration_unit =
+                    parse_enum::<DurationUnit>(v, "duration_unit", &["minutes", "hours", "days", "weeks", "months"])?;
             }
             if let Some(h) = a.f64("hours_per_point")? {
                 if h <= 0.0 {

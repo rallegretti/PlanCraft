@@ -25,9 +25,7 @@ impl Unit {
             Unit::Day => midnight(d),
             Unit::Week => midnight(d - Duration::days(d.weekday().num_days_from_monday() as i64)),
             Unit::Month => midnight(d.with_day(1).unwrap()),
-            Unit::Quarter => {
-                midnight(NaiveDate::from_ymd_opt(d.year(), (d.month0() / 3) * 3 + 1, 1).unwrap())
-            }
+            Unit::Quarter => midnight(NaiveDate::from_ymd_opt(d.year(), (d.month0() / 3) * 3 + 1, 1).unwrap()),
             Unit::Year => midnight(NaiveDate::from_ymd_opt(d.year(), 1, 1).unwrap()),
         }
     }
@@ -36,10 +34,7 @@ impl Unit {
         let add_months = |t: NaiveDateTime, m: u32| {
             let d = t.date();
             let total = d.year() * 12 + d.month0() as i32 + m as i32;
-            NaiveDate::from_ymd_opt(total.div_euclid(12), total.rem_euclid(12) as u32 + 1, 1)
-                .unwrap()
-                .and_hms_opt(0, 0, 0)
-                .unwrap()
+            NaiveDate::from_ymd_opt(total.div_euclid(12), total.rem_euclid(12) as u32 + 1, 1).unwrap().and_hms_opt(0, 0, 0).unwrap()
         };
         match self {
             Unit::Hours6 => t + Duration::hours(6),
@@ -61,12 +56,7 @@ impl Unit {
                 } else if width >= 26.0 {
                     d.format("%-d").to_string()
                 } else {
-                    d.format("%a")
-                        .to_string()
-                        .chars()
-                        .next()
-                        .map(String::from)
-                        .unwrap_or_default()
+                    d.format("%a").to_string().chars().next().map(String::from).unwrap_or_default()
                 }
             }
             Unit::Week => {
@@ -84,21 +74,12 @@ impl Unit {
                 } else if width >= 40.0 {
                     d.format("%b '%y").to_string()
                 } else {
-                    d.format("%b")
-                        .to_string()
-                        .chars()
-                        .next()
-                        .map(String::from)
-                        .unwrap_or_default()
+                    d.format("%b").to_string().chars().next().map(String::from).unwrap_or_default()
                 }
             }
             Unit::Quarter => {
                 let q = d.month0() / 3 + 1;
-                if width >= 60.0 {
-                    format!("Q{q} {}", d.year())
-                } else {
-                    format!("Q{q}")
-                }
+                if width >= 60.0 { format!("Q{q} {}", d.year()) } else { format!("Q{q}") }
             }
             Unit::Year => d.year().to_string(),
         }
@@ -128,10 +109,7 @@ pub fn paint_header(painter: &Painter, rect: Rect, g: &GanttState) -> Vec<(f32, 
     let font = FontId::proportional(11.5);
     let end = g.time_at(rect.left(), rect.right());
     let mut out = Vec::new();
-    for (unit, y0, y1, collect) in [
-        (top, rect.top(), mid, false),
-        (bottom, mid, rect.bottom(), true),
-    ] {
+    for (unit, y0, y1, collect) in [(top, rect.top(), mid, false), (bottom, mid, rect.bottom(), true)] {
         let mut t = unit.floor(g.left);
         let mut guard = 0;
         while t <= end && guard < 2000 {
@@ -139,27 +117,13 @@ pub fn paint_header(painter: &Painter, rect: Rect, g: &GanttState) -> Vec<(f32, 
             let n = unit.next(t);
             let x0 = g.x_of(rect.left(), t);
             let x1 = g.x_of(rect.left(), n);
-            painter.vline(
-                x0.round() + 0.5,
-                y0..=y1,
-                Stroke::new(1.0, theme::GRID_LINE_STRONG),
-            );
+            painter.vline(x0.round() + 0.5, y0..=y1, Stroke::new(1.0, theme::GRID_LINE_STRONG));
             let cell = Rect::from_x_y_ranges(x0.max(rect.left())..=x1.min(rect.right()), y0..=y1);
             if cell.width() > 8.0 {
                 let label = unit.label(t, x1 - x0);
-                let anchor = if collect || x1 - x0 < 60.0 {
-                    Align2::CENTER_CENTER
-                } else {
-                    Align2::LEFT_CENTER
-                };
-                let pos = if anchor == Align2::CENTER_CENTER {
-                    cell.center()
-                } else {
-                    pos2(cell.left() + 4.0, cell.center().y)
-                };
-                painter
-                    .with_clip_rect(cell)
-                    .text(pos, anchor, label, font.clone(), theme::TEXT);
+                let anchor = if collect || x1 - x0 < 60.0 { Align2::CENTER_CENTER } else { Align2::LEFT_CENTER };
+                let pos = if anchor == Align2::CENTER_CENTER { cell.center() } else { pos2(cell.left() + 4.0, cell.center().y) };
+                painter.with_clip_rect(cell).text(pos, anchor, label, font.clone(), theme::TEXT);
             }
             if collect {
                 out.push((x0, t));
@@ -168,10 +132,6 @@ pub fn paint_header(painter: &Painter, rect: Rect, g: &GanttState) -> Vec<(f32, 
         }
     }
     painter.hline(rect.x_range(), mid, Stroke::new(1.0, theme::GRID_LINE));
-    painter.hline(
-        rect.x_range(),
-        rect.bottom() - 0.5,
-        Stroke::new(1.0, theme::GRID_LINE_STRONG),
-    );
+    painter.hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, theme::GRID_LINE_STRONG));
     out
 }

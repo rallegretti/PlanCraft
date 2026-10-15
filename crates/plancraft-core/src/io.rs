@@ -15,15 +15,9 @@ use crate::schedule::recalculate;
 #[derive(Debug, thiserror::Error)]
 pub enum FileError {
     #[error("I/O error on {path}: {source}")]
-    Io {
-        path: PathBuf,
-        source: std::io::Error,
-    },
+    Io { path: PathBuf, source: std::io::Error },
     #[error("{path} is not a valid PlanCraft document: {source}")]
-    Parse {
-        path: PathBuf,
-        source: serde_json::Error,
-    },
+    Parse { path: PathBuf, source: serde_json::Error },
     #[error("{0} is not a PlanCraft document")]
     WrongFormat(PathBuf),
     #[error("{path} was written by a newer PlanCraft (format version {version})")]
@@ -43,47 +37,22 @@ pub fn to_json(p: &Project) -> FileResult<String> {
 
 /// Parses a project from JSON text.
 pub fn from_json(text: &str, path: &Path) -> FileResult<Project> {
-    let value: serde_json::Value =
-        serde_json::from_str(text).map_err(|source| FileError::Parse {
-            path: path.into(),
-            source,
-        })?;
+    let value: serde_json::Value = serde_json::from_str(text).map_err(|source| FileError::Parse { path: path.into(), source })?;
     if value.get("format").and_then(|f| f.as_str()) != Some(FILE_FORMAT) {
         return Err(FileError::WrongFormat(path.into()));
     }
     let version = value.get("version").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
     if version > FILE_VERSION {
-        return Err(FileError::TooNew {
-            path: path.into(),
-            version,
-        });
+        return Err(FileError::TooNew { path: path.into(), version });
     }
-    let mut p: Project = serde_json::from_value(value).map_err(|source| FileError::Parse {
-        path: path.into(),
-        source,
-    })?;
+    let mut p: Project = serde_json::from_value(value).map_err(|source| FileError::Parse { path: path.into(), source })?;
     p.version = FILE_VERSION;
     // Keep id counters ahead of every stored id (hand-edited files may lag behind).
-    p.ids.task = p
-        .ids
-        .task
-        .max(p.tasks.iter().map(|t| t.id.0).max().unwrap_or(0));
-    p.ids.resource = p
-        .ids
-        .resource
-        .max(p.resources.iter().map(|r| r.id.0).max().unwrap_or(0));
-    p.ids.calendar = p
-        .ids
-        .calendar
-        .max(p.calendars.iter().map(|c| c.id.0).max().unwrap_or(0));
-    p.ids.assignment = p
-        .ids
-        .assignment
-        .max(p.assignments.iter().map(|a| a.id.0).max().unwrap_or(0));
-    p.ids.time_entry = p
-        .ids
-        .time_entry
-        .max(p.time_entries.iter().map(|e| e.id.0).max().unwrap_or(0));
+    p.ids.task = p.ids.task.max(p.tasks.iter().map(|t| t.id.0).max().unwrap_or(0));
+    p.ids.resource = p.ids.resource.max(p.resources.iter().map(|r| r.id.0).max().unwrap_or(0));
+    p.ids.calendar = p.ids.calendar.max(p.calendars.iter().map(|c| c.id.0).max().unwrap_or(0));
+    p.ids.assignment = p.ids.assignment.max(p.assignments.iter().map(|a| a.id.0).max().unwrap_or(0));
+    p.ids.time_entry = p.ids.time_entry.max(p.time_entries.iter().map(|e| e.id.0).max().unwrap_or(0));
     if p.calendars.is_empty() {
         let id = p.ids.next_calendar();
         p.calendars.push(crate::calendar::Calendar::standard(id));
@@ -96,10 +65,7 @@ pub fn from_json(text: &str, path: &Path) -> FileResult<Project> {
 /// Loads a project document and recalculates it.
 pub fn load(path: impl AsRef<Path>) -> FileResult<Project> {
     let path = path.as_ref();
-    let text = std::fs::read_to_string(path).map_err(|source| FileError::Io {
-        path: path.into(),
-        source,
-    })?;
+    let text = std::fs::read_to_string(path).map_err(|source| FileError::Io { path: path.into(), source })?;
     let mut p = from_json(&text, path)?;
     recalculate(&mut p);
     Ok(p)
@@ -110,14 +76,8 @@ pub fn save(p: &Project, path: impl AsRef<Path>) -> FileResult<()> {
     let path = path.as_ref();
     let text = to_json(p)?;
     let tmp = path.with_extension(format!("{FILE_EXTENSION}.tmp"));
-    std::fs::write(&tmp, text).map_err(|source| FileError::Io {
-        path: tmp.clone(),
-        source,
-    })?;
-    std::fs::rename(&tmp, path).map_err(|source| FileError::Io {
-        path: path.into(),
-        source,
-    })?;
+    std::fs::write(&tmp, text).map_err(|source| FileError::Io { path: tmp.clone(), source })?;
+    std::fs::rename(&tmp, path).map_err(|source| FileError::Io { path: path.into(), source })?;
     Ok(())
 }
 
@@ -189,12 +149,7 @@ fn snapshot(t: &Task) -> ExternalTaskSnapshot {
 pub fn referenced_external_tasks(p: &Project, project: Uuid) -> HashSet<TaskId> {
     let mut out = HashSet::new();
     for t in &p.tasks {
-        for r in t
-            .predecessors
-            .iter()
-            .map(|d| &d.predecessor)
-            .chain(t.members.iter())
-        {
+        for r in t.predecessors.iter().map(|d| &d.predecessor).chain(t.members.iter()) {
             if let TaskRef::External { project: pid, task } = r
                 && *pid == project
             {
@@ -208,38 +163,22 @@ pub fn referenced_external_tasks(p: &Project, project: Uuid) -> HashSet<TaskId> 
 /// Registers another document as an external project and returns its id.
 ///
 /// The stored path is relative to `doc_path`'s directory when `doc_path` is known.
-pub fn add_external_project(
-    p: &mut Project,
-    doc_path: Option<&Path>,
-    other: &Path,
-) -> FileResult<Uuid> {
+pub fn add_external_project(p: &mut Project, doc_path: Option<&Path>, other: &Path) -> FileResult<Uuid> {
     let abs_other = if other.is_absolute() {
         other.to_path_buf()
     } else {
-        std::env::current_dir()
-            .map(|c| c.join(other))
-            .unwrap_or_else(|_| other.to_path_buf())
+        std::env::current_dir().map(|c| c.join(other)).unwrap_or_else(|_| other.to_path_buf())
     };
     let other_project = load(&abs_other)?;
     let stored = match doc_path.and_then(|d| d.parent()) {
         Some(dir) => {
-            let dir = if dir.is_absolute() {
-                dir.to_path_buf()
-            } else {
-                std::env::current_dir()
-                    .map(|c| c.join(dir))
-                    .unwrap_or_default()
-            };
+            let dir = if dir.is_absolute() { dir.to_path_buf() } else { std::env::current_dir().map(|c| c.join(dir)).unwrap_or_default() };
             relative_path(&abs_other, &dir)
         }
         None => abs_other.clone(),
     };
     let stored = stored.to_string_lossy().replace('\\', "/");
-    if let Some(e) = p
-        .external_projects
-        .iter_mut()
-        .find(|e| e.id == other_project.id)
-    {
+    if let Some(e) = p.external_projects.iter_mut().find(|e| e.id == other_project.id) {
         e.path = stored;
         e.name = other_project.name.clone();
         return Ok(e.id);
@@ -255,22 +194,13 @@ pub fn add_external_project(
 }
 
 /// Ensures snapshot data exists for an external task (loading the other document).
-pub fn ensure_external_task(
-    p: &mut Project,
-    doc_path: Option<&Path>,
-    project: Uuid,
-    task: TaskId,
-) -> FileResult<()> {
+pub fn ensure_external_task(p: &mut Project, doc_path: Option<&Path>, project: Uuid, task: TaskId) -> FileResult<()> {
     let Some(ext) = p.external_projects.iter().find(|e| e.id == project) else {
         return Ok(());
     };
     let path = resolve_external_path(&ext.path, doc_path);
     let other = load(&path)?;
-    let ext = p
-        .external_projects
-        .iter_mut()
-        .find(|e| e.id == project)
-        .expect("checked");
+    let ext = p.external_projects.iter_mut().find(|e| e.id == project).expect("checked");
     if let Some(t) = other.task(task) {
         ext.tasks.retain(|s| s.id != task);
         ext.tasks.push(snapshot(t));
@@ -279,11 +209,7 @@ pub fn ensure_external_task(
 }
 
 /// Lists the tasks of an external project document (loading it from disk).
-pub fn external_task_list(
-    p: &Project,
-    doc_path: Option<&Path>,
-    project: Uuid,
-) -> FileResult<Vec<ExternalTaskSnapshot>> {
+pub fn external_task_list(p: &Project, doc_path: Option<&Path>, project: Uuid) -> FileResult<Vec<ExternalTaskSnapshot>> {
     let Some(ext) = p.external(project) else {
         return Ok(Vec::new());
     };
@@ -296,10 +222,7 @@ pub fn refresh_external(p: &mut Project, doc_path: Option<&Path>) -> Vec<String>
     let mut warnings = Vec::new();
     let now = chrono::Local::now().naive_local();
     for i in 0..p.external_projects.len() {
-        let (id, stored) = (
-            p.external_projects[i].id,
-            p.external_projects[i].path.clone(),
-        );
+        let (id, stored) = (p.external_projects[i].id, p.external_projects[i].path.clone());
         let wanted = referenced_external_tasks(p, id);
         let path = resolve_external_path(&stored, doc_path);
         match load(&path) {
@@ -321,19 +244,13 @@ pub fn refresh_external(p: &mut Project, doc_path: Option<&Path>) -> Vec<String>
                             ext.tasks.retain(|s| s.id != *tid);
                             ext.tasks.push(snapshot(t));
                         }
-                        None => warnings.push(format!(
-                            "Task {} no longer exists in '{}'",
-                            tid.0, other.name
-                        )),
+                        None => warnings.push(format!("Task {} no longer exists in '{}'", tid.0, other.name)),
                     }
                 }
                 ext.tasks.sort_by_key(|s| s.id);
                 ext.last_sync = Some(now);
             }
-            Err(e) => warnings.push(format!(
-                "Could not refresh '{}': {e}",
-                p.external_projects[i].name
-            )),
+            Err(e) => warnings.push(format!("Could not refresh '{}': {e}", p.external_projects[i].name)),
         }
     }
     warnings
@@ -345,17 +262,8 @@ mod tests {
 
     #[test]
     fn relative_paths() {
-        assert_eq!(
-            relative_path(Path::new("/a/b/c.plancraft"), Path::new("/a/b")),
-            PathBuf::from("c.plancraft")
-        );
-        assert_eq!(
-            relative_path(Path::new("/a/x/c.plancraft"), Path::new("/a/b")),
-            PathBuf::from("../x/c.plancraft")
-        );
-        assert_eq!(
-            resolve_external_path("../x/c.plancraft", Some(Path::new("/a/b/doc.plancraft"))),
-            PathBuf::from("/a/x/c.plancraft")
-        );
+        assert_eq!(relative_path(Path::new("/a/b/c.plancraft"), Path::new("/a/b")), PathBuf::from("c.plancraft"));
+        assert_eq!(relative_path(Path::new("/a/x/c.plancraft"), Path::new("/a/b")), PathBuf::from("../x/c.plancraft"));
+        assert_eq!(resolve_external_path("../x/c.plancraft", Some(Path::new("/a/b/doc.plancraft"))), PathBuf::from("/a/x/c.plancraft"));
     }
 }

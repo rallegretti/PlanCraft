@@ -163,7 +163,8 @@ fn critical_path(ctx: &Ctx, a: &Args) -> ToolResult {
     ctx.read(a, |doc| {
         let p = &doc.project;
         let near = a.get("near_critical_slack").map(|v| parse_duration_value(p, v, "near_critical_slack")).transpose()?.map(|x| x.0);
-        let mut crit: Vec<usize> = (0..p.tasks.len()).filter(|&i| p.tasks[i].sched.critical && !p.tasks[i].sched.is_summary && p.tasks[i].active).collect();
+        let mut crit: Vec<usize> =
+            (0..p.tasks.len()).filter(|&i| p.tasks[i].sched.critical && !p.tasks[i].sched.is_summary && p.tasks[i].active).collect();
         crit.sort_by_key(|&i| (p.tasks[i].sched.start, i));
         let mut near_list: Vec<usize> = match near {
             Some(n) => (0..p.tasks.len())
@@ -201,12 +202,7 @@ fn default_window(p: &Project, a: &Args) -> ToolResult<(NaiveDate, NaiveDate)> {
     };
     let to = match a.get("to") {
         Some(v) => parse_date(v, "to")?,
-        None => p
-            .sched
-            .finish
-            .map(|f| f.date())
-            .unwrap_or(from + chrono::Duration::days(27))
-            .max(from),
+        None => p.sched.finish.map(|f| f.date()).unwrap_or(from + chrono::Duration::days(27)).max(from),
     };
     if to < from {
         return err("'to' is before 'from'");
@@ -378,9 +374,7 @@ fn clear_leveling_tool(ctx: &Ctx, a: &Args) -> ToolResult {
             clear_leveling(p);
             Ok(n)
         },
-        |doc, n| {
-            Ok(json!({ "cleared_tasks": n, "project_finish": fmt_dt(doc.project.sched.finish) }))
-        },
+        |doc, n| Ok(json!({ "cleared_tasks": n, "project_finish": fmt_dt(doc.project.sched.finish) })),
     )
 }
 
@@ -391,12 +385,7 @@ fn project_statistics(ctx: &Ctx, a: &Args) -> ToolResult {
         let mut v = views::stats_json(p, &st);
         v["name"] = json!(p.name);
         v["status_date"] = fmt_dt(Some(report::status_moment(p)));
-        v["milestones_status"] = Value::Array(
-            st.milestone_status
-                .iter()
-                .map(|m| views::milestone_status_json(p, m))
-                .collect(),
-        );
+        v["milestones_status"] = Value::Array(st.milestone_status.iter().map(|m| views::milestone_status_json(p, m)).collect());
         v["earned_value"] = views::earned_value_json(&st.earned_value);
         Ok(v)
     })
