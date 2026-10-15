@@ -175,4 +175,4 @@ Everything is Rust: the scheduler, the UI (egui and wgpu), file dialogs (rfd ove
 
 ## License
 
-MIT
+[CC0 1.0 Universal](LICENSE): dedicated to the public domain.
