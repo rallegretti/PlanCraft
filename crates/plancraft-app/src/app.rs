@@ -10,12 +10,12 @@ use plancraft_core::leveling::{LevelingOptions, clear_leveling, level_resources}
 use plancraft_core::prelude::*;
 use plancraft_core::workspace::{ChangeSource, Document, SharedWorkspace, Workspace};
 
-use crate::backstage;
 use crate::commands::Command;
 use crate::dialogs::{self, Dialogs};
 use crate::mcp_host::McpHost;
 use crate::menubar::{self, MenuInfo};
 use crate::settings::AppSettings;
+use crate::start_page;
 use crate::state::{ToastKind, UiState, ViewKind};
 use crate::theme;
 use crate::views;
@@ -26,7 +26,6 @@ pub struct PlanCraftApp {
     dialogs: Dialogs,
     settings: AppSettings,
     mcp: McpHost,
-    backstage_page: backstage::Page,
     seen: HashMap<u64, u64>,
     status: Option<(String, Instant)>,
     confirm_close: Option<CloseRequest>,
@@ -49,14 +48,13 @@ impl PlanCraftApp {
         theme::install(&cc.egui_ctx);
         let settings = AppSettings::load();
         let has_doc = ws.lock().map(|w| !w.docs.is_empty()).unwrap_or(false);
-        let st = UiState { table_width: settings.table_width, backstage: !has_doc, ..UiState::default() };
+        let st = UiState { table_width: settings.table_width, start_page: !has_doc, ..UiState::default() };
         let mut app = Self {
             ws,
             st,
             dialogs: Dialogs::default(),
             settings,
             mcp: McpHost::default(),
-            backstage_page: backstage::Page::Home,
             seen: HashMap::new(),
             status: None,
             confirm_close: None,
@@ -135,7 +133,7 @@ impl PlanCraftApp {
         match r {
             Ok(Ok(_)) => {
                 self.settings.add_recent(path.clone());
-                self.st.backstage = false;
+                self.st.start_page = false;
                 self.st.sel = Default::default();
                 self.st.gantt.initialized_for = None;
                 self.set_status(format!("Opened {}", path.display()));
@@ -228,7 +226,7 @@ impl PlanCraftApp {
                 let n = ws.docs.len() + 1;
                 ws.add(Project::new(format!("Project{n}"), start), None);
                 drop(ws);
-                self.st.backstage = false;
+                self.st.start_page = false;
                 self.st.sel = Default::default();
                 self.st.view = ViewKind::Gantt;
             }
@@ -236,7 +234,7 @@ impl PlanCraftApp {
                 let today = chrono::Local::now().date_naive();
                 let monday = today - Duration::days(chrono::Datelike::weekday(&today).num_days_from_monday() as i64) - Duration::days(7);
                 self.ws.lock().unwrap().add(plancraft_core::sample::demo_project(monday), None);
-                self.st.backstage = false;
+                self.st.start_page = false;
                 self.st.sel = Default::default();
                 self.st.view = ViewKind::Gantt;
             }
@@ -264,18 +262,17 @@ impl PlanCraftApp {
             }
             Command::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Command::StartPage => {
-                self.backstage_page = backstage::Page::Home;
-                self.st.backstage = true;
+                self.st.start_page = true;
             }
             Command::ExportCsv => self.export_csv(),
             Command::McpPanel => {
                 self.dialogs.mcp = true;
-                self.st.backstage = false;
+                self.st.start_page = false;
             }
             Command::About => self.dialogs.about = true,
             Command::SetView(v) => {
                 self.st.view = v;
-                self.st.backstage = false;
+                self.st.start_page = false;
             }
             Command::Filter(f) => self.st.filter = f,
             Command::Table(t) => self.st.table = t,
@@ -299,7 +296,7 @@ impl PlanCraftApp {
         self.st.sel = Default::default();
         self.st.gantt.initialized_for = None;
         if empty {
-            self.st.backstage = true;
+            self.st.start_page = true;
         }
     }
 
@@ -707,7 +704,7 @@ impl PlanCraftApp {
             } else {
                 ws.close(h);
                 if ws.docs.is_empty() {
-                    self.st.backstage = true;
+                    self.st.start_page = true;
                 }
             }
         }
@@ -934,8 +931,8 @@ impl PlanCraftApp {
                         egui::Popup::open_id(ctx, egui::Id::new("view_selector").with("popup"));
                         continue;
                     }
-                    "Backstage" => {
-                        self.st.backstage = true;
+                    "StartPage" => {
+                        self.st.start_page = true;
                         continue;
                     }
                     _ => continue,
@@ -1026,7 +1023,7 @@ impl eframe::App for PlanCraftApp {
         let active = ws.active_doc().map(|d| d.handle);
         if active != self.last_active {
             if self.last_active.is_none() && active.is_some() {
-                self.st.backstage = false;
+                self.st.start_page = false;
             }
             self.st.sel = Default::default();
             self.st.gantt.initialized_for = None;
@@ -1047,21 +1044,23 @@ impl eframe::App for PlanCraftApp {
         }
 
         let info = self.menu_info(&ws);
-        let backstage_open = self.st.backstage;
+        let start_open = self.st.start_page;
 
-        if backstage_open {
+        if start_open {
             let stats = ws.active_doc().map(|d| plancraft_core::report::project_stats(&d.project));
-            let binfo = backstage::BackstageInfo {
+            let sinfo = start_page::StartInfo {
                 has_doc: info.has_doc,
                 doc_title: ws.active_doc().map(|d| d.project.name.clone()).unwrap_or_default(),
                 doc_path: ws.active_doc().and_then(|d| d.path.as_ref().map(|p| p.display().to_string())),
                 stats,
                 settings: &self.settings,
-                can_close: info.has_doc,
             };
+            egui::Panel::top("title").frame(egui::Frame::new().fill(theme::BG)).show(ui, |ui| {
+                menubar::title_bar(ui, &info, &mut out);
+            });
             egui::CentralPanel::no_frame().show(ui, |ui| {
-                if backstage::show(ui, &mut self.backstage_page, &binfo, &mut out) {
-                    self.st.backstage = false;
+                if start_page::show(ui, &sinfo, &mut out) {
+                    self.st.start_page = false;
                 }
             });
         } else {
@@ -1269,7 +1268,7 @@ mod ui_tests {
             h.state_mut().st.view = v;
             h.run_steps(2);
         }
-        h.state_mut().st.backstage = true;
+        h.state_mut().st.start_page = true;
         h.run_steps(2);
     }
 }

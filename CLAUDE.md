@@ -9,3 +9,4 @@
 - Test: `cargo test --workspace`. Visual check: `PLANCRAFT_VIEW="Gantt Chart" PLANCRAFT_CMD=TaskInfo PLANCRAFT_SCREENSHOT=out.png cargo run -p plancraft-app -- --demo` writes a PNG and exits.
 - Formatting: `cargo fmt --all` (rustfmt.toml: max_width 140).
 - UI chrome: a two-row command bar (`menubar.rs`): plain tabs plus one compact toolbar row, with the view selector spanning both rows. Do NOT reintroduce a Microsoft-Ribbon-style UI (large icon buttons, stacked small buttons, group captions under button groups); the owner explicitly wants to avoid resembling the Ribbon.
+- The Start Page (`start_page.rs`) is a centered card layout under the title band. Avoid Office-backstage patterns (full-height colored left nav, Back arrow, Info/Account/Options nav list).

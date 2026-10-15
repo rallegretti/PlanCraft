@@ -258,7 +258,8 @@ impl Selection {
 pub struct UiState {
     pub view: ViewKind,
     pub menu_tab: MenuTab,
-    pub backstage: bool,
+    /// The Start Page is shown instead of the views.
+    pub start_page: bool,
     pub sel: Selection,
     pub task_grid: GridState,
     pub resource_grid: GridState,
@@ -289,7 +290,7 @@ impl Default for UiState {
         Self {
             view: ViewKind::Gantt,
             menu_tab: MenuTab::Task,
-            backstage: false,
+            start_page: false,
             sel: Selection::default(),
             task_grid: GridState::default(),
             resource_grid: GridState::default(),

@@ -44,6 +44,7 @@
 | ![Resource Usage](docs/images/resource-usage.png) | ![Workload](docs/images/workload.png) |
 | ![Team Planner](docs/images/team-planner.png) | ![Milestones](docs/images/milestones.png) |
 | ![Task Information](docs/images/task-information.png) | ![MCP panel](docs/images/mcp-panel.png) |
+| ![Start Page](docs/images/start-page.png) | |
 
 ## The interface
 
@@ -106,7 +107,7 @@ cargo run --release -p plancraft-app -- path/to/project.plancraft
 cargo run --release -p plancraft-app
 ```
 
-Without arguments, the app opens the File backstage.
+Without arguments, the app opens the Start Page.
 
 On Linux the app talks to Wayland or X11 directly, and file dialogs go through the XDG desktop portal. No GTK or C toolkit is required.
 

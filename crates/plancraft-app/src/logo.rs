@@ -4,7 +4,7 @@
 //! The mark is defined once as simple geometry in a unit square and is both
 //! painted with egui (in the UI) and rasterized in software (window icon).
 
-use egui::{Color32, Painter, Pos2, Rect, Shape, Stroke, pos2, vec2};
+use egui::{Color32, Painter, Rect, Shape, Stroke, pos2, vec2};
 
 use crate::theme;
 
@@ -36,18 +36,6 @@ pub fn paint(painter: &Painter, rect: Rect) {
     }
     let (cx, cy, r) = DIAMOND;
     painter.add(Shape::convex_polygon(vec![p(cx, cy - r), p(cx + r, cy), p(cx, cy + r), p(cx - r, cy)], theme::GOLD, Stroke::NONE));
-}
-
-/// Paints the mark followed by the word mark "PlanCraft".
-pub fn paint_with_name(ui: &mut egui::Ui, size: f32, text_color: Color32) -> egui::Response {
-    let font = egui::FontId::proportional(size * 0.72);
-    let galley = ui.painter().layout_no_wrap("PlanCraft".into(), font, text_color);
-    let desired = vec2(size + 8.0 + galley.size().x, size);
-    let (rect, resp) = ui.allocate_exact_size(desired, egui::Sense::hover());
-    paint(ui.painter(), Rect::from_min_size(rect.min, vec2(size, size)));
-    let text_pos = Pos2::new(rect.min.x + size + 8.0, rect.center().y - galley.size().y / 2.0);
-    ui.painter().galley(text_pos, galley, text_color);
-    resp
 }
 
 fn rounded_rect_contains(x: f32, y: f32, x0: f32, y0: f32, x1: f32, y1: f32, r: f32) -> bool {

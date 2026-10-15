@@ -106,7 +106,7 @@ The desktop app uses egui and eframe 0.36 with the wgpu renderer.
 
 - **`app`:** layout (title band, command bar, document tabs, status bar, vertical view label), keyboard shortcuts, command execution, dialogs, the unsaved-changes prompt, and agent-change detection.
 - **`menubar`:** the title band and the two-row command bar (a view selector spanning both rows, plain tabs with a File dropdown, and a single toolbar row).
-- **`backstage`:** the Start Page (New, Open, Recent, Info).
+- **`start_page`:** the Start Page, a centered launcher with start actions, recent projects (with file dates) and a summary of the open project.
 - **`commands`:** the `Command` enum shared by the menu bar, toolbar, context menus and shortcuts.
 - **`widgets::grid`:** a virtualized spreadsheet grid with in-place text and choice editors, column resizing, keyboard navigation, and blank rows for entering new items.
 - **`widgets::timescale`:** the two-tier timescale.

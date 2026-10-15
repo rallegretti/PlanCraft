@@ -114,3 +114,41 @@ pub fn install(ctx: &egui::Context) {
         style.visuals = v;
     });
 }
+
+#[cfg(test)]
+mod tests {
+    /// Glyphs the bundled egui fonts cannot render (they show as empty boxes).
+    /// Found by rendering a glyph sheet; extend when a new icon turns out to be missing.
+    const MISSING_GLYPHS: &str = "→↶↷⊘▤▸◆●⮜🗂🗒🤖ⓘ⊕⊖⇄✎⬚▦◯🗓✓✗✘⬤▢◈◇❖✜🧭🧮🗃🧑⏩▬";
+
+    fn sources(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(dir).unwrap().flatten() {
+            let p = e.path();
+            if p.is_dir() {
+                sources(&p, out);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                out.push(p);
+            }
+        }
+    }
+
+    #[test]
+    fn ui_text_avoids_glyphs_missing_from_bundled_fonts() {
+        let mut files = Vec::new();
+        sources(&std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"), &mut files);
+        let mut problems = Vec::new();
+        for f in files {
+            let text = std::fs::read_to_string(&f).unwrap();
+            for (n, line) in text.lines().enumerate() {
+                let code = line.trim_start();
+                if code.starts_with("//") || code.starts_with("const MISSING_GLYPHS") {
+                    continue;
+                }
+                for c in line.chars().filter(|c| MISSING_GLYPHS.contains(*c)) {
+                    problems.push(format!("{}:{}: '{c}'", f.display(), n + 1));
+                }
+            }
+        }
+        assert!(problems.is_empty(), "glyphs that render as boxes:\n{}", problems.join("\n"));
+    }
+}

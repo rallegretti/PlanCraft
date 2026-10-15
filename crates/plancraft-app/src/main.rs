@@ -6,7 +6,6 @@
 //! ```
 
 mod app;
-mod backstage;
 mod columns;
 mod commands;
 mod dialogs;
@@ -15,6 +14,7 @@ mod logo;
 mod mcp_host;
 mod menubar;
 mod settings;
+mod start_page;
 mod state;
 mod theme;
 mod views;
