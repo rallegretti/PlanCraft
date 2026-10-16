@@ -237,7 +237,7 @@ pub struct CellCtx<'a> {
 /// Cell content of `col` for the task at `idx`.
 pub fn cell(col: TaskCol, p: &Project, idx: usize, ctx: &CellCtx) -> Cell {
     use TaskCol::*;
-    let t = &p.tasks[idx];
+    let Some(t) = p.tasks.get(idx) else { return Cell::default() };
     let s = &t.sched;
     let summary = s.is_summary;
     let mut c = match col {
@@ -373,6 +373,10 @@ fn parse_work_text(p: &Project, text: &str) -> Result<Minutes, String> {
     parse_work(text, &p.settings.time).ok_or_else(|| format!("'{text}' is not a valid amount of work"))
 }
 
+fn task_mut(p: &mut Project, id: TaskId) -> Result<&mut Task, String> {
+    p.task_mut(id).ok_or_else(|| "task not found".to_string())
+}
+
 /// Applies an edited value to a task. Runs inside an undoable edit.
 pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(), String> {
     use TaskCol::*;
@@ -384,12 +388,12 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
             if text.trim().is_empty() {
                 return Err("task name cannot be empty".into());
             }
-            p.tasks[idx].name = text.trim().to_string();
+            task_mut(p, id)?.name = text.trim().to_string();
         }
         Mode => {
-            p.tasks[idx].mode = if text.starts_with('M') { ScheduleMode::Manual } else { ScheduleMode::Auto };
-            if p.tasks[idx].mode == ScheduleMode::Manual {
-                let t = &mut p.tasks[idx];
+            let t = task_mut(p, id)?;
+            t.mode = if text.starts_with('M') { ScheduleMode::Manual } else { ScheduleMode::Auto };
+            if t.mode == ScheduleMode::Manual {
                 t.manual_start = t.sched.start;
                 t.manual_finish = t.sched.finish;
             }
@@ -404,7 +408,7 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
             if summary {
                 return Err("summary task dates are calculated from their subtasks".into());
             }
-            let t = &mut p.tasks[idx];
+            let t = task_mut(p, id)?;
             if t.mode == ScheduleMode::Manual {
                 if finish {
                     t.manual_finish = Some(date);
@@ -437,7 +441,7 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
                 .map(|a| (a.id, a.work))
                 .collect();
             if assignments.is_empty() {
-                p.tasks[idx].estimate = Some(Estimate::Work { minutes: w });
+                task_mut(p, id)?.estimate = Some(Estimate::Work { minutes: w });
             } else {
                 let total: Minutes = assignments.iter().map(|(_, w)| w).sum();
                 for (aid, aw) in &assignments {
@@ -446,11 +450,11 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
                 }
             }
         }
-        FixedCost => p.tasks[idx].fixed_cost = format::parse_money(text).ok_or("invalid amount")?,
-        ActualStart => p.tasks[idx].actual_start = parse_date(p, text, false)?,
+        FixedCost => task_mut(p, id)?.fixed_cost = format::parse_money(text).ok_or("invalid amount")?,
+        ActualStart => task_mut(p, id)?.actual_start = parse_date(p, text, false)?,
         ActualFinish => {
             let d = parse_date(p, text, true)?;
-            let t = &mut p.tasks[idx];
+            let t = task_mut(p, id)?;
             t.actual_finish = d;
             if d.is_some() {
                 t.percent_complete = 100;
@@ -461,7 +465,7 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
         }
         ConstraintType => {
             let kind = ConstraintKind::ALL.into_iter().find(|k| k.label() == text).unwrap_or_default();
-            let t = &mut p.tasks[idx];
+            let t = task_mut(p, id)?;
             t.constraint.kind = kind;
             if kind.needs_date() && t.constraint.date.is_none() {
                 t.constraint.date = if kind.is_start_constraint() { t.sched.start } else { t.sched.finish };
@@ -471,9 +475,9 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
             }
         }
         ConstraintDate => {
-            let finish = !p.tasks[idx].constraint.kind.is_start_constraint();
+            let finish = !task_mut(p, id)?.constraint.kind.is_start_constraint();
             let d = parse_date(p, text, finish)?;
-            let t = &mut p.tasks[idx];
+            let t = task_mut(p, id)?;
             t.constraint.date = d;
             if d.is_some() && !t.constraint.kind.needs_date() {
                 t.constraint.kind = ConstraintKind::Snet;
@@ -482,17 +486,17 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
                 t.constraint.kind = ConstraintKind::Asap;
             }
         }
-        Deadline => p.tasks[idx].deadline = parse_date(p, text, true)?,
-        Priority => p.tasks[idx].priority = text.trim().parse::<u16>().map_err(|_| "priority must be 0-1000")?.min(1000),
+        Deadline => task_mut(p, id)?.deadline = parse_date(p, text, true)?,
+        Priority => task_mut(p, id)?.priority = text.trim().parse::<u16>().map_err(|_| "priority must be 0-1000")?.min(1000),
         TaskType => {
-            p.tasks[idx].task_type = match text {
+            task_mut(p, id)?.task_type = match text {
                 "Fixed Duration" => plancraft_core::model::TaskType::FixedDuration,
                 "Fixed Work" => plancraft_core::model::TaskType::FixedWork,
                 _ => plancraft_core::model::TaskType::FixedUnits,
             }
         }
         EstimateMethod => {
-            let t = &mut p.tasks[idx];
+            let t = task_mut(p, id)?;
             let work_guess = t.sched.work.max(t.duration);
             t.estimate = match text {
                 "Complexity" => Some(Estimate::Complexity { points: 3.0 }),
@@ -505,11 +509,11 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
         }
         Points => {
             let v: f64 = text.trim().parse().map_err(|_| "points must be a number")?;
-            p.tasks[idx].estimate = Some(Estimate::Complexity { points: v.max(0.0) });
+            task_mut(p, id)?.estimate = Some(Estimate::Complexity { points: v.max(0.0) });
         }
         Optimistic | MostLikely | Pessimistic => {
             let w = parse_work_text(p, text)?;
-            let t = &mut p.tasks[idx];
+            let t = task_mut(p, id)?;
             let (mut o, mut m, mut pe) = match t.estimate {
                 Some(Estimate::ThreePoint { optimistic, most_likely, pessimistic }) => (optimistic, most_likely, pessimistic),
                 _ => (w, w, w),
@@ -521,8 +525,8 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
             }
             t.estimate = Some(Estimate::ThreePoint { optimistic: o, most_likely: m, pessimistic: pe });
         }
-        Deliverable => p.tasks[idx].deliverable = text.to_string(),
-        Notes => p.tasks[idx].notes = text.to_string(),
+        Deliverable => task_mut(p, id)?.deliverable = text.to_string(),
+        Notes => task_mut(p, id)?.notes = text.to_string(),
         _ => return Err("this field is calculated and cannot be edited".into()),
     }
     Ok(())

@@ -49,6 +49,29 @@ impl From<plancraft_core::io::FileError> for ToolError {
 
 pub type ToolResult<T = Value> = Result<T, ToolError>;
 
+/// An error for something that was just resolved or inserted but is gone: a bug, reported
+/// instead of panicking.
+pub fn missing(what: &str) -> ToolError {
+    ToolError(format!("internal error: {what} disappeared while the tool ran; please report this"))
+}
+
+/// The task at row `i`.
+pub fn row(p: &Project, i: usize) -> ToolResult<&Task> {
+    p.tasks.get(i).ok_or_else(|| missing("a task row"))
+}
+
+/// The task at row `i`, mutably.
+pub fn row_mut(p: &mut Project, i: usize) -> ToolResult<&mut Task> {
+    p.tasks.get_mut(i).ok_or_else(|| missing("a task row"))
+}
+
+/// Sets `key` on a JSON object (no-op on anything else, where `v[key] = ..` would panic).
+pub fn set(v: &mut Value, key: &str, value: Value) {
+    if let Some(m) = v.as_object_mut() {
+        m.insert(key.to_string(), value);
+    }
+}
+
 /// Shorthand for an error result.
 pub fn err<T>(msg: impl Into<String>) -> ToolResult<T> {
     Err(ToolError(msg.into()))
@@ -487,7 +510,7 @@ pub fn resolve_task_with(p: &Project, v: &Value, keys: Option<&TaskKeys>) -> Too
             let exact: Vec<&Task> = p.tasks.iter().filter(|x| x.name == t).collect();
             let matches = if exact.is_empty() { p.tasks.iter().filter(|x| x.name.trim().eq_ignore_ascii_case(t)).collect() } else { exact };
             match matches.len() {
-                1 => Ok(matches[0].id),
+                1 => matches.first().map(|x| x.id).ok_or_else(|| missing("a matching task")),
                 0 => err(format!("no task named '{t}' (use list_tasks to find task ids)")),
                 _ => err(format!(
                     "task name '{t}' is ambiguous; matching ids: {}. Use the numeric id instead",

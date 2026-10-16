@@ -234,10 +234,9 @@ impl McpServer {
     ///
     /// Unknown tools and failures are reported as results with `isError: true`.
     pub fn call_tool(&self, name: &str, arguments: &Value) -> Value {
-        let Some(&idx) = self.tool_index.get(name) else {
+        let Some(tool) = self.tool_index.get(name).and_then(|&i| self.tools.get(i)) else {
             return tool_error_result(format!("unknown tool '{name}'"));
         };
-        let tool = &self.tools[idx];
         let empty = Map::new();
         let map = arguments.as_object().unwrap_or(&empty);
         if let Err(e) = tool.validate(map) {
@@ -349,14 +348,14 @@ impl Ctx<'_> {
     pub fn read<R>(&self, a: &Args, f: impl FnOnce(&Document) -> ToolResult<R>) -> ToolResult<R> {
         let ws = self.server.lock();
         let i = Self::doc_index(&ws, a)?;
-        f(&ws.docs[i])
+        f(doc_at(&ws, i)?)
     }
 
     /// Runs `f` on the selected document mutably, without undo support (e.g. save).
     pub fn with_doc<R>(&self, a: &Args, f: impl FnOnce(&mut Document) -> ToolResult<R>) -> ToolResult<R> {
         let mut ws = self.server.lock();
         let i = Self::doc_index(&ws, a)?;
-        f(&mut ws.docs[i])
+        f(doc_at_mut(&mut ws, i)?)
     }
 
     /// Applies an undoable edit through [`Document::try_edit`] and renders the result.
@@ -373,12 +372,11 @@ impl Ctx<'_> {
     ) -> ToolResult<Value> {
         let mut ws = self.server.lock();
         let i = Self::doc_index(&ws, a)?;
-        let doc = &mut ws.docs[i];
+        let doc = doc_at_mut(&mut ws, i)?;
         let path = doc.path.clone();
-        let r = doc.try_edit(label, ChangeSource::Agent, |p| match catch_unwind(AssertUnwindSafe(|| f(p, path.as_deref()))) {
-            Ok(r) => r,
-            Err(_) => err("internal error while applying the edit; the change was rolled back"),
-        })?;
+        // `try_edit` validates the result against the core limits and rolls back on any error,
+        // including a panic inside `f` (turned into an error by the core guard).
+        let r = doc.try_edit(label, ChangeSource::Agent, |p| f(p, path.as_deref()))?;
         self.mark_changed();
         let mut out = view(doc, r)?;
         if let Value::Object(m) = &mut out {
@@ -386,4 +384,14 @@ impl Ctx<'_> {
         }
         Ok(out)
     }
+}
+
+/// The open document at index `i`.
+pub fn doc_at(ws: &Workspace, i: usize) -> ToolResult<&Document> {
+    ws.docs.get(i).ok_or_else(|| crate::args::missing("a document"))
+}
+
+/// The open document at index `i`, mutably.
+pub fn doc_at_mut(ws: &mut Workspace, i: usize) -> ToolResult<&mut Document> {
+    ws.docs.get_mut(i).ok_or_else(|| crate::args::missing("a document"))
 }

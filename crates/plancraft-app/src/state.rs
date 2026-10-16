@@ -192,7 +192,7 @@ impl GanttState {
         let anchor_t = self.time_at(chart_left, anchor_x);
         let idx = Self::ZOOMS.iter().position(|z| *z >= self.px_per_day - 0.01).unwrap_or(5) as i32;
         let n = (idx + dir).clamp(0, Self::ZOOMS.len() as i32 - 1) as usize;
-        self.px_per_day = Self::ZOOMS[n];
+        self.px_per_day = Self::ZOOMS.get(n).copied().unwrap_or(self.px_per_day);
         // Keep the anchor time under the cursor.
         let days = (anchor_x - chart_left) / self.px_per_day;
         self.left = anchor_t - Duration::minutes((days * 1440.0) as i64);

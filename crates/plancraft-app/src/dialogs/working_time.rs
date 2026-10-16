@@ -30,7 +30,7 @@ impl WorkingTime {
         let today = chrono::Local::now().date_naive();
         Self {
             calendar: p.calendar,
-            month: today.with_day(1).unwrap(),
+            month: today.with_day(1).unwrap_or(today),
             selected_day: Some(today),
             tab: 0,
             week_text: Vec::new(),
@@ -54,11 +54,11 @@ impl WorkingTime {
         let wc = WorkCal::single(cal);
         ui.horizontal(|ui| {
             if ui.small_button("⏴").clicked() {
-                self.month = (self.month - Duration::days(1)).with_day(1).unwrap();
+                self.month = (self.month - Duration::days(1)).with_day(1).unwrap_or(self.month);
             }
             ui.label(RichText::new(self.month.format("%B %Y").to_string()).strong());
             if ui.small_button("⏵").clicked() {
-                self.month = (self.month + Duration::days(32)).with_day(1).unwrap();
+                self.month = (self.month + Duration::days(32)).with_day(1).unwrap_or(self.month);
             }
         });
         let cell = 30.0;
@@ -163,16 +163,21 @@ impl WorkingTime {
                     });
                     if cal.id != doc.project.calendar && ui.button("Use as Project Calendar").clicked() {
                         let id = cal.id;
-                        doc.edit("Set Project Calendar", |p| p.calendar = id);
+                        if let Err(e) = doc.edit("Set Project Calendar", |p| p.calendar = id) {
+                            self.error = Some(e.to_string());
+                        }
                     }
                     ui.separator();
                     ui.add(egui::TextEdit::singleline(&mut self.new_cal_name).hint_text("new calendar name").desired_width(140.0));
                     if ui.button("Create (copy)").clicked() && !self.new_cal_name.trim().is_empty() {
                         let name = self.new_cal_name.trim().to_string();
                         let from = cal.id;
-                        if let Ok(id) = doc.try_edit("Create Calendar", ChangeSource::User, |p| p.add_calendar(name, Some(from))) {
-                            self.calendar = id;
-                            self.new_cal_name.clear();
+                        match doc.try_edit("Create Calendar", ChangeSource::User, |p| p.add_calendar(name, Some(from))) {
+                            Ok(id) => {
+                                self.calendar = id;
+                                self.new_cal_name.clear();
+                            }
+                            Err(e) => self.error = Some(e.to_string()),
                         }
                     }
                 });
@@ -215,11 +220,16 @@ impl WorkingTime {
                             });
                             if let Some(i) = remove {
                                 let id = cal.id;
-                                doc.edit("Remove Calendar Exception", |p| {
-                                    if let Some(c) = p.calendars.iter_mut().find(|c| c.id == id) {
+                                let r = doc.edit("Remove Calendar Exception", |p| {
+                                    if let Some(c) = p.calendars.iter_mut().find(|c| c.id == id)
+                                        && i < c.exceptions.len()
+                                    {
                                         c.exceptions.remove(i);
                                     }
                                 });
+                                if let Err(e) = r {
+                                    self.error = Some(e.to_string());
+                                }
                             }
                             ui.separator();
                             ui.horizontal(|ui| {
@@ -252,12 +262,12 @@ impl WorkingTime {
                                                 yearly: self.ex_yearly,
                                             };
                                             let id = cal.id;
-                                            doc.edit("Add Calendar Exception", |p| {
+                                            let r = doc.edit("Add Calendar Exception", |p| {
                                                 if let Some(c) = p.calendars.iter_mut().find(|c| c.id == id) {
                                                     c.exceptions.push(ex);
                                                 }
                                             });
-                                            self.error = None;
+                                            self.error = r.err().map(|e| e.to_string());
                                         }
                                         (_, _, None) => self.error = Some("Working times look like 08:00-12:00, 13:00-17:00".into()),
                                         _ => self.error = Some("Enter start/end dates as YYYY-MM-DD (end on or after start)".into()),
@@ -267,9 +277,9 @@ impl WorkingTime {
                         } else {
                             ui.label("Working times for each day of the default work week (comma-separated, empty = nonworking):");
                             egui::Grid::new("wt_week").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
-                                for (i, wd) in WEEKDAYS.iter().enumerate() {
+                                for (wd, text) in WEEKDAYS.iter().zip(self.week_text.iter_mut()) {
                                     ui.label(format!("{wd:?}"));
-                                    ui.add(egui::TextEdit::singleline(&mut self.week_text[i]).desired_width(260.0).hint_text("nonworking"));
+                                    ui.add(egui::TextEdit::singleline(text).desired_width(260.0).hint_text("nonworking"));
                                     ui.end_row();
                                 }
                             });
@@ -277,8 +287,8 @@ impl WorkingTime {
                                 if ui.button("Apply Work Week").clicked() {
                                     let mut week = WorkWeek::default();
                                     let mut ok = true;
-                                    for (i, wd) in WEEKDAYS.iter().enumerate() {
-                                        let txt = self.week_text[i].trim();
+                                    for (wd, txt) in WEEKDAYS.iter().zip(self.week_text.iter()) {
+                                        let txt = txt.trim();
                                         if txt.is_empty() {
                                             continue;
                                         }
@@ -292,13 +302,13 @@ impl WorkingTime {
                                     }
                                     if ok {
                                         let id = cal.id;
-                                        doc.edit("Change Work Week", |p| {
+                                        let r = doc.edit("Change Work Week", |p| {
                                             if let Some(c) = p.calendars.iter_mut().find(|c| c.id == id) {
                                                 c.week = week;
                                             }
                                         });
                                         self.week_loaded_for = None;
-                                        self.error = None;
+                                        self.error = r.err().map(|e| e.to_string());
                                     } else {
                                         self.error = Some("Working times look like 08:00-12:00, 13:00-17:00".into());
                                     }
@@ -325,7 +335,9 @@ impl WorkingTime {
                     }
                     if cal.id != doc.project.calendar && ui.button("Delete Calendar").clicked() {
                         let id = cal.id;
-                        let _ = doc.try_edit("Delete Calendar", ChangeSource::User, |p| p.delete_calendar(id));
+                        if let Err(e) = doc.try_edit("Delete Calendar", ChangeSource::User, |p| p.delete_calendar(id)) {
+                            self.error = Some(e.to_string());
+                        }
                         self.calendar = doc.project.calendar;
                     }
                 });

@@ -9,6 +9,7 @@ use plancraft_core::workspace::{ChangeSource, Document};
 
 use crate::columns::{self, CellCtx, TaskCol};
 use crate::commands::Command;
+use crate::edit::EditExt;
 use crate::state::{ToastKind, UiState};
 use crate::theme;
 use crate::views::gantt_chart::{self, ChartAction, ChartInput};
@@ -47,13 +48,13 @@ pub fn task_table(
         let collapsed = &st.collapsed;
         let is_over = |id: TaskId| over_tasks.contains(&id);
         let ctx = CellCtx { overallocated: &is_over };
-        let is_selected = |r: usize| sel.tasks.contains(&p.tasks[rows[r]].id);
+        let is_selected = |r: usize| super::task_at(p, rows, r).is_some_and(|t| sel.tasks.contains(&t.id));
         let mut cell = |r: usize, c: usize| {
-            let idx = rows[r];
-            let mut cell = columns::cell(cols[c], p, idx, &ctx);
-            if cols[c] == TaskCol::Name && cell.expander.is_some() {
-                cell.expander = Some(!collapsed.contains(&p.tasks[idx].id));
-            } else if cols[c] == TaskCol::Name {
+            let (Some(&idx), Some(&col)) = (rows.get(r), cols.get(c)) else { return grid::Cell::default() };
+            let mut cell = columns::cell(col, p, idx, &ctx);
+            if col == TaskCol::Name && cell.expander.is_some() {
+                cell.expander = Some(!p.tasks.get(idx).is_some_and(|t| collapsed.contains(&t.id)));
+            } else if col == TaskCol::Name {
                 cell.indent += 14.0;
             }
             cell
@@ -70,22 +71,22 @@ pub fn task_table(
                 out.push(Command::TaskInfo);
             }
             GridEvent::ToggleExpand(row) => {
-                let id = doc.project.tasks[rows[row]].id;
+                let Some(id) = super::task_at(&doc.project, rows, row).map(|t| t.id) else { continue };
                 if !st.collapsed.remove(&id) {
                     st.collapsed.insert(id);
                 }
             }
             GridEvent::Commit { row, col, text } => {
-                let column = cols[col];
+                let (Some(&column), Some(def)) = (cols.get(col), defs.get(col)) else { continue };
                 if row < rows.len() {
-                    let id = doc.project.tasks[rows[row]].id;
-                    let label = format!("Edit {}", defs[col].title);
-                    if let Err(e) = doc.try_edit(&label, ChangeSource::User, |p| columns::commit(column, p, id, &text)) {
+                    let Some(id) = super::task_at(&doc.project, rows, row).map(|t| t.id) else { continue };
+                    let label = format!("Edit {}", def.title);
+                    if let Err(e) = doc.edit_msg(&label, |p| columns::commit(column, p, id, &text)) {
                         st.toast(ToastKind::Error, e);
                     }
                 } else if !text.is_empty() {
                     // Typing into a blank row creates a task.
-                    let r = doc.try_edit("New Task", ChangeSource::User, |p| {
+                    let r = doc.edit_msg("New Task", |p| {
                         let name = if column == TaskCol::Name { text.clone() } else { "New Task".to_string() };
                         let id = p.add_task(name, None);
                         if column != TaskCol::Name {
@@ -191,7 +192,7 @@ pub fn apply_chart_actions(doc: &mut Document, st: &mut UiState, rows: &[usize],
     for a in actions {
         match a {
             ChartAction::Select { task, shift, ctrl } => {
-                if let Some(r) = rows.iter().position(|&i| doc.project.tasks[i].id == task) {
+                if let Some(r) = rows.iter().position(|&i| doc.project.tasks.get(i).is_some_and(|t| t.id == task)) {
                     super::select_row(&mut st.sel, &doc.project, rows, r, shift, ctrl);
                     st.task_grid.cursor = Some((r, st.task_grid.cursor.map(|c| c.1).unwrap_or(2)));
                 } else {
@@ -203,9 +204,8 @@ pub fn apply_chart_actions(doc: &mut Document, st: &mut UiState, rows: &[usize],
                 out.push(Command::TaskInfo);
             }
             ChartAction::MoveTo { task, start } => {
-                let r = doc.try_edit("Move Task", ChangeSource::User, |p| {
-                    let idx = p.task_index(task).ok_or("task not found")?;
-                    let t = &mut p.tasks[idx];
+                let r = doc.edit_msg("Move Task", |p| {
+                    let t = p.task_mut(task).ok_or("task not found")?;
                     if t.mode == ScheduleMode::Manual {
                         let dur = t.sched.finish.zip(t.sched.start).map(|(f, s)| f - s).unwrap_or_default();
                         t.manual_start = Some(start);
@@ -222,9 +222,9 @@ pub fn apply_chart_actions(doc: &mut Document, st: &mut UiState, rows: &[usize],
                 }
             }
             ChartAction::SetFinish { task, finish } => {
-                let r = doc.try_edit("Change Duration", ChangeSource::User, |p| {
+                let r = doc.edit_msg("Change Duration", |p| {
                     let idx = p.task_index(task).ok_or("task not found")?;
-                    let start = p.tasks[idx].sched.start.ok_or("task has no start")?;
+                    let start = p.task(task).and_then(|t| t.sched.start).ok_or("task has no start")?;
                     let cal = task_calendar(p, idx);
                     let mut mins = cal.between(start, finish).max(0);
                     let day = p.settings.time.minutes_per_day.max(1);
@@ -233,8 +233,11 @@ pub fn apply_chart_actions(doc: &mut Document, st: &mut UiState, rows: &[usize],
                     } else {
                         mins = (mins + 30) / 60 * 60;
                     }
-                    if p.tasks[idx].mode == ScheduleMode::Manual {
-                        p.tasks[idx].manual_finish = Some(cal.add(start, mins));
+                    let manual_finish = cal.add(start, mins);
+                    if let Some(t) = p.task_mut(task)
+                        && t.mode == ScheduleMode::Manual
+                    {
+                        t.manual_finish = Some(manual_finish);
                     }
                     p.set_duration(task, mins, false).map_err(|e| e.to_string())
                 });
@@ -243,7 +246,9 @@ pub fn apply_chart_actions(doc: &mut Document, st: &mut UiState, rows: &[usize],
                 }
             }
             ChartAction::SetProgress { task, pct } => {
-                let _ = doc.try_edit("Update Progress", ChangeSource::User, |p| p.set_percent_complete(task, pct));
+                if let Err(e) = doc.try_edit("Update Progress", ChangeSource::User, |p| p.set_percent_complete(task, pct)) {
+                    st.toast(ToastKind::Warning, e.to_string());
+                }
             }
             ChartAction::Link { from, to } => {
                 let r = doc.try_edit("Link Tasks", ChangeSource::User, |p| p.link(from.into(), to, LinkType::FS, Lag::None));

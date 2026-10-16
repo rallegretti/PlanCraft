@@ -7,9 +7,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use crate::guard;
 use crate::io::{self, FileResult};
+use crate::limits;
 use crate::model::Project;
-use crate::schedule::recalculate;
+use crate::ops::{PlanError, PlanResult};
+use crate::schedule::{recalculate, try_recalculate};
 
 const UNDO_LIMIT: usize = 200;
 
@@ -39,13 +42,25 @@ pub struct Document {
     /// Incremented on every change (edits, undo, redo, reload).
     pub revision: u64,
     pub last_change: Option<(String, ChangeSource)>,
+    /// What opening the file adjusted (values clamped into range), shown once by the app.
+    pub load_notes: Vec<String>,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
 }
 
 impl Document {
     pub fn new(handle: u64, project: Project, path: Option<PathBuf>) -> Self {
-        Self { handle, path, project, dirty: false, revision: 1, last_change: None, undo: Vec::new(), redo: Vec::new() }
+        Self {
+            handle,
+            path,
+            project,
+            dirty: false,
+            revision: 1,
+            last_change: None,
+            load_notes: Vec::new(),
+            undo: Vec::new(),
+            redo: Vec::new(),
+        }
     }
 
     /// Window/tab title: file name or project name, with `*` when modified.
@@ -59,50 +74,56 @@ impl Document {
         if self.dirty { format!("{base}*") } else { base }
     }
 
-    fn push_undo(&mut self, label: &str, source: ChangeSource) {
-        self.undo.push(Snapshot { label: label.into(), source, project: self.project.clone() });
-        if self.undo.len() > UNDO_LIMIT {
-            self.undo.remove(0);
-        }
-        self.redo.clear();
-    }
-
     fn touched(&mut self, label: &str, source: ChangeSource) {
         self.dirty = true;
-        self.revision += 1;
+        self.revision = self.revision.wrapping_add(1);
         self.last_change = Some((label.into(), source));
     }
 
     /// Applies an edit with undo support and recalculates the schedule.
-    pub fn edit<R>(&mut self, label: &str, f: impl FnOnce(&mut Project) -> R) -> R {
+    ///
+    /// The edit is validated against [`crate::limits`]; if it leaves the project out of range, or
+    /// anything panics while it runs, the project is restored and an error returned.
+    pub fn edit<R>(&mut self, label: &str, f: impl FnOnce(&mut Project) -> R) -> PlanResult<R> {
         self.edit_as(label, ChangeSource::User, f)
     }
 
-    pub fn edit_as<R>(&mut self, label: &str, source: ChangeSource, f: impl FnOnce(&mut Project) -> R) -> R {
-        self.push_undo(label, source);
-        let r = f(&mut self.project);
-        recalculate(&mut self.project);
-        self.touched(label, source);
-        r
+    pub fn edit_as<R>(&mut self, label: &str, source: ChangeSource, f: impl FnOnce(&mut Project) -> R) -> PlanResult<R> {
+        self.try_edit(label, source, |p| Ok::<R, PlanError>(f(p)))
     }
 
     /// Applies a fallible edit; on error the project is restored and no undo step is recorded.
-    pub fn try_edit<R, E>(&mut self, label: &str, source: ChangeSource, f: impl FnOnce(&mut Project) -> Result<R, E>) -> Result<R, E> {
+    pub fn try_edit<R, E: From<PlanError>>(
+        &mut self,
+        label: &str,
+        source: ChangeSource,
+        f: impl FnOnce(&mut Project) -> Result<R, E>,
+    ) -> Result<R, E> {
         let before = self.project.clone();
-        match f(&mut self.project) {
-            Ok(r) => {
+        let project = &mut self.project;
+        let outcome = guard::catch(&format!("edit '{label}'"), || -> Result<R, E> {
+            let r = f(project)?;
+            limits::check_edit(project)?;
+            try_recalculate(project).map_err(|p| E::from(PlanError::from(p)))?;
+            Ok(r)
+        });
+        match outcome {
+            Ok(Ok(r)) => {
                 self.undo.push(Snapshot { label: label.into(), source, project: before });
                 if self.undo.len() > UNDO_LIMIT {
                     self.undo.remove(0);
                 }
                 self.redo.clear();
-                recalculate(&mut self.project);
                 self.touched(label, source);
                 Ok(r)
             }
-            Err(e) => {
+            Ok(Err(e)) => {
                 self.project = before;
                 Err(e)
+            }
+            Err(panicked) => {
+                self.project = before;
+                Err(E::from(PlanError::from(panicked)))
             }
         }
     }
@@ -184,7 +205,7 @@ impl Document {
         let warnings = io::refresh_external(&mut self.project, self.path.as_deref());
         recalculate(&mut self.project);
         if self.project.external_projects != before.external_projects {
-            self.revision += 1;
+            self.revision = self.revision.wrapping_add(1);
         }
         warnings
     }
@@ -207,12 +228,12 @@ impl Workspace {
 
     /// Adds a document and makes it active. Returns its handle.
     pub fn add(&mut self, mut project: Project, path: Option<PathBuf>) -> u64 {
-        self.next_handle += 1;
+        self.next_handle = self.next_handle.saturating_add(1);
         recalculate(&mut project);
         let mut doc = Document::new(self.next_handle, project, path);
         let _ = doc.refresh_external();
         self.docs.push(doc);
-        self.active = Some(self.docs.len() - 1);
+        self.active = self.docs.len().checked_sub(1);
         self.next_handle
     }
 
@@ -222,12 +243,17 @@ impl Workspace {
         let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         if let Some(i) =
             self.docs.iter().position(|d| d.path.as_ref().is_some_and(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()) == abs))
+            && let Some(doc) = self.docs.get(i)
         {
             self.active = Some(i);
-            return Ok(self.docs[i].handle);
+            return Ok(doc.handle);
         }
-        let project = io::load(&abs)?;
-        Ok(self.add(project, Some(abs)))
+        let (project, notes) = io::load_with_notes(&abs)?;
+        let handle = self.add(project, Some(abs));
+        if let Some(doc) = self.active_doc_mut() {
+            doc.load_notes = notes;
+        }
+        Ok(handle)
     }
 
     pub fn close(&mut self, handle: u64) -> bool {
@@ -238,7 +264,7 @@ impl Workspace {
         self.active = match self.active {
             _ if self.docs.is_empty() => None,
             Some(a) if a > i => Some(a - 1),
-            Some(a) if a == i => Some(i.min(self.docs.len() - 1)),
+            Some(a) if a == i => Some(i.min(self.docs.len().saturating_sub(1))),
             other => other,
         };
         true
@@ -286,11 +312,11 @@ mod tests {
         let h = ws.add(Project::new("P", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
         let i = ws.index_of(h).unwrap();
         let doc = &mut ws.docs[i];
-        doc.edit("Add task", |p| p.add_task("A", None));
+        doc.edit("Add task", |p| p.add_task("A", None)).unwrap();
         assert_eq!(doc.project.tasks.len(), 1);
-        let r: Result<(), &str> = doc.try_edit("Bad", ChangeSource::Agent, |p| {
+        let r: PlanResult<()> = doc.try_edit("Bad", ChangeSource::Agent, |p| {
             p.add_task("B", None);
-            Err("nope")
+            Err(PlanError::Invalid("nope".into()))
         });
         assert!(r.is_err());
         assert_eq!(doc.project.tasks.len(), 1);
@@ -299,5 +325,28 @@ mod tests {
         assert!(doc.redo());
         assert_eq!(doc.project.tasks.len(), 1);
         assert_eq!(doc.title(), "P*");
+    }
+
+    #[test]
+    fn panicking_and_out_of_range_edits_roll_back() {
+        let mut ws = Workspace::default();
+        let h = ws.add(Project::new("P", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+        let i = ws.index_of(h).unwrap();
+        let doc = &mut ws.docs[i];
+        let id = doc.edit("Add task", |p| p.add_task("A", None)).unwrap();
+        let before = doc.project.clone();
+        let steps = doc.history().len();
+
+        let r = doc.edit("Explode", |p| {
+            p.tasks.clear();
+            panic!("bug in an edit")
+        });
+        assert!(matches!(r, Err(PlanError::Internal(m)) if m.contains("bug in an edit")));
+        assert_eq!(doc.project, before, "a panicking edit is rolled back");
+
+        let r = doc.edit("Too long", |p| p.task_mut(id).map(|t| t.duration = crate::limits::MAX_MINUTES * 2));
+        assert!(matches!(r, Err(PlanError::Limit(_))));
+        assert_eq!(doc.project, before, "an out-of-range edit is rolled back");
+        assert_eq!(doc.history().len(), steps, "failed edits leave no undo step");
     }
 }

@@ -45,7 +45,7 @@ impl RpcError {
     pub fn to_json(&self) -> Value {
         let mut e = json!({ "code": self.code, "message": self.message });
         if let Some(d) = &self.data {
-            e["data"] = d.clone();
+            crate::args::set(&mut e, "data", d.clone());
         }
         e
     }

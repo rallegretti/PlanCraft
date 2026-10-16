@@ -4,7 +4,7 @@
 use chrono::{Datelike, Duration, NaiveDate};
 use egui::{Align2, Color32, FontId, Rect, Sense, Stroke, Ui, pos2, vec2};
 use plancraft_core::prelude::*;
-use plancraft_core::workload::{Granularity, workload};
+use plancraft_core::workload::{AssignmentLoad, Granularity, ResourceLoad, workload};
 use plancraft_core::workspace::Document;
 
 use crate::commands::Command;
@@ -16,9 +16,9 @@ use crate::widgets::grid::{self, Cell, ColumnDef, GridConfig, GridEvent, scrollb
 pub const PERIOD_W: f32 = 64.0;
 
 #[derive(Clone, Copy)]
-enum Row {
-    Resource(usize),
-    Assignment(usize, usize),
+enum Row<'a> {
+    Resource(&'a Resource, &'a ResourceLoad),
+    Assignment(&'a Resource, &'a AssignmentLoad),
 }
 
 pub fn period_label(g: Granularity, d: NaiveDate) -> String {
@@ -90,12 +90,11 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
 
     // Rows.
     let mut rows: Vec<Row> = Vec::new();
-    for (ri, r) in p.resources.iter().enumerate() {
-        rows.push(Row::Resource(ri));
+    // The report lists resources in project order.
+    for (r, rl) in p.resources.iter().zip(&report.resources) {
+        rows.push(Row::Resource(r, rl));
         if !st.collapsed_resources.contains(&r.id) {
-            for ai in 0..report.resources[ri].assignments.len() {
-                rows.push(Row::Assignment(ri, ai));
-            }
+            rows.extend(rl.assignments.iter().map(|a| Row::Assignment(r, a)));
         }
     }
 
@@ -115,11 +114,10 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     let output = {
         let sel = &st.sel;
         let collapsed = &st.collapsed_resources;
-        let is_sel = |r: usize| matches!(rows[r], Row::Resource(ri) if sel.resources.contains(&p.resources[ri].id));
-        let mut cell = |r: usize, c: usize| match rows[r] {
-            Row::Resource(ri) => {
-                let res = &p.resources[ri];
-                let rl = &report.resources[ri];
+        let is_sel = |r: usize| matches!(rows.get(r), Some(Row::Resource(res, _)) if sel.resources.contains(&res.id));
+        let mut cell = |r: usize, c: usize| match rows.get(r).copied() {
+            None => Cell::default(),
+            Some(Row::Resource(res, rl)) => {
                 let over = rl.overallocated;
                 let mut cl = if c == 0 {
                     Cell {
@@ -146,8 +144,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                 }
                 cl
             }
-            Row::Assignment(ri, ai) => {
-                let a = &report.resources[ri].assignments[ai];
+            Some(Row::Assignment(_, a)) => {
                 if c == 0 {
                     Cell { text: a.task_name.clone(), indent: 30.0, ..Default::default() }
                 } else {
@@ -160,19 +157,20 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     for ev in output.events {
         match ev {
             GridEvent::ToggleExpand(r) | GridEvent::Activate { row: r, .. } => {
-                if let Row::Resource(ri) = rows[r] {
-                    let id = p.resources[ri].id;
+                if let Some(Row::Resource(res, _)) = rows.get(r) {
+                    let id = res.id;
                     if !st.collapsed_resources.remove(&id) {
                         st.collapsed_resources.insert(id);
                     }
                 }
             }
-            GridEvent::Select { row, .. } | GridEvent::CursorRow { row, .. } => match rows[row] {
-                Row::Resource(ri) => st.sel.select_resource(p.resources[ri].id),
-                Row::Assignment(ri, ai) => {
-                    st.sel.select_resource(p.resources[ri].id);
-                    st.sel.select_task(report.resources[ri].assignments[ai].task);
+            GridEvent::Select { row, .. } | GridEvent::CursorRow { row, .. } => match rows.get(row) {
+                Some(Row::Resource(res, _)) => st.sel.select_resource(res.id),
+                Some(Row::Assignment(res, a)) => {
+                    st.sel.select_resource(res.id);
+                    st.sel.select_task(a.task);
                 }
+                None => {}
             },
             _ => {}
         }
@@ -218,11 +216,11 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
             let x = right.left() + i as f32 * PERIOD_W;
             let cr = Rect::from_min_size(pos2(x, y), vec2(PERIOD_W, rh));
             let (val, util, bold) = match row {
-                Row::Resource(ri) => {
-                    let pl = &report.resources[*ri].periods[i];
-                    (pl.load, Some(pl.utilization()), true)
+                Row::Resource(_, rl) => {
+                    let pl = rl.periods.get(i);
+                    (pl.map_or(0.0, |pl| pl.load), pl.map(|pl| pl.utilization()), true)
                 }
-                Row::Assignment(ri, ai) => (report.resources[*ri].assignments[*ai].load[i], None, false),
+                Row::Assignment(_, a) => (a.load.get(i).copied().unwrap_or(0.0), None, false),
             };
             if let Some(u) = util {
                 bp.rect_filled(cr.shrink(0.5), 0.0, theme::utilization_color(u));

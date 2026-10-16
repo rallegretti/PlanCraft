@@ -3,8 +3,9 @@
 use chrono::NaiveDate;
 use egui::{Context, RichText};
 use plancraft_core::prelude::*;
-use plancraft_core::workspace::{ChangeSource, Document};
+use plancraft_core::workspace::Document;
 
+use crate::edit::EditExt;
 use crate::format;
 use crate::theme;
 
@@ -243,7 +244,7 @@ impl ResourceInfo {
                             Err(e) => self.error = Some(e),
                             Ok(()) => {
                                 let id = self.id;
-                                let r = doc.try_edit(&format!("Resource Information: {}", draft.name), ChangeSource::User, |p| {
+                                let r = doc.edit_msg(&format!("Resource Information: {}", draft.name), |p| {
                                     let slot = p.resource_mut(id).ok_or("resource was deleted")?;
                                     *slot = draft;
                                     Ok::<(), String>(())

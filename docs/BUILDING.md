@@ -1,6 +1,6 @@
 # Building and packaging PlanCraft
 
-Release packages are made with `cargo xtask`. This is a small Rust program in `xtask/` that builds the app and packages it for each platform. When you ask for a platform other than the one you're on, it does the work on a build machine over SSH. No cloud CI is involved.
+Release packages are made with `cargo xtask`. This is a small Rust program in `xtask/` that builds the app and packages it for each platform. When you ask for a platform other than the one you're on, it does the work on a build machine over SSH. Releases are built only on your own machines; GitHub Actions just runs the checks below.
 
 | Platform | Package | Contents |
 |---|---|---|
@@ -32,6 +32,24 @@ cargo xtask icons
 ```
 
 Regenerates `assets/plancraft.ico`, the icon embedded in `PlanCraft.exe`, from the logo. Run it after changing the logo, then commit the new file.
+
+## Checks
+
+```bash
+cargo xtask ci
+```
+
+Runs every quality gate, the same ones GitHub Actions runs (`.github/workflows/ci.yml`):
+
+- `cargo fmt --check`;
+- `cargo clippy --workspace --all-targets -- -D warnings`, including the never-crash lints (`unwrap`, `expect`, `panic!` and indexing are denied in shipped code);
+- `cargo test --workspace`: unit tests, the hostile-input sweeps (`crates/plancraft-core/tests/hostile.rs`, `crates/plancraft-mcp/tests/garbage.rs`) and the Microsoft Project parity tests (`crates/plancraft-core/tests/ms_parity.rs`);
+- the scheduler speed gate in release mode (200 tasks must recalculate in under 10 ms);
+- `cargo deny check`: licences, security advisories, banned crates (nothing that compiles C) and sources. Install it once with `cargo install --locked cargo-deny`.
+
+GitHub Actions runs Linux on every push and pull request, and macOS and Windows on pushes to `main`, weekly and on demand (*Actions ▸ CI ▸ Run workflow*). The repository is private, and GitHub bills macOS and Windows minutes at a higher rate than Linux minutes; the comment at the top of the workflow says how to run all three on every pull request instead.
+
+The property tests use random inputs. To search harder locally, raise the number of cases, for example `PROPTEST_CASES=5000 cargo test -p plancraft-core --test hostile`. When one fails, proptest saves the failing input in a `*.proptest-regressions` file next to the test; commit it so the case is always re-run.
 
 ## Build hosts
 

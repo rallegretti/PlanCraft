@@ -106,7 +106,7 @@ fn create_milestone(ctx: &Ctx, a: &Args) -> ToolResult {
             let (index, level) = insert_position(p, a)?;
             let id = insert_new_task(p, &name, index, level, true);
             {
-                let t = p.task_mut(id).expect("inserted");
+                let t = p.task_mut(id).ok_or_else(|| missing("inserted"))?;
                 t.show_on_timeline = a.bool("show_on_timeline")?.unwrap_or(true);
             }
             // Reuse the generic field handling for deliverable, deadline, notes.
@@ -118,7 +118,7 @@ fn create_milestone(ctx: &Ctx, a: &Args) -> ToolResult {
             }
             if let Some(d) = a.get("date") {
                 let dt = parse_dt(p, d, true, "date")?;
-                p.task_mut(id).expect("inserted").constraint = Constraint { kind: ConstraintKind::Snet, date: Some(dt) };
+                p.task_mut(id).ok_or_else(|| missing("inserted"))?.constraint = Constraint { kind: ConstraintKind::Snet, date: Some(dt) };
             }
             let fa = Args::new(&fields);
             apply_task_fields(p, id, &fa)?;

@@ -60,7 +60,7 @@ fn find_doc<'a>(ws: &'a Workspace, key: &str) -> Option<&'a Document> {
     if key == "active" {
         return ws.active_doc();
     }
-    ws.find(key).map(|i| &ws.docs[i])
+    ws.find(key).and_then(|i| ws.docs.get(i))
 }
 
 pub fn read(server: &McpServer, uri: &str) -> Result<Value, RpcError> {

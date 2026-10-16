@@ -17,11 +17,14 @@
 
 pub mod calendar;
 pub mod duration;
+pub mod guard;
 pub mod ids;
 pub mod io;
 pub mod leveling;
+pub mod limits;
 pub mod model;
 pub mod ops;
+pub mod paths;
 pub mod report;
 pub mod sample;
 pub mod schedule;

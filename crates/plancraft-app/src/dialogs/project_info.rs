@@ -3,8 +3,9 @@
 use chrono::NaiveDate;
 use egui::{Context, RichText};
 use plancraft_core::prelude::*;
-use plancraft_core::workspace::{ChangeSource, Document};
+use plancraft_core::workspace::Document;
 
+use crate::edit::EditExt;
 use crate::format;
 use crate::theme;
 
@@ -176,7 +177,7 @@ impl ProjectInfo {
                         close = true;
                     }
                     if ui.add(egui::Button::new(RichText::new("  OK  ").color(egui::Color32::WHITE)).fill(theme::pal().ACCENT)).clicked() {
-                        match doc.try_edit("Project Information", ChangeSource::User, |p| self.apply(p)) {
+                        match doc.edit_msg("Project Information", |p| self.apply(p)) {
                             Ok(()) => close = true,
                             Err(e) => self.error = Some(e),
                         }

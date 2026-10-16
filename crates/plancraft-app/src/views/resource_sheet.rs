@@ -4,9 +4,10 @@ use std::collections::{HashMap, HashSet};
 
 use egui::{Rect, Ui};
 use plancraft_core::prelude::*;
-use plancraft_core::workspace::{ChangeSource, Document};
+use plancraft_core::workspace::Document;
 
 use crate::commands::Command;
+use crate::edit::EditExt;
 use crate::format;
 use crate::state::{ToastKind, UiState};
 use crate::theme;
@@ -220,14 +221,18 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     let output = {
         let p = &doc.project;
         let sel = &st.sel;
-        let is_sel = |r: usize| sel.resources.contains(&p.resources[r].id);
-        let mut cellf = |r: usize, c: usize| cell(p, &p.resources[r], COLS[c], &over, &work);
+        let is_sel = |r: usize| p.resources.get(r).is_some_and(|res| sel.resources.contains(&res.id));
+        let mut cellf = |r: usize, c: usize| match (p.resources.get(r), COLS.get(c)) {
+            (Some(res), Some(&col)) => cell(p, res, col, &over, &work),
+            _ => Cell::default(),
+        };
         grid::show(ui, rect, &mut st.resource_grid, &cfg, &is_sel, &mut cellf)
     };
+    let resource_at = |doc: &Document, row: usize| doc.project.resources.get(row).map(|r| r.id);
     for ev in output.events {
         match ev {
             GridEvent::Select { row, ctrl, .. } => {
-                let id = doc.project.resources[row].id;
+                let Some(id) = resource_at(doc, row) else { continue };
                 if ctrl {
                     if !st.sel.resources.remove(&id) {
                         st.sel.resources.insert(id);
@@ -236,25 +241,30 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                     st.sel.select_resource(id);
                 }
             }
-            GridEvent::CursorRow { row, .. } => st.sel.select_resource(doc.project.resources[row].id),
+            GridEvent::CursorRow { row, .. } => {
+                if let Some(id) = resource_at(doc, row) {
+                    st.sel.select_resource(id);
+                }
+            }
             GridEvent::Activate { row, .. } => {
-                st.sel.select_resource(doc.project.resources[row].id);
-                out.push(Command::ResourceInfo);
+                if let Some(id) = resource_at(doc, row) {
+                    st.sel.select_resource(id);
+                    out.push(Command::ResourceInfo);
+                }
             }
             GridEvent::Commit { row, col, text } => {
+                let (Some(&column), Some(def)) = (COLS.get(col), defs.get(col)) else { continue };
                 if row < n {
-                    let id = doc.project.resources[row].id;
-                    if let Err(e) =
-                        doc.try_edit(&format!("Edit {}", defs[col].title), ChangeSource::User, |p| commit(p, id, COLS[col], &text))
-                    {
+                    let Some(id) = resource_at(doc, row) else { continue };
+                    if let Err(e) = doc.edit_msg(&format!("Edit {}", def.title), |p| commit(p, id, column, &text)) {
                         st.toast(ToastKind::Error, e);
                     }
                 } else if !text.is_empty() {
-                    let r = doc.try_edit("New Resource", ChangeSource::User, |p| {
-                        let name = if COLS[col] == Col::Name { text.clone() } else { format!("Resource {}", p.resources.len() + 1) };
+                    let r = doc.edit_msg("New Resource", |p| {
+                        let name = if column == Col::Name { text.clone() } else { format!("Resource {}", p.resources.len() + 1) };
                         let id = p.add_resource(name);
-                        if COLS[col] != Col::Name {
-                            commit(p, id, COLS[col], &text)?;
+                        if column != Col::Name {
+                            commit(p, id, column, &text)?;
                         }
                         Ok::<_, String>(id)
                     });
@@ -267,7 +277,9 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
             GridEvent::DeleteKey => out.push(Command::DeleteResources),
             GridEvent::InsertKey => out.push(Command::InsertResource),
             GridEvent::ContextMenu { row, .. } => {
-                st.sel.select_resource(doc.project.resources[row].id);
+                if let Some(id) = resource_at(doc, row) {
+                    st.sel.select_resource(id);
+                }
             }
             GridEvent::ClickEmpty { .. } => st.sel.resources.clear(),
             GridEvent::ToggleExpand(_) => {}

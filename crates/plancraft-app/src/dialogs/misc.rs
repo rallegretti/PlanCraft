@@ -9,6 +9,7 @@ use plancraft_core::report;
 use plancraft_core::workspace::{ChangeSource, Document};
 use uuid::Uuid;
 
+use crate::edit::EditExt;
 use crate::format;
 use crate::logo;
 use crate::state::{Selection, ToastKind, UiState};
@@ -239,7 +240,7 @@ impl ExternalLinks {
                     && let Some(path) = rfd::FileDialog::new().add_filter("PlanCraft project", &["plancraft"]).pick_file()
                 {
                     let doc_path = doc.path.clone();
-                    match doc.try_edit("Add External Project", ChangeSource::User, |p| io::add_external_project(p, doc_path.as_deref(), &path)) {
+                    match doc.edit_msg("Add External Project", |p| io::add_external_project(p, doc_path.as_deref(), &path).map_err(|e| e.to_string())) {
                         Ok(id) => {
                             self.selected = Some(id);
                             self.loaded_for = None;
@@ -323,7 +324,7 @@ impl ExternalLinks {
                     });
                     if let (Some((tid, member)), Some(target)) = (link, target) {
                         let doc_path = doc.path.clone();
-                        let r = doc.try_edit("Link External Task", ChangeSource::User, |p| {
+                        let r = doc.edit_msg("Link External Task", |p| {
                             io::ensure_external_task(p, doc_path.as_deref(), ext_id, tid).map_err(|e| e.to_string())?;
                             let r = TaskRef::External { project: ext_id, task: tid };
                             if member { p.add_milestone_members(target, &[r]) } else { p.link(r, target, LinkType::FS, Lag::None) }.map_err(|e| e.to_string())
@@ -407,14 +408,5 @@ pub fn history(ctx: &Context, doc: &mut Document, open: &mut bool) {
 
 /// Paths for recent files, stored in the user's config directory.
 pub fn config_dir() -> Option<PathBuf> {
-    if let Some(x) = std::env::var_os("XDG_CONFIG_HOME") {
-        return Some(PathBuf::from(x).join("plancraft"));
-    }
-    if let Some(a) = std::env::var_os("APPDATA") {
-        return Some(PathBuf::from(a).join("PlanCraft"));
-    }
-    std::env::var_os("HOME").map(|h| {
-        let h = PathBuf::from(h);
-        if cfg!(target_os = "macos") { h.join("Library/Application Support/PlanCraft") } else { h.join(".config/plancraft") }
-    })
+    plancraft_core::paths::config_dir()
 }

@@ -51,7 +51,7 @@ fn step(ctx: &Ctx, a: &Args, redo: bool) -> ToolResult {
             "revision": doc.revision,
             "project_finish": fmt_dt(doc.project.sched.finish),
         });
-        v[if redo { "redone" } else { "undone" }] = json!(done);
+        set(&mut v, if redo { "redone" } else { "undone" }, json!(done));
         Ok(v)
     })?;
     ctx.mark_changed();

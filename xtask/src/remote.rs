@@ -61,13 +61,12 @@ fn base64(data: &[u8]) -> String {
     const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
-        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
-        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        let byte = |i: usize| u32::from(chunk.get(i).copied().unwrap_or(0));
+        let n = byte(0) << 16 | byte(1) << 8 | byte(2);
         for i in 0..4 {
-            if i <= chunk.len() {
-                out.push(ALPHABET[(n >> (18 - 6 * i)) as usize & 63] as char);
-            } else {
-                out.push('=');
+            match ALPHABET.get((n >> (18 - 6 * i)) as usize & 63) {
+                Some(&c) if i <= chunk.len() => out.push(char::from(c)),
+                _ => out.push('='),
             }
         }
     }
@@ -128,8 +127,8 @@ pub fn dist(target: Target, host: &str) -> Result<Vec<PathBuf>> {
         .context("running git archive")?;
     let mut upload = ssh(host).arg(extract).stdin(Stdio::piped()).spawn().context("starting ssh")?;
     {
-        let mut from = archive.stdout.take().unwrap();
-        let mut to = upload.stdin.take().unwrap();
+        let mut from = archive.stdout.take().context("git archive has no stdout")?;
+        let mut to = upload.stdin.take().context("ssh has no stdin")?;
         std::io::copy(&mut from, &mut to).context("streaming source to the build host")?;
         to.flush()?;
     }
@@ -151,7 +150,7 @@ pub fn dist(target: Target, host: &str) -> Result<Vec<PathBuf>> {
     };
     let mut child = ssh(host).arg(build).stdout(Stdio::piped()).spawn().context("starting remote build")?;
     let mut artifacts = Vec::new();
-    for line in BufReader::new(child.stdout.take().unwrap()).lines() {
+    for line in BufReader::new(child.stdout.take().context("ssh has no stdout")?).lines() {
         let line = line?;
         match line.strip_prefix("ARTIFACT: ") {
             Some(path) => artifacts.push(path.trim().to_string()),

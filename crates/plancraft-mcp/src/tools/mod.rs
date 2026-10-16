@@ -139,7 +139,7 @@ pub fn schema(props: Value, required: &[&str]) -> Value {
     props.insert("document".into(), document_prop());
     let mut s = json!({ "type": "object", "properties": props, "additionalProperties": false });
     if !required.is_empty() {
-        s["required"] = json!(required);
+        crate::args::set(&mut s, "required", json!(required));
     }
     s
 }

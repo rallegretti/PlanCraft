@@ -66,7 +66,7 @@ So a vacation of any assigned person pauses the task. Lags and summary durations
 
 ### Duration, work and units
 
-Assignments follow Microsoft Project's task types (Fixed Units, Fixed Duration, Fixed Work) and the effort-driven rule (`ops::assign`, `set_duration`, `set_assignment_*`).
+Assignments follow Microsoft Project's task types (Fixed Units, Fixed Duration, Fixed Work) and the effort-driven rule (`ops::assign`, `unassign`, `set_duration`, `set_assignment_*`). Fixed Work tasks are always effort-driven. Adding or removing a person on an effort-driven task keeps total work and shares it by units; a Fixed Duration task keeps its duration and changes units instead. `tests/ms_parity.rs` checks this against the worked examples in Microsoft's published documentation, with each test citing its page.
 
 A task with an **estimate** carries `sched.work` before any assignment. The first work assignment of an estimated task derives its work from the estimate, and its duration from that work divided by the units.
 
@@ -82,7 +82,14 @@ Scheduling only ever reads the snapshots, so a file opens and schedules even whe
 
 ### Undo and attribution
 
-`Document::edit` and `Document::try_edit` snapshot the project, apply the change, recalculate and bump `revision`. `try_edit` rolls back on error. Each snapshot records whether the user or an agent made the change. Projects are small, so whole-project snapshots are simple and reliable.
+`Document::edit` and `Document::try_edit` snapshot the project, apply the change, validate it against `limits`, recalculate and bump `revision`. Both return a `Result` and roll back on error. Each snapshot records whether the user or an agent made the change. Projects are small, so whole-project snapshots are simple and reliable.
+
+### Robustness
+
+- **No panics in shipped code.** Workspace clippy lints deny `unwrap`, `expect`, `panic!` and indexing; code returns `Result`/`Option` and uses `get()` and checked or saturating arithmetic. Date arithmetic saturates (`calendar::shift`) and never walks past a horizon (1800–2500), so hostile durations can't hang the scheduler.
+- **Guards as a last resort.** `guard::catch` turns a panic into an error. Edits roll back, `recalculate` leaves a warning, the MCP server answers with a tool error, and the app keeps running and writes recovery copies.
+- **Hostile input.** `limits` caps counts (50,000 tasks, …), durations (5 years), dates (1900–2300), numbers and text. Loading clamps values and reports what it changed (`io::load_with_notes`); oversized files, too many items or duplicate ids are refused.
+- **Atomic, private files.** `io::write_atomic` writes a temporary file in the same directory, fsyncs it, renames it over the target and fsyncs the directory. Per-user files are owner-only (0600/0700 on Unix).
 
 ## plancraft-mcp
 

@@ -138,8 +138,8 @@ fn link_tasks(ctx: &Ctx, a: &Args) -> ToolResult {
             let p = &doc.project;
             Ok(json!({
                 "linked": true,
-                "predecessor": views::task_row(p, p.task_index(pred).expect("exists")),
-                "successor": views::task_row(p, p.task_index(succ).expect("exists")),
+                "predecessor": views::task_row(p, p.task_index(pred).ok_or_else(|| missing("exists"))?),
+                "successor": views::task_row(p, p.task_index(succ).ok_or_else(|| missing("exists"))?),
             }))
         },
     )
@@ -161,7 +161,7 @@ fn unlink_tasks(ctx: &Ctx, a: &Args) -> ToolResult {
                 return err("give 'predecessor' and 'successor', or 'tasks'");
             }
             let succ = task_arg(p, a, "successor")?;
-            let pred = resolve_task_ref(p, a.get("predecessor").expect("checked"), None)?;
+            let pred = resolve_task_ref(p, a.get("predecessor").ok_or_else(|| missing("checked"))?, None)?;
             if !p.unlink(pred, succ)? {
                 return err("these tasks are not linked");
             }
@@ -182,8 +182,10 @@ fn link_chain(ctx: &Ctx, a: &Args) -> ToolResult {
             }
             let kind = parse_link_type(a.get("type"))?;
             let lag = parse_lag_value(p, a.get("lag"), "lag")?;
-            for w in ids.windows(2) {
-                p.link(TaskRef::Local(w[0]), w[1], kind, lag).map_err(|e| ToolError(format!("linking {} → {}: {e}", w[0].0, w[1].0)))?;
+            for pair in ids.windows(2) {
+                if let [pred, succ] = pair {
+                    p.link(TaskRef::Local(*pred), *succ, kind, lag).map_err(|e| ToolError(format!("linking {} → {}: {e}", pred.0, succ.0)))?;
+                }
             }
             Ok(ids)
         },
@@ -202,7 +204,7 @@ fn link_json(p: &Project, succ: &Task, d: &Dependency) -> Value {
         "lag": views::lag_json(p, d.lag),
     });
     if matches!(d.predecessor, TaskRef::External { .. }) {
-        v["external"] = json!(true);
+        set(&mut v, "external", json!(true));
     }
     v
 }
@@ -257,7 +259,7 @@ fn add_external_project(ctx: &Ctx, a: &Args) -> ToolResult {
         },
         |doc, (id, unsaved)| {
             let p = &doc.project;
-            let e = p.external(id).expect("added");
+            let e = p.external(id).ok_or_else(|| missing("added"))?;
             Ok(json!({
                 "external_project": { "id": e.id.to_string(), "name": e.name, "path": e.path },
                 "note": if unsaved { "This document has not been saved yet, so an absolute path was stored." } else { "" },
@@ -347,9 +349,9 @@ fn link_external_task(ctx: &Ctx, a: &Args) -> ToolResult {
                     let name = task_v.as_str().unwrap_or_default();
                     let list = io::external_task_list(p, doc_path, ext)?;
                     let hits: Vec<_> = list.iter().filter(|s| s.name.eq_ignore_ascii_case(name.trim())).collect();
-                    match hits.len() {
-                        1 => hits[0].id,
-                        0 => return err(format!("no task named '{name}' in the external project (see list_external_tasks)")),
+                    match hits.as_slice() {
+                        [one] => one.id,
+                        [] => return err(format!("no task named '{name}' in the external project (see list_external_tasks)")),
                         _ => return err(format!("task name '{name}' is ambiguous in the external project; use its id")),
                     }
                 }

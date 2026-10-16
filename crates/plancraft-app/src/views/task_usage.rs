@@ -16,9 +16,17 @@ use crate::views::resource_usage::{PERIOD_W, period_label, period_toolbar, step}
 use crate::widgets::grid::{self, Cell, ColumnDef, GridConfig, GridEvent, scrollbar};
 
 #[derive(Clone, Copy)]
-enum Row {
-    Task(usize),
-    Assignment(usize, AssignmentId),
+enum Row<'a> {
+    Task(usize, &'a Task),
+    Assignment(&'a Task, AssignmentId),
+}
+
+impl Row<'_> {
+    fn task_id(&self) -> TaskId {
+        match self {
+            Row::Task(_, t) | Row::Assignment(t, _) => t.id,
+        }
+    }
 }
 
 pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: &mut Vec<Command>) {
@@ -49,9 +57,10 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     let task_rows = super::visible_rows(p, st);
     let mut rows = Vec::new();
     for &i in &task_rows {
-        rows.push(Row::Task(i));
-        for a in p.assignments_for_task(p.tasks[i].id) {
-            rows.push(Row::Assignment(i, a.id));
+        let Some(t) = p.tasks.get(i) else { continue };
+        rows.push(Row::Task(i, t));
+        for a in p.assignments_for_task(t.id) {
+            rows.push(Row::Assignment(t, a.id));
         }
     }
     // Time-phased values per assignment, summed into tasks (summaries roll up leaves).
@@ -59,8 +68,8 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     for a in &p.assignments {
         let mut v = vec![0.0; nper];
         for (day, w) in assignment_daily_work(p, a) {
-            if let Some(b) = bucket(day) {
-                v[b] += w;
+            if let Some(slot) = bucket(day).and_then(|b| v.get_mut(b)) {
+                *slot += w;
             }
         }
         per_assignment.insert(a.id, v);
@@ -68,11 +77,11 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     let task_values = |i: usize| -> Vec<f64> {
         let mut v = vec![0.0; nper];
         let range = if p.has_children(i) { p.descendants_range(i) } else { i..i + 1 };
-        for j in range {
-            for a in p.assignments_for_task(p.tasks[j].id) {
+        for t in p.tasks.get(range).unwrap_or_default() {
+            for a in p.assignments_for_task(t.id) {
                 if let Some(av) = per_assignment.get(&a.id) {
-                    for k in 0..nper {
-                        v[k] += av[k];
+                    for (sum, x) in v.iter_mut().zip(av) {
+                        *sum += x;
                     }
                 }
             }
@@ -94,10 +103,10 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     let left = Rect::from_min_size(rect.min, vec2(left_w, rect.height()));
     let output = {
         let sel = &st.sel;
-        let is_sel = |r: usize| matches!(rows[r], Row::Task(i) if sel.tasks.contains(&p.tasks[i].id));
-        let mut cell = |r: usize, c: usize| match rows[r] {
-            Row::Task(i) => {
-                let t = &p.tasks[i];
+        let is_sel = |r: usize| matches!(rows.get(r), Some(Row::Task(_, t)) if sel.tasks.contains(&t.id));
+        let mut cell = |r: usize, c: usize| match rows.get(r).copied() {
+            None => Cell::default(),
+            Some(Row::Task(_, t)) => {
                 if c == 0 {
                     Cell {
                         text: t.name.clone(),
@@ -109,8 +118,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                     Cell { text: format_work(t.sched.work), bold: t.sched.is_summary, ..Default::default() }
                 }
             }
-            Row::Assignment(i, aid) => {
-                let t = &p.tasks[i];
+            Some(Row::Assignment(t, aid)) => {
                 let a = p.assignment(aid);
                 let name = a.and_then(|a| p.resource(a.resource)).map(|r| r.name.clone()).unwrap_or_default();
                 if c == 0 {
@@ -131,17 +139,15 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     for ev in output.events {
         match ev {
             GridEvent::Select { row, .. } | GridEvent::CursorRow { row, .. } => {
-                let i = match rows[row] {
-                    Row::Task(i) | Row::Assignment(i, _) => i,
-                };
-                st.sel.select_task(p.tasks[i].id);
+                if let Some(r) = rows.get(row) {
+                    st.sel.select_task(r.task_id());
+                }
             }
             GridEvent::Activate { row, .. } => {
-                let i = match rows[row] {
-                    Row::Task(i) | Row::Assignment(i, _) => i,
-                };
-                st.sel.select_task(p.tasks[i].id);
-                out.push(Command::TaskInfo);
+                if let Some(r) = rows.get(row) {
+                    st.sel.select_task(r.task_id());
+                    out.push(Command::TaskInfo);
+                }
             }
             _ => {}
         }
@@ -181,7 +187,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
             continue;
         }
         let (vals, is_task) = match row {
-            Row::Task(i) => (task_values(*i), true),
+            Row::Task(i, _) => (task_values(*i), true),
             Row::Assignment(_, aid) => (per_assignment.get(aid).cloned().unwrap_or_default(), false),
         };
         if is_task {

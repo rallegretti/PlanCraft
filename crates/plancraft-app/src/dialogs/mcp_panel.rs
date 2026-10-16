@@ -1,5 +1,9 @@
 //! The "AI Agents (MCP)" panel: start/stop the live MCP server and show how
 //! to connect Claude Code or other MCP clients.
+//!
+//! The server requires a bearer token that changes on every start. Claude Code connects through
+//! `plancraft mcp --attach`, which reads the current URL and token from an owner-only session
+//! file, so its configuration keeps working across restarts; other HTTP clients get the token.
 
 use egui::{Context, RichText};
 
@@ -7,15 +11,27 @@ use crate::mcp_host::McpHost;
 use crate::settings::AppSettings;
 use crate::theme;
 
-fn code_line(ui: &mut egui::Ui, text: &str) {
+/// A command or value in a code box with a copy button; `shown` may mask secrets in `text`.
+fn code_line(ui: &mut egui::Ui, shown: &str, text: &str) {
     ui.horizontal(|ui| {
         egui::Frame::new().fill(theme::pal().HEADER_BG).corner_radius(4.0).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
-            ui.label(RichText::new(text).monospace());
+            ui.add(egui::Label::new(RichText::new(shown).monospace()).wrap());
         });
         if ui.small_button("📋").on_hover_text("Copy").clicked() {
             ui.ctx().copy_text(text.to_string());
         }
     });
+}
+
+fn heading(ui: &mut egui::Ui, text: &str) {
+    ui.add_space(4.0);
+    ui.label(RichText::new(text).strong());
+}
+
+/// The running executable, quoted for a shell command line.
+fn exe() -> String {
+    let path = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "plancraft".into());
+    format!("\"{path}\"")
 }
 
 pub fn show(
@@ -57,18 +73,41 @@ pub fn show(
         if let Some(e) = &host.error {
             ui.colored_label(theme::pal().ERROR, e);
         }
-        if let Some(url) = host.url() {
-            let url = url.as_str();
-            ui.label("Add it to Claude Code:");
-            code_line(ui, &format!("claude mcp add --transport http plancraft {url}"));
+        let exe = exe();
+        heading(ui, "Claude Code (recommended)");
+        let attach = format!("claude mcp add plancraft -- {exe} mcp --attach");
+        code_line(ui, &attach, &attach);
+        ui.label(
+            RichText::new("Add it once: it connects to this window whenever the server is running, even after PlanCraft restarts.")
+                .small()
+                .color(theme::pal().TEXT_WEAK),
+        );
+        if let (Some(url), Some(token)) = (host.url(), host.token()) {
+            heading(ui, "Other HTTP MCP clients");
+            code_line(ui, &url, &url);
+            let id = egui::Id::new("mcp_show_token");
+            let mut show_token = ctx.data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+            let header = format!("--header \"Authorization: Bearer {token}\"");
+            let masked = format!("--header \"Authorization: Bearer {}\"", "•".repeat(16));
+            ui.horizontal(|ui| {
+                code_line(ui, if show_token { &header } else { &masked }, &header);
+                let label = if show_token { "Hide" } else { "Show" };
+                if ui.toggle_value(&mut show_token, label).on_hover_text("Show the bearer token").changed() {
+                    ctx.data_mut(|d| d.insert_temp(id, show_token));
+                }
+            });
+            ui.label(
+                RichText::new("Clients must send this bearer token. It changes each time the server starts.").small().color(theme::pal().TEXT_WEAK),
+            );
+            ui.add_space(2.0);
             ui.label(RichText::new(format!("Changes made by agents this session: {}", host.changes())).small().color(theme::pal().TEXT_WEAK));
         }
         ui.add_space(10.0);
         ui.separator();
         ui.label(RichText::new("Headless (stdio) mode").strong().size(15.0));
         ui.label("Agents can also run PlanCraft without the window, working directly on files:");
-        let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "plancraft".into());
-        code_line(ui, &format!("claude mcp add plancraft -- {exe} mcp path/to/project.plancraft"));
+        let headless = format!("claude mcp add plancraft-files -- {exe} mcp path/to/project.plancraft");
+        code_line(ui, &headless, &headless);
         ui.label(RichText::new("Only connect agents you trust: they can change and save your project files.").small().color(theme::pal().TEXT_WEAK));
     });
 }

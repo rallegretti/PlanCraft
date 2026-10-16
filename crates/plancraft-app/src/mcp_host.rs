@@ -2,11 +2,16 @@
 //!
 //! The server shares the app's [`SharedWorkspace`], so agents operate on the
 //! documents open in the window and every change shows up immediately.
+//!
+//! Every start uses a fresh bearer token. The URL and token are published in an owner-only
+//! session file so `plancraft mcp --attach` can relay a stdio client to this window; the file is
+//! withdrawn when the server stops.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use plancraft_core::workspace::SharedWorkspace;
+use plancraft_mcp::session::{self, SessionInfo};
 use plancraft_mcp::{HttpHandle, McpServer, ServerOptions, serve_http};
 
 #[derive(Default)]
@@ -23,6 +28,11 @@ impl McpHost {
 
     pub fn url(&self) -> Option<String> {
         self.handle.as_ref().filter(|h| h.is_running()).map(|h| h.url())
+    }
+
+    /// The bearer token HTTP clients must send while the server runs (new on every start).
+    pub fn token(&self) -> Option<&str> {
+        self.handle.as_ref().filter(|h| h.is_running()).map(|h| h.token())
     }
 
     /// Number of change notifications received from agents.
@@ -45,10 +55,15 @@ impl McpHost {
             changes.fetch_add(1, Ordering::Relaxed);
             ctx.request_repaint();
         }));
-        match serve_http(Arc::new(server), &format!("127.0.0.1:{port}")) {
+        let token = session::new_token();
+        match serve_http(Arc::new(server), &format!("127.0.0.1:{port}"), &token) {
             Ok(h) => {
+                let info = SessionInfo { url: h.url(), token: h.token().to_string(), pid: std::process::id() };
+                self.error = match session::publish(&info) {
+                    Ok(_) => None,
+                    Err(e) => Some(format!("The server is running, but `plancraft mcp --attach` cannot find it: {e}")),
+                };
                 self.handle = Some(h);
-                self.error = None;
             }
             Err(e) => self.error = Some(format!("Could not start the MCP server on port {port}: {e}")),
         }
@@ -56,7 +71,14 @@ impl McpHost {
 
     pub fn stop(&mut self) {
         if let Some(h) = self.handle.take() {
+            session::withdraw(h.token());
             h.shutdown();
         }
+    }
+}
+
+impl Drop for McpHost {
+    fn drop(&mut self) {
+        self.stop();
     }
 }

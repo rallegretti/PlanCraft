@@ -241,9 +241,11 @@ impl Estimate {
     /// Expected work in minutes.
     pub fn expected_work(&self, settings: &ProjectSettings) -> Minutes {
         match *self {
-            Estimate::Complexity { points } => (points * settings.minutes_per_point as f64).round() as Minutes,
+            Estimate::Complexity { points } => {
+                crate::limits::clamp_minutes((points * settings.minutes_per_point as f64).round() as Minutes)
+            }
             Estimate::ThreePoint { optimistic, most_likely, pessimistic } => {
-                ((optimistic + 4 * most_likely + pessimistic) as f64 / 6.0).round() as Minutes
+                ((optimistic as f64 + 4.0 * most_likely as f64 + pessimistic as f64) / 6.0).round() as Minutes
             }
             Estimate::Work { minutes } => minutes,
         }
@@ -252,7 +254,7 @@ impl Estimate {
     /// Standard deviation of a three-point estimate (0 for other methods).
     pub fn std_dev(&self) -> Minutes {
         match *self {
-            Estimate::ThreePoint { optimistic, pessimistic, .. } => ((pessimistic - optimistic) as f64 / 6.0).round() as Minutes,
+            Estimate::ThreePoint { optimistic, pessimistic, .. } => ((pessimistic as f64 - optimistic as f64) / 6.0).round() as Minutes,
             _ => 0,
         }
     }
@@ -432,6 +434,11 @@ impl Task {
 
     pub fn is_complete(&self) -> bool {
         self.percent_complete >= 100
+    }
+
+    /// Whether adding or removing people keeps total work the same. Fixed Work tasks always are.
+    pub fn is_effort_driven(&self) -> bool {
+        self.effort_driven || self.task_type == TaskType::FixedWork
     }
 }
 
@@ -788,7 +795,7 @@ impl Project {
         let h24 = ids.next_calendar();
         let night = ids.next_calendar();
         let settings = ProjectSettings::default();
-        let start_time = start.and_hms_opt(0, 0, 0).unwrap() + chrono::Duration::minutes(settings.time.default_start_time as i64);
+        let start_time = crate::calendar::shift(start.and_time(chrono::NaiveTime::MIN), Minutes::from(settings.time.default_start_time));
         Self {
             format: FILE_FORMAT.into(),
             version: FILE_VERSION,
@@ -817,9 +824,10 @@ impl Project {
         self.calendars.iter().find(|c| c.id == id)
     }
 
-    /// The project's base calendar (falls back to the first calendar).
+    /// The project's base calendar (falls back to the first calendar, then to a standard week).
     pub fn base_calendar(&self) -> &Calendar {
-        self.calendar(self.calendar).or_else(|| self.calendars.first()).expect("project has no calendars")
+        static FALLBACK: std::sync::LazyLock<Calendar> = std::sync::LazyLock::new(|| Calendar::standard(CalendarId(0)));
+        self.calendar(self.calendar).or_else(|| self.calendars.first()).unwrap_or(&FALLBACK)
     }
 
     pub fn task_index(&self, id: TaskId) -> Option<usize> {
@@ -868,37 +876,39 @@ impl Project {
         self.task_index(id).map(|i| i + 1)
     }
 
-    /// Index range of the descendants of the task at `idx` (exclusive of `idx`).
+    /// Index range of the descendants of the task at `idx` (exclusive of `idx`; empty when out of range).
     pub fn descendants_range(&self, idx: usize) -> std::ops::Range<usize> {
-        let level = self.tasks[idx].outline_level;
-        let mut end = idx + 1;
-        while end < self.tasks.len() && self.tasks[end].outline_level > level {
-            end += 1;
-        }
-        idx + 1..end
+        let Some(level) = self.tasks.get(idx).map(|t| t.outline_level) else {
+            return 0..0;
+        };
+        let first = idx + 1;
+        let end = self.tasks.iter().skip(first).position(|t| t.outline_level <= level).map_or(self.tasks.len(), |k| first + k);
+        first..end
     }
 
     /// Index of the parent summary of the task at `idx`.
     pub fn parent_index(&self, idx: usize) -> Option<usize> {
-        let level = self.tasks[idx].outline_level;
-        (0..idx).rev().find(|&i| self.tasks[i].outline_level < level)
+        let level = self.tasks.get(idx)?.outline_level;
+        self.tasks.get(..idx)?.iter().rposition(|t| t.outline_level < level)
     }
 
     /// Whether the task at `idx` has children.
     pub fn has_children(&self, idx: usize) -> bool {
-        idx + 1 < self.tasks.len() && self.tasks[idx + 1].outline_level > self.tasks[idx].outline_level
+        match (self.tasks.get(idx), self.tasks.get(idx + 1)) {
+            (Some(t), Some(next)) => next.outline_level > t.outline_level,
+            _ => false,
+        }
     }
 
     /// Outline number like "1.2.3" for the task at `idx`.
     pub fn wbs(&self, idx: usize) -> String {
         let mut counters: Vec<usize> = Vec::new();
-        for t in &self.tasks[..=idx] {
-            let lvl = t.outline_level.max(1) as usize;
-            counters.truncate(lvl);
-            while counters.len() < lvl {
-                counters.push(0);
+        for t in self.tasks.iter().take(idx.saturating_add(1)) {
+            let lvl = usize::from(t.outline_level.max(1));
+            counters.resize(lvl, 0);
+            if let Some(c) = counters.last_mut() {
+                *c += 1;
             }
-            counters[lvl - 1] += 1;
         }
         counters.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(".")
     }

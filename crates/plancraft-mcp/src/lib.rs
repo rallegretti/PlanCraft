@@ -19,8 +19,9 @@
 //!
 //! let ws = workspace_from_files(&["plan.plancraft"]).unwrap();
 //! let server = Arc::new(McpServer::new(ws).with_change_callback(Arc::new(|| println!("changed"))));
-//! let handle = serve_http(server, "127.0.0.1:7878").unwrap();
-//! println!("MCP endpoint: {}", handle.url());
+//! let token = plancraft_mcp::session::new_token();
+//! let handle = serve_http(server, "127.0.0.1:7878", &token).unwrap();
+//! println!("MCP endpoint: {} (Authorization: Bearer {})", handle.url(), handle.token());
 //! ```
 //!
 //! All mutations go through `Document::try_edit` with `ChangeSource::Agent`,
@@ -29,12 +30,14 @@
 #![recursion_limit = "512"]
 
 pub mod args;
+pub mod attach;
 pub mod cli;
 pub mod http;
 pub mod prompts;
 pub mod protocol;
 pub mod resources;
 pub mod server;
+pub mod session;
 pub mod stdio;
 pub mod tools;
 pub mod views;
@@ -103,9 +106,9 @@ pub fn workspace_from_files<P: AsRef<Path>>(paths: &[P]) -> Result<SharedWorkspa
             let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "New Project".into());
             let abs = if path.is_absolute() { path } else { std::env::current_dir().map(|c| c.join(&path)).unwrap_or(path) };
             let handle = ws.add(Project::new(name, chrono::Local::now().date_naive()), Some(abs));
-            if let Some(i) = ws.index_of(handle) {
+            if let Some(doc) = ws.index_of(handle).and_then(|i| ws.docs.get_mut(i)) {
                 // A brand-new document has unsaved content.
-                ws.docs[i].dirty = true;
+                doc.dirty = true;
             }
         }
     }

@@ -1,8 +1,8 @@
 //! The Start Page: shown when no project is open, or from File ▸ Start Page.
 //!
 //! A centered, card-based launcher under the regular title band: start actions
-//! on the left, recent projects on the right, and a summary of the open project
-//! when there is one.
+//! on the left, recent projects on the right, a summary of the open project
+//! when there is one, and work recovered after a crash.
 
 use std::path::Path;
 
@@ -11,6 +11,7 @@ use egui::{Align, Align2, Color32, FontId, Layout, Rect, RichText, Sense, Stroke
 use crate::commands::Command;
 use crate::format;
 use crate::logo;
+use crate::recovery::RecoveredItem;
 use crate::settings::AppSettings;
 use crate::theme;
 
@@ -20,6 +21,8 @@ pub struct StartInfo<'a> {
     pub doc_path: Option<String>,
     pub stats: Option<plancraft_core::report::ProjectStats>,
     pub settings: &'a AppSettings,
+    /// Recovery copies left by an earlier session that did not exit cleanly.
+    pub recovered: &'a [RecoveredItem],
 }
 
 const MAX_WIDTH: f32 = 1000.0;
@@ -82,16 +85,82 @@ fn home_relative(path: &Path) -> String {
 
 fn modified_label(path: &Path) -> Option<String> {
     let modified = std::fs::metadata(path).ok()?.modified().ok()?;
-    let dt: chrono::DateTime<chrono::Local> = modified.into();
+    Some(time_label(modified.into(), false))
+}
+
+/// "Today 14:05", "Yesterday" (with the time when `with_time`), or a date.
+fn time_label(dt: chrono::DateTime<chrono::Local>, with_time: bool) -> String {
     let today = chrono::Local::now().date_naive();
     let d = dt.date_naive();
-    Some(if d == today {
+    let time = if with_time { dt.format(" %H:%M").to_string() } else { String::new() };
+    if d == today {
         format!("Today {}", dt.format("%H:%M"))
     } else if (today - d).num_days() == 1 {
-        "Yesterday".into()
+        format!("Yesterday{time}")
     } else {
-        dt.format("%b %-d, %Y").to_string()
-    })
+        format!("{}{time}", dt.format("%b %-d, %Y"))
+    }
+}
+
+/// Work recovered after PlanCraft closed without saving: restore or discard each copy.
+fn recovered_work(ui: &mut Ui, items: &[RecoveredItem], out: &mut Vec<Command>) {
+    let width = ui.available_width();
+    let resp = egui::Frame::new()
+        .fill(theme::pal().BG)
+        .stroke(Stroke::new(1.0, theme::pal().GRID_LINE))
+        .corner_radius(CARD_RADIUS)
+        .inner_margin(egui::Margin { left: 18, right: 14, top: 12, bottom: 8 })
+        .show(ui, |ui| {
+            ui.set_width(width - 34.0);
+            ui.label(
+                RichText::new("PlanCraft closed before these changes were saved. Restore a copy to keep working on it, or discard it.")
+                    .size(11.5)
+                    .color(theme::pal().TEXT_WEAK),
+            );
+            ui.add_space(4.0);
+            for (i, item) in items.iter().enumerate() {
+                let top = ui.cursor().top();
+                if i > 0 {
+                    ui.painter().hline(ui.max_rect().x_range(), top, Stroke::new(1.0, theme::pal().GRID_LINE));
+                }
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    let (badge, _) = ui.allocate_exact_size(vec2(34.0, 34.0), Sense::hover());
+                    ui.painter().rect_filled(badge, 8.0, theme::pal().ACCENT_PALE);
+                    ui.painter().text(badge.center(), Align2::CENTER_CENTER, "⟳", FontId::proportional(17.0), theme::pal().ACCENT);
+                    ui.add_space(4.0);
+                    ui.vertical(|ui| {
+                        ui.label(RichText::new(&item.name).size(13.5).color(theme::pal().TEXT));
+                        let origin = item.original_path.as_deref().map(home_relative).unwrap_or_else(|| "Never saved to a file".into());
+                        let when = item.saved_at.map(|t| format!("  ·  Copied {}", time_label(t, true))).unwrap_or_default();
+                        ui.label(RichText::new(format!("{origin}{when}")).size(11.0).color(theme::pal().TEXT_WEAK))
+                            .on_hover_text(item.original_path.as_ref().map(|p| p.display().to_string()).unwrap_or_default());
+                    });
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if ui.button("Discard").on_hover_text("Delete this recovery copy").clicked() {
+                            out.push(Command::DiscardRecovered(item.stem.clone()));
+                        }
+                        let restore = egui::Button::new(RichText::new("Restore").color(Color32::WHITE)).fill(theme::pal().ACCENT);
+                        let hint = match &item.original_path {
+                            Some(_) => "Open this copy as an unsaved document; Save writes it back to the original file",
+                            None => "Open this copy as an unsaved document",
+                        };
+                        if ui.add(restore).on_hover_text(hint).clicked() {
+                            out.push(Command::RestoreRecovered(item.stem.clone()));
+                        }
+                    });
+                });
+                ui.add_space(6.0);
+            }
+        })
+        .response;
+    // A warm edge marks work that still needs a decision.
+    let r = resp.rect;
+    ui.painter().rect_filled(
+        Rect::from_min_max(r.min, pos2(r.left() + 4.0, r.bottom())),
+        egui::CornerRadius { nw: CARD_RADIUS, sw: CARD_RADIUS, ne: 0, se: 0 },
+        theme::pal().WARN,
+    );
 }
 
 fn recent_list(ui: &mut Ui, settings: &AppSettings, out: &mut Vec<Command>) {
@@ -263,6 +332,12 @@ pub fn show(ui: &mut Ui, info: &StartInfo, out: &mut Vec<Command>) -> bool {
             }
         });
         ui.add_space(26.0);
+
+        if !info.recovered.is_empty() {
+            section_title(ui, "Recovered work");
+            recovered_work(ui, info.recovered, out);
+            ui.add_space(22.0);
+        }
 
         if info.has_doc {
             current_project(ui, info, out);

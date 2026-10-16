@@ -98,8 +98,8 @@ pub fn task_ref_json(p: &Project, r: &TaskRef) -> Value {
 
 pub fn dependency_json(p: &Project, d: &Dependency) -> Value {
     let mut v = task_ref_json(p, &d.predecessor);
-    v["type"] = json!(d.kind.code());
-    v["lag"] = lag_json(p, d.lag);
+    set(&mut v, "type", json!(d.kind.code()));
+    set(&mut v, "lag", lag_json(p, d.lag));
     v
 }
 
@@ -115,7 +115,9 @@ fn kind_str(t: &Task) -> &'static str {
 
 /// Compact task row used by list views.
 pub fn task_row(p: &Project, idx: usize) -> Value {
-    let t = &p.tasks[idx];
+    let Some(t) = p.tasks.get(idx) else {
+        return Value::Null;
+    };
     let mut v = json!({
         "id": t.id.0,
         "row": idx + 1,
@@ -136,7 +138,9 @@ pub fn task_row(p: &Project, idx: usize) -> Value {
         "predecessors": p.format_predecessors(t.id),
         "resources": p.format_resource_names(t.id),
     });
-    let m = v.as_object_mut().expect("object");
+    let Some(m) = v.as_object_mut() else {
+        return v;
+    };
     if t.sched.is_summary {
         m.insert("is_summary".into(), json!(true));
     }
@@ -237,7 +241,7 @@ pub fn assignment_json(p: &Project, a: &Assignment) -> Value {
         "finish": fmt_dt(t.and_then(|t| t.sched.finish)),
     });
     if a.cost != 0.0 {
-        v["fixed_cost"] = json!(a.cost);
+        set(&mut v, "fixed_cost", json!(a.cost));
     }
     v
 }
@@ -272,16 +276,23 @@ pub fn task_detail(p: &Project, id: TaskId) -> Value {
     let Some(idx) = p.task_index(id) else {
         return Value::Null;
     };
-    let t = &p.tasks[idx];
+    let Some(t) = p.tasks.get(idx) else {
+        return Value::Null;
+    };
     let mut v = task_row(p, idx);
-    let m = v.as_object_mut().expect("object");
+    let Some(m) = v.as_object_mut() else {
+        return Value::Null;
+    };
     let at = report::status_moment(p);
-    let parent = p.parent_index(idx).map(|i| json!({ "id": p.tasks[i].id.0, "name": p.tasks[i].name }));
+    let parent = p.parent_index(idx).and_then(|i| p.tasks.get(i)).map(|pt| json!({ "id": pt.id.0, "name": pt.name }));
     let children: Vec<Value> = if p.has_children(idx) {
         let lvl = t.outline_level;
-        p.descendants_range(idx)
-            .filter(|&i| p.tasks[i].outline_level == lvl + 1)
-            .map(|i| json!({ "id": p.tasks[i].id.0, "name": p.tasks[i].name }))
+        p.tasks
+            .get(p.descendants_range(idx))
+            .unwrap_or_default()
+            .iter()
+            .filter(|c| c.outline_level == lvl.saturating_add(1))
+            .map(|c| json!({ "id": c.id.0, "name": c.name }))
             .collect()
     } else {
         Vec::new()
@@ -381,8 +392,8 @@ pub fn calendar_brief(p: &Project, c: &Calendar) -> Value {
 
 pub fn calendar_detail(p: &Project, c: &Calendar) -> Value {
     let mut v = calendar_brief(p, c);
-    v["work_week"] = week_json(c);
-    v["exception_list"] = Value::Array(c.exceptions.iter().enumerate().map(|(i, e)| exception_json(i, e)).collect());
+    set(&mut v, "work_week", week_json(c));
+    set(&mut v, "exception_list", Value::Array(c.exceptions.iter().enumerate().map(|(i, e)| exception_json(i, e)).collect()));
     v
 }
 
@@ -409,10 +420,10 @@ pub fn resource_row(p: &Project, r: &Resource, over: &HashSet<ResourceId>) -> Va
         "overallocated": over.contains(&r.id),
     });
     if !r.email.is_empty() {
-        v["email"] = json!(r.email);
+        set(&mut v, "email", json!(r.email));
     }
     if r.kind == ResourceType::Material {
-        v["material_label"] = json!(r.material_label);
+        set(&mut v, "material_label", json!(r.material_label));
     }
     v
 }
@@ -579,8 +590,7 @@ pub fn schedule_table(p: &Project, rows: &[usize]) -> String {
         p.tasks.len()
     ));
     out.push_str("row | id | wbs | name | duration | start | finish | % | pred | resources | flags\n");
-    for &i in rows {
-        let t = &p.tasks[i];
+    for (i, t) in rows.iter().filter_map(|&i| Some((i, p.tasks.get(i)?))) {
         let indent = "  ".repeat(t.outline_level.saturating_sub(1) as usize);
         let mut flags = Vec::new();
         if t.sched.is_summary {

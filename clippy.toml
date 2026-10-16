@@ -1,0 +1,7 @@
+# Tests may unwrap, expect, panic and index: a failing assertion is the point of a test. Shipped
+# code may not (workspace lints in Cargo.toml; CLAUDE.md › Never crash).
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
+too-many-arguments-threshold = 10

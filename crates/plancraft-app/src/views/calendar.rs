@@ -17,17 +17,17 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
         ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(rect.min + vec2(8.0, 4.0), vec2(rect.width() - 16.0, 26.0))));
     bar.horizontal(|ui| {
         if ui.button("⏴").clicked() {
-            st.calendar_month = (month - Duration::days(1)).with_day(1).unwrap();
+            st.calendar_month = (month - Duration::days(1)).with_day(1).unwrap_or(month);
         }
         ui.label(egui::RichText::new(month.format("%B %Y").to_string()).size(16.0).strong());
         if ui.button("⏵").clicked() {
-            st.calendar_month = (month + Duration::days(32)).with_day(1).unwrap();
+            st.calendar_month = (month + Duration::days(32)).with_day(1).unwrap_or(month);
         }
         if ui.button("Today").clicked() {
-            st.calendar_month = chrono::Local::now().date_naive().with_day(1).unwrap();
+            st.calendar_month = chrono::Local::now().date_naive().with_day(1).unwrap_or(month);
         }
         if ui.button("Project Start").clicked() {
-            st.calendar_month = p.sched.start.unwrap_or(p.start).date().with_day(1).unwrap();
+            st.calendar_month = p.sched.start.unwrap_or(p.start).date().with_day(1).unwrap_or(month);
         }
     });
     let area = Rect::from_min_max(pos2(rect.left() + 8.0, rect.top() + 36.0), rect.max - vec2(8.0, 8.0));

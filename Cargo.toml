@@ -25,3 +25,19 @@ opt-level = 2
 
 [profile.release]
 lto = "thin"
+
+[workspace.lints.rust]
+# Only the Windows console attach in plancraft-app needs `unsafe` (allowed at that one call).
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+dbg_macro = "warn"
+# PlanCraft never crashes: shipped code returns `Result`/`Option` instead of panicking (see
+# CLAUDE.md › Never crash). Tests may unwrap (clippy.toml).
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+indexing_slicing = "deny"

@@ -25,19 +25,27 @@ struct Lane {
 }
 
 fn pack(p: &Project, mut idxs: Vec<usize>) -> (Vec<(usize, usize)>, usize) {
-    idxs.sort_by_key(|&i| p.tasks[i].sched.start);
+    idxs.sort_by_key(|&i| p.tasks.get(i).and_then(|t| t.sched.start));
     let mut lane_end: Vec<chrono::NaiveDateTime> = Vec::new();
     let mut out = Vec::new();
     for i in idxs {
-        let t = &p.tasks[i];
+        let Some(t) = p.tasks.get(i) else { continue };
         let (Some(s), Some(f)) = (t.sched.start, t.sched.finish) else {
             continue;
         };
-        let lane = lane_end.iter().position(|e| *e <= s).unwrap_or_else(|| {
-            lane_end.push(s);
-            lane_end.len() - 1
-        });
-        lane_end[lane] = f.max(s + chrono::Duration::minutes(1));
+        let end = f.max(s + chrono::Duration::minutes(1));
+        let lane = match lane_end.iter().position(|e| *e <= s) {
+            Some(lane) => {
+                if let Some(e) = lane_end.get_mut(lane) {
+                    *e = end;
+                }
+                lane
+            }
+            None => {
+                lane_end.push(end);
+                lane_end.len() - 1
+            }
+        };
         out.push((i, lane));
     }
     let n = lane_end.len().max(1);
@@ -57,13 +65,16 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
         let (bars, sublanes) = pack(p, idxs);
         lanes.push(Lane { resource: Some(r.id), name: r.name.clone(), over: over.contains(&r.id), bars, sublanes });
     }
-    let unassigned: Vec<usize> = (0..p.tasks.len())
-        .filter(|&i| {
-            let t = &p.tasks[i];
+    let unassigned: Vec<usize> = p
+        .tasks
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| {
             !t.sched.is_summary
                 && !t.is_milestone()
                 && !p.assignments_for_task(t.id).any(|a| p.resource(a.resource).is_some_and(|r| r.kind == ResourceType::Work))
         })
+        .map(|(i, _)| i)
         .collect();
     let (bars, sublanes) = pack(p, unassigned);
     lanes.push(Lane { resource: None, name: "Unassigned Tasks".into(), over: false, bars, sublanes });
@@ -168,7 +179,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
         bp.hline(lane_rect.x_range(), lane_rect.bottom() - 0.5, Stroke::new(1.0, theme::pal().GRID_LINE_STRONG));
         bp.vline(name_rect.right(), lane_rect.y_range(), Stroke::new(1.0, theme::pal().GRID_LINE_STRONG));
         for &(i, sub) in &lane.bars {
-            let t = &p.tasks[i];
+            let Some(t) = p.tasks.get(i) else { continue };
             let (Some(s), Some(f)) = (t.sched.start, t.sched.finish) else {
                 continue;
             };
@@ -207,9 +218,10 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
 
     // Interaction: click selects, double-click opens, drag reassigns.
     let resp = ui.interact(chart, egui::Id::new("tp_chart"), Sense::click_and_drag());
-    if let Some((i, lane_res)) = hovered_bar {
+    if let Some((i, lane_res)) = hovered_bar
+        && let Some(t) = p.tasks.get(i)
+    {
         ui.ctx().set_cursor_icon(CursorIcon::Grab);
-        let t = &p.tasks[i];
         if dragging.is_none() {
             resp.clone().on_hover_text(format!(
                 "{}\n{} – {}\n{}",

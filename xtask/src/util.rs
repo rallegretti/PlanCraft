@@ -8,7 +8,8 @@ use sha2::{Digest, Sha256};
 
 /// Workspace root (the directory containing the top-level Cargo.toml).
 pub fn root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).parent().expect("xtask lives inside the workspace").to_path_buf()
+    let xtask = Path::new(env!("CARGO_MANIFEST_DIR"));
+    xtask.parent().unwrap_or(xtask).to_path_buf()
 }
 
 /// `[workspace.package] version` from the root Cargo.toml.
@@ -113,7 +114,7 @@ pub fn write_checksum(file: &Path) -> Result<PathBuf> {
     let bytes = std::fs::read(file)?;
     let digest = Sha256::digest(&bytes);
     let hex: String = digest.iter().map(|b| format!("{b:02x}")).collect();
-    let name = file.file_name().unwrap().to_string_lossy();
+    let name = file.file_name().context("checksum of a path without a file name")?.to_string_lossy();
     let sum_path = file.with_file_name(format!("{name}.sha256"));
     std::fs::write(&sum_path, format!("{hex}  {name}\n"))?;
     Ok(sum_path)

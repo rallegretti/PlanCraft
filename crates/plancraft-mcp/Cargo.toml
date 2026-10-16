@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+publish = false
 
 [lib]
 path = "src/lib.rs"
@@ -23,4 +24,8 @@ thiserror.workspace = true
 tiny_http = "0.12"
 
 [dev-dependencies]
+proptest = "1"
 tempfile = "3"
+
+[lints]
+workspace = true

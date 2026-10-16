@@ -60,7 +60,7 @@ impl DurationUnit {
             DurationUnit::Hours => 60,
             DurationUnit::Days => s.minutes_per_day.max(1),
             DurationUnit::Weeks => s.minutes_per_week.max(1),
-            DurationUnit::Months => (s.minutes_per_day * s.days_per_month).max(1),
+            DurationUnit::Months => s.minutes_per_day.saturating_mul(s.days_per_month).max(1),
         }
     }
 
@@ -132,6 +132,9 @@ pub fn parse_duration(text: &str, default_unit: DurationUnit, s: &TimeSettings) 
         t.char_indices().find(|(_, c)| !(c.is_ascii_digit() || *c == '.' || *c == '-' || *c == '+')).map(|(i, _)| i).unwrap_or(t.len());
     let (num, unit) = t.split_at(split);
     let value: f64 = num.trim().parse().ok()?;
+    if !value.is_finite() {
+        return None;
+    }
     let unit = match unit.trim() {
         "" => default_unit,
         "m" | "min" | "mins" | "minute" | "minutes" => DurationUnit::Minutes,
@@ -141,7 +144,13 @@ pub fn parse_duration(text: &str, default_unit: DurationUnit, s: &TimeSettings) 
         "mo" | "mon" | "mons" | "month" | "months" => DurationUnit::Months,
         _ => return None,
     };
-    Some(((value * unit.minutes(s) as f64).round() as Minutes, estimated))
+    Some((to_minutes(value * unit.minutes(s) as f64)?, estimated))
+}
+
+/// Rounds a number of minutes, refusing values beyond [`crate::limits::MAX_MINUTES`] (either sign).
+fn to_minutes(v: f64) -> Option<Minutes> {
+    let max = crate::limits::MAX_MINUTES as f64;
+    (v.is_finite() && v.abs() <= max).then(|| v.round() as Minutes)
 }
 
 /// Parses an amount of work. A bare number means hours.
@@ -193,12 +202,13 @@ impl Lag {
             return Some(Lag::None);
         }
         if let Some(p) = t.strip_suffix('%') {
-            return p.parse::<i32>().ok().map(Lag::Percent);
+            let max = crate::limits::MAX_LAG_PERCENT;
+            return p.parse::<i32>().ok().filter(|p| (-max..=max).contains(p)).map(Lag::Percent);
         }
         for suffix in ["edays", "eday", "ed", "e"] {
             if let Some(n) = t.strip_suffix(suffix) {
                 let v: f64 = n.parse().ok()?;
-                return Some(Lag::Elapsed((v * 24.0 * 60.0).round() as Minutes));
+                return to_minutes(v * 24.0 * 60.0).map(Lag::Elapsed);
             }
         }
         parse_duration(&t, DurationUnit::Days, s).map(|(m, _)| Lag::Working(m))

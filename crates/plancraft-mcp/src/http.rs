@@ -8,7 +8,9 @@
 //!
 //! Requests carrying an `Origin` header that is not a localhost origin are
 //! rejected (DNS-rebinding protection); when bound to a loopback address the
-//! `Host` header must name a loopback host as well.
+//! `Host` header must name a loopback host as well. Every request must carry
+//! `Authorization: Bearer <token>` with the server's per-session token
+//! (see [`crate::session`]); others get `401 Unauthorized`.
 
 use std::io::{self, Read};
 use std::net::SocketAddr;
@@ -32,6 +34,7 @@ pub struct HttpHandle {
     http: Arc<Server>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
+    token: Arc<str>,
 }
 
 impl std::fmt::Debug for HttpHandle {
@@ -53,6 +56,11 @@ impl HttpHandle {
     /// The MCP endpoint URL, e.g. `http://127.0.0.1:7878/mcp`.
     pub fn url(&self) -> String {
         format!("http://{}/mcp", self.addr)
+    }
+
+    /// The bearer token clients must send (`Authorization: Bearer <token>`).
+    pub fn token(&self) -> &str {
+        &self.token
     }
 
     /// Whether the server thread is still running.
@@ -82,7 +90,13 @@ impl Drop for HttpHandle {
 
 /// Starts serving MCP over HTTP on `addr` (e.g. `"127.0.0.1:7878"`, or port 0
 /// for an ephemeral port) on a background thread.
-pub fn serve_http(server: Arc<McpServer>, addr: &str) -> io::Result<HttpHandle> {
+///
+/// Clients must authenticate with `token` (make one with [`crate::session::new_token`]).
+pub fn serve_http(server: Arc<McpServer>, addr: &str, token: &str) -> io::Result<HttpHandle> {
+    if token.len() < 32 {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "the bearer token must be at least 32 characters"));
+    }
+    let token: Arc<str> = Arc::from(token);
     let http = Server::http(addr).map_err(|e| io::Error::new(io::ErrorKind::AddrNotAvailable, format!("cannot listen on {addr}: {e}")))?;
     let bound = http.server_addr().to_ip().ok_or_else(|| io::Error::other("server is not bound to an IP address"))?;
     let http = Arc::new(http);
@@ -91,13 +105,16 @@ pub fn serve_http(server: Arc<McpServer>, addr: &str) -> io::Result<HttpHandle> 
     let thread = {
         let http = Arc::clone(&http);
         let stop = Arc::clone(&stop);
+        let token = Arc::clone(&token);
         std::thread::Builder::new().name("plancraft-mcp-http".into()).spawn(move || {
             while !stop.load(Ordering::SeqCst) {
                 match http.recv_timeout(Duration::from_millis(250)) {
                     Ok(Some(req)) => {
                         let server = Arc::clone(&server);
-                        let spawned =
-                            std::thread::Builder::new().name("plancraft-mcp-request".into()).spawn(move || handle(&server, req, loopback));
+                        let token = Arc::clone(&token);
+                        let spawned = std::thread::Builder::new()
+                            .name("plancraft-mcp-request".into())
+                            .spawn(move || handle(&server, req, loopback, &token));
                         if let Err(e) = spawned {
                             eprintln!("plancraft-mcp: cannot spawn request thread: {e}");
                         }
@@ -113,7 +130,7 @@ pub fn serve_http(server: Arc<McpServer>, addr: &str) -> io::Result<HttpHandle> 
             }
         })?
     };
-    Ok(HttpHandle { addr: bound, http, stop, thread: Some(thread) })
+    Ok(HttpHandle { addr: bound, http, stop, thread: Some(thread), token })
 }
 
 fn header<'a>(req: &'a Request, name: &str) -> Option<&'a str> {
@@ -145,18 +162,32 @@ pub fn is_local_origin(origin: &str) -> bool {
     is_loopback_host(authority)
 }
 
-fn h(name: &str, value: &str) -> Header {
-    Header::from_bytes(name.as_bytes(), value.as_bytes()).expect("valid header")
+/// Adds a header (header names and values here are constants or ASCII, so this never fails in
+/// practice; a header that can't be built is left out).
+fn with(mut r: Response<io::Cursor<Vec<u8>>>, name: &str, value: &str) -> Response<io::Cursor<Vec<u8>>> {
+    if let Ok(h) = Header::from_bytes(name.as_bytes(), value.as_bytes()) {
+        r.add_header(h);
+    }
+    r
 }
 
 fn json_response(status: u16, body: &Value) -> Response<io::Cursor<Vec<u8>>> {
-    Response::from_data(serde_json::to_vec(body).unwrap_or_default())
-        .with_status_code(StatusCode(status))
-        .with_header(h("Content-Type", "application/json"))
+    with(
+        Response::from_data(serde_json::to_vec(body).unwrap_or_default()).with_status_code(StatusCode(status)),
+        "Content-Type",
+        "application/json",
+    )
 }
 
 fn text_response(status: u16, text: &str) -> Response<io::Cursor<Vec<u8>>> {
-    Response::from_string(text).with_status_code(StatusCode(status)).with_header(h("Content-Type", "text/plain; charset=utf-8"))
+    with(Response::from_string(text).with_status_code(StatusCode(status)), "Content-Type", "text/plain; charset=utf-8")
+}
+
+/// Whether the request carries `Authorization: Bearer <token>`.
+fn authorized(req: &Request, token: &str) -> bool {
+    header(req, "Authorization")
+        .and_then(|v| v.trim().split_once(' '))
+        .is_some_and(|(scheme, value)| scheme.eq_ignore_ascii_case("bearer") && crate::session::tokens_match(value.trim(), token))
 }
 
 fn contains_initialize(v: &Value) -> bool {
@@ -167,15 +198,15 @@ fn contains_initialize(v: &Value) -> bool {
     }
 }
 
-fn handle(server: &McpServer, mut req: Request, loopback: bool) {
+fn handle(server: &McpServer, mut req: Request, loopback: bool, token: &str) {
     let path = req.url().split('?').next().unwrap_or("").trim_end_matches('/').to_string();
-    let response = route(server, &mut req, &path, loopback);
+    let response = route(server, &mut req, &path, loopback, token);
     if let Err(e) = req.respond(response) {
         eprintln!("plancraft-mcp: failed to send HTTP response: {e}");
     }
 }
 
-fn route(server: &McpServer, req: &mut Request, path: &str, loopback: bool) -> Response<io::Cursor<Vec<u8>>> {
+fn route(server: &McpServer, req: &mut Request, path: &str, loopback: bool, token: &str) -> Response<io::Cursor<Vec<u8>>> {
     if let Some(origin) = header(req, "Origin")
         && !is_local_origin(origin)
     {
@@ -187,6 +218,13 @@ fn route(server: &McpServer, req: &mut Request, path: &str, loopback: bool) -> R
     {
         return text_response(403, "Forbidden: invalid Host header");
     }
+    if !authorized(req, token) {
+        return with(
+            text_response(401, "Unauthorized: send the PlanCraft session token as 'Authorization: Bearer <token>'"),
+            "WWW-Authenticate",
+            "Bearer realm=\"plancraft\"",
+        );
+    }
     if !(path.is_empty() || path == "/mcp") {
         return text_response(404, "Not found: the MCP endpoint is /mcp");
     }
@@ -194,11 +232,14 @@ fn route(server: &McpServer, req: &mut Request, path: &str, loopback: bool) -> R
         Method::Post => {}
         Method::Delete => return text_response(200, ""),
         Method::Get => {
-            return text_response(405, "Method Not Allowed: this server does not offer an SSE stream; use POST")
-                .with_header(h("Allow", "POST, DELETE"));
+            return with(
+                text_response(405, "Method Not Allowed: this server does not offer an SSE stream; use POST"),
+                "Allow",
+                "POST, DELETE",
+            );
         }
         _ => {
-            return text_response(405, "Method Not Allowed").with_header(h("Allow", "POST, DELETE"));
+            return with(text_response(405, "Method Not Allowed"), "Allow", "POST, DELETE");
         }
     }
     let mut body = Vec::new();
@@ -216,11 +257,8 @@ fn route(server: &McpServer, req: &mut Request, path: &str, loopback: bool) -> R
     match server.handle_message(msg) {
         None => Response::from_data(Vec::new()).with_status_code(StatusCode(202)),
         Some(resp) => {
-            let mut r = json_response(200, &resp);
-            if init {
-                r.add_header(h("Mcp-Session-Id", &uuid::Uuid::new_v4().to_string()));
-            }
-            r
+            let r = json_response(200, &resp);
+            if init { with(r, "Mcp-Session-Id", &uuid::Uuid::new_v4().to_string()) } else { r }
         }
     }
 }

@@ -20,6 +20,10 @@ pub enum Command {
     ExportCsv,
     Quit,
     StartPage,
+    /// Restore a recovery copy (by its stem in the recovery folder).
+    RestoreRecovered(String),
+    /// Delete a recovery copy.
+    DiscardRecovered(String),
     // Tasks
     InsertTask,
     InsertMilestone,

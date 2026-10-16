@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::{MutexGuard, PoisonError};
 use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{Duration, NaiveDate};
@@ -14,6 +15,7 @@ use crate::commands::Command;
 use crate::dialogs::{self, Dialogs};
 use crate::mcp_host::McpHost;
 use crate::menubar::{self, MenuInfo};
+use crate::recovery::{Recovery, RecoveryStore};
 use crate::settings::AppSettings;
 use crate::start_page;
 use crate::state::{ToastKind, UiState, ViewKind};
@@ -35,7 +37,36 @@ pub struct PlanCraftApp {
     shot: Option<(PathBuf, u32)>,
     /// Handle of the active document last frame (agents may open or switch documents).
     last_active: Option<u64>,
+    /// Recovery copies of unsaved work.
+    recovery: Recovery,
+    /// The last recovery-copy error shown (shown once until it changes).
+    recovery_error: Option<String>,
+    /// Message of the last internal error caught by the frame guard, until dismissed.
+    crash: Option<String>,
+    /// Developer/test hook: panic inside the next frame (`PLANCRAFT_CMD=Panic`).
+    inject_panic: bool,
 }
+
+/// Locks the shared workspace. A panic caught while it was held must not lock the user out of
+/// their plans, so a poisoned lock is simply taken over.
+pub fn lock(ws: &SharedWorkspace) -> MutexGuard<'_, Workspace> {
+    ws.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Whether a summary task above task `i` is one of `sel`.
+fn has_selected_ancestor(p: &Project, i: usize, sel: &[TaskId]) -> bool {
+    let mut a = p.parent_index(i);
+    while let Some(ai) = a {
+        if p.tasks.get(ai).is_some_and(|t| sel.contains(&t.id)) {
+            return true;
+        }
+        a = p.parent_index(ai);
+    }
+    false
+}
+
+/// Longest panic message shown to the user.
+const MAX_CRASH_CHARS: usize = 400;
 
 #[derive(Clone, Copy, PartialEq)]
 enum CloseRequest {
@@ -50,7 +81,7 @@ impl PlanCraftApp {
             settings.theme = t;
         }
         theme::install(&cc.egui_ctx, settings.theme);
-        let has_doc = ws.lock().map(|w| !w.docs.is_empty()).unwrap_or(false);
+        let has_doc = !lock(&ws).docs.is_empty();
         let st = UiState { table_width: settings.table_width, start_page: !has_doc, ..UiState::default() };
         let mut app = Self {
             ws,
@@ -65,7 +96,18 @@ impl PlanCraftApp {
             last_title: String::new(),
             shot: std::env::var_os("PLANCRAFT_SCREENSHOT").map(|p| (PathBuf::from(p), 0)),
             last_active: None,
+            // Tests never touch the user's recovery folder; they inject their own store.
+            recovery: Recovery::new(if cfg!(test) { None } else { RecoveryStore::user() }),
+            recovery_error: None,
+            crash: None,
+            inject_panic: false,
         };
+        if !app.recovery.found.is_empty() && !app.st.start_page {
+            app.st.toast(
+                ToastKind::Info,
+                "PlanCraft found unsaved work from an earlier session. Open the Start Page (File menu) to restore it.",
+            );
+        }
         if let Ok(v) = std::env::var("PLANCRAFT_TAB")
             && let Some(tab) = crate::state::MenuTab::ALL.into_iter().find(|t| t.label().eq_ignore_ascii_case(&v))
         {
@@ -126,29 +168,28 @@ impl PlanCraftApp {
 
     fn with_doc<R>(&mut self, f: impl FnOnce(&mut Document, &mut UiState) -> R) -> Option<R> {
         let ws = self.ws.clone();
-        let mut ws = ws.lock().ok()?;
+        let mut ws = lock(&ws);
         let doc = ws.active_doc_mut()?;
         Some(f(doc, &mut self.st))
     }
 
     fn open_path(&mut self, path: PathBuf) {
-        let r = self.ws.lock().map(|mut ws| ws.open(&path)).map_err(|_| ());
+        let r = lock(&self.ws).open(&path);
         match r {
-            Ok(Ok(_)) => {
+            Ok(_) => {
                 self.settings.add_recent(path.clone());
                 self.st.start_page = false;
                 self.st.sel = Default::default();
                 self.st.gantt.initialized_for = None;
                 self.set_status(format!("Opened {}", path.display()));
             }
-            Ok(Err(e)) => self.st.toast(ToastKind::Error, e.to_string()),
-            Err(_) => {}
+            Err(e) => self.st.toast(ToastKind::Error, e.to_string()),
         }
     }
 
     fn save(&mut self, save_as: bool) -> bool {
         let ws = self.ws.clone();
-        let Ok(mut ws) = ws.lock() else { return false };
+        let mut ws = lock(&ws);
         let Some(doc) = ws.active_doc_mut() else {
             return false;
         };
@@ -225,7 +266,7 @@ impl PlanCraftApp {
         match cmd {
             Command::NewProject => {
                 let start = chrono::Local::now().date_naive();
-                let mut ws = self.ws.lock().unwrap();
+                let mut ws = lock(&self.ws);
                 let n = ws.docs.len() + 1;
                 ws.add(Project::new(format!("Project{n}"), start), None);
                 drop(ws);
@@ -236,7 +277,7 @@ impl PlanCraftApp {
             Command::NewDemo => {
                 let today = chrono::Local::now().date_naive();
                 let monday = today - Duration::days(chrono::Datelike::weekday(&today).num_days_from_monday() as i64) - Duration::days(7);
-                self.ws.lock().unwrap().add(plancraft_core::sample::demo_project(monday), None);
+                lock(&self.ws).add(plancraft_core::sample::demo_project(monday), None);
                 self.st.start_page = false;
                 self.st.sel = Default::default();
                 self.st.view = ViewKind::Gantt;
@@ -254,7 +295,7 @@ impl PlanCraftApp {
                 self.save(true);
             }
             Command::Close => {
-                let info = self.ws.lock().unwrap().active_doc().map(|d| (d.handle, d.dirty));
+                let info = lock(&self.ws).active_doc().map(|d| (d.handle, d.dirty));
                 if let Some((h, dirty)) = info {
                     if dirty {
                         self.confirm_close = Some(CloseRequest::Document(h));
@@ -266,6 +307,11 @@ impl PlanCraftApp {
             Command::Quit => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             Command::StartPage => {
                 self.st.start_page = true;
+            }
+            Command::RestoreRecovered(stem) => self.restore_recovered(&stem),
+            Command::DiscardRecovered(stem) => {
+                self.recovery.discard(&stem);
+                self.set_status("Recovery copy discarded");
             }
             Command::ExportCsv => self.export_csv(),
             Command::McpPanel => {
@@ -287,7 +333,7 @@ impl PlanCraftApp {
             }
             other => {
                 let ws = self.ws.clone();
-                let mut ws = ws.lock().unwrap();
+                let mut ws = lock(&ws);
                 let Some(doc) = ws.active_doc_mut() else {
                     return;
                 };
@@ -296,10 +342,49 @@ impl PlanCraftApp {
         }
     }
 
+    /// Opens a recovery copy as an unsaved document, bound to its original file when it had one.
+    fn restore_recovered(&mut self, stem: &str) {
+        let Some(item) = self.recovery.find(stem).cloned() else { return };
+        let Some(store) = self.recovery.store().cloned() else { return };
+        match store.load(&item) {
+            Ok((project, notes)) => {
+                let mut ws = lock(&self.ws);
+                ws.add(project, item.original_path.clone());
+                if let Some(doc) = ws.active_doc_mut() {
+                    doc.dirty = true;
+                    doc.load_notes = notes;
+                }
+                // Copy the restored document under its new handle before the old copy goes.
+                let copied = self.recovery.write_dirty(&ws);
+                drop(ws);
+                match copied {
+                    Ok(_) => self.recovery.discard(stem),
+                    // Keep the old copy and drop it from the list only (it stays on disk).
+                    Err(e) => {
+                        self.recovery.found.retain(|i| i.stem != stem);
+                        self.st.toast(ToastKind::Warning, e);
+                    }
+                }
+                self.st.start_page = false;
+                self.st.sel = Default::default();
+                self.st.gantt.initialized_for = None;
+                self.st.view = ViewKind::Gantt;
+                let target = match &item.original_path {
+                    Some(p) => format!("Save writes it back to {}", p.display()),
+                    None => "Save it to keep it".to_string(),
+                };
+                self.set_status(format!("Restored {} from a recovery copy. {target}.", item.name));
+            }
+            Err(e) => self.st.toast(ToastKind::Error, format!("Could not restore {}: {e}", item.name)),
+        }
+    }
+
     fn close_doc(&mut self, handle: u64) {
-        let mut ws = self.ws.lock().unwrap();
+        let mut ws = lock(&self.ws);
         ws.close(handle);
         let empty = ws.docs.is_empty();
+        // The user chose to save or discard: the recovery copy is no longer needed.
+        self.recovery.prune(&ws);
         drop(ws);
         self.st.sel = Default::default();
         self.st.gantt.initialized_for = None;
@@ -312,11 +397,11 @@ impl PlanCraftApp {
         let st = &mut self.st;
         let sel: Vec<TaskId> = views::selected_in_order(&doc.project, &st.sel);
         let first_sel_index = sel.first().and_then(|id| doc.project.task_index(*id));
-        let report = |st: &mut UiState, r: Result<(), PlanError>| {
+        fn report<T>(st: &mut UiState, r: PlanResult<T>) {
             if let Err(e) = r {
                 st.toast(ToastKind::Warning, e.to_string());
             }
-        };
+        }
         match cmd {
             Command::Undo => {
                 if doc.undo() {
@@ -330,9 +415,13 @@ impl PlanCraftApp {
             Command::InsertTask | Command::InsertMilestone => {
                 let milestone = cmd == Command::InsertMilestone;
                 let at = first_sel_index;
-                let id = doc.edit(if milestone { "Insert Milestone" } else { "Insert Task" }, |p| {
+                let r = doc.edit(if milestone { "Insert Milestone" } else { "Insert Task" }, |p| {
                     if milestone { p.add_milestone("<New Milestone>", at) } else { p.add_task("<New Task>", at) }
                 });
+                let id = match r {
+                    Ok(id) => id,
+                    Err(e) => return st.toast(ToastKind::Warning, e.to_string()),
+                };
                 st.sel.select_task(id);
                 if let Some(r) = doc.project.task_index(id) {
                     let rows = views::visible_rows(&doc.project, st);
@@ -345,8 +434,10 @@ impl PlanCraftApp {
             }
             Command::InsertSummary => {
                 if sel.is_empty() {
-                    let id = doc.edit("Insert Summary Task", |p| p.add_task("<New Summary Task>", None));
-                    st.sel.select_task(id);
+                    match doc.edit("Insert Summary Task", |p| p.add_task("<New Summary Task>", None)) {
+                        Ok(id) => st.sel.select_task(id),
+                        Err(e) => st.toast(ToastKind::Warning, e.to_string()),
+                    }
                 } else {
                     let r = doc.try_edit("Insert Summary Task", ChangeSource::User, |p| p.add_summary_over("<New Summary Task>", &sel));
                     match r {
@@ -374,17 +465,7 @@ impl PlanCraftApp {
                 let tops: Vec<TaskId> = sel
                     .iter()
                     .copied()
-                    .filter(|id| {
-                        let i = doc.project.task_index(*id).unwrap();
-                        let mut a = doc.project.parent_index(i);
-                        while let Some(ai) = a {
-                            if sel.contains(&doc.project.tasks[ai].id) {
-                                return false;
-                            }
-                            a = doc.project.parent_index(ai);
-                        }
-                        true
-                    })
+                    .filter(|id| doc.project.task_index(*id).is_some_and(|i| !has_selected_ancestor(&doc.project, i, &sel)))
                     .collect();
                 let r = doc.try_edit(if indent { "Indent" } else { "Outdent" }, ChangeSource::User, |p| {
                     for id in &tops {
@@ -411,7 +492,8 @@ impl PlanCraftApp {
             }
             Command::UnlinkSelected => {
                 if !sel.is_empty() {
-                    doc.edit("Unlink Tasks", |p| p.unlink_tasks(&sel));
+                    let r = doc.edit("Unlink Tasks", |p| p.unlink_tasks(&sel));
+                    report(st, r);
                 }
             }
             Command::SetPercent(pct) => {
@@ -455,19 +537,20 @@ impl PlanCraftApp {
             }
             Command::ToggleActive => {
                 if !sel.is_empty() {
-                    doc.edit("Inactivate Task", |p| {
-                        let new = !p.task(sel[0]).map(|t| t.active).unwrap_or(true);
+                    let r = doc.edit("Inactivate Task", |p| {
+                        let new = !sel.first().and_then(|id| p.task(*id)).map(|t| t.active).unwrap_or(true);
                         for id in &sel {
                             if let Some(t) = p.task_mut(*id) {
                                 t.active = new;
                             }
                         }
                     });
+                    report(st, r);
                 }
             }
             Command::SetMode(mode) => {
                 if !sel.is_empty() {
-                    doc.edit(if mode == ScheduleMode::Manual { "Manually Schedule" } else { "Auto Schedule" }, |p| {
+                    let r = doc.edit(if mode == ScheduleMode::Manual { "Manually Schedule" } else { "Auto Schedule" }, |p| {
                         for id in &sel {
                             if let Some(t) = p.task_mut(*id) {
                                 if mode == ScheduleMode::Manual && t.mode == ScheduleMode::Auto {
@@ -478,6 +561,7 @@ impl PlanCraftApp {
                             }
                         }
                     });
+                    report(st, r);
                 }
             }
             Command::TaskInfo | Command::TaskNotes => {
@@ -487,14 +571,15 @@ impl PlanCraftApp {
             }
             Command::ToggleTimeline => {
                 if !sel.is_empty() {
-                    doc.edit("Add to Timeline", |p| {
-                        let new = !p.task(sel[0]).map(|t| t.show_on_timeline).unwrap_or(false);
+                    let r = doc.edit("Add to Timeline", |p| {
+                        let new = !sel.first().and_then(|id| p.task(*id)).map(|t| t.show_on_timeline).unwrap_or(false);
                         for id in &sel {
                             if let Some(t) = p.task_mut(*id) {
                                 t.show_on_timeline = new;
                             }
                         }
                     });
+                    report(st, r);
                     st.timeline_visible = true;
                 }
             }
@@ -505,8 +590,9 @@ impl PlanCraftApp {
                 {
                     st.gantt.scroll_to(s);
                     let rows = views::visible_rows(&doc.project, st);
-                    let idx = doc.project.task_index(*id).unwrap();
-                    if let Some(r) = rows.iter().position(|&i| i == idx) {
+                    if let Some(idx) = doc.project.task_index(*id)
+                        && let Some(r) = rows.iter().position(|&i| i == idx)
+                    {
                         st.task_grid.scroll_to = Some(r);
                     }
                 }
@@ -515,18 +601,7 @@ impl PlanCraftApp {
                 if !sel.is_empty() {
                     let mut copied = Vec::new();
                     for (i, t) in doc.project.tasks.iter().enumerate() {
-                        let inside = sel.contains(&t.id) || {
-                            let mut a = doc.project.parent_index(i);
-                            let mut found = false;
-                            while let Some(ai) = a {
-                                if sel.contains(&doc.project.tasks[ai].id) {
-                                    found = true;
-                                    break;
-                                }
-                                a = doc.project.parent_index(ai);
-                            }
-                            found
-                        };
+                        let inside = sel.contains(&t.id) || has_selected_ancestor(&doc.project, i, &sel);
                         if inside {
                             copied.push(t.clone());
                         }
@@ -543,9 +618,10 @@ impl PlanCraftApp {
                 if !st.clipboard.is_empty() {
                     let clip = st.clipboard.clone();
                     let at = first_sel_index.unwrap_or(doc.project.tasks.len());
-                    let ids = doc.edit("Paste Tasks", |p| {
+                    let r = doc.edit("Paste Tasks", |p| {
                         let base = clip.iter().map(|t| t.outline_level).min().unwrap_or(1);
-                        let target_level = if at < p.tasks.len() { p.tasks[at].outline_level } else { 1 };
+                        let target_level = p.tasks.get(at).map_or(1, |t| t.outline_level);
+                        let at = at.min(p.tasks.len());
                         let mut ids = Vec::new();
                         for (k, t) in clip.iter().enumerate() {
                             let mut nt = t.clone();
@@ -553,28 +629,36 @@ impl PlanCraftApp {
                             nt.predecessors.clear();
                             nt.members.clear();
                             nt.baseline = None;
-                            nt.outline_level = target_level + (t.outline_level - base);
+                            nt.outline_level = target_level.saturating_add(t.outline_level.saturating_sub(base));
                             ids.push(nt.id);
                             p.tasks.insert(at + k, nt);
                         }
                         p.normalize_outline();
                         ids
                     });
-                    st.sel.tasks = ids.into_iter().collect();
+                    match r {
+                        Ok(ids) => st.sel.tasks = ids.into_iter().collect(),
+                        Err(e) => st.toast(ToastKind::Warning, e.to_string()),
+                    }
                 }
             }
             Command::InsertResource => {
-                let id = doc.edit("Add Resource", |p| {
+                let r = doc.edit("Add Resource", |p| {
                     let n = p.resources.len() + 1;
                     p.add_resource(format!("Resource {n}"))
                 });
+                let id = match r {
+                    Ok(id) => id,
+                    Err(e) => return st.toast(ToastKind::Warning, e.to_string()),
+                };
                 st.sel.select_resource(id);
                 if st.view != ViewKind::ResourceSheet {
                     st.view = ViewKind::ResourceSheet;
                 }
-                let row = doc.project.resources.len() - 1;
-                st.resource_grid.begin_edit(row, 1, String::new());
-                st.resource_grid.scroll_to = Some(row);
+                if let Some(row) = doc.project.resources.iter().position(|r| r.id == id) {
+                    st.resource_grid.begin_edit(row, 1, String::new());
+                    st.resource_grid.scroll_to = Some(row);
+                }
             }
             Command::DeleteResources => {
                 let ids: Vec<ResourceId> = st.sel.resources.iter().copied().collect();
@@ -591,7 +675,10 @@ impl PlanCraftApp {
             }
             Command::AssignResources => self.dialogs.assign = Some(Default::default()),
             Command::LevelAll => {
-                let r = doc.edit("Level Resources", |p| level_resources(p, &LevelingOptions::default()));
+                let r = match doc.edit("Level Resources", |p| level_resources(p, &LevelingOptions::default())) {
+                    Ok(r) => r,
+                    Err(e) => return st.toast(ToastKind::Warning, e.to_string()),
+                };
                 let msg = if r.delayed.is_empty() && r.unresolved.is_empty() {
                     "No overallocations needed leveling.".to_string()
                 } else {
@@ -607,18 +694,18 @@ impl PlanCraftApp {
                     st.toast(ToastKind::Warning, u);
                 }
             }
-            Command::ClearLeveling => doc.edit("Clear Leveling", clear_leveling),
+            Command::ClearLeveling => report(st, doc.edit("Clear Leveling", clear_leveling)),
             Command::ProjectInfo => self.dialogs.project_info = Some(dialogs::project_info::ProjectInfo::new(&doc.project)),
             Command::ChangeWorkingTime => self.dialogs.working_time = Some(dialogs::working_time::WorkingTime::new(&doc.project)),
-            Command::SetBaseline => {
-                doc.edit("Set Baseline", |p| p.set_baseline(&[]));
-                st.toast(ToastKind::Success, "Baseline saved for all tasks");
-            }
-            Command::ClearBaseline => doc.edit("Clear Baseline", |p| p.clear_baseline(&[])),
-            Command::UpdateProgressFromTime => {
-                doc.edit("Update Progress from Time", |p| p.update_progress_from_time());
-                st.toast(ToastKind::Success, "Progress updated from tracked time");
-            }
+            Command::SetBaseline => match doc.edit("Set Baseline", |p| p.set_baseline(&[])) {
+                Ok(()) => st.toast(ToastKind::Success, "Baseline saved for all tasks"),
+                Err(e) => st.toast(ToastKind::Warning, e.to_string()),
+            },
+            Command::ClearBaseline => report(st, doc.edit("Clear Baseline", |p| p.clear_baseline(&[]))),
+            Command::UpdateProgressFromTime => match doc.edit("Update Progress from Time", |p| p.update_progress_from_time()) {
+                Ok(_) => st.toast(ToastKind::Success, "Progress updated from tracked time"),
+                Err(e) => st.toast(ToastKind::Warning, e.to_string()),
+            },
             Command::ExternalLinks => self.dialogs.external = Some(Default::default()),
             Command::RefreshExternal => {
                 let w = doc.refresh_external();
@@ -738,8 +825,10 @@ impl PlanCraftApp {
                     )
                     .sense(Sense::click()),
                 );
-                if resp.on_hover_text("Click to change how new tasks are scheduled").clicked() {
-                    doc.edit("New Task Mode", |p| p.settings.new_tasks_auto = !auto);
+                if resp.on_hover_text("Click to change how new tasks are scheduled").clicked()
+                    && let Err(e) = doc.edit("New Task Mode", |p| p.settings.new_tasks_auto = !auto)
+                {
+                    self.st.toast(ToastKind::Warning, e.to_string());
                 }
                 if self.st.filter != crate::state::TaskFilter::All {
                     ui.separator();
@@ -836,7 +925,7 @@ impl PlanCraftApp {
             return;
         };
         let names: Vec<String> = {
-            let ws = self.ws.lock().unwrap();
+            let ws = lock(&self.ws);
             match req {
                 CloseRequest::Document(h) => ws.docs.iter().filter(|d| d.handle == h).map(|d| d.project.name.clone()).collect(),
                 CloseRequest::App => ws.docs.iter().filter(|d| d.dirty).map(|d| d.project.name.clone()).collect(),
@@ -862,8 +951,10 @@ impl PlanCraftApp {
         });
         match (choice, req) {
             (Some(0), CloseRequest::Document(h)) => {
-                let idx = self.ws.lock().unwrap().index_of(h);
-                self.ws.lock().unwrap().active = idx;
+                {
+                    let mut ws = lock(&self.ws);
+                    ws.active = ws.index_of(h);
+                }
                 if self.save(false) {
                     self.close_doc(h);
                 }
@@ -874,10 +965,10 @@ impl PlanCraftApp {
                 self.confirm_close = None;
             }
             (Some(0), CloseRequest::App) => {
-                let dirty: Vec<usize> = self.ws.lock().unwrap().docs.iter().enumerate().filter(|(_, d)| d.dirty).map(|(i, _)| i).collect();
+                let dirty: Vec<usize> = lock(&self.ws).docs.iter().enumerate().filter(|(_, d)| d.dirty).map(|(i, _)| i).collect();
                 let mut all = true;
                 for i in dirty {
-                    self.ws.lock().unwrap().active = Some(i);
+                    lock(&self.ws).active = Some(i);
                     all &= self.save(false);
                 }
                 self.confirm_close = None;
@@ -901,9 +992,7 @@ impl PlanCraftApp {
     fn screenshot_hook(&mut self, ctx: &egui::Context) {
         if self.shot.as_ref().is_some_and(|(_, f)| *f == 3) {
             let row: usize = std::env::var("PLANCRAFT_SELECT").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
-            if let Ok(ws) = self.ws.lock()
-                && let Some(doc) = ws.active_doc()
-            {
+            if let Some(doc) = lock(&self.ws).active_doc() {
                 if let Some(t) = doc.project.tasks.get(row.saturating_sub(1)) {
                     self.st.sel.select_task(t.id);
                 }
@@ -941,6 +1030,10 @@ impl PlanCraftApp {
                     }
                     "StartPage" => {
                         self.st.start_page = true;
+                        continue;
+                    }
+                    "Panic" => {
+                        self.inject_panic = true;
                         continue;
                     }
                     _ => continue,
@@ -986,34 +1079,127 @@ impl PlanCraftApp {
     }
 }
 
-impl eframe::App for PlanCraftApp {
-    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        theme::pal().BG.to_normalized_gamma_f32()
+impl PlanCraftApp {
+    /// Clean exit: settings saved, the MCP server stopped and this session's recovery copies
+    /// deleted (the user saved or chose to discard every change).
+    fn shutdown(&mut self) {
+        // Screenshot automation may override the theme; keep the user's settings as they were.
+        if self.shot.is_none() {
+            self.settings.table_width = self.st.table_width;
+            self.settings.save();
+        }
+        self.mcp.stop();
+        self.recovery.forget_all();
     }
 
-    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+    /// Called after the frame guard caught a panic: secure the user's work first, then tell them.
+    fn after_panic(&mut self, ctx: &egui::Context, message: &str) {
+        let (any_dirty, saved) = {
+            let ws = lock(&self.ws);
+            (ws.docs.iter().any(|d| d.dirty), self.recovery.write_dirty(&ws))
+        };
+        let message: String = match message.char_indices().nth(MAX_CRASH_CHARS) {
+            Some((cut, _)) => format!("{}…", message.get(..cut).unwrap_or(message)),
+            None => message.to_string(),
+        };
+        self.crash = Some(match (any_dirty, saved) {
+            (true, Ok(_)) => {
+                format!("PlanCraft hit an internal error; your unsaved work was saved as a recovery copy. Please report this: {message}")
+            }
+            (true, Err(e)) => format!("PlanCraft hit an internal error. {e}, so please save your work now. Please report this: {message}"),
+            (false, _) => format!("PlanCraft hit an internal error; you had no unsaved changes. Please report this: {message}"),
+        });
+        ctx.request_repaint();
+    }
+
+    /// The non-modal notice shown after an internal error, until dismissed.
+    fn crash_notice(&mut self, ctx: &egui::Context) {
+        let Some(msg) = self.crash.clone() else { return };
+        let mut dismiss = false;
+        egui::Area::new(egui::Id::new("crash_notice")).order(egui::Order::Foreground).anchor(Align2::CENTER_TOP, vec2(0.0, 72.0)).show(
+            ctx,
+            |ui| {
+                egui::Frame::popup(ui.style()).stroke(Stroke::new(1.5, theme::pal().ERROR)).inner_margin(egui::Margin::same(12)).show(
+                    ui,
+                    |ui| {
+                        ui.set_max_width(560.0);
+                        ui.horizontal_top(|ui| {
+                            ui.label(RichText::new("✖").color(theme::pal().ERROR).size(18.0));
+                            ui.vertical(|ui| {
+                                ui.label(RichText::new(&msg).color(theme::pal().TEXT));
+                                ui.add_space(6.0);
+                                ui.horizontal(|ui| {
+                                    if ui.button("Copy details").clicked() {
+                                        ui.ctx().copy_text(msg.clone());
+                                    }
+                                    if ui.button("Dismiss").clicked() {
+                                        dismiss = true;
+                                    }
+                                });
+                            });
+                        });
+                    },
+                );
+            },
+        );
+        if dismiss {
+            self.crash = None;
+        }
+    }
+
+    /// Shows what opening a file clamped into range, once per document.
+    fn report_load_notes(&mut self, ws: &mut Workspace) {
+        for doc in &mut ws.docs {
+            if doc.load_notes.is_empty() {
+                continue;
+            }
+            let notes = std::mem::take(&mut doc.load_notes);
+            const SHOWN: usize = 5;
+            let mut list = notes.iter().take(SHOWN).cloned().collect::<Vec<_>>().join("; ");
+            if notes.len() > SHOWN {
+                list.push_str(&format!("; and {} more", notes.len() - SHOWN));
+            }
+            self.st.toast(ToastKind::Warning, format!("Opened {}; PlanCraft adjusted out-of-range values: {list}", doc.title()));
+        }
+    }
+
+    /// Everything drawn in one frame (run behind the frame guard).
+    fn frame(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         theme::sync(&ctx);
         self.screenshot_hook(&ctx);
+        if std::mem::take(&mut self.inject_panic) {
+            injected_panic();
+        }
         let mut out: Vec<Command> = Vec::new();
 
         // Intercept window close when there are unsaved changes.
-        if ctx.input(|i| i.viewport().close_requested()) && !self.allow_exit {
-            let dirty = self.ws.lock().map(|w| w.docs.iter().any(|d| d.dirty)).unwrap_or(false);
-            if dirty {
+        if ctx.input(|i| i.viewport().close_requested()) {
+            let dirty = lock(&self.ws).docs.iter().any(|d| d.dirty);
+            if dirty && !self.allow_exit {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
                 self.confirm_close = Some(CloseRequest::App);
             } else {
-                self.settings.table_width = self.st.table_width;
-                self.settings.save();
-                self.mcp.stop();
+                self.shutdown();
             }
         }
 
         self.shortcuts(&ctx, &mut out);
 
         let ws_arc = self.ws.clone();
-        let mut ws = ws_arc.lock().unwrap();
+        let mut ws = lock(&ws_arc);
+
+        // Keep recovery copies of unsaved work up to date.
+        match self.recovery.tick(&ws) {
+            Ok(()) => self.recovery_error = None,
+            Err(e) => {
+                if self.recovery_error.as_ref() != Some(&e) {
+                    self.st.toast(ToastKind::Error, e.clone());
+                }
+                self.recovery_error = Some(e);
+            }
+        }
+        self.report_load_notes(&mut ws);
 
         // Notice changes made by AI agents through MCP.
         let mut agent_msgs = Vec::new();
@@ -1063,6 +1249,7 @@ impl eframe::App for PlanCraftApp {
                 doc_path: ws.active_doc().and_then(|d| d.path.as_ref().map(|p| p.display().to_string())),
                 stats,
                 settings: &self.settings,
+                recovered: &self.recovery.found,
             };
             egui::Panel::top("title").frame(egui::Frame::new().fill(theme::pal().BG)).show(ui, |ui| {
                 menubar::title_bar(ui, &info, &mut out);
@@ -1178,6 +1365,29 @@ impl eframe::App for PlanCraftApp {
     }
 }
 
+/// Developer/test hook behind `PLANCRAFT_CMD=Panic`: exercises the frame guard.
+#[allow(clippy::panic)]
+fn injected_panic() {
+    panic!("test panic requested with PLANCRAFT_CMD=Panic");
+}
+
+impl eframe::App for PlanCraftApp {
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        theme::pal().BG.to_normalized_gamma_f32()
+    }
+
+    fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
+        // Last line of defence: a bug while drawing must never take the user's plans with it.
+        if let Err(p) = plancraft_core::guard::catch("drawing the window", || self.frame(ui)) {
+            self.after_panic(&ctx, &p.message);
+        }
+        if let Err(p) = plancraft_core::guard::catch("showing an error", || self.crash_notice(&ctx)) {
+            eprintln!("plancraft: {p}");
+        }
+    }
+}
+
 #[cfg(test)]
 mod ui_tests {
     use super::*;
@@ -1268,6 +1478,77 @@ mod ui_tests {
         let p = &ws.active_doc().unwrap().project;
         assert_eq!(p.task(b).unwrap().outline_level, level);
         assert!(p.task(b).unwrap().predecessors.iter().any(|d| d.predecessor == plancraft_core::model::TaskRef::Local(a)));
+    }
+
+    #[test]
+    fn frame_guard_turns_a_panic_into_a_message_and_saves_unsaved_work() {
+        let tmp = crate::recovery::tests::TempDir::new("frame-guard");
+        let mut h = harness();
+        h.state_mut().recovery = Recovery::new(Some(RecoveryStore::new(&tmp.0)));
+        h.state().ws.lock().unwrap().active_doc_mut().unwrap().edit("Add", |p| p.add_task("Unsaved work", None)).unwrap();
+
+        h.state_mut().inject_panic = true;
+        h.run_steps(2);
+        let msg = h.state().crash.clone().expect("the error is shown");
+        assert!(msg.contains("saved as a recovery copy"), "{msg}");
+        assert!(msg.contains("PLANCRAFT_CMD=Panic"), "{msg}");
+        let copies = RecoveryStore::new(&tmp.0).list();
+        assert_eq!(copies.len(), 1, "unsaved work was copied right away");
+
+        // The app keeps running: frames draw and commands still work.
+        h.run_steps(3);
+        assert!(tasks(&h).iter().any(|t| t == "Unsaved work"));
+        let ctx = h.ctx.clone();
+        h.state_mut().exec(&ctx, Command::InsertTask);
+        h.run_steps(2);
+        assert!(tasks(&h).iter().any(|t| t == "<New Task>"));
+        assert!(h.state().crash.is_some(), "the notice stays until dismissed");
+    }
+
+    #[test]
+    fn recovered_work_restores_bound_to_its_file_and_can_be_discarded() {
+        let tmp = crate::recovery::tests::TempDir::new("restore");
+        let store = RecoveryStore::new(&tmp.0);
+        // An earlier session left two copies behind.
+        {
+            let mut ws = Workspace::default();
+            ws.add(
+                Project::new("Crashed Plan", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()),
+                Some(PathBuf::from("/plans/crashed.plancraft")),
+            );
+            ws.add(Project::new("Scratch", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+            for d in &mut ws.docs {
+                d.edit("Add", |p| p.add_task("Recovered task", None)).unwrap();
+            }
+            Recovery::new(Some(store.clone())).write_dirty(&ws).unwrap();
+        }
+        let mut h = harness();
+        h.state_mut().recovery = Recovery::new(Some(store.clone()));
+        assert_eq!(h.state().recovery.found.len(), 2);
+        h.state_mut().st.start_page = true;
+        h.run_steps(2);
+
+        let crashed = h.state().recovery.found.iter().find(|i| i.name == "Crashed Plan").unwrap().stem.clone();
+        let ctx = h.ctx.clone();
+        h.state_mut().exec(&ctx, Command::RestoreRecovered(crashed.clone()));
+        h.run_steps(2);
+        {
+            let ws = h.state().ws.lock().unwrap();
+            let doc = ws.active_doc().unwrap();
+            assert_eq!(doc.project.name, "Crashed Plan");
+            assert!(doc.dirty, "a restored copy is unsaved work");
+            assert_eq!(doc.path.as_deref(), Some(std::path::Path::new("/plans/crashed.plancraft")));
+            assert!(doc.project.tasks.iter().any(|t| t.name == "Recovered task"));
+        }
+        let left: Vec<String> = store.list().into_iter().map(|i| i.name).collect();
+        assert_eq!(left.len(), 2, "the restored document has its own copy now: {left:?}");
+        assert!(store.list().iter().all(|i| i.stem != crashed), "the old copy is gone");
+
+        let scratch = h.state().recovery.found.iter().find(|i| i.name == "Scratch").unwrap().stem.clone();
+        let ctx = h.ctx.clone();
+        h.state_mut().exec(&ctx, Command::DiscardRecovered(scratch.clone()));
+        assert!(h.state().recovery.found.is_empty());
+        assert!(store.list().iter().all(|i| i.stem != scratch));
     }
 
     #[test]

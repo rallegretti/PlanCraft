@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 //! JSON-RPC / MCP protocol behaviour driven through `handle_message`.
 
 mod common;

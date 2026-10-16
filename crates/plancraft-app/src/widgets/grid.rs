@@ -237,34 +237,33 @@ pub fn show(
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, theme::pal().BG);
 
-    // Column x positions.
-    let mut col_x = Vec::with_capacity(ncols + 1);
+    // Column x positions: (left, right) per column.
+    let mut spans: Vec<(f32, f32)> = Vec::with_capacity(ncols);
     let mut x = body.left() + rn_w - state.scroll_x;
     for w in &state.widths {
-        col_x.push(x);
+        spans.push((x, x + *w));
         x += *w;
     }
-    col_x.push(x);
 
     // ---- Header ----
     painter.rect_filled(header, 0.0, theme::pal().HEADER_BG);
     let hdr_painter = painter.with_clip_rect(Rect::from_min_max(pos2(header.left() + rn_w, header.top()), header.max));
     let font = FontId::proportional(12.5);
-    for c in 0..ncols {
-        let r = Rect::from_x_y_ranges(col_x[c]..=col_x[c + 1], header.y_range());
+    for (c, (def, &(x0, x1))) in cfg.columns.iter().zip(&spans).enumerate() {
+        let r = Rect::from_x_y_ranges(x0..=x1, header.y_range());
         hdr_painter.vline(r.right() - 0.5, header.y_range(), Stroke::new(1.0, theme::pal().GRID_LINE));
-        let text_pos = match cfg.columns[c].align {
+        let text_pos = match def.align {
             Align::Max => pos2(r.right() - 6.0, r.center().y),
             Align::Center => r.center(),
             Align::Min => pos2(r.left() + 6.0, r.center().y),
         };
-        let anchor = match cfg.columns[c].align {
+        let anchor = match def.align {
             Align::Max => Align2::RIGHT_CENTER,
             Align::Center => Align2::CENTER_CENTER,
             Align::Min => Align2::LEFT_CENTER,
         };
         let hp = hdr_painter.with_clip_rect(r.shrink2(vec2(2.0, 0.0)).intersect(header));
-        hp.text(text_pos, anchor, &cfg.columns[c].title, font.clone(), theme::pal().TEXT);
+        hp.text(text_pos, anchor, &def.title, font.clone(), theme::pal().TEXT);
         // Resize handle.
         let handle = Rect::from_center_size(pos2(r.right(), header.center().y), vec2(6.0, header.height()));
         if handle.left() > header.left() + rn_w && handle.right() < header.right() + 3.0 {
@@ -272,8 +271,10 @@ pub fn show(
             if hr.hovered() || hr.dragged() {
                 ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
             }
-            if hr.dragged() {
-                state.widths[c] = (state.widths[c] + hr.drag_delta().x).max(24.0);
+            if hr.dragged()
+                && let Some(w) = state.widths.get_mut(c)
+            {
+                *w = (*w + hr.drag_delta().x).max(24.0);
             }
         }
     }
@@ -301,8 +302,8 @@ pub fn show(
         if selected {
             body_painter.rect_filled(row_rect, 0.0, theme::pal().SELECTION);
         }
-        for c in 0..ncols {
-            let r = Rect::from_x_y_ranges(col_x[c]..=col_x[c + 1], row_rect.y_range());
+        for (c, (def, &(x0, x1))) in cfg.columns.iter().zip(&spans).enumerate() {
+            let r = Rect::from_x_y_ranges(x0..=x1, row_rect.y_range());
             if r.right() < body.left() + rn_w || r.left() > body.right() {
                 continue;
             }
@@ -350,7 +351,7 @@ pub fn show(
             if !content.text.is_empty() {
                 let color = content.color.unwrap_or(theme::pal().TEXT);
                 let galley = cp.layout_no_wrap(content.text.clone(), cell_font.clone(), color);
-                let gx = match cfg.columns[c].align {
+                let gx = match def.align {
                     Align::Max => r.right() - 5.0 - galley.size().x,
                     Align::Center => r.center().x - galley.size().x / 2.0,
                     Align::Min => tx,
@@ -404,7 +405,7 @@ pub fn show(
             return None;
         }
         let row = ((p.y - body.top() + state.scroll_y) / cfg.row_height).floor() as usize;
-        let col = (0..ncols).find(|&c| p.x >= col_x[c] && p.x < col_x[c + 1] && p.x >= body.left() + rn_w);
+        let col = spans.iter().position(|&(x0, x1)| p.x >= x0 && p.x < x1 && p.x >= body.left() + rn_w);
         Some((row, col))
     };
     if body_resp.clicked() || body_resp.double_clicked() || body_resp.secondary_clicked() {
@@ -427,7 +428,7 @@ pub fn show(
         }
         if body_resp.double_clicked() {
             match col {
-                Some(c) if cfg.columns[c].editor != Editor::None && row < total_rows => {
+                Some(c) if cfg.columns.get(c).is_some_and(|d| d.editor != Editor::None) && row < total_rows => {
                     let text = if row < cfg.row_count {
                         let ce = cell(row, c);
                         ce.edit_text.unwrap_or(ce.text)
@@ -453,10 +454,12 @@ pub fn show(
 
     // ---- Editing ----
     let mut finished: Option<(bool, Option<(isize, isize)>)> = None; // (commit, move)
-    if let Some((r, row, c)) = edit_rect {
-        let editor = cfg.columns[c].editor.clone();
+    if let Some((r, row, c)) = edit_rect
+        && let Some(def) = cfg.columns.get(c)
+        && let Some(edit) = state.editing.as_mut()
+    {
+        let editor = def.editor.clone();
         let clip = Rect::from_min_max(pos2(body.left() + rn_w, body.top()), body.max);
-        let edit = state.editing.as_mut().expect("editing");
         match editor {
             Editor::Choice(options) => {
                 body_painter.rect_filled(r, 0.0, theme::pal().BG);
@@ -507,7 +510,7 @@ pub fn show(
                     .margin(egui::Margin::symmetric(4, 2))
                     .font(cell_font.clone())
                     .desired_width(r.width() - 4.0)
-                    .horizontal_align(cfg.columns[c].align);
+                    .horizontal_align(def.align);
                 let resp = child.add(te);
                 body_painter.rect_stroke(r.shrink(0.5), 0.0, Stroke::new(1.5, theme::pal().ACCENT), StrokeKind::Inside);
                 if !edit.started {
@@ -611,10 +614,11 @@ pub fn show(
         }
         if let Some((r, c)) = state.cursor
             && r < total_rows
-            && cfg.columns[c].editor != Editor::None
+            && let Some(def) = cfg.columns.get(c)
+            && def.editor != Editor::None
         {
             if let Some(t) = typed.filter(|t| !t.trim().is_empty()) {
-                if matches!(cfg.columns[c].editor, Editor::Text) {
+                if matches!(def.editor, Editor::Text) {
                     state.begin_edit(r, c, t);
                     if let Some(e) = state.editing.as_mut() {
                         // Place cursor at end of the typed text.

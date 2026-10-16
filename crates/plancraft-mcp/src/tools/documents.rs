@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::args::*;
+use crate::server::{doc_at, doc_at_mut};
 use crate::views;
 
 pub fn tools() -> Vec<Tool> {
@@ -180,14 +181,14 @@ fn new_project(ctx: &Ctx, a: &Args) -> ToolResult {
     }
     let out = ctx.with_workspace(|ws| {
         let handle = ws.add(project, None);
-        let i = ws.index_of(handle).expect("just added");
+        let i = ws.index_of(handle).ok_or_else(|| missing("just added"))?;
         if let Some(p) = path
-            && let Err(e) = ws.docs[i].save_as(&p)
+            && let Err(e) = doc_at_mut(ws, i)?.save_as(&p)
         {
             ws.close(handle);
             return Err(e.into());
         }
-        Ok(project_overview(&ws.docs[i]))
+        Ok(project_overview(doc_at(ws, i)?))
     })?;
     ctx.mark_changed();
     Ok(out)
@@ -200,8 +201,8 @@ fn open_project(ctx: &Ctx, a: &Args) -> ToolResult {
     let p = if p.exists() { p } else { with_extension(&path) };
     let out = ctx.with_workspace(|ws| {
         let handle = ws.open(&p)?;
-        let i = ws.index_of(handle).expect("opened");
-        Ok(project_overview(&ws.docs[i]))
+        let i = ws.index_of(handle).ok_or_else(|| missing("opened"))?;
+        Ok(project_overview(doc_at(ws, i)?))
     })?;
     ctx.mark_changed();
     Ok(out)
@@ -243,7 +244,7 @@ fn close_project(ctx: &Ctx, a: &Args) -> ToolResult {
     let discard = a.bool("discard_changes")?.unwrap_or(false);
     let out = ctx.with_workspace(|ws| {
         let i = Ctx::doc_index(ws, a)?;
-        let doc = &ws.docs[i];
+        let doc = doc_at(ws, i)?;
         if doc.dirty && !discard {
             return err(format!("'{}' has unsaved changes; call save_project first or pass discard_changes: true", doc.title()));
         }
@@ -265,7 +266,7 @@ fn set_active_document(ctx: &Ctx, a: &Args) -> ToolResult {
     let out = ctx.with_workspace(|ws| {
         let i = Ctx::doc_index(ws, a)?;
         ws.active = Some(i);
-        Ok(views::document_brief(&ws.docs[i], true))
+        Ok(views::document_brief(doc_at(ws, i)?, true))
     })?;
     ctx.mark_changed();
     Ok(out)

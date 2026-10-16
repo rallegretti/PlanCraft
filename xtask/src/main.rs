@@ -1,6 +1,7 @@
 //! PlanCraft build tasks.
 //!
 //! ```text
+//! cargo xtask ci                           fmt, clippy, tests, speed gate, cargo deny
 //! cargo xtask package <mac|linux|windows> build + package on this machine
 //! cargo xtask dist <mac|linux|windows|all> [--host ALIAS]
 //!                                          package here, or on a build host over SSH,
@@ -14,6 +15,7 @@
 //! windows = "win-build"
 //! ```
 
+mod ci;
 mod linux;
 mod mac;
 mod remote;
@@ -63,6 +65,10 @@ const USAGE: &str = "\
 PlanCraft build tasks
 
 USAGE:
+    cargo xtask ci
+        Run the checks CI runs: fmt, clippy -D warnings, tests, the scheduler
+        speed gate (release) and cargo deny.
+
     cargo xtask package <mac|linux|windows>
         Build release binaries and package them on this machine.
 
@@ -113,6 +119,9 @@ fn real_main() -> Result<()> {
             }
             _ => positional.push(a.as_str()),
         }
+    }
+    if positional.as_slice() == ["ci"] {
+        return ci::ci();
     }
     let results = match positional.as_slice() {
         ["package", t] => package(Target::parse(t)?)?,

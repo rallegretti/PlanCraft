@@ -2,8 +2,9 @@
 
 use egui::{Context, RichText, Ui};
 use plancraft_core::prelude::*;
-use plancraft_core::workspace::{ChangeSource, Document};
+use plancraft_core::workspace::Document;
 
+use crate::edit::EditExt;
 use crate::format;
 use crate::theme;
 
@@ -81,8 +82,7 @@ pub struct TaskInfo {
 
 impl TaskInfo {
     pub fn new(p: &Project, id: TaskId, notes_tab: bool) -> Option<Self> {
-        let idx = p.task_index(id)?;
-        let t = &p.tasks[idx];
+        let t = p.task(id)?;
         let (est_kind, points, o, m, pe, w) = match t.estimate {
             None => (EstKind::None, String::new(), String::new(), String::new(), String::new(), String::new()),
             Some(Estimate::Complexity { points }) => {
@@ -149,7 +149,9 @@ impl TaskInfo {
 
     fn apply(&self, p: &mut Project) -> Result<(), String> {
         let id = self.id;
-        let idx = p.task_index(id).ok_or("task was deleted")?;
+        if p.task(id).is_none() {
+            return Err("task was deleted".into());
+        }
         let err = |e: PlanError| e.to_string();
         let opt_date = |p: &Project, s: &str, finish: bool| -> Result<Option<chrono::NaiveDateTime>, String> {
             if s.trim().is_empty() || s.trim().eq_ignore_ascii_case("na") {
@@ -162,7 +164,7 @@ impl TaskInfo {
             return Err("The task name cannot be empty.".into());
         }
         {
-            let t = &mut p.tasks[idx];
+            let t = p.task_mut(id).ok_or("task was deleted")?;
             t.name = self.name.trim().to_string();
             t.mode = self.mode;
             t.active = self.active;
@@ -185,37 +187,36 @@ impl TaskInfo {
         let afinish = opt_date(p, &self.actual_finish, true)?;
         let manual_start = opt_date(p, &self.start, false)?;
         let manual_finish = opt_date(p, &self.finish, true)?;
+        let estimate = match self.est_kind {
+            EstKind::None => None,
+            EstKind::Complexity => {
+                Some(Estimate::Complexity { points: self.points.trim().parse().map_err(|_| "Complexity points must be a number")? })
+            }
+            EstKind::ThreePoint => {
+                let w = |s: &str| parse_work(s, &p.settings.time).ok_or_else(|| format!("'{s}' is not a valid amount of work"));
+                Some(Estimate::ThreePoint {
+                    optimistic: w(&self.optimistic)?,
+                    most_likely: w(&self.most_likely)?,
+                    pessimistic: w(&self.pessimistic)?,
+                })
+            }
+            EstKind::Work => Some(Estimate::Work { minutes: parse_work(&self.est_work, &p.settings.time).ok_or("Invalid work estimate")? }),
+        };
         {
-            let t = &mut p.tasks[idx];
+            let t = p.task_mut(id).ok_or("task was deleted")?;
             t.constraint = Constraint { kind: self.constraint, date: if self.constraint.needs_date() { cdate } else { None } };
             t.deadline = deadline;
             if self.mode == ScheduleMode::Manual {
                 t.manual_start = manual_start;
                 t.manual_finish = manual_finish;
             }
-            t.estimate = match self.est_kind {
-                EstKind::None => None,
-                EstKind::Complexity => {
-                    Some(Estimate::Complexity { points: self.points.trim().parse().map_err(|_| "Complexity points must be a number")? })
-                }
-                EstKind::ThreePoint => {
-                    let w = |s: &str| parse_work(s, &p.settings.time).ok_or_else(|| format!("'{s}' is not a valid amount of work"));
-                    Some(Estimate::ThreePoint {
-                        optimistic: w(&self.optimistic)?,
-                        most_likely: w(&self.most_likely)?,
-                        pessimistic: w(&self.pessimistic)?,
-                    })
-                }
-                EstKind::Work => {
-                    Some(Estimate::Work { minutes: parse_work(&self.est_work, &p.settings.time).ok_or("Invalid work estimate")? })
-                }
-            };
+            t.estimate = estimate;
         }
         if !self.summary {
             p.set_milestone(id, self.milestone).map_err(err)?;
             if !self.milestone {
                 let (mins, est) = p.parse_duration(&self.duration).ok_or_else(|| format!("'{}' is not a valid duration", self.duration))?;
-                let cur = &p.tasks[p.task_index(id).unwrap()];
+                let cur = p.task(id).ok_or("task was deleted")?;
                 if mins != cur.duration || (est || self.estimated) != cur.estimated {
                     p.set_duration(id, mins, est || self.estimated).map_err(err)?;
                 }
@@ -230,8 +231,9 @@ impl TaskInfo {
         p.set_predecessors(id, deps).map_err(err)?;
         // Milestone members.
         if self.milestone {
-            let idx = p.task_index(id).unwrap();
-            p.tasks[idx].members.clear();
+            if let Some(t) = p.task_mut(id) {
+                t.members.clear();
+            }
             p.add_milestone_members(id, &self.members).map_err(err)?;
         }
         // Resources.
@@ -270,11 +272,10 @@ impl TaskInfo {
         plancraft_core::schedule::recalculate(p);
         let pct: u8 =
             self.percent.trim().trim_end_matches('%').parse::<f64>().map_err(|_| "% complete must be a number")?.clamp(0.0, 100.0) as u8;
-        let idx = p.task_index(id).unwrap();
-        if pct != p.tasks[idx].percent_complete {
+        if pct != p.task(id).ok_or("task was deleted")?.percent_complete {
             p.set_percent_complete(id, pct).map_err(err)?;
         }
-        let t = &mut p.tasks[idx];
+        let t = p.task_mut(id).ok_or("task was deleted")?;
         if astart != t.actual_start && astart.is_some() {
             t.actual_start = astart;
         }
@@ -352,7 +353,7 @@ impl TaskInfo {
                     }
                     if ui.add(egui::Button::new(RichText::new("  OK  ").color(egui::Color32::WHITE)).fill(theme::pal().ACCENT)).clicked() {
                         let label = format!("Task Information: {}", self.name);
-                        match doc.try_edit(&label, ChangeSource::User, |p| self.apply(p)) {
+                        match doc.edit_msg(&label, |p| self.apply(p)) {
                             Ok(()) => close = true,
                             Err(e) => self.error = Some(e),
                         }

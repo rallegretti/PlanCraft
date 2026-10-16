@@ -1,0 +1,94 @@
+# Quality gates on Linux, macOS and Windows: format, clippy with warnings denied (including the
+# never-crash lints), the test suite (hostile-input sweeps and Microsoft parity tests included),
+# the scheduler speed gate in release mode, and cargo deny. `cargo xtask ci` runs the same checks
+# locally. Release packages are still built on the owner's machines (`cargo xtask dist`).
+#
+# Cost: the repository is private, where GitHub bills macOS and Windows runner minutes at a
+# multiple of Linux minutes. Linux runs on every push and pull request; macOS and Windows run on
+# pushes to main, weekly, and on demand (Actions ▸ CI ▸ Run workflow). To run all three on every
+# pull request, delete the `if:` line of the `platforms` job.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  # Keep file:line in backtraces but skip the rest of the debug info (faster, smaller caches).
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+# A newer push to a pull request cancels its older run; runs on main always finish.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  linux:
+    name: test (ubuntu-latest)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux system dependencies (egui/winit/rfd)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev libxi-dev libgl1-mesa-dev libgtk-3-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy (warnings denied)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --locked
+      - name: Scheduler speed gate (release, 200 tasks < 10 ms)
+        run: cargo test --release --locked -p plancraft-core --test speed -- --nocapture
+
+  platforms:
+    name: test (${{ matrix.os }})
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Clippy (warnings denied)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test
+        run: cargo test --workspace --locked
+      - name: Scheduler speed gate (release, 200 tasks < 10 ms)
+        run: cargo test --release --locked -p plancraft-core --test speed -- --nocapture
+
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

@@ -323,7 +323,7 @@ fn add_resource_exception(ctx: &Ctx, a: &Args) -> ToolResult {
         &format!("Add '{}' to resource", exc.name),
         |p, _| {
             let id = resource_arg(p, a, "resource")?;
-            p.resource_mut(id).expect("resolved").exceptions.push(exc);
+            p.resource_mut(id).ok_or_else(|| missing("resolved"))?.exceptions.push(exc);
             Ok(id)
         },
         |doc, id| Ok(resource_view(&doc.project, id)),
@@ -338,7 +338,7 @@ fn remove_resource_exception(ctx: &Ctx, a: &Args) -> ToolResult {
             let id = resource_arg(p, a, "resource")?;
             let index = a.u64("index")?;
             let name = a.str("name")?.map(str::to_string);
-            let r = p.resource_mut(id).expect("resolved");
+            let r = p.resource_mut(id).ok_or_else(|| missing("resolved"))?;
             let before = r.exceptions.len();
             match (index, name) {
                 (Some(i), _) => {
@@ -389,7 +389,7 @@ fn set_resource_availability(ctx: &Ctx, a: &Args) -> ToolResult {
             if periods.is_none() && max_units.is_none() {
                 return err("give 'periods' and/or 'max_units'");
             }
-            let r = p.resource_mut(id).expect("resolved");
+            let r = p.resource_mut(id).ok_or_else(|| missing("resolved"))?;
             if let Some(ps) = periods {
                 r.availability = ps;
             }

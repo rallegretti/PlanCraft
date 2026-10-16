@@ -19,8 +19,12 @@ use plancraft_core::prelude::*;
 use crate::columns;
 use crate::state::{Selection, TaskFilter, UiState};
 
-fn matches_filter(p: &Project, idx: usize, f: TaskFilter) -> bool {
-    let t = &p.tasks[idx];
+/// The task shown on display row `row`, where `rows` maps rows to task indices.
+pub fn task_at<'a>(p: &'a Project, rows: &[usize], row: usize) -> Option<&'a Task> {
+    rows.get(row).and_then(|&i| p.tasks.get(i))
+}
+
+fn matches_filter(p: &Project, t: &Task, f: TaskFilter) -> bool {
     match f {
         TaskFilter::All => true,
         TaskFilter::Critical => t.sched.critical,
@@ -39,16 +43,17 @@ pub fn visible_rows(p: &Project, st: &UiState) -> Vec<usize> {
     let filtering = st.filter != TaskFilter::All || !search.is_empty();
     let mut keep: Vec<bool> = vec![!filtering; p.tasks.len()];
     if filtering {
-        for i in 0..p.tasks.len() {
-            let ok = matches_filter(p, i, st.filter) && (search.is_empty() || p.tasks[i].name.to_lowercase().contains(&search));
+        for (i, t) in p.tasks.iter().enumerate() {
+            let ok = matches_filter(p, t, st.filter) && (search.is_empty() || t.name.to_lowercase().contains(&search));
             if !ok {
                 continue;
             }
-            keep[i] = true;
             // Keep summary rows above matches as context, like "show related summary rows".
-            let mut a = p.parent_index(i);
+            let mut a = Some(i);
             while let Some(ai) = a {
-                keep[ai] = true;
+                if let Some(k) = keep.get_mut(ai) {
+                    *k = true;
+                }
                 a = p.parent_index(ai);
             }
         }
@@ -62,7 +67,7 @@ pub fn visible_rows(p: &Project, st: &UiState) -> Vec<usize> {
             }
             skip_deeper = None;
         }
-        if !keep[i] {
+        if !keep.get(i).copied().unwrap_or(false) {
             continue;
         }
         rows.push(i);
@@ -75,16 +80,17 @@ pub fn visible_rows(p: &Project, st: &UiState) -> Vec<usize> {
 
 /// Applies a click on `row` to the task selection.
 pub fn select_row(sel: &mut Selection, p: &Project, rows: &[usize], row: usize, shift: bool, ctrl: bool) {
-    let Some(&idx) = rows.get(row) else { return };
-    let id = p.tasks[idx].id;
+    let Some(id) = task_at(p, rows, row).map(|t| t.id) else { return };
     if shift && let Some(anchor) = sel.anchor {
-        let a = rows.iter().position(|&i| p.tasks[i].id == anchor).unwrap_or(row);
+        let a = rows.iter().position(|&i| p.tasks.get(i).is_some_and(|t| t.id == anchor)).unwrap_or(row);
         let (lo, hi) = if a <= row { (a, row) } else { (row, a) };
         if !ctrl {
             sel.tasks.clear();
         }
-        for &i in &rows[lo..=hi] {
-            sel.tasks.insert(p.tasks[i].id);
+        for i in rows.iter().take(hi + 1).skip(lo) {
+            if let Some(t) = p.tasks.get(*i) {
+                sel.tasks.insert(t.id);
+            }
         }
     } else if ctrl {
         if !sel.tasks.remove(&id) {

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use chrono::{Duration, NaiveDateTime};
+use chrono::{Duration, NaiveDateTime, NaiveTime};
 use egui::{Align2, Color32, CursorIcon, FontId, Painter, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, pos2, vec2};
 use plancraft_core::prelude::*;
 use plancraft_core::schedule::{project_calendar, task_calendar};
@@ -111,7 +111,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
         let end = g.time_at(chart_left, body.right()).date();
         while d <= end {
             if !proj_cal.is_working_day(d) {
-                let t0 = d.and_hms_opt(0, 0, 0).unwrap();
+                let t0 = d.and_time(NaiveTime::MIN);
                 let x0 = g.x_of(chart_left, t0);
                 let x1 = g.x_of(chart_left, t0 + Duration::days(1));
                 bp.rect_filled(Rect::from_x_y_ranges(x0..=x1, body.y_range()), 0.0, theme::pal().NONWORKING);
@@ -130,7 +130,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
     let last = ((*scroll_y + body.height()) / rh).ceil() as usize + 1;
     for r in first..last.min(input.rows.len()) {
         let y = body.top() + r as f32 * rh - *scroll_y;
-        if (input.selected)(p.tasks[input.rows[r]].id) {
+        if super::task_at(p, input.rows, r).is_some_and(|t| (input.selected)(t.id)) {
             bp.rect_filled(Rect::from_min_size(pos2(body.left(), y), vec2(body.width(), rh)), 0.0, theme::pal().SELECTION_TINT);
         }
     }
@@ -155,7 +155,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
     // ---- Geometry for all rows (links need off-screen ones too) ----
     let mut geom: HashMap<TaskId, BarGeom> = HashMap::with_capacity(input.rows.len());
     for (r, &idx) in input.rows.iter().enumerate() {
-        let t = &p.tasks[idx];
+        let Some(t) = p.tasks.get(idx) else { continue };
         let (Some(s), Some(f)) = (t.sched.start, t.sched.finish) else {
             continue;
         };
@@ -167,7 +167,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
     if g.show_links {
         let link_stroke = Stroke::new(1.0, theme::pal().LINK);
         for &idx in input.rows {
-            let t = &p.tasks[idx];
+            let Some(t) = p.tasks.get(idx) else { continue };
             let Some(sg) = geom.get(&t.id).copied() else {
                 continue;
             };
@@ -245,7 +245,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
     if g.show_links {
         let stroke = Stroke::new(1.0, theme::pal().MEMBER_LINK);
         for &idx in input.rows {
-            let t = &p.tasks[idx];
+            let Some(t) = p.tasks.get(idx) else { continue };
             if !t.is_milestone() || t.members.is_empty() {
                 continue;
             }
@@ -267,8 +267,8 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
     let mut hovered: Option<(TaskId, &'static str)> = None;
     let pointer = ui.input(|i| i.pointer.hover_pos());
     for r in first..last.min(input.rows.len()) {
-        let idx = input.rows[r];
-        let t = &p.tasks[idx];
+        let Some(&idx) = input.rows.get(r) else { continue };
+        let Some(t) = p.tasks.get(idx) else { continue };
         let Some(bg) = geom.get(&t.id).copied() else {
             continue;
         };
@@ -418,8 +418,8 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
     }
     if resp.drag_started()
         && let Some((tid, zone)) = hovered
+        && let Some(t) = p.task(tid)
     {
-        let t = p.task(tid).unwrap();
         let grab_x = resp.interact_pointer_pos().map(|pp| pp.x).unwrap_or(0.0);
         let start = t.sched.start.unwrap_or(p.start);
         g.drag = Some(match zone {
@@ -431,10 +431,10 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
     }
     let snap = |t: NaiveDateTime| -> NaiveDateTime {
         if g.px_per_day >= 72.0 {
-            let m = (t - t.date().and_hms_opt(0, 0, 0).unwrap()).num_minutes();
-            t.date().and_hms_opt(0, 0, 0).unwrap() + Duration::minutes((m + 30) / 60 * 60)
+            let midnight = t.date().and_time(NaiveTime::MIN);
+            midnight + Duration::minutes(((t - midnight).num_minutes() + 30) / 60 * 60)
         } else {
-            (t + Duration::hours(12)).date().and_hms_opt(0, 0, 0).unwrap()
+            (t + Duration::hours(12)).date().and_time(NaiveTime::MIN)
         }
     };
     if let (Some(drag), Some(pp)) = (g.drag.clone(), ui.input(|i| i.pointer.interact_pos())) {
@@ -451,7 +451,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
                 {
                     g.drag = Some(BarDrag::Link { from: task });
                 } else {
-                    let t = p.task(task).unwrap();
+                    let name = p.task(task).map_or("", |t| t.name.as_str());
                     let new_start = snap(g.time_at(chart_left, pp.x - grab_dx));
                     let dur_px = geom.get(&task).map(|bgm| bgm.x1 - bgm.x0).unwrap_or(0.0);
                     let x = g.x_of(chart_left, new_start);
@@ -460,7 +460,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
                             Rect::from_min_max(pos2(x, sg.y - BAR_H / 2.0 - 1.0), pos2(x + dur_px.max(2.0), sg.y + BAR_H / 2.0 + 1.0));
                         bp.rect_stroke(ghost, 2.0, Stroke::new(1.5, theme::pal().ACCENT), StrokeKind::Outside);
                     }
-                    tooltip_at(ui, pp, &format!("{}\nStart: {}", t.name, format::date_long(Some(new_start))));
+                    tooltip_at(ui, pp, &format!("{name}\nStart: {}", format::date_long(Some(new_start))));
                     if resp.drag_stopped() {
                         g.drag = None;
                         if new_start != origin_start {
@@ -470,7 +470,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
                 }
             }
             BarDrag::Resize { task } => {
-                let t = p.task(task).unwrap();
+                let name = p.task(task).map_or("", |t| t.name.as_str());
                 let new_finish = snap(g.time_at(chart_left, pp.x));
                 if let Some(sg) = geom.get(&task) {
                     let x = g.x_of(chart_left, new_finish).max(sg.x0 + 2.0);
@@ -481,7 +481,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
                         StrokeKind::Outside,
                     );
                 }
-                tooltip_at(ui, pp, &format!("{}\nFinish: {}", t.name, format::date_long(Some(new_finish))));
+                tooltip_at(ui, pp, &format!("{name}\nFinish: {}", format::date_long(Some(new_finish))));
                 if resp.drag_stopped() {
                     g.drag = None;
                     actions.push(ChartAction::SetFinish { task, finish: new_finish });
@@ -502,7 +502,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
             BarDrag::Link { from } => {
                 if let Some(sg) = geom.get(&from) {
                     bp.line_segment([pos2(sg.x1, sg.y), pp], Stroke::new(1.5, theme::pal().ACCENT));
-                    let target = row_at(pp.y).map(|r| p.tasks[input.rows[r]].id).filter(|id| *id != from);
+                    let target = row_at(pp.y).and_then(|r| super::task_at(p, input.rows, r)).map(|t| t.id).filter(|id| *id != from);
                     let msg = match target {
                         Some(to) => format!(
                             "Link: {} – {}",
@@ -559,8 +559,10 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
             actions.push(ChartAction::Select { task: tid, shift, ctrl });
         } else if let Some(pp) = resp.interact_pointer_pos() {
             let r = ((pp.y - body.top() + *scroll_y) / rh).floor();
-            if r >= 0.0 && (r as usize) < input.rows.len() {
-                actions.push(ChartAction::Select { task: p.tasks[input.rows[r as usize]].id, shift: false, ctrl: false });
+            if r >= 0.0
+                && let Some(t) = super::task_at(p, input.rows, r as usize)
+            {
+                actions.push(ChartAction::Select { task: t.id, shift: false, ctrl: false });
             }
         }
     }

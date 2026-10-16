@@ -55,8 +55,10 @@ pub fn clear_leveling(p: &mut Project) {
 type Load = HashMap<ResourceId, BTreeMap<NaiveDate, f64>>;
 
 fn task_loads(p: &Project, idx: usize, delay: Minutes, filter: &HashSet<ResourceId>) -> Load {
-    let t = &p.tasks[idx];
     let mut out: Load = HashMap::new();
+    let Some(t) = p.tasks.get(idx) else {
+        return out;
+    };
     let (Some(s), Some(_)) = (t.sched.start, t.sched.finish) else {
         return out;
     };
@@ -140,18 +142,13 @@ pub fn level_resources(p: &mut Project, opts: &LevelingOptions) -> LevelingRepor
 
     while !order.is_empty() {
         // Re-sort each round: earlier delays may have moved successors.
-        order.sort_by(|a, b| {
-            let ta = p.task(*a).unwrap();
-            let tb = p.task(*b).unwrap();
-            ta.sched
-                .start
-                .cmp(&tb.sched.start)
-                .then(tb.priority.cmp(&ta.priority))
-                .then(ta.sched.total_slack.cmp(&tb.sched.total_slack))
-                .then(ta.id.cmp(&tb.id))
+        order.sort_by_key(|id| {
+            let t = p.task(*id);
+            (t.and_then(|t| t.sched.start), std::cmp::Reverse(t.map_or(0, |t| t.priority)), t.map_or(0, |t| t.sched.total_slack), *id)
         });
         let id = order.remove(0);
-        let idx = p.task_index(id).unwrap();
+        let Some(idx) = p.task_index(id) else { continue };
+        let name = p.tasks.get(idx).map(|t| t.name.clone()).unwrap_or_default();
 
         // Rebuild committed load from fixed + already placed tasks at their current dates.
         let mut current = HashMap::new();
@@ -164,7 +161,7 @@ pub fn level_resources(p: &mut Project, opts: &LevelingOptions) -> LevelingRepor
 
         let alone = task_loads(p, idx, 0, &filter);
         if !fits(p, &HashMap::new(), &alone, &mut caps) {
-            report.unresolved.push(format!("'{}' needs more units than its resources can provide", p.tasks[idx].name));
+            report.unresolved.push(format!("'{}' needs more units than its resources can provide", name));
             placed.push(id);
             continue;
         }
@@ -179,11 +176,13 @@ pub fn level_resources(p: &mut Project, opts: &LevelingOptions) -> LevelingRepor
             delay += day;
         }
         if !found {
-            report.unresolved.push(format!("'{}' could not be leveled within {} days", p.tasks[idx].name, opts.max_delay_days));
+            report.unresolved.push(format!("'{}' could not be leveled within {} days", name, opts.max_delay_days));
             delay = 0;
         }
         if delay > 0 {
-            p.tasks[idx].leveling_delay += delay;
+            if let Some(t) = p.tasks.get_mut(idx) {
+                t.leveling_delay = crate::limits::clamp_minutes(t.leveling_delay.saturating_add(delay));
+            }
             *delays.entry(id).or_default() += delay;
             recalculate(p);
         }

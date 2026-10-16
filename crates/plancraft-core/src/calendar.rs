@@ -249,13 +249,13 @@ impl<'a> CalLayer<'a> {
 fn intersect(a: &[TimeRange], b: &[TimeRange]) -> Vec<TimeRange> {
     let mut out = Vec::new();
     let (mut i, mut j) = (0, 0);
-    while i < a.len() && j < b.len() {
-        let s = a[i].start.max(b[j].start);
-        let e = a[i].end.min(b[j].end);
+    while let (Some(x), Some(y)) = (a.get(i), b.get(j)) {
+        let s = x.start.max(y.start);
+        let e = x.end.min(y.end);
         if s < e {
             out.push(TimeRange::new(s, e));
         }
-        if a[i].end < b[j].end { i += 1 } else { j += 1 }
+        if x.end < y.end { i += 1 } else { j += 1 }
     }
     out
 }
@@ -266,8 +266,34 @@ pub struct WorkCal<'a> {
     layers: Vec<CalLayer<'a>>,
 }
 
+/// `minute` minutes after midnight on `d` (1440 is the next midnight; clamped at the end of time).
 fn at(d: NaiveDate, minute: u32) -> NaiveDateTime {
-    d.and_time(NaiveTime::MIN) + Duration::minutes(minute as i64)
+    shift(d.and_time(NaiveTime::MIN), Minutes::from(minute.min(1440)))
+}
+
+/// `dt` moved by `mins` elapsed minutes, saturating at chrono's representable range.
+pub fn shift(dt: NaiveDateTime, mins: Minutes) -> NaiveDateTime {
+    let delta = Duration::try_minutes(mins).unwrap_or(if mins < 0 { Duration::MIN } else { Duration::MAX });
+    dt.checked_add_signed(delta).unwrap_or(if mins < 0 { NaiveDateTime::MIN } else { NaiveDateTime::MAX })
+}
+
+/// Last day date arithmetic walks to: computed dates beyond it are clamped (hostile durations
+/// can't make the scheduler walk to the year 200,000).
+pub fn horizon_end() -> NaiveDate {
+    NaiveDate::from_ymd_opt(2500, 12, 31).unwrap_or(NaiveDate::MAX)
+}
+
+/// First day date arithmetic walks back to.
+pub fn horizon_start() -> NaiveDate {
+    NaiveDate::from_ymd_opt(1800, 1, 1).unwrap_or(NaiveDate::MIN)
+}
+
+fn next_day(d: NaiveDate) -> Option<NaiveDate> {
+    d.succ_opt().filter(|n| *n <= horizon_end())
+}
+
+fn prev_day(d: NaiveDate) -> Option<NaiveDate> {
+    d.pred_opt().filter(|n| *n >= horizon_start())
 }
 
 fn minute_of_day(dt: NaiveDateTime) -> u32 {
@@ -281,8 +307,8 @@ impl<'a> WorkCal<'a> {
         Self { layers: vec![CalLayer::new(calendar, &[])] }
     }
 
+    /// Combines layers; with no layers there is no working time at all.
     pub fn from_layers(layers: Vec<CalLayer<'a>>) -> Self {
-        assert!(!layers.is_empty(), "WorkCal requires at least one layer");
         Self { layers }
     }
 
@@ -337,7 +363,8 @@ impl<'a> WorkCal<'a> {
                     return at(d, m.max(r.start));
                 }
             }
-            d = d.succ_opt().unwrap_or(d);
+            let Some(next) = next_day(d) else { break };
+            d = next;
             m = 0;
         }
         dt
@@ -348,7 +375,8 @@ impl<'a> WorkCal<'a> {
         let mut d = dt.date();
         let mut m = minute_of_day(dt);
         if m == 0 {
-            d = d.pred_opt().unwrap_or(d);
+            let Some(prev) = prev_day(d) else { return dt };
+            d = prev;
             m = 1440;
         }
         for _ in 0..MAX_IDLE_SCAN_DAYS {
@@ -357,7 +385,8 @@ impl<'a> WorkCal<'a> {
                     return at(d, m.min(r.end));
                 }
             }
-            d = d.pred_opt().unwrap_or(d);
+            let Some(prev) = prev_day(d) else { break };
+            d = prev;
             m = 1440;
         }
         dt
@@ -366,7 +395,10 @@ impl<'a> WorkCal<'a> {
     /// Placement of a zero-length event: kept at the end of a working range, otherwise snapped forward.
     pub fn snap_event(&self, dt: NaiveDateTime) -> NaiveDateTime {
         let m = minute_of_day(dt);
-        let (d, m) = if m == 0 { (dt.date().pred_opt().unwrap_or(dt.date()), 1440) } else { (dt.date(), m) };
+        let (d, m) = match dt.date().pred_opt() {
+            Some(prev) if m == 0 => (prev, 1440),
+            _ => (dt.date(), m),
+        };
         if self.ranges(d).iter().any(|r| r.end == m) {
             return dt;
         }
@@ -398,18 +430,21 @@ impl<'a> WorkCal<'a> {
                 }
                 worked = true;
                 let s = m.max(r.start);
-                let avail = (r.end - s) as Minutes;
+                let avail = Minutes::from(r.end - s);
                 if remaining <= avail {
-                    return at(d, s + remaining as u32);
+                    return at(d, s + u32::try_from(remaining).unwrap_or(0));
                 }
                 remaining -= avail;
                 m = r.end;
             }
             idle = if worked { 0 } else { idle + 1 };
-            d = d.succ_opt().unwrap_or(d);
+            let Some(next) = next_day(d) else {
+                return at(d, 1440);
+            };
+            d = next;
             m = 0;
         }
-        dt + Duration::minutes(mins)
+        shift(dt, mins)
     }
 
     /// Subtracts working minutes from `dt`; the result is the start of the earliest consumed minute.
@@ -424,7 +459,8 @@ impl<'a> WorkCal<'a> {
         let mut d = end.date();
         let mut m = minute_of_day(end);
         if m == 0 {
-            d = d.pred_opt().unwrap_or(d);
+            let Some(prev) = prev_day(d) else { return end };
+            d = prev;
             m = 1440;
         }
         let mut remaining = mins;
@@ -438,18 +474,21 @@ impl<'a> WorkCal<'a> {
                 }
                 worked = true;
                 let e = m.min(r.end);
-                let avail = (e - r.start) as Minutes;
+                let avail = Minutes::from(e - r.start);
                 if remaining <= avail {
-                    return at(d, e - remaining as u32);
+                    return at(d, e - u32::try_from(remaining).unwrap_or(0));
                 }
                 remaining -= avail;
                 m = r.start;
             }
             idle = if worked { 0 } else { idle + 1 };
-            d = d.pred_opt().unwrap_or(d);
+            let Some(prev) = prev_day(d) else {
+                return at(d, 0);
+            };
+            d = prev;
             m = 1440;
         }
-        dt - Duration::minutes(mins)
+        shift(dt, -mins)
     }
 
     /// Working minutes in `[a, b)`; negative if `b < a`.
@@ -457,9 +496,9 @@ impl<'a> WorkCal<'a> {
         if b < a {
             return -self.between(b, a);
         }
-        let mut total = 0;
-        let mut d = a.date();
-        let last = b.date();
+        let mut total: Minutes = 0;
+        let mut d = a.date().max(horizon_start());
+        let last = b.date().min(horizon_end());
         while d <= last {
             let lo = if d == a.date() { minute_of_day(a) } else { 0 };
             let hi = if d == last { minute_of_day(b) } else { 1440 };
@@ -468,7 +507,7 @@ impl<'a> WorkCal<'a> {
                     let s = r.start.max(lo);
                     let e = r.end.min(hi);
                     if e > s {
-                        total += (e - s) as Minutes;
+                        total = total.saturating_add(Minutes::from(e - s));
                     }
                 }
             }
@@ -483,7 +522,7 @@ impl<'a> WorkCal<'a> {
     /// Working minutes on day `d` that fall inside `[a, b)`.
     pub fn working_minutes_within(&self, d: NaiveDate, a: NaiveDateTime, b: NaiveDateTime) -> Minutes {
         let day_start = at(d, 0);
-        let day_end = day_start + Duration::days(1);
+        let day_end = at(d, 1440);
         let lo = a.max(day_start);
         let hi = b.min(day_end);
         if hi <= lo { 0 } else { self.between(lo, hi) }

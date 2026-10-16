@@ -127,17 +127,20 @@ fn get_schedule(ctx: &Ctx, a: &Args) -> ToolResult {
         let p = &doc.project;
         let max_level = a.u64("max_level")?;
         let hide_completed = a.bool("hide_completed")?.unwrap_or(false);
-        let rows: Vec<usize> = (0..p.tasks.len())
-            .filter(|&i| {
-                let t = &p.tasks[i];
+        let rows: Vec<usize> = p
+            .tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| {
                 max_level.is_none_or(|m| t.outline_level as u64 <= m) && !(hide_completed && !t.sched.is_summary && t.is_complete())
             })
+            .map(|(i, _)| i)
             .collect();
         let table = views::schedule_table(p, &rows);
         let tasks: Vec<Value> = rows
             .iter()
-            .map(|&i| {
-                let t = &p.tasks[i];
+            .filter_map(|&i| Some((i, p.tasks.get(i)?)))
+            .map(|(i, t)| {
                 json!({
                     "row": i + 1, "id": t.id.0, "wbs": p.wbs(i), "name": t.name, "level": t.outline_level,
                     "duration": p.format_duration(t.sched.duration, t.estimated && !t.sched.is_summary),
@@ -163,21 +166,23 @@ fn critical_path(ctx: &Ctx, a: &Args) -> ToolResult {
     ctx.read(a, |doc| {
         let p = &doc.project;
         let near = a.get("near_critical_slack").map(|v| parse_duration_value(p, v, "near_critical_slack")).transpose()?.map(|x| x.0);
+        let start_of = |i: usize| p.tasks.get(i).and_then(|t| t.sched.start);
         let mut crit: Vec<usize> =
-            (0..p.tasks.len()).filter(|&i| p.tasks[i].sched.critical && !p.tasks[i].sched.is_summary && p.tasks[i].active).collect();
-        crit.sort_by_key(|&i| (p.tasks[i].sched.start, i));
+            p.tasks.iter().enumerate().filter(|(_, t)| t.sched.critical && !t.sched.is_summary && t.active).map(|(i, _)| i).collect();
+        crit.sort_by_key(|&i| (start_of(i), i));
         let mut near_list: Vec<usize> = match near {
-            Some(n) => (0..p.tasks.len())
-                .filter(|&i| {
-                    let t = &p.tasks[i];
-                    !t.sched.critical && !t.sched.is_summary && t.active && t.sched.total_slack <= n
-                })
+            Some(n) => p
+                .tasks
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| !t.sched.critical && !t.sched.is_summary && t.active && t.sched.total_slack <= n)
+                .map(|(i, _)| i)
                 .collect(),
             None => Vec::new(),
         };
-        near_list.sort_by_key(|&i| (p.tasks[i].sched.start, i));
+        near_list.sort_by_key(|&i| (start_of(i), i));
         let row = |i: &usize| {
-            let t = &p.tasks[*i];
+            let Some(t) = p.tasks.get(*i) else { return Value::Null };
             json!({
                 "id": t.id.0, "row": i + 1, "name": t.name,
                 "duration": p.format_duration(t.sched.duration, t.estimated),
@@ -260,8 +265,12 @@ fn get_workload(ctx: &Ctx, a: &Args) -> ToolResult {
                     "utilization_pct_by_period": rl.periods.iter().map(|x| { let u = x.utilization(); if u.is_finite() { round2(u * 100.0) } else { 9999.0 } }).collect::<Vec<_>>(),
                 });
                 if include_asg {
-                    v["assignments"] = Value::Array(
-                        rl.assignments.iter().map(|al| json!({ "assignment": al.assignment.0, "task_id": al.task.0, "task": al.task_name, "load_hours": al.load.iter().map(|x| hours(*x)).collect::<Vec<_>>() })).collect(),
+                    set(
+                        &mut v,
+                        "assignments",
+                        Value::Array(
+                            rl.assignments.iter().map(|al| json!({ "assignment": al.assignment.0, "task_id": al.task.0, "task": al.task_name, "load_hours": al.load.iter().map(|x| hours(*x)).collect::<Vec<_>>() })).collect(),
+                        ),
                     );
                 }
                 v
@@ -291,7 +300,7 @@ fn get_overallocations(ctx: &Ctx, a: &Args) -> ToolResult {
             if only.is_some_and(|o| o != rid) {
                 continue;
             }
-            let r = p.resource(rid).expect("exists");
+            let r = p.resource(rid).ok_or_else(|| missing("exists"))?;
             let cal = workload::resource_calendar(p, r);
             let mut per_day: BTreeMap<NaiveDate, Vec<(TaskId, f64)>> = BTreeMap::new();
             let wanted: HashSet<NaiveDate> = days.iter().copied().collect();
@@ -383,10 +392,10 @@ fn project_statistics(ctx: &Ctx, a: &Args) -> ToolResult {
         let p = &doc.project;
         let st = report::project_stats(p);
         let mut v = views::stats_json(p, &st);
-        v["name"] = json!(p.name);
-        v["status_date"] = fmt_dt(Some(report::status_moment(p)));
-        v["milestones_status"] = Value::Array(st.milestone_status.iter().map(|m| views::milestone_status_json(p, m)).collect());
-        v["earned_value"] = views::earned_value_json(&st.earned_value);
+        set(&mut v, "name", json!(p.name));
+        set(&mut v, "status_date", fmt_dt(Some(report::status_moment(p))));
+        set(&mut v, "milestones_status", Value::Array(st.milestone_status.iter().map(|m| views::milestone_status_json(p, m)).collect()));
+        set(&mut v, "earned_value", views::earned_value_json(&st.earned_value));
         Ok(v)
     })
 }

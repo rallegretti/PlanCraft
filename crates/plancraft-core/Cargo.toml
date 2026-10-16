@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+publish = false
 
 [dependencies]
 serde.workspace = true
@@ -14,4 +15,8 @@ uuid.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+proptest = "1"
 tempfile = "3"
+
+[lints]
+workspace = true

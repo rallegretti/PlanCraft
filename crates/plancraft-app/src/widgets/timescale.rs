@@ -1,6 +1,6 @@
 //! Two-tier timescale used by the Gantt chart, usage views and timeline.
 
-use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Timelike};
+use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
 use egui::{Align2, FontId, Painter, Rect, Stroke, pos2};
 
 use crate::state::GanttState;
@@ -19,14 +19,14 @@ pub enum Unit {
 impl Unit {
     pub fn floor(self, t: NaiveDateTime) -> NaiveDateTime {
         let d = t.date();
-        let midnight = |d: NaiveDate| d.and_hms_opt(0, 0, 0).unwrap();
+        let midnight = |d: NaiveDate| d.and_time(NaiveTime::MIN);
         match self {
             Unit::Hours6 => midnight(d) + Duration::hours((t.hour() / 6 * 6) as i64),
             Unit::Day => midnight(d),
             Unit::Week => midnight(d - Duration::days(d.weekday().num_days_from_monday() as i64)),
-            Unit::Month => midnight(d.with_day(1).unwrap()),
-            Unit::Quarter => midnight(NaiveDate::from_ymd_opt(d.year(), (d.month0() / 3) * 3 + 1, 1).unwrap()),
-            Unit::Year => midnight(NaiveDate::from_ymd_opt(d.year(), 1, 1).unwrap()),
+            Unit::Month => midnight(d.with_day(1).unwrap_or(d)),
+            Unit::Quarter => midnight(NaiveDate::from_ymd_opt(d.year(), (d.month0() / 3) * 3 + 1, 1).unwrap_or(d)),
+            Unit::Year => midnight(NaiveDate::from_ymd_opt(d.year(), 1, 1).unwrap_or(d)),
         }
     }
 
@@ -34,7 +34,9 @@ impl Unit {
         let add_months = |t: NaiveDateTime, m: u32| {
             let d = t.date();
             let total = d.year() * 12 + d.month0() as i32 + m as i32;
-            NaiveDate::from_ymd_opt(total.div_euclid(12), total.rem_euclid(12) as u32 + 1, 1).unwrap().and_hms_opt(0, 0, 0).unwrap()
+            // Out of chrono's range: still move forward so callers stepping through units terminate.
+            NaiveDate::from_ymd_opt(total.div_euclid(12), total.rem_euclid(12) as u32 + 1, 1)
+                .map_or(t + Duration::days(31 * i64::from(m)), |d| d.and_time(NaiveTime::MIN))
         };
         match self {
             Unit::Hours6 => t + Duration::hours(6),

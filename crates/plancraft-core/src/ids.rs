@@ -60,23 +60,23 @@ pub struct IdCounters {
 
 impl IdCounters {
     pub fn next_task(&mut self) -> TaskId {
-        self.task += 1;
+        self.task = self.task.saturating_add(1);
         TaskId(self.task)
     }
     pub fn next_resource(&mut self) -> ResourceId {
-        self.resource += 1;
+        self.resource = self.resource.saturating_add(1);
         ResourceId(self.resource)
     }
     pub fn next_calendar(&mut self) -> CalendarId {
-        self.calendar += 1;
+        self.calendar = self.calendar.saturating_add(1);
         CalendarId(self.calendar)
     }
     pub fn next_assignment(&mut self) -> AssignmentId {
-        self.assignment += 1;
+        self.assignment = self.assignment.saturating_add(1);
         AssignmentId(self.assignment)
     }
     pub fn next_time_entry(&mut self) -> TimeEntryId {
-        self.time_entry += 1;
+        self.time_entry = self.time_entry.saturating_add(1);
         TimeEntryId(self.time_entry)
     }
 }

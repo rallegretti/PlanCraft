@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime};
+use chrono::{Datelike, Days, NaiveDate, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 
 use crate::calendar::{CalLayer, WorkCal};
@@ -31,7 +31,7 @@ impl Granularity {
     pub fn bucket_start(self, d: NaiveDate) -> NaiveDate {
         match self {
             Granularity::Day => d,
-            Granularity::Week => d - Duration::days(d.weekday().num_days_from_monday() as i64),
+            Granularity::Week => d.checked_sub_days(Days::new(u64::from(d.weekday().num_days_from_monday()))).unwrap_or(d),
             Granularity::Month => d.with_day(1).unwrap_or(d),
         }
     }
@@ -39,11 +39,11 @@ impl Granularity {
     /// First day of the bucket after the one starting at `start`.
     pub fn next(self, start: NaiveDate) -> NaiveDate {
         match self {
-            Granularity::Day => start + Duration::days(1),
-            Granularity::Week => start + Duration::days(7),
+            Granularity::Day => start.checked_add_days(Days::new(1)).unwrap_or(NaiveDate::MAX),
+            Granularity::Week => start.checked_add_days(Days::new(7)).unwrap_or(NaiveDate::MAX),
             Granularity::Month => {
                 let (y, m) = if start.month() == 12 { (start.year() + 1, 1) } else { (start.year(), start.month() + 1) };
-                NaiveDate::from_ymd_opt(y, m, 1).unwrap_or(start + Duration::days(31))
+                NaiveDate::from_ymd_opt(y, m, 1).unwrap_or(NaiveDate::MAX)
             }
         }
     }
@@ -54,7 +54,11 @@ impl Granularity {
         let mut d = self.bucket_start(from);
         while d <= to && out.len() < 5000 {
             out.push(d);
-            d = self.next(d);
+            let next = self.next(d);
+            if next <= d {
+                break;
+            }
+            d = next;
         }
         out
     }
@@ -65,7 +69,9 @@ pub fn assignment_daily_work(p: &Project, a: &Assignment) -> BTreeMap<NaiveDate,
     let Some(ti) = p.task_index(a.task) else {
         return BTreeMap::new();
     };
-    let t = &p.tasks[ti];
+    let Some(t) = p.tasks.get(ti) else {
+        return BTreeMap::new();
+    };
     let (Some(s), Some(f)) = (t.sched.start, t.sched.finish) else {
         return BTreeMap::new();
     };
@@ -80,20 +86,18 @@ pub fn distribute(cal: &WorkCal, start: NaiveDateTime, finish: NaiveDateTime, wo
         return out;
     }
     let mut days: Vec<(NaiveDate, f64)> = Vec::new();
-    let mut d = start.date();
-    while d <= finish.date() {
+    for d in start.date().iter_days().take_while(|d| *d <= finish.date()) {
         let wm = cal.working_minutes_within(d, start, finish) as f64;
         if wm > 0.0 {
             days.push((d, wm));
         }
-        d += Duration::days(1);
     }
     let total: f64 = days.iter().map(|(_, w)| w).sum();
     if total <= 0.0 {
         // No working time in span (e.g. elapsed-time task): spread evenly over calendar days.
         let n = (finish.date() - start.date()).num_days().max(0) + 1;
-        for i in 0..n {
-            out.insert(start.date() + Duration::days(i), work / n as f64);
+        for d in start.date().iter_days().take(usize::try_from(n).unwrap_or(0)) {
+            out.insert(d, work / n as f64);
         }
         return out;
     }
@@ -228,8 +232,12 @@ pub fn overallocations(p: &Project) -> Vec<(ResourceId, Vec<NaiveDate>)> {
     out
 }
 
-/// Builds a time-phased workload report for `[from, to]`.
+/// Longest window a workload report covers (about 20 years).
+pub const MAX_WINDOW_DAYS: u64 = 20 * 366;
+
+/// Builds a time-phased workload report for `[from, to]` (at most [`MAX_WINDOW_DAYS`] long).
 pub fn workload(p: &Project, from: NaiveDate, to: NaiveDate, granularity: Granularity) -> WorkloadReport {
+    let to = to.min(from.checked_add_days(Days::new(MAX_WINDOW_DAYS)).unwrap_or(NaiveDate::MAX));
     let periods = granularity.buckets(from, to);
     let bucket_of = |d: NaiveDate| -> Option<usize> {
         if d < from || d > to {
@@ -266,28 +274,26 @@ pub fn workload(p: &Project, from: NaiveDate, to: NaiveDate, granularity: Granul
             let mut per = vec![0.0; periods.len()];
             for (d, w) in assignment_daily_work(p, a) {
                 *daily.entry(d).or_default() += w;
-                if let Some(b) = bucket_of(d) {
-                    per[b] += w;
+                if let Some(slot) = bucket_of(d).and_then(|b| per.get_mut(b)) {
+                    *slot += w;
                 }
             }
             assignment_loads.push(AssignmentLoad { assignment: a.id, task: t.id, task_name: t.name.clone(), load: per });
         }
         let mut over_days = Vec::new();
-        let mut d = from;
-        while d <= to {
+        for d in from.iter_days().take_while(|d| *d <= to) {
             let cap = if r.kind == ResourceType::Work { capacity_on(&cal, r, d) } else { 0.0 };
             let load = daily.get(&d).copied().unwrap_or(0.0);
-            if let Some(b) = bucket_of(d) {
-                periods_load[b].capacity += cap;
-                periods_load[b].load += load;
+            if let Some(period) = bucket_of(d).and_then(|b| periods_load.get_mut(b)) {
+                period.capacity += cap;
+                period.load += load;
                 if load > cap + 0.5 {
-                    periods_load[b].overallocated = true;
+                    period.overallocated = true;
                 }
             }
             if load > cap + 0.5 {
                 over_days.push(d);
             }
-            d += Duration::days(1);
         }
         let window_load = periods_load.iter().map(|p| p.load).sum();
         let window_capacity = periods_load.iter().map(|p| p.capacity).sum();
@@ -321,8 +327,8 @@ pub fn workload(p: &Project, from: NaiveDate, to: NaiveDate, granularity: Granul
         };
         let cal = task_calendar(p, i);
         for (d, w) in distribute(&cal, s, f, t.sched.work as f64, WorkContour::Flat) {
-            if let Some(b) = bucket_of(d) {
-                unassigned[b] += w;
+            if let Some(slot) = bucket_of(d).and_then(|b| unassigned.get_mut(b)) {
+                *slot += w;
             }
         }
     }

@@ -79,10 +79,9 @@ pub fn rasterize(size: u32) -> Vec<u8> {
             }
             if a > 0.0 {
                 let i = ((py * size + px) * 4) as usize;
-                out[i] = (r / a) as u8;
-                out[i + 1] = (g / a) as u8;
-                out[i + 2] = (b / a) as u8;
-                out[i + 3] = (a / (SS * SS) as f32 * 255.0) as u8;
+                if let Some(px) = out.get_mut(i..i + 4) {
+                    px.copy_from_slice(&[(r / a) as u8, (g / a) as u8, (b / a) as u8, (a / (SS * SS) as f32 * 255.0) as u8]);
+                }
             }
         }
     }

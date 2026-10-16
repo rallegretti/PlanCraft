@@ -6,15 +6,53 @@
 
 <p align="center">
   <b>Plan the work, then work the plan.</b><br>
-  A desktop project planner for tasks, milestones, people and schedules,
+  A desktop project planner for tasks, milestones, people and schedules,<br>
   with an AI assistant that can plan right alongside you.
 </p>
 
 <p align="center">
-  Windows · macOS · Linux · Free and open source
+  <img alt="100% Rust" src="https://img.shields.io/badge/100%25-Rust-b7410e?style=flat-square&logo=rust">
+  <img alt="Windows · macOS · Linux" src="https://img.shields.io/badge/Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-native-1B3A8C?style=flat-square">
+  <img alt="License: CC0 1.0" src="https://img.shields.io/badge/license-CC0%201.0-3a3a3a?style=flat-square">
+  <img alt="Status: early preview" src="https://img.shields.io/badge/status-early%20preview-F2B11C?style=flat-square">
+  <a href="https://github.com/rallegretti/PlanCraft/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/rallegretti/PlanCraft/actions/workflows/ci.yml/badge.svg"></a>
 </p>
 
+<p align="center">
+  <a href="#what-you-can-do-with-plancraft">Features</a> ·
+  <a href="#screenshots">Screenshots</a> ·
+  <a href="#installing">Install</a> ·
+  <a href="#getting-started">Get started</a> ·
+  <a href="#planning-with-an-ai-assistant">AI assistants</a> ·
+  <a href="#your-plans-are-safe">Your plans are safe</a>
+</p>
+
+<br>
+
 ![The Gantt chart with the critical path highlighted](docs/images/gantt.png)
+
+<table>
+  <tr>
+    <td width="25%" valign="top">
+      <h3>📋 Familiar by design</h3>
+      Task list, Gantt chart, resource sheet and calendars where you expect them. If you've planned a project before, you already know your way around.
+    </td>
+    <td width="25%" valign="top">
+      <h3>⚡ Native and fast</h3>
+      A native app written in Rust. A 200-task plan reschedules in well under a millisecond, so dates update as you type. No browser, no Electron.
+    </td>
+    <td width="25%" valign="top">
+      <h3>🔒 Offline and private</h3>
+      Your plans are files on your own disk. No account, no telemetry, and nothing leaves your computer.
+    </td>
+    <td width="25%" valign="top">
+      <h3>🤖 AI-ready</h3>
+      A built-in MCP server lets an assistant such as Claude Code plan with you. You see every change live and can undo any of it.
+    </td>
+  </tr>
+</table>
+
+<br>
 
 ## What you can do with PlanCraft
 
@@ -148,16 +186,26 @@ PlanCraft has built-in support for the **Model Context Protocol (MCP)**, the ope
 
 **To connect Claude Code to the PlanCraft window:**
 1. In PlanCraft, open **Project ▸ AI Agents** and click **Start server**. You can tick *Start automatically* so it's always ready.
-2. Run the command the panel shows you:
+2. Copy the command the panel shows you and run it once. It looks like this, with the path to PlanCraft on your computer:
    ```bash
-   claude mcp add --transport http plancraft http://127.0.0.1:7878/mcp
+   claude mcp add plancraft -- /path/to/plancraft mcp --attach
    ```
 
 Changes the AI makes appear in the window as they happen. They're marked with ⚡ in **View ▸ History**, and **Ctrl+Z** undoes them like your own edits.
 
+The connection is private to you: each time the server starts it creates a new secret key, kept in a file only your user account can read, and PlanCraft refuses requests that don't carry it. Other apps that connect over HTTP can use the address and key shown in the panel.
+
 AI assistants can also work on project files without the window open. The AI Agents panel shows the exact command to use, and [docs/MCP.md](docs/MCP.md) lists everything an assistant can do.
 
 > Only connect assistants you trust. They can change your plans and save files.
+
+## Your plans are safe
+
+- **Saving never corrupts a file.** PlanCraft writes the new version alongside the old one and swaps them in a single step, so a crash or power cut mid-save leaves you with either the old plan or the new one, never a broken file.
+- **Recovery copies.** While you work, PlanCraft keeps a copy of unsaved changes. If it ever closes unexpectedly, the Start Page offers to restore them.
+- **Built not to crash.** If something goes wrong inside PlanCraft, the action that failed is undone and you get a message instead of losing your work.
+- **Files from others are checked.** A damaged or unusual file is opened as far as it safely can be: out-of-range values are corrected and PlanCraft tells you what it changed.
+- **Private by default.** New plan files, settings and recovery copies are readable only by your user account on macOS and Linux, because plans hold people's names and rates.
 
 ## Your files
 

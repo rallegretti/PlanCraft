@@ -66,14 +66,16 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
         ui.separator();
         if ui.button("⏱ Update task progress from time").on_hover_text("Set each task's % complete from tracked vs planned work").clicked()
         {
-            doc.edit("Update Progress from Time", |p| p.update_progress_from_time());
-            st.toast(ToastKind::Success, "Task progress updated from tracked time");
+            match doc.edit("Update Progress from Time", |p| p.update_progress_from_time()) {
+                Ok(_) => st.toast(ToastKind::Success, "Task progress updated from tracked time"),
+                Err(e) => st.toast(ToastKind::Warning, e.to_string()),
+            }
         }
     });
     let rect = Rect::from_min_max(pos2(rect.left(), rect.top() + 34.0), rect.max);
 
     let p = &doc.project;
-    let days: Vec<NaiveDate> = (0..7).map(|i| week + Duration::days(i)).collect();
+    let days: [NaiveDate; 7] = std::array::from_fn(|i| week + Duration::days(i as i64));
     let mut lines: Vec<Line> = Vec::new();
     for a in &p.assignments {
         if st.timesheet_resource.is_some_and(|r| r != a.resource) {
@@ -122,7 +124,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
                 return match c {
                     1 => Cell { text: "Total".into(), bold: true, ..Default::default() },
                     2..=8 => {
-                        let d = days[c - 2];
+                        let Some(&d) = days.get(c - 2) else { return Cell::default() };
                         let total: Minutes = lines.iter().map(|l| tracked(l.task, l.resource, d)).sum();
                         Cell {
                             text: if total > 0 { format::hours(total as f64) } else { String::new() },
@@ -139,12 +141,12 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
                     _ => Cell::default(),
                 };
             }
-            let l = &lines[r];
+            let Some(l) = lines.get(r) else { return Cell::default() };
             match c {
                 0 => Cell::text(l.resource_name.clone()),
                 1 => Cell::text(l.label.clone()),
                 2..=8 => {
-                    let d = days[c - 2];
+                    let Some(&d) = days.get(c - 2) else { return Cell::default() };
                     let m = tracked(l.task, l.resource, d);
                     let workday =
                         p.resource(l.resource).map(|r| plancraft_core::workload::resource_calendar(p, r).is_working_day(d)).unwrap_or(true);
@@ -176,11 +178,9 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
     };
     for ev in output.events {
         if let GridEvent::Commit { row, col, text } = ev {
-            if row >= lines.len() || !(2..=8).contains(&col) {
+            let (Some(l), Some(&d)) = (lines.get(row).cloned(), col.checked_sub(2).and_then(|k| days.get(k))) else {
                 continue;
-            }
-            let l = lines[row].clone();
-            let d = days[col - 2];
+            };
             let minutes = if text.trim().is_empty() { Some(0) } else { parse_work(&text, &doc.project.settings.time) };
             match minutes {
                 Some(m) => {

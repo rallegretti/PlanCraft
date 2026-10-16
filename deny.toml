@@ -1,0 +1,54 @@
+# cargo-deny: licences, advisories, banned crates and sources (`cargo deny check`, run in CI).
+[graph]
+all-features = false
+# The platforms PlanCraft ships for (dependencies of other platforms, e.g. Android, don't count).
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+    "aarch64-pc-windows-msvc",
+]
+
+[advisories]
+# RustSec advisories: vulnerabilities fail the check; unmaintained crates are reported for the
+# workspace's direct dependencies only.
+unmaintained = "workspace"
+yanked = "deny"
+
+[licenses]
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "CC0-1.0",
+    # egui's bundled UI fonts (epaint_default_fonts).
+    "OFL-1.1",
+    "Ubuntu-font-1.0",
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+# Workspace crates refer to each other by path; they are never published.
+allow-wildcard-paths = true
+deny = [
+    # Everything is Rust (CLAUDE.md): no C toolchain in the build.
+    # wayland-backend's build script compiles C only with its `log` feature, which nothing in
+    # PlanCraft enables (`cargo tree -p plancraft-app -i cc -e build` prints nothing).
+    { crate = "cc", reason = "PlanCraft must not compile C code", wrappers = ["wayland-backend"] },
+    { crate = "cmake", reason = "PlanCraft must not compile C code" },
+    { crate = "openssl-sys", reason = "use pure-Rust crypto" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

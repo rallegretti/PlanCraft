@@ -140,7 +140,7 @@ fn get_calendar(ctx: &Ctx, a: &Args) -> ToolResult {
     ctx.read(a, |doc| {
         let p = &doc.project;
         let id = cal_or_default(p, a)?;
-        let cal = p.calendar(id).expect("resolved");
+        let cal = p.calendar(id).ok_or_else(|| missing("resolved"))?;
         let mut v = views::calendar_detail(p, cal);
         if a.get("from").is_some() || a.get("to").is_some() {
             let from = match a.get("from") {
@@ -173,7 +173,7 @@ fn get_calendar(ctx: &Ctx, a: &Args) -> ToolResult {
                 }));
                 d += chrono::Duration::days(1);
             }
-            v["days"] = Value::Array(days);
+            set(&mut v, "days", Value::Array(days));
         }
         Ok(v)
     })
@@ -208,7 +208,7 @@ fn apply_week(p: &mut Project, id: CalendarId, week: &Args) -> ToolResult<()> {
         let wd: Weekday = k.parse().map_err(|_| ToolError(format!("unknown weekday '{k}' in 'week'")))?;
         updates.push((wd, parse_time_ranges(Some(v), k)?));
     }
-    let cal = p.calendars.iter_mut().find(|c| c.id == id).expect("resolved");
+    let cal = p.calendars.iter_mut().find(|c| c.id == id).ok_or_else(|| missing("resolved"))?;
     for (wd, r) in updates {
         *cal.week.day_mut(wd) = r;
     }
@@ -216,7 +216,7 @@ fn apply_week(p: &mut Project, id: CalendarId, week: &Args) -> ToolResult<()> {
 }
 
 fn check_not_empty(p: &Project, id: CalendarId) -> ToolResult<()> {
-    let cal = p.calendar(id).expect("resolved");
+    let cal = p.calendar(id).ok_or_else(|| missing("resolved"))?;
     if cal.week.weekly_minutes() == 0 {
         return err("a calendar needs at least one working day per week");
     }
@@ -246,7 +246,7 @@ fn create_calendar(ctx: &Ctx, a: &Args) -> ToolResult {
             }
             Ok(id)
         },
-        |doc, id| Ok(views::calendar_detail(&doc.project, doc.project.calendar(id).expect("exists"))),
+        |doc, id| Ok(views::calendar_detail(&doc.project, doc.project.calendar(id).ok_or_else(|| missing("exists"))?)),
     )
 }
 
@@ -261,7 +261,7 @@ fn set_work_week(ctx: &Ctx, a: &Args) -> ToolResult {
                 if n.is_empty() {
                     return err("'name' must not be empty");
                 }
-                p.calendars.iter_mut().find(|c| c.id == id).expect("resolved").name = n.to_string();
+                p.calendars.iter_mut().find(|c| c.id == id).ok_or_else(|| missing("resolved"))?.name = n.to_string();
             }
             if let Some(w) = a.object("week")? {
                 apply_week(p, id, &w)?;
@@ -270,7 +270,7 @@ fn set_work_week(ctx: &Ctx, a: &Args) -> ToolResult {
                 (Some(d), true) => {
                     let days = parse_days(d)?;
                     let ranges = parse_time_ranges(a.map().get("working_times"), "working_times")?;
-                    let cal = p.calendars.iter_mut().find(|c| c.id == id).expect("resolved");
+                    let cal = p.calendars.iter_mut().find(|c| c.id == id).ok_or_else(|| missing("resolved"))?;
                     for wd in days {
                         *cal.week.day_mut(wd) = ranges.clone();
                     }
@@ -288,7 +288,7 @@ fn set_work_week(ctx: &Ctx, a: &Args) -> ToolResult {
             check_not_empty(p, id)?;
             Ok(id)
         },
-        |doc, id| Ok(views::calendar_detail(&doc.project, doc.project.calendar(id).expect("exists"))),
+        |doc, id| Ok(views::calendar_detail(&doc.project, doc.project.calendar(id).ok_or_else(|| missing("exists"))?)),
     )
 }
 
@@ -304,10 +304,10 @@ fn add_calendar_exception(ctx: &Ctx, a: &Args) -> ToolResult {
         &format!("Add calendar exception '{}'", exc.name),
         |p, _| {
             let id = cal_or_default(p, a)?;
-            p.calendars.iter_mut().find(|c| c.id == id).expect("resolved").exceptions.push(exc);
+            p.calendars.iter_mut().find(|c| c.id == id).ok_or_else(|| missing("resolved"))?.exceptions.push(exc);
             Ok(id)
         },
-        |doc, id| Ok(views::calendar_detail(&doc.project, doc.project.calendar(id).expect("exists"))),
+        |doc, id| Ok(views::calendar_detail(&doc.project, doc.project.calendar(id).ok_or_else(|| missing("exists"))?)),
     )
 }
 
@@ -319,7 +319,7 @@ fn remove_calendar_exception(ctx: &Ctx, a: &Args) -> ToolResult {
             let id = cal_or_default(p, a)?;
             let index = a.u64("index")?;
             let name = a.str("name")?.map(str::to_string);
-            let cal = p.calendars.iter_mut().find(|c| c.id == id).expect("resolved");
+            let cal = p.calendars.iter_mut().find(|c| c.id == id).ok_or_else(|| missing("resolved"))?;
             let before = cal.exceptions.len();
             match (index, name) {
                 (Some(i), _) => {
@@ -336,7 +336,7 @@ fn remove_calendar_exception(ctx: &Ctx, a: &Args) -> ToolResult {
             }
             Ok(id)
         },
-        |doc, id| Ok(views::calendar_detail(&doc.project, doc.project.calendar(id).expect("exists"))),
+        |doc, id| Ok(views::calendar_detail(&doc.project, doc.project.calendar(id).ok_or_else(|| missing("exists"))?)),
     )
 }
 

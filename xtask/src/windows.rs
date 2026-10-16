@@ -77,7 +77,8 @@ fn write_zip(dir: &Path, folder: &str, out: &Path) -> Result<()> {
         if !path.is_file() {
             continue;
         }
-        let name = format!("{folder}/{}", path.file_name().unwrap().to_string_lossy());
+        let Some(file_name) = path.file_name() else { continue };
+        let name = format!("{folder}/{}", file_name.to_string_lossy());
         zip.start_file(name, options)?;
         zip.write_all(&std::fs::read(&path)?)?;
     }

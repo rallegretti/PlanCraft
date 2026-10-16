@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
 use chrono::{NaiveDate, NaiveDateTime};
 use plancraft_core::leveling::{LevelingOptions, level_resources};
 use plancraft_core::prelude::*;

@@ -57,8 +57,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
                 ui.label(egui::RichText::new(h).strong().color(theme::pal().TEXT_WEAK));
             }
             ui.end_row();
-            for (ri, rl) in report.resources.iter().enumerate() {
-                let r = &p.resources[ri];
+            for (r, rl) in p.resources.iter().zip(&report.resources) {
                 let selected = st.sel.resources.contains(&r.id);
                 if ui.selectable_label(selected, &r.name).clicked() {
                     st.sel.select_resource(r.id);
@@ -111,11 +110,10 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
     } else {
         Some(0)
     });
-    let Some(ri) = sel else {
+    let Some(rl) = sel.and_then(|ri| report.resources.get(ri)) else {
         ui.label("Add resources to see their workload.");
         return;
     };
-    let rl = &report.resources[ri];
     ui.label(egui::RichText::new(format!("Resource Graph — {}", rl.name)).strong().size(15.0));
     let graph = ui.available_rect_before_wrap();
     let graph = Rect::from_min_max(graph.min + vec2(50.0, 10.0), graph.max - vec2(10.0, 28.0));

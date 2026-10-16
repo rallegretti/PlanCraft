@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
+publish = false
 
 [[bin]]
 name = "plancraft"
@@ -28,3 +29,6 @@ egui_kittest = { version = "0.36", features = ["eframe"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
+
+[lints]
+workspace = true

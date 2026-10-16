@@ -100,10 +100,10 @@ fn log_time(ctx: &Ctx, a: &Args) -> ToolResult {
         },
         |doc, id| {
             let p = &doc.project;
-            let e = p.time_entries.iter().find(|e| e.id == id).expect("logged");
+            let e = p.time_entries.iter().find(|e| e.id == id).ok_or_else(|| missing("logged"))?;
             Ok(json!({
                 "entry": views::time_entry_json(p, e),
-                "task": views::task_row(p, p.task_index(e.task).expect("exists")),
+                "task": views::task_row(p, p.task_index(e.task).ok_or_else(|| missing("exists"))?),
             }))
         },
     )

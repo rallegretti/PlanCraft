@@ -14,7 +14,8 @@ It supports MCP protocol revisions `2025-11-25`, `2025-06-18`, `2025-03-26` and 
 |---|---|---|
 | stdio, via the desktop app binary | Work on files without the GUI open | `claude mcp add plancraft -- /path/to/plancraft mcp /path/to/project.plancraft` |
 | stdio, standalone binary | Headless / CI / no GUI installed | `claude mcp add plancraft -- plancraft-mcp /path/to/project.plancraft` |
-| HTTP, live connection to the running app | See the agent's changes appear live in the GUI and undo them there | `claude mcp add --transport http plancraft http://127.0.0.1:7878/mcp` |
+| stdio bridge to the running app (recommended for Claude Code) | See the agent's changes appear live in the GUI and undo them there | `claude mcp add plancraft -- /path/to/plancraft mcp --attach` |
+| HTTP, live connection to the running app | MCP clients that speak HTTP | `claude mcp add --transport http plancraft http://127.0.0.1:7878/mcp --header "Authorization: Bearer <token>"` |
 
 ### stdio
 
@@ -37,17 +38,31 @@ claude mcp add plancraft -- plancraft-mcp
 Use absolute paths: Claude Code may start the server from a different working directory.
 Changes are kept in memory until the agent calls `save_project`.
 
-### Live HTTP connection to the desktop app
+### Live connection to the desktop app
 
-When the HTTP server is enabled from the app's UI, the app serves MCP at `http://127.0.0.1:7878/mcp` and shares
-its open documents with the agent: every agent edit appears immediately, is labelled as an agent change in the
-undo history and can be undone with Ctrl+Z like any other edit.
+When the server is started from the app (Project ▸ AI Agents ▸ Start server), the app serves MCP at
+`http://127.0.0.1:7878/mcp` and shares its open documents with the agent: every agent edit appears immediately, is
+labelled as an agent change in the undo history and can be undone with Ctrl+Z like any other edit.
+
+Each time the server starts it creates a new random **bearer token**; every request must carry
+`Authorization: Bearer <token>`, or it is refused with `401`. Plans hold people's names and rates, so another
+program on the same computer must not be able to read or change them just by finding the port.
+
+The app also writes the URL and token to a session file that only your user account can read
+(`mcp-session.json` in PlanCraft's config directory; 0600 inside a 0700 directory on macOS and Linux). The
+`--attach` bridge reads it, so Claude Code never needs the token itself and keeps working after the app restarts:
 
 ```sh
-claude mcp add --transport http plancraft http://127.0.0.1:7878/mcp
+claude mcp add plancraft -- /path/to/plancraft mcp --attach
 ```
 
-The standalone binary can serve HTTP too:
+For clients that connect over HTTP directly, copy the command with the current token from the AI Agents panel:
+
+```sh
+claude mcp add --transport http plancraft http://127.0.0.1:7878/mcp --header "Authorization: Bearer <token>"
+```
+
+The standalone binary can serve HTTP too; it prints its token at startup:
 
 ```sh
 plancraft-mcp project.plancraft --http 127.0.0.1:7878
@@ -60,15 +75,19 @@ HTTP details (MCP "Streamable HTTP", JSON responses only):
 * `GET /mcp` → `405` (no server-initiated SSE stream); `DELETE /mcp` → `200`.
 * Security: bind to `127.0.0.1` (the default). Requests whose `Origin` header is not a localhost origin are rejected
   with `403`, and when bound to a loopback address the `Host` header must name a loopback host (DNS-rebinding
-  protection). There is no authentication, so do not bind to a public interface.
+  protection). Requests without the session's bearer token get `401` (tokens are compared in constant time).
+  Bodies over 32 MiB get `413`. Even with a token, do not bind to a public interface: traffic is not encrypted.
 
 ### Command line
 
 ```text
 plancraft-mcp [FILE...] [--http [ADDR]] [--no-file-access]
+plancraft-mcp --attach
 
   FILE...             .plancraft documents to open
-  --http [ADDR]       serve HTTP on ADDR (default 127.0.0.1:7878) instead of stdio
+  --http [ADDR]       serve HTTP on ADDR (default 127.0.0.1:7878) instead of stdio;
+                      prints this session's bearer token
+  --attach            serve stdio by relaying to the running desktop app
   --no-file-access    refuse tools that open/create/link arbitrary paths
                       (saving open documents to their own path still works)
 ```
@@ -82,8 +101,9 @@ use plancraft_mcp::{McpServer, ServerOptions, serve_http, run_stdio, workspace_f
 // Live connection: share the app's workspace and repaint on agent changes.
 let server = McpServer::with_options(shared_workspace.clone(), ServerOptions::default())
     .with_change_callback(Arc::new(move || egui_ctx.request_repaint()));
-let handle: HttpHandle = serve_http(Arc::new(server), "127.0.0.1:7878")?; // stops on drop / handle.shutdown()
-println!("{}", handle.url()); // http://127.0.0.1:7878/mcp
+let token = plancraft_mcp::session::new_token();
+let handle: HttpHandle = serve_http(Arc::new(server), "127.0.0.1:7878", &token)?; // stops on drop / handle.shutdown()
+println!("{}", handle.url()); // http://127.0.0.1:7878/mcp; clients send `Authorization: Bearer {token}`
 
 // `plancraft mcp FILE...` subcommand: stdio server.
 let ws = workspace_from_files(&files)?;           // Result<SharedWorkspace, String>
@@ -94,6 +114,15 @@ run_stdio(&McpServer::new(ws))?;                    // std::io::Result<()>
 (single messages and batches; `None` for notifications). The workspace mutex is held only while one request is
 processed. Every mutation goes through `Document::try_edit(label, ChangeSource::Agent, …)`: it is undoable,
 triggers recalculation, bumps the document revision and is rolled back entirely if the tool fails.
+
+## Hostile input
+
+Tool arguments are treated as hostile. Counts, durations, dates, numbers and text are capped
+(`plancraft_core::limits`: e.g. 50,000 tasks, durations up to 5 years, dates 1900–2300); an edit that would go
+beyond them is refused with an explanation and rolled back. A bug that panics inside a tool becomes a tool error
+and the document is restored to its state before the call. Messages larger than 32 MiB are refused on both
+transports. `crates/plancraft-mcp/tests/garbage.rs` calls every tool with every argument set to dozens of
+junk values (and random JSON) and fails if anything panics, even inside the guard.
 
 ## Conventions for agents
 

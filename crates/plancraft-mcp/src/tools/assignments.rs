@@ -120,10 +120,10 @@ fn assign_resource(ctx: &Ctx, a: &Args) -> ToolResult {
         },
         |doc, id| {
             let p = &doc.project;
-            let asg = p.assignment(id).expect("exists");
+            let asg = p.assignment(id).ok_or_else(|| missing("exists"))?;
             Ok(json!({
                 "assignment": views::assignment_json(p, asg),
-                "task": views::task_row(p, p.task_index(asg.task).expect("exists")),
+                "task": views::task_row(p, p.task_index(asg.task).ok_or_else(|| missing("exists"))?),
             }))
         },
     )
@@ -148,10 +148,10 @@ fn update_assignment(ctx: &Ctx, a: &Args) -> ToolResult {
         },
         |doc, id| {
             let p = &doc.project;
-            let asg = p.assignment(id).expect("exists");
+            let asg = p.assignment(id).ok_or_else(|| missing("exists"))?;
             Ok(json!({
                 "assignment": views::assignment_json(p, asg),
-                "task": views::task_row(p, p.task_index(asg.task).expect("exists")),
+                "task": views::task_row(p, p.task_index(asg.task).ok_or_else(|| missing("exists"))?),
             }))
         },
     )
@@ -163,7 +163,7 @@ fn unassign_resource(ctx: &Ctx, a: &Args) -> ToolResult {
         "Remove assignment",
         |p, _| {
             let id = find_assignment(p, a)?;
-            let task = p.assignment(id).expect("exists").task;
+            let task = p.assignment(id).ok_or_else(|| missing("exists"))?.task;
             p.unassign(id)?;
             Ok(task)
         },

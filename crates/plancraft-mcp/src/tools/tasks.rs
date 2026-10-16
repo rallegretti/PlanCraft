@@ -169,7 +169,7 @@ fn list_tasks(ctx: &Ctx, a: &Args) -> ToolResult {
         let range = match a.get("parent") {
             Some(v) => {
                 let id = resolve_task(p, v)?;
-                let i = p.task_index(id).expect("resolved");
+                let i = p.task_index(id).ok_or_else(|| missing("resolved"))?;
                 p.descendants_range(i)
             }
             None => 0..p.tasks.len(),
@@ -177,7 +177,7 @@ fn list_tasks(ctx: &Ctx, a: &Args) -> ToolResult {
         let at = report::status_moment(p);
         let mut rows = Vec::new();
         for i in range {
-            let t = &p.tasks[i];
+            let t = row(p, i)?;
             let leaf = !t.sched.is_summary;
             let keep = match filter.as_str() {
                 "all" => true,
@@ -214,7 +214,7 @@ fn list_tasks(ctx: &Ctx, a: &Args) -> ToolResult {
                 if include {
                     views::task_row(p, i)
                 } else {
-                    let t = &p.tasks[i];
+                    let Some(t) = p.tasks.get(i) else { return Value::Null };
                     json!({ "id": t.id.0, "row": i + 1, "wbs": p.wbs(i), "name": t.name, "level": t.outline_level, "kind": if t.sched.is_summary { "summary" } else if t.is_milestone() { "milestone" } else { "task" }, "percent_complete": round2(t.sched.percent_complete as f64) })
                 }
             })
@@ -250,7 +250,12 @@ fn parse_color(v: &Value) -> ToolResult<Option<[u8; 3]>> {
             if h.len() != 6 {
                 return err("'bar_color' must look like \"#RRGGBB\"");
             }
-            let c = |i: usize| u8::from_str_radix(&h[i..i + 2], 16).map_err(|_| ToolError("'bar_color' must look like \"#RRGGBB\"".into()));
+            // `get` refuses ranges inside multi-byte characters ("ééé" is 6 bytes too).
+            let c = |i: usize| {
+                h.get(i..i + 2)
+                    .and_then(|pair| u8::from_str_radix(pair, 16).ok())
+                    .ok_or_else(|| ToolError("'bar_color' must look like \"#RRGGBB\"".into()))
+            };
             Ok(Some([c(0)?, c(2)?, c(4)?]))
         }
         other => err(format!("'bar_color' must be a string, got {other}")),
@@ -279,7 +284,7 @@ pub fn apply_task_fields(p: &mut Project, id: TaskId, a: &Args) -> ToolResult<()
             return err("'name' must not be empty");
         }
         let i = idx_of(p, id)?;
-        p.tasks[i].name = name.to_string();
+        row_mut(p, i)?.name = name.to_string();
     }
     let milestone_flag = match (a.bool("is_milestone")?, a.bool("milestone").ok().flatten()) {
         (Some(b), _) | (None, Some(b)) => Some(b),
@@ -294,7 +299,7 @@ pub fn apply_task_fields(p: &mut Project, id: TaskId, a: &Args) -> ToolResult<()
     if let Some(v) = a.get("mode") {
         let mode: ScheduleMode = parse_enum(v, "mode", &["auto", "manual"])?;
         let i = idx_of(p, id)?;
-        let t = &mut p.tasks[i];
+        let t = row_mut(p, i)?;
         if mode == ScheduleMode::Manual && t.mode == ScheduleMode::Auto {
             // Freeze the current dates as the manual dates.
             t.manual_start = t.manual_start.or(t.sched.start);
@@ -304,11 +309,11 @@ pub fn apply_task_fields(p: &mut Project, id: TaskId, a: &Args) -> ToolResult<()
     if let Some(v) = a.get("task_type") {
         let tt: TaskType = parse_enum(v, "task_type", &["fixed_units", "fixed_duration", "fixed_work"])?;
         let i = idx_of(p, id)?;
-        p.tasks[i].task_type = tt;
+        row_mut(p, i)?.task_type = tt;
     }
     if let Some(b) = a.bool("effort_driven")? {
         let i = idx_of(p, id)?;
-        p.tasks[i].effort_driven = b;
+        row_mut(p, i)?.effort_driven = b;
     }
     if a.present("estimate") {
         let est = match a.map().get("estimate") {
@@ -316,7 +321,7 @@ pub fn apply_task_fields(p: &mut Project, id: TaskId, a: &Args) -> ToolResult<()
             None => None,
         };
         let i = idx_of(p, id)?;
-        p.tasks[i].estimate = est;
+        row_mut(p, i)?.estimate = est;
     }
     if let Some(v) = a.get("duration") {
         let (m, mut est) = parse_duration_value(p, v, "duration")?;
@@ -326,45 +331,45 @@ pub fn apply_task_fields(p: &mut Project, id: TaskId, a: &Args) -> ToolResult<()
         p.set_duration(id, m, est)?;
     } else if let Some(e) = a.bool("estimated")? {
         let i = idx_of(p, id)?;
-        p.tasks[i].estimated = e;
+        row_mut(p, i)?.estimated = e;
     }
     {
         let i = idx_of(p, id)?;
         if let Some(b) = a.bool("active")? {
-            p.tasks[i].active = b;
+            row_mut(p, i)?.active = b;
         }
         if let Some(pr) = a.u64("priority")? {
             if pr > 1000 {
                 return err("'priority' must be between 0 and 1000");
             }
-            p.tasks[i].priority = pr as u16;
+            row_mut(p, i)?.priority = pr as u16;
         }
         if let Some(n) = a.str("notes")? {
-            p.tasks[i].notes = n.to_string();
+            row_mut(p, i)?.notes = n.to_string();
         }
         if let Some(c) = a.f64("fixed_cost")? {
-            p.tasks[i].fixed_cost = c;
+            row_mut(p, i)?.fixed_cost = c;
         }
         if let Some(d) = a.str("deliverable")? {
-            p.tasks[i].deliverable = d.to_string();
+            row_mut(p, i)?.deliverable = d.to_string();
         }
         if let Some(b) = a.bool("show_on_timeline")? {
-            p.tasks[i].show_on_timeline = b;
+            row_mut(p, i)?.show_on_timeline = b;
         }
         if let Some(b) = a.bool("ignore_resource_calendars")? {
-            p.tasks[i].ignore_resource_calendars = b;
+            row_mut(p, i)?.ignore_resource_calendars = b;
         }
         if a.present("bar_color") {
-            p.tasks[i].bar_color = parse_color(a.map().get("bar_color").unwrap_or(&Value::Null))?;
+            row_mut(p, i)?.bar_color = parse_color(a.map().get("bar_color").unwrap_or(&Value::Null))?;
         }
     }
     if a.is_clear("calendar") {
         let i = idx_of(p, id)?;
-        p.tasks[i].calendar = None;
+        row_mut(p, i)?.calendar = None;
     } else if let Some(v) = a.get("calendar") {
         let c = resolve_calendar(p, v)?;
         let i = idx_of(p, id)?;
-        p.tasks[i].calendar = Some(c);
+        row_mut(p, i)?.calendar = Some(c);
     }
 
     // Constraints and dates.
@@ -379,7 +384,7 @@ pub fn apply_task_fields(p: &mut Project, id: TaskId, a: &Args) -> ToolResult<()
             _ => None,
         };
         let i = idx_of(p, id)?;
-        p.tasks[i].constraint = Constraint { kind, date };
+        row_mut(p, i)?.constraint = Constraint { kind, date };
     } else if let Some(d) = a.get("constraint_date") {
         let kind = p.task(id).map(|t| t.constraint.kind).unwrap_or_default();
         if !kind.needs_date() {
@@ -387,25 +392,25 @@ pub fn apply_task_fields(p: &mut Project, id: TaskId, a: &Args) -> ToolResult<()
         }
         let date = parse_dt(p, d, !kind.is_start_constraint(), "constraint_date")?;
         let i = idx_of(p, id)?;
-        p.tasks[i].constraint.date = Some(date);
+        row_mut(p, i)?.constraint.date = Some(date);
     }
     let manual = p.task(id).is_some_and(|t| t.mode == ScheduleMode::Manual);
     if let Some(v) = a.get("start") {
         let d = parse_dt(p, v, false, "start")?;
         let i = idx_of(p, id)?;
         if manual {
-            p.tasks[i].manual_start = Some(d);
+            row_mut(p, i)?.manual_start = Some(d);
         } else {
-            p.tasks[i].constraint = Constraint { kind: ConstraintKind::Snet, date: Some(d) };
+            row_mut(p, i)?.constraint = Constraint { kind: ConstraintKind::Snet, date: Some(d) };
         }
     }
     if let Some(v) = a.get("finish") {
         let d = parse_dt(p, v, true, "finish")?;
         let i = idx_of(p, id)?;
         if manual {
-            p.tasks[i].manual_finish = Some(d);
+            row_mut(p, i)?.manual_finish = Some(d);
         } else {
-            p.tasks[i].constraint = Constraint { kind: ConstraintKind::Fnet, date: Some(d) };
+            row_mut(p, i)?.constraint = Constraint { kind: ConstraintKind::Fnet, date: Some(d) };
         }
     }
     for (key, finish) in
@@ -413,7 +418,7 @@ pub fn apply_task_fields(p: &mut Project, id: TaskId, a: &Args) -> ToolResult<()
     {
         if let Some(val) = opt_dt(p, a, key, finish)? {
             let i = idx_of(p, id)?;
-            let t = &mut p.tasks[i];
+            let t = row_mut(p, i)?;
             match key {
                 "deadline" => t.deadline = val,
                 "manual_start" => t.manual_start = val,
@@ -488,25 +493,25 @@ pub fn apply_all(p: &mut Project, id: TaskId, a: &Args) -> ToolResult<()> {
 pub fn insert_position(p: &mut Project, a: &Args) -> ToolResult<(usize, Option<u16>)> {
     if let Some(v) = a.get("parent") {
         let pid = resolve_task(p, v).map_err(|e| ToolError(format!("'parent': {e}")))?;
-        let pi = p.task_index(pid).expect("resolved");
-        if p.tasks[pi].is_milestone() {
-            if !p.tasks[pi].members.is_empty() {
-                return err(format!("'{}' is a milestone with members and cannot become a summary task", p.tasks[pi].name));
+        let pi = p.task_index(pid).ok_or_else(|| missing("resolved"))?;
+        if row(p, pi)?.is_milestone() {
+            if !row(p, pi)?.members.is_empty() {
+                return err(format!("'{}' is a milestone with members and cannot become a summary task", row(p, pi)?.name));
             }
-            p.tasks[pi].kind = TaskKind::Task;
+            row_mut(p, pi)?.kind = TaskKind::Task;
         }
         let end = p.descendants_range(pi).end;
-        return Ok((end, Some(p.tasks[pi].outline_level + 1)));
+        return Ok((end, Some(row(p, pi)?.outline_level + 1)));
     }
     if let Some(v) = a.get("after") {
         let aid = resolve_task(p, v).map_err(|e| ToolError(format!("'after': {e}")))?;
-        let ai = p.task_index(aid).expect("resolved");
-        return Ok((p.descendants_range(ai).end, Some(p.tasks[ai].outline_level)));
+        let ai = p.task_index(aid).ok_or_else(|| missing("resolved"))?;
+        return Ok((p.descendants_range(ai).end, Some(row(p, ai)?.outline_level)));
     }
     if let Some(v) = a.get("before") {
         let bid = resolve_task(p, v).map_err(|e| ToolError(format!("'before': {e}")))?;
-        let bi = p.task_index(bid).expect("resolved");
-        return Ok((bi, Some(p.tasks[bi].outline_level)));
+        let bi = p.task_index(bid).ok_or_else(|| missing("resolved"))?;
+        return Ok((bi, Some(row(p, bi)?.outline_level)));
     }
     if let Some(i) = a.u64("index")? {
         let i = (i.max(1) as usize - 1).min(p.tasks.len());
@@ -526,8 +531,7 @@ pub fn insert_new_task(p: &mut Project, name: &str, index: usize, level: Option<
             p.insert_task(index, t)
         }
     };
-    if milestone {
-        let t = p.task_mut(id).expect("inserted");
+    if milestone && let Some(t) = p.task_mut(id) {
         t.kind = TaskKind::Milestone;
         t.duration = 0;
         t.estimated = false;
@@ -615,7 +619,7 @@ fn create_tasks(ctx: &Ctx, a: &Args) -> ToolResult {
                 None => {
                     if index > 0 && index <= p.tasks.len() {
                         let above = index - 1;
-                        if p.has_children(above) { p.tasks[above].outline_level + 1 } else { p.tasks[above].outline_level }
+                        if p.has_children(above) { row(p, above)?.outline_level + 1 } else { row(p, above)?.outline_level }
                     } else {
                         1
                     }
@@ -667,14 +671,14 @@ fn create_tasks(ctx: &Ctx, a: &Args) -> ToolResult {
                 .iter()
                 .filter_map(|id| {
                     let i = p.task_index(*id)?;
-                    let t = &p.tasks[i];
+                    let t = p.tasks.get(i)?;
                     let mut v = json!({
                         "id": id.0, "row": i + 1, "wbs": p.wbs(i), "name": t.name, "level": t.outline_level,
                         "duration": p.format_duration(t.sched.duration, t.estimated && !t.sched.is_summary),
                         "start": fmt_dt(t.sched.start), "finish": fmt_dt(t.sched.finish),
                     });
                     if let Some((_, k)) = keyed.iter().find(|(tid, _)| tid == id) {
-                        v["key"] = json!(k);
+                        set(&mut v, "key", json!(k));
                     }
                     Some(v)
                 })
@@ -769,7 +773,7 @@ fn move_task(ctx: &Ctx, a: &Args) -> ToolResult {
         "Move task",
         |p, _| {
             let id = task_arg(p, a, "task")?;
-            let idx = p.task_index(id).expect("resolved");
+            let idx = p.task_index(id).ok_or_else(|| missing("resolved"))?;
             let block_len = p.descendants_range(idx).len() + 1;
             let in_block = |p: &Project, other: TaskId| p.task_index(other).is_some_and(|o| o >= idx && o < idx + block_len);
             let (target, level) = if let Some(v) = a.get("before") {
@@ -777,28 +781,28 @@ fn move_task(ctx: &Ctx, a: &Args) -> ToolResult {
                 if in_block(p, o) {
                     return err("cannot move a task relative to itself or its own subtasks");
                 }
-                let oi = p.task_index(o).expect("resolved");
-                (oi, Some(p.tasks[oi].outline_level))
+                let oi = p.task_index(o).ok_or_else(|| missing("resolved"))?;
+                (oi, Some(row(p, oi)?.outline_level))
             } else if let Some(v) = a.get("after") {
                 let o = resolve_task(p, v)?;
                 if in_block(p, o) {
                     return err("cannot move a task relative to itself or its own subtasks");
                 }
-                let oi = p.task_index(o).expect("resolved");
-                (p.descendants_range(oi).end, Some(p.tasks[oi].outline_level))
+                let oi = p.task_index(o).ok_or_else(|| missing("resolved"))?;
+                (p.descendants_range(oi).end, Some(row(p, oi)?.outline_level))
             } else if let Some(v) = a.get("parent") {
                 let o = resolve_task(p, v)?;
                 if in_block(p, o) {
                     return err("cannot move a task under itself or its own subtasks");
                 }
-                let oi = p.task_index(o).expect("resolved");
-                if p.tasks[oi].is_milestone() {
-                    if !p.tasks[oi].members.is_empty() {
+                let oi = p.task_index(o).ok_or_else(|| missing("resolved"))?;
+                if row(p, oi)?.is_milestone() {
+                    if !row(p, oi)?.members.is_empty() {
                         return err("a milestone with members cannot become a summary task");
                     }
-                    p.tasks[oi].kind = TaskKind::Task;
+                    row_mut(p, oi)?.kind = TaskKind::Task;
                 }
-                (p.descendants_range(oi).end, Some(p.tasks[oi].outline_level + 1))
+                (p.descendants_range(oi).end, Some(row(p, oi)?.outline_level + 1))
             } else if let Some(i) = a.u64("index")? {
                 ((i.max(1) as usize) - 1, None)
             } else {
@@ -806,10 +810,12 @@ fn move_task(ctx: &Ctx, a: &Args) -> ToolResult {
             };
             p.move_task(id, target)?;
             if let Some(level) = level {
-                let ni = p.task_index(id).expect("moved");
-                let delta = level as i32 - p.tasks[ni].outline_level as i32;
-                for t in &mut p.tasks[ni..ni + block_len] {
-                    t.outline_level = (t.outline_level as i32 + delta).max(1) as u16;
+                let ni = p.task_index(id).ok_or_else(|| missing("moved"))?;
+                let delta = i32::from(level) - i32::from(row(p, ni)?.outline_level);
+                for t in p.tasks.iter_mut().skip(ni).take(block_len) {
+                    t.outline_level =
+                        u16::try_from((i32::from(t.outline_level) + delta).clamp(1, i32::from(plancraft_core::limits::MAX_OUTLINE_LEVEL)))
+                            .unwrap_or(1);
                 }
                 p.normalize_outline();
             }
@@ -828,7 +834,7 @@ fn top_level_selection(p: &Project, ids: &[TaskId]) -> Vec<TaskId> {
         .filter(|&id| {
             let mut cur = p.task_index(id).and_then(|i| p.parent_index(i));
             while let Some(c) = cur {
-                if set.contains(&p.tasks[c].id) {
+                if p.tasks.get(c).is_some_and(|t| set.contains(&t.id)) {
                     return false;
                 }
                 cur = p.parent_index(c);
