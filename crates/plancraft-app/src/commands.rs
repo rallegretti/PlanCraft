@@ -70,6 +70,7 @@ pub enum Command {
     CollapseAll,
     ExpandAll,
     History,
+    SetTheme(crate::theme::ThemeChoice),
     About,
 }
 

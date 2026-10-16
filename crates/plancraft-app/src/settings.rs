@@ -11,11 +11,12 @@ pub struct AppSettings {
     pub mcp_port: u16,
     pub mcp_autostart: bool,
     pub table_width: f32,
+    pub theme: crate::theme::ThemeChoice,
 }
 
 impl Default for AppSettings {
     fn default() -> Self {
-        Self { recent: Vec::new(), mcp_port: 7878, mcp_autostart: false, table_width: 720.0 }
+        Self { recent: Vec::new(), mcp_port: 7878, mcp_autostart: false, table_width: 720.0, theme: crate::theme::ThemeChoice::System }
     }
 }
 

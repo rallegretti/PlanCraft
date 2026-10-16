@@ -73,16 +73,16 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     let chart_left = rect.left() + NAME_W;
     let chart = Rect::from_min_max(pos2(chart_left, body.top()), body.max);
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, theme::BG);
+    painter.rect_filled(rect, 0.0, theme::pal().BG);
 
     // Header: name column + timescale.
-    painter.rect_filled(Rect::from_min_size(header.min, vec2(NAME_W, header.height())), 0.0, theme::HEADER_BG);
+    painter.rect_filled(Rect::from_min_size(header.min, vec2(NAME_W, header.height())), 0.0, theme::pal().HEADER_BG);
     painter.text(
         pos2(header.left() + 8.0, header.center().y),
         Align2::LEFT_CENTER,
         "Resource Name",
         FontId::proportional(12.5),
-        theme::TEXT,
+        theme::pal().TEXT,
     );
     let ts_rect = Rect::from_min_max(pos2(chart_left, header.top()), header.max);
     {
@@ -116,7 +116,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     let now = chrono::Local::now().naive_local();
     let xt = st.gantt.x_of(chart_left, now);
     if chart.x_range().contains(xt) {
-        cp.vline(xt, chart.y_range(), Stroke::new(1.5, theme::TODAY));
+        cp.vline(xt, chart.y_range(), Stroke::new(1.5, theme::pal().TODAY));
     }
 
     let pointer = ui.input(|i| i.pointer.hover_pos());
@@ -137,14 +137,14 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
             name_rect,
             0.0,
             if selected {
-                theme::ACCENT_LIGHT
+                theme::pal().ACCENT_LIGHT
             } else if lane.resource.is_none() {
-                theme::PANEL_BG
+                theme::pal().PANEL_BG
             } else {
-                theme::HEADER_BG
+                theme::pal().HEADER_BG
             },
         );
-        let name_color = if lane.over { theme::ERROR } else { theme::TEXT };
+        let name_color = if lane.over { theme::pal().ERROR } else { theme::pal().TEXT };
         let icon = if lane.resource.is_none() {
             "📋"
         } else if lane.over {
@@ -165,8 +165,8 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
         {
             st.sel.select_resource(rid);
         }
-        bp.hline(lane_rect.x_range(), lane_rect.bottom() - 0.5, Stroke::new(1.0, theme::GRID_LINE_STRONG));
-        bp.vline(name_rect.right(), lane_rect.y_range(), Stroke::new(1.0, theme::GRID_LINE_STRONG));
+        bp.hline(lane_rect.x_range(), lane_rect.bottom() - 0.5, Stroke::new(1.0, theme::pal().GRID_LINE_STRONG));
+        bp.vline(name_rect.right(), lane_rect.y_range(), Stroke::new(1.0, theme::pal().GRID_LINE_STRONG));
         for &(i, sub) in &lane.bars {
             let t = &p.tasks[i];
             let (Some(s), Some(f)) = (t.sched.start, t.sched.finish) else {
@@ -177,19 +177,19 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
             let r = Rect::from_min_max(pos2(x0, y + 4.0 + sub as f32 * LANE_H), pos2(x1, y + 4.0 + sub as f32 * LANE_H + LANE_H - 4.0));
             let complete = t.is_complete();
             let fill = if complete {
-                Color32::from_rgb(0x8F, 0xA3, 0xC8)
+                theme::pal().BAR_COMPLETE
             } else if t.sched.critical && st.gantt.show_critical {
-                theme::BAR_CRITICAL
+                theme::pal().BAR_CRITICAL
             } else {
-                theme::BAR_TASK
+                theme::pal().BAR_TASK
             };
             cp.rect_filled(r, 3.0, fill);
             if t.sched.percent_complete > 0.0 && !complete {
                 let px = r.left() + r.width() * t.sched.percent_complete / 100.0;
-                cp.rect_filled(Rect::from_min_max(r.min, pos2(px, r.bottom())), 3.0, theme::BAR_TASK_EDGE);
+                cp.rect_filled(Rect::from_min_max(r.min, pos2(px, r.bottom())), 3.0, theme::pal().BAR_TASK_EDGE);
             }
             if st.sel.tasks.contains(&t.id) {
-                cp.rect_stroke(r, 3.0, Stroke::new(2.0, theme::ACCENT_DARK), StrokeKind::Outside);
+                cp.rect_stroke(r, 3.0, Stroke::new(2.0, theme::pal().ACCENT_DARK), StrokeKind::Outside);
             }
             cp.with_clip_rect(r.intersect(chart)).text(
                 pos2(r.left() + 5.0, r.center().y),
@@ -234,7 +234,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
         ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
         if let Some(pp) = pointer {
             let name = p.task(tid).map(|t| t.name.clone()).unwrap_or_default();
-            painter.text(pp + vec2(12.0, 0.0), Align2::LEFT_CENTER, format!("↪ {name}"), FontId::proportional(12.0), theme::ACCENT);
+            painter.text(pp + vec2(12.0, 0.0), Align2::LEFT_CENTER, format!("↪ {name}"), FontId::proportional(12.0), theme::pal().ACCENT);
         }
         if resp.drag_stopped() || !ui.input(|i| i.pointer.any_down()) {
             ui.ctx().data_mut(|d| d.remove::<(TaskId, Option<ResourceId>)>(drag_id));
@@ -261,5 +261,5 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
 
     let vs = Rect::from_min_max(pos2(rect.right() - 12.0, body.top()), pos2(rect.right(), body.bottom()));
     st.misc_grid.scroll_y = scrollbar(ui, egui::Id::new("tp_vs"), vs, true, st.misc_grid.scroll_y, total_h + 20.0, body.height());
-    painter.hline(header.x_range(), header.bottom() - 0.5, Stroke::new(1.0, theme::GRID_LINE_STRONG));
+    painter.hline(header.x_range(), header.bottom() - 0.5, Stroke::new(1.0, theme::pal().GRID_LINE_STRONG));
 }

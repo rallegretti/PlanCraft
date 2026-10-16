@@ -343,14 +343,14 @@ impl TaskInfo {
                     }
                 });
                 if let Some(e) = &self.error {
-                    ui.colored_label(theme::ERROR, e);
+                    ui.colored_label(theme::pal().ERROR, e);
                 }
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Cancel").clicked() {
                         close = true;
                     }
-                    if ui.add(egui::Button::new(RichText::new("  OK  ").color(egui::Color32::WHITE)).fill(theme::ACCENT)).clicked() {
+                    if ui.add(egui::Button::new(RichText::new("  OK  ").color(egui::Color32::WHITE)).fill(theme::pal().ACCENT)).clicked() {
                         let label = format!("Task Information: {}", self.name);
                         match doc.try_edit(&label, ChangeSource::User, |p| self.apply(p)) {
                             Ok(()) => close = true,
@@ -393,18 +393,18 @@ impl TaskInfo {
             ui.end_row();
         });
         if self.mode == ScheduleMode::Auto {
-            ui.label(RichText::new("Start and finish of auto-scheduled tasks are calculated from links, constraints and calendars. Set a constraint on the Advanced tab to pin a date.").small().color(theme::TEXT_WEAK));
+            ui.label(RichText::new("Start and finish of auto-scheduled tasks are calculated from links, constraints and calendars. Set a constraint on the Advanced tab to pin a date.").small().color(theme::pal().TEXT_WEAK));
         }
         if let Some(t) = p.task(self.id) {
             ui.add_space(6.0);
             egui::Grid::new("ti_computed").num_columns(4).spacing([12.0, 4.0]).show(ui, |ui| {
-                ui.label(RichText::new("Scheduled:").color(theme::TEXT_WEAK));
+                ui.label(RichText::new("Scheduled:").color(theme::pal().TEXT_WEAK));
                 ui.label(format!("{} – {}", format::date_long(t.sched.start), format::date_long(t.sched.finish)));
                 ui.end_row();
-                ui.label(RichText::new("Work:").color(theme::TEXT_WEAK));
+                ui.label(RichText::new("Work:").color(theme::pal().TEXT_WEAK));
                 ui.label(format!("{} planned, {} actual", format_work(t.sched.work), format_work(t.sched.actual_work)));
                 ui.end_row();
-                ui.label(RichText::new("Slack:").color(theme::TEXT_WEAK));
+                ui.label(RichText::new("Slack:").color(theme::pal().TEXT_WEAK));
                 ui.label(format!(
                     "total {}, free {}{}",
                     p.format_duration(t.sched.total_slack, false),
@@ -412,12 +412,12 @@ impl TaskInfo {
                     if t.sched.critical { " · critical" } else { "" }
                 ));
                 ui.end_row();
-                ui.label(RichText::new("Cost:").color(theme::TEXT_WEAK));
+                ui.label(RichText::new("Cost:").color(theme::pal().TEXT_WEAK));
                 ui.label(format::money(p, t.sched.cost));
                 ui.end_row();
                 for w in &t.sched.warnings {
-                    ui.label(RichText::new("⚠").color(theme::ERROR));
-                    ui.label(RichText::new(w).color(theme::ERROR));
+                    ui.label(RichText::new("⚠").color(theme::pal().ERROR));
+                    ui.label(RichText::new(w).color(theme::pal().ERROR));
                     ui.end_row();
                 }
             });
@@ -484,7 +484,7 @@ impl TaskInfo {
                 "Lag examples: 2d, -1d (lead), 50%, 3ed (elapsed days). Link to tasks in other files via Project > Links Between Projects.",
             )
             .small()
-            .color(theme::TEXT_WEAK),
+            .color(theme::pal().TEXT_WEAK),
         );
     }
 
@@ -530,7 +530,7 @@ impl TaskInfo {
         ui.label(
             RichText::new("Leave Work empty to derive it from the duration (or the estimate for a first assignment).")
                 .small()
-                .color(theme::TEXT_WEAK),
+                .color(theme::pal().TEXT_WEAK),
         );
     }
 
@@ -651,7 +651,7 @@ impl TaskInfo {
         ui.label(
             RichText::new("The milestone is reached when all of these tasks finish (they act as finish-to-start predecessors).")
                 .small()
-                .color(theme::TEXT_WEAK),
+                .color(theme::pal().TEXT_WEAK),
         );
         let mut remove = None;
         for (i, m) in self.members.iter().enumerate() {

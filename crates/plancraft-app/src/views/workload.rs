@@ -2,7 +2,7 @@
 //! selected resource's load against its capacity.
 
 use chrono::Duration;
-use egui::{Align2, Color32, FontId, Rect, Sense, Stroke, Ui, pos2, vec2};
+use egui::{Align2, FontId, Rect, Sense, Stroke, Ui, pos2, vec2};
 use plancraft_core::prelude::*;
 use plancraft_core::workload::workload;
 use plancraft_core::workspace::Document;
@@ -35,7 +35,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
             format::day(from),
             format::day(to - Duration::days(1))
         ))
-        .color(theme::TEXT_WEAK),
+        .color(theme::pal().TEXT_WEAK),
     );
     ui.add_space(6.0);
 
@@ -54,7 +54,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
                 "Utilization",
                 "Overallocated",
             ] {
-                ui.label(egui::RichText::new(h).strong().color(theme::TEXT_WEAK));
+                ui.label(egui::RichText::new(h).strong().color(theme::pal().TEXT_WEAK));
             }
             ui.end_row();
             for (ri, rl) in report.resources.iter().enumerate() {
@@ -72,24 +72,24 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
                 let u = rl.utilization();
                 ui.horizontal(|ui| {
                     let (bar_rect, _) = ui.allocate_exact_size(vec2(120.0, 14.0), Sense::hover());
-                    ui.painter().rect_filled(bar_rect, 3.0, Color32::from_rgb(0xEC, 0xEF, 0xF4));
+                    ui.painter().rect_filled(bar_rect, 3.0, theme::pal().TRACK);
                     let w = (bar_rect.width() * (u.min(1.5) / 1.5) as f32).max(0.0);
                     let color = if u > 1.0 {
-                        theme::ERROR
+                        theme::pal().ERROR
                     } else if u > 0.85 {
-                        theme::WARN
+                        theme::pal().WARN
                     } else {
-                        theme::ACCENT_MID
+                        theme::pal().ACCENT_MID
                     };
                     ui.painter().rect_filled(Rect::from_min_size(bar_rect.min, vec2(w, bar_rect.height())), 3.0, color);
                     let x100 = bar_rect.left() + bar_rect.width() / 1.5;
-                    ui.painter().vline(x100, bar_rect.y_range(), Stroke::new(1.0, theme::TEXT_WEAK));
+                    ui.painter().vline(x100, bar_rect.y_range(), Stroke::new(1.0, theme::pal().TEXT_WEAK));
                     ui.label(format!("{:.0}%", u * 100.0));
                 });
                 if rl.overallocated {
-                    ui.label(egui::RichText::new(format!("⚠ {} day(s)", rl.overallocated_days.len())).color(theme::ERROR));
+                    ui.label(egui::RichText::new(format!("⚠ {} day(s)", rl.overallocated_days.len())).color(theme::pal().ERROR));
                 } else {
-                    ui.label(egui::RichText::new("✔ OK").color(theme::OK));
+                    ui.label(egui::RichText::new("✔ OK").color(theme::pal().OK));
                 }
                 ui.end_row();
             }
@@ -129,8 +129,14 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
     for k in 0..=4 {
         let v = max_v * k as f64 / 4.0;
         let y = y_of(v);
-        painter.hline(graph.x_range(), y, Stroke::new(1.0, theme::GRID_LINE));
-        painter.text(pos2(graph.left() - 6.0, y), Align2::RIGHT_CENTER, format::hours(v), FontId::proportional(10.5), theme::TEXT_WEAK);
+        painter.hline(graph.x_range(), y, Stroke::new(1.0, theme::pal().GRID_LINE));
+        painter.text(
+            pos2(graph.left() - 6.0, y),
+            Align2::RIGHT_CENTER,
+            format::hours(v),
+            FontId::proportional(10.5),
+            theme::pal().TEXT_WEAK,
+        );
     }
     let n = rl.periods.len().max(1);
     let slot = graph.width() / n as f32;
@@ -140,10 +146,10 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
         let x1 = x0 + slot * 0.7;
         let within = pl.load.min(pl.capacity);
         if within > 0.0 {
-            painter.rect_filled(Rect::from_min_max(pos2(x0, y_of(within)), pos2(x1, graph.bottom())), 1.0, theme::BAR_TASK);
+            painter.rect_filled(Rect::from_min_max(pos2(x0, y_of(within)), pos2(x1, graph.bottom())), 1.0, theme::pal().BAR_TASK);
         }
         if pl.load > pl.capacity + 0.5 {
-            painter.rect_filled(Rect::from_min_max(pos2(x0, y_of(pl.load)), pos2(x1, y_of(pl.capacity))), 1.0, theme::BAR_CRITICAL);
+            painter.rect_filled(Rect::from_min_max(pos2(x0, y_of(pl.load)), pos2(x1, y_of(pl.capacity))), 1.0, theme::pal().BAR_CRITICAL);
         }
         let xc = graph.left() + (i as f32 + 0.5) * slot;
         cap_pts.push(pos2(graph.left() + i as f32 * slot, y_of(pl.capacity)));
@@ -154,17 +160,19 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
                 Align2::CENTER_CENTER,
                 period_label(st.granularity, pl.start),
                 FontId::proportional(10.0),
-                theme::TEXT_WEAK,
+                theme::pal().TEXT_WEAK,
             );
         }
     }
-    painter.add(egui::Shape::line(cap_pts, Stroke::new(2.0, theme::ACCENT_DARK)));
+    painter.add(egui::Shape::line(cap_pts, Stroke::new(2.0, theme::pal().ACCENT_DARK)));
     // Legend.
     let ly = graph.bottom() + 24.0;
     let mut lx = graph.left();
-    for (c, l) in [(theme::BAR_TASK, "Allocated"), (theme::BAR_CRITICAL, "Overallocated"), (theme::ACCENT_DARK, "Capacity")] {
+    for (c, l) in
+        [(theme::pal().BAR_TASK, "Allocated"), (theme::pal().BAR_CRITICAL, "Overallocated"), (theme::pal().ACCENT_DARK, "Capacity")]
+    {
         painter.rect_filled(Rect::from_min_size(pos2(lx, ly - 5.0), vec2(10.0, 10.0)), 2.0, c);
-        painter.text(pos2(lx + 14.0, ly), Align2::LEFT_CENTER, l, FontId::proportional(11.0), theme::TEXT);
+        painter.text(pos2(lx + 14.0, ly), Align2::LEFT_CENTER, l, FontId::proportional(11.0), theme::pal().TEXT);
         lx += 110.0;
     }
 }

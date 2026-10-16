@@ -1,7 +1,7 @@
 //! Change Working Time: calendars, work weeks and exceptions.
 
 use chrono::{Datelike, Duration, NaiveDate};
-use egui::{Align2, Color32, Context, FontId, Rect, RichText, Sense, Stroke, Ui, pos2, vec2};
+use egui::{Align2, Context, FontId, Rect, RichText, Sense, Stroke, Ui, pos2, vec2};
 use plancraft_core::calendar::{WEEKDAYS, WorkCal};
 use plancraft_core::prelude::*;
 use plancraft_core::workspace::{ChangeSource, Document};
@@ -70,7 +70,7 @@ impl WorkingTime {
                 Align2::CENTER_CENTER,
                 *d,
                 FontId::proportional(12.0),
-                theme::TEXT_WEAK,
+                theme::pal().TEXT_WEAK,
             );
         }
         let first = self.month - Duration::days(self.month.weekday().num_days_from_monday() as i64);
@@ -86,17 +86,17 @@ impl WorkingTime {
             let is_exception = cal.exceptions.iter().any(|e| e.covers(day));
             let working = wc.is_working_day(day);
             let fill = if is_exception {
-                if working { Color32::from_rgb(0xC9, 0xE8, 0xD8) } else { Color32::from_rgb(0xF4, 0xC7, 0xC7) }
+                if working { theme::pal().EXCEPTION_WORKING } else { theme::pal().EXCEPTION_OFF }
             } else if working {
-                Color32::WHITE
+                theme::pal().BG
             } else {
-                theme::NONWORKING
+                theme::pal().NONWORKING
             };
             painter.rect_filled(r, 3.0, fill);
-            let color = if day.month() == self.month.month() { theme::TEXT } else { theme::GRID_LINE_STRONG };
+            let color = if day.month() == self.month.month() { theme::pal().TEXT } else { theme::pal().GRID_LINE_STRONG };
             painter.text(r.center(), Align2::CENTER_CENTER, day.day().to_string(), FontId::proportional(12.0), color);
             if self.selected_day == Some(day) {
-                painter.rect_stroke(r, 3.0, Stroke::new(2.0, theme::ACCENT), egui::StrokeKind::Inside);
+                painter.rect_stroke(r, 3.0, Stroke::new(2.0, theme::pal().ACCENT), egui::StrokeKind::Inside);
             }
             let resp = ui.interact(r, egui::Id::new(("wt_day", day)), Sense::click());
             if resp.clicked() {
@@ -114,19 +114,19 @@ impl WorkingTime {
             };
             ui.label(RichText::new(format!("{}: {txt}", format::day(d))).small());
             if let Some(e) = cal.exceptions.iter().rev().find(|e| e.covers(d)) {
-                ui.label(RichText::new(format!("Exception: {}", e.name)).small().color(theme::ACCENT_MID));
+                ui.label(RichText::new(format!("Exception: {}", e.name)).small().color(theme::pal().ACCENT_MID));
             }
         }
         ui.horizontal(|ui| {
             for (c, l) in [
-                (Color32::WHITE, "Working"),
-                (theme::NONWORKING, "Nonworking"),
-                (Color32::from_rgb(0xF4, 0xC7, 0xC7), "Exception (off)"),
-                (Color32::from_rgb(0xC9, 0xE8, 0xD8), "Exception (hours)"),
+                (theme::pal().BG, "Working"),
+                (theme::pal().NONWORKING, "Nonworking"),
+                (theme::pal().EXCEPTION_OFF, "Exception (off)"),
+                (theme::pal().EXCEPTION_WORKING, "Exception (hours)"),
             ] {
                 let (r, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
                 ui.painter().rect_filled(r, 2.0, c);
-                ui.painter().rect_stroke(r, 2.0, Stroke::new(1.0, theme::GRID_LINE_STRONG), egui::StrokeKind::Inside);
+                ui.painter().rect_stroke(r, 2.0, Stroke::new(1.0, theme::pal().GRID_LINE_STRONG), egui::StrokeKind::Inside);
                 ui.label(RichText::new(l).small());
             }
         });
@@ -308,14 +308,15 @@ impl WorkingTime {
                                     self.load_week(&std);
                                 }
                                 ui.label(
-                                    RichText::new(format!("{} per week", format_work(cal.week.weekly_minutes()))).color(theme::TEXT_WEAK),
+                                    RichText::new(format!("{} per week", format_work(cal.week.weekly_minutes())))
+                                        .color(theme::pal().TEXT_WEAK),
                                 );
                             });
                         }
                     });
                 });
                 if let Some(e) = &self.error {
-                    ui.colored_label(theme::ERROR, e);
+                    ui.colored_label(theme::pal().ERROR, e);
                 }
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

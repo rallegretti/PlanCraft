@@ -127,14 +127,14 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
                         Cell {
                             text: if total > 0 { format::hours(total as f64) } else { String::new() },
                             bold: true,
-                            bg: Some(theme::HEADER_BG),
+                            bg: Some(theme::pal().HEADER_BG),
                             ..Default::default()
                         }
                     }
                     9 => {
                         let total: Minutes =
                             lines.iter().flat_map(|l| days.iter().map(move |d| (l, d))).map(|(l, d)| tracked(l.task, l.resource, *d)).sum();
-                        Cell { text: format::hours(total as f64), bold: true, bg: Some(theme::HEADER_BG), ..Default::default() }
+                        Cell { text: format::hours(total as f64), bold: true, bg: Some(theme::pal().HEADER_BG), ..Default::default() }
                     }
                     _ => Cell::default(),
                 };
@@ -151,7 +151,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
                     Cell {
                         text: if m > 0 { format::hours(m as f64) } else { String::new() },
                         edit_text: Some(if m > 0 { format!("{}", m as f64 / 60.0) } else { String::new() }),
-                        bg: if workday { None } else { Some(theme::NONWORKING) },
+                        bg: if workday { None } else { Some(theme::pal().NONWORKING) },
                         ..Default::default()
                     }
                 }
@@ -165,7 +165,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
                     let over = planned > 0 && actual > planned;
                     Cell {
                         text: format!("{} / {}", format_work(actual), format_work(planned)),
-                        color: Some(if over { theme::ERROR } else { theme::TEXT }),
+                        color: Some(if over { theme::pal().ERROR } else { theme::pal().TEXT }),
                         ..Default::default()
                     }
                 }
@@ -198,7 +198,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
             egui::Align2::CENTER_CENTER,
             "No assignments are scheduled this week. Assign resources to tasks to track their time here.",
             egui::FontId::proportional(13.0),
-            theme::TEXT_WEAK,
+            theme::pal().TEXT_WEAK,
         );
     }
 }

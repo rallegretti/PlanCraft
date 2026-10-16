@@ -13,12 +13,24 @@ pub const HEIGHT: f32 = 78.0;
 
 pub fn show(ui: &mut Ui, rect: Rect, p: &Project, g: &mut GanttState, chart_width: f32) {
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, theme::PANEL_BG);
-    painter.hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, theme::GRID_LINE_STRONG));
-    painter.text(pos2(rect.left() + 8.0, rect.top() + 9.0), Align2::LEFT_CENTER, "TIMELINE", FontId::proportional(10.0), theme::TEXT_WEAK);
+    painter.rect_filled(rect, 0.0, theme::pal().PANEL_BG);
+    painter.hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, theme::pal().GRID_LINE_STRONG));
+    painter.text(
+        pos2(rect.left() + 8.0, rect.top() + 9.0),
+        Align2::LEFT_CENTER,
+        "TIMELINE",
+        FontId::proportional(10.0),
+        theme::pal().TEXT_WEAK,
+    );
 
     let (Some(start), Some(finish)) = (p.sched.start, p.sched.finish) else {
-        painter.text(rect.center(), Align2::CENTER_CENTER, "Add tasks to see the timeline", FontId::proportional(12.0), theme::TEXT_WEAK);
+        painter.text(
+            rect.center(),
+            Align2::CENTER_CENTER,
+            "Add tasks to see the timeline",
+            FontId::proportional(12.0),
+            theme::pal().TEXT_WEAK,
+        );
         return;
     };
     let span = (finish - start).num_minutes().max(60) as f32;
@@ -32,32 +44,32 @@ pub fn show(ui: &mut Ui, rect: Rect, p: &Project, g: &mut GanttState, chart_widt
         Align2::LEFT_CENTER,
         "Start",
         FontId::proportional(10.0),
-        theme::TEXT_WEAK,
+        theme::pal().TEXT_WEAK,
     );
     painter.text(
         pos2(rect.left() + 10.0, bar.center().y + 7.0),
         Align2::LEFT_CENTER,
         start.format("%a %-m/%-d/%y").to_string(),
         FontId::proportional(11.5),
-        theme::TEXT,
+        theme::pal().TEXT,
     );
     painter.text(
         pos2(rect.right() - 10.0, bar.center().y - 7.0),
         Align2::RIGHT_CENTER,
         "Finish",
         FontId::proportional(10.0),
-        theme::TEXT_WEAK,
+        theme::pal().TEXT_WEAK,
     );
     painter.text(
         pos2(rect.right() - 10.0, bar.center().y + 7.0),
         Align2::RIGHT_CENTER,
         finish.format("%a %-m/%-d/%y").to_string(),
         FontId::proportional(11.5),
-        theme::TEXT,
+        theme::pal().TEXT,
     );
 
-    painter.rect_filled(bar, 3.0, Color32::from_rgb(0xE3, 0xE9, 0xF5));
-    painter.rect_stroke(bar, 3.0, Stroke::new(1.0, theme::ACCENT_LIGHT), StrokeKind::Inside);
+    painter.rect_filled(bar, 3.0, theme::pal().TIMELINE_BAND);
+    painter.rect_stroke(bar, 3.0, Stroke::new(1.0, theme::pal().ACCENT_LIGHT), StrokeKind::Inside);
 
     // Month ticks.
     let mut m = crate::widgets::timescale::Unit::Month.floor(start);
@@ -68,7 +80,7 @@ pub fn show(ui: &mut Ui, rect: Rect, p: &Project, g: &mut GanttState, chart_widt
         guard += 1;
         let x = x_of(m);
         if x > bar.left() + 2.0 {
-            painter.vline(x, bar.top()..=bar.bottom(), Stroke::new(1.0, Color32::from_rgb(0xC9, 0xD3, 0xE6)));
+            painter.vline(x, bar.top()..=bar.bottom(), Stroke::new(1.0, theme::pal().TIMELINE_TICK));
         }
         let next = unit.next(m);
         let label_x = x_of(m).max(bar.left()) + 4.0;
@@ -78,7 +90,7 @@ pub fn show(ui: &mut Ui, rect: Rect, p: &Project, g: &mut GanttState, chart_widt
                 Align2::LEFT_CENTER,
                 unit.label(m, x_of(next) - label_x),
                 FontId::proportional(10.5),
-                theme::TEXT_WEAK,
+                theme::pal().TEXT_WEAK,
             );
         }
         m = next;
@@ -96,8 +108,8 @@ pub fn show(ui: &mut Ui, rect: Rect, p: &Project, g: &mut GanttState, chart_widt
             let c = pos2(x, bar.bottom() + 5.0);
             painter.add(Shape::convex_polygon(
                 vec![c + vec2(0.0, -5.0), c + vec2(5.0, 0.0), c + vec2(0.0, 5.0), c + vec2(-5.0, 0.0)],
-                theme::GOLD,
-                Stroke::new(1.0, theme::ACCENT_DARK),
+                theme::pal().GOLD,
+                Stroke::new(1.0, theme::pal().ACCENT_DARK),
             ));
             // Alternate label rows to reduce overlap.
             let row = ms_slots.iter().filter(|&&px| (px - x).abs() < 110.0).count() % 2;
@@ -108,11 +120,11 @@ pub fn show(ui: &mut Ui, rect: Rect, p: &Project, g: &mut GanttState, chart_widt
                 Align2::CENTER_CENTER,
                 format!("{} {}", t.name, f.format("%-m/%-d")),
                 font.clone(),
-                theme::TEXT,
+                theme::pal().TEXT,
             );
         } else {
             let r = Rect::from_min_max(pos2(x_of(s), bar.top() + 2.0), pos2(x_of(f), bar.bottom() - 2.0));
-            painter.rect_filled(r, 2.0, theme::BAR_TASK);
+            painter.rect_filled(r, 2.0, theme::pal().BAR_TASK);
             let c = painter.with_clip_rect(r);
             c.text(pos2(r.left() + 4.0, r.center().y), Align2::LEFT_CENTER, &t.name, font.clone(), Color32::WHITE);
         }
@@ -122,8 +134,8 @@ pub fn show(ui: &mut Ui, rect: Rect, p: &Project, g: &mut GanttState, chart_widt
     let now = chrono::Local::now().naive_local();
     if now >= start && now <= finish {
         let x = x_of(now);
-        painter.vline(x, (bar.top() - 4.0)..=(bar.bottom() + 2.0), Stroke::new(2.0, theme::TODAY));
-        painter.text(pos2(x, bar.top() - 9.0), Align2::CENTER_CENTER, "Today", FontId::proportional(9.5), theme::TODAY);
+        painter.vline(x, (bar.top() - 4.0)..=(bar.bottom() + 2.0), Stroke::new(2.0, theme::pal().TODAY));
+        painter.text(pos2(x, bar.top() - 9.0), Align2::CENTER_CENTER, "Today", FontId::proportional(9.5), theme::pal().TODAY);
     }
 
     // Visible-range window (drag to pan the Gantt chart).
@@ -133,8 +145,8 @@ pub fn show(ui: &mut Ui, rect: Rect, p: &Project, g: &mut GanttState, chart_widt
     let wx1 = x_of(view_end).clamp(bar.left(), bar.right());
     if wx1 > wx0 + 1.0 {
         let w = Rect::from_min_max(pos2(wx0, bar.top() - 2.0), pos2(wx1, bar.bottom() + 2.0));
-        painter.rect_filled(w, 2.0, Color32::from_rgba_unmultiplied(0x1B, 0x3A, 0x8C, 28));
-        painter.rect_stroke(w, 2.0, Stroke::new(1.5, theme::ACCENT), StrokeKind::Outside);
+        painter.rect_filled(w, 2.0, theme::pal().TIMELINE_WINDOW);
+        painter.rect_stroke(w, 2.0, Stroke::new(1.5, theme::pal().ACCENT), StrokeKind::Outside);
     }
     let resp = ui.interact(bar.expand(4.0), ui.id().with("timeline_bar"), Sense::click_and_drag());
     if resp.hovered() {

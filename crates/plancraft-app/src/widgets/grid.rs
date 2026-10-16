@@ -70,7 +70,7 @@ impl Cell {
         Self { text: t.into(), ..Default::default() }
     }
     pub fn weak(t: impl Into<String>) -> Self {
-        Self { text: t.into(), color: Some(theme::TEXT_WEAK), ..Default::default() }
+        Self { text: t.into(), color: Some(theme::pal().TEXT_WEAK), ..Default::default() }
     }
 }
 
@@ -159,7 +159,7 @@ const VSCROLL_W: f32 = 12.0;
 /// Paints a scrollbar. Returns the new offset.
 pub fn scrollbar(ui: &mut Ui, id: Id, track: Rect, vertical: bool, offset: f32, content: f32, viewport: f32) -> f32 {
     let painter = ui.painter_at(track);
-    painter.rect_filled(track, 0.0, theme::PANEL_BG);
+    painter.rect_filled(track, 0.0, theme::pal().PANEL_BG);
     if content <= viewport + 0.5 {
         return 0.0;
     }
@@ -184,7 +184,7 @@ pub fn scrollbar(ui: &mut Ui, id: Id, track: Rect, vertical: bool, offset: f32, 
         let pos = if vertical { p.y - track.top() } else { p.x - track.left() };
         new = ((pos - thumb_len / 2.0) / (len - thumb_len).max(1.0)) * max_off;
     }
-    let color = if resp.hovered() || resp.dragged() { theme::GRID_LINE_STRONG } else { Color32::from_rgb(0xD0, 0xD4, 0xDB) };
+    let color = if resp.hovered() || resp.dragged() { theme::pal().GRID_LINE_STRONG } else { theme::pal().SCROLL_THUMB };
     painter.rect_filled(thumb, 4.0, color);
     new.clamp(0.0, max_off)
 }
@@ -235,7 +235,7 @@ pub fn show(
     state.scroll_x = state.scroll_x.clamp(0.0, (total_cols_w - cols_view_w).max(0.0));
 
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, theme::BG);
+    painter.rect_filled(rect, 0.0, theme::pal().BG);
 
     // Column x positions.
     let mut col_x = Vec::with_capacity(ncols + 1);
@@ -247,12 +247,12 @@ pub fn show(
     col_x.push(x);
 
     // ---- Header ----
-    painter.rect_filled(header, 0.0, theme::HEADER_BG);
+    painter.rect_filled(header, 0.0, theme::pal().HEADER_BG);
     let hdr_painter = painter.with_clip_rect(Rect::from_min_max(pos2(header.left() + rn_w, header.top()), header.max));
     let font = FontId::proportional(12.5);
     for c in 0..ncols {
         let r = Rect::from_x_y_ranges(col_x[c]..=col_x[c + 1], header.y_range());
-        hdr_painter.vline(r.right() - 0.5, header.y_range(), Stroke::new(1.0, theme::GRID_LINE));
+        hdr_painter.vline(r.right() - 0.5, header.y_range(), Stroke::new(1.0, theme::pal().GRID_LINE));
         let text_pos = match cfg.columns[c].align {
             Align::Max => pos2(r.right() - 6.0, r.center().y),
             Align::Center => r.center(),
@@ -264,7 +264,7 @@ pub fn show(
             Align::Min => Align2::LEFT_CENTER,
         };
         let hp = hdr_painter.with_clip_rect(r.shrink2(vec2(2.0, 0.0)).intersect(header));
-        hp.text(text_pos, anchor, &cfg.columns[c].title, font.clone(), theme::TEXT);
+        hp.text(text_pos, anchor, &cfg.columns[c].title, font.clone(), theme::pal().TEXT);
         // Resize handle.
         let handle = Rect::from_center_size(pos2(r.right(), header.center().y), vec2(6.0, header.height()));
         if handle.left() > header.left() + rn_w && handle.right() < header.right() + 3.0 {
@@ -279,10 +279,10 @@ pub fn show(
     }
     if cfg.row_numbers {
         let r = Rect::from_min_size(header.min, vec2(rn_w, header.height()));
-        painter.rect_filled(r, 0.0, theme::HEADER_BG);
-        painter.vline(r.right() - 0.5, header.y_range(), Stroke::new(1.0, theme::GRID_LINE_STRONG));
+        painter.rect_filled(r, 0.0, theme::pal().HEADER_BG);
+        painter.vline(r.right() - 0.5, header.y_range(), Stroke::new(1.0, theme::pal().GRID_LINE_STRONG));
     }
-    painter.hline(header.x_range(), header.bottom() - 0.5, Stroke::new(1.0, theme::GRID_LINE_STRONG));
+    painter.hline(header.x_range(), header.bottom() - 0.5, Stroke::new(1.0, theme::pal().GRID_LINE_STRONG));
 
     // ---- Body ----
     let body_painter = painter.with_clip_rect(body);
@@ -299,7 +299,7 @@ pub fn show(
         let data_row = row < cfg.row_count;
         let selected = data_row && is_selected(row);
         if selected {
-            body_painter.rect_filled(row_rect, 0.0, theme::SELECTION);
+            body_painter.rect_filled(row_rect, 0.0, theme::pal().SELECTION);
         }
         for c in 0..ncols {
             let r = Rect::from_x_y_ranges(col_x[c]..=col_x[c + 1], row_rect.y_range());
@@ -314,9 +314,9 @@ pub fn show(
                 cp.rect_filled(r, 0.0, bg);
             }
             if cursor_here {
-                cp.rect_filled(r, 0.0, theme::SELECTION_CELL);
+                cp.rect_filled(r, 0.0, theme::pal().SELECTION_CELL);
             }
-            cp.vline(r.right() - 0.5, r.y_range(), Stroke::new(1.0, theme::GRID_LINE));
+            cp.vline(r.right() - 0.5, r.y_range(), Stroke::new(1.0, theme::pal().GRID_LINE));
             if state.editing.as_ref().is_some_and(|e| e.row == row && e.col == c) {
                 edit_rect = Some((r, row, c));
                 continue;
@@ -329,7 +329,7 @@ pub fn show(
                 } else {
                     vec![tri_c + vec2(-2.0, -4.0), tri_c + vec2(3.0, 0.0), tri_c + vec2(-2.0, 4.0)]
                 };
-                cp.add(egui::Shape::convex_polygon(pts, theme::TEXT_WEAK, Stroke::NONE));
+                cp.add(egui::Shape::convex_polygon(pts, theme::pal().TEXT_WEAK, Stroke::NONE));
                 let tr = Rect::from_center_size(tri_c, vec2(14.0, 14.0));
                 if ui.interact(tr.intersect(clip), cfg.id.with(("exp", row)), Sense::click()).clicked() {
                     events.push(GridEvent::ToggleExpand(row));
@@ -348,7 +348,7 @@ pub fn show(
                 tx += 16.0;
             }
             if !content.text.is_empty() {
-                let color = content.color.unwrap_or(theme::TEXT);
+                let color = content.color.unwrap_or(theme::pal().TEXT);
                 let galley = cp.layout_no_wrap(content.text.clone(), cell_font.clone(), color);
                 let gx = match cfg.columns[c].align {
                     Align::Max => r.right() - 5.0 - galley.size().x,
@@ -367,7 +367,7 @@ pub fn show(
                 }
             }
             if cursor_here {
-                cp.rect_stroke(r.shrink(0.5), 0.0, Stroke::new(1.5, theme::ACCENT_MID), StrokeKind::Inside);
+                cp.rect_stroke(r.shrink(0.5), 0.0, Stroke::new(1.5, theme::pal().ACCENT_MID), StrokeKind::Inside);
             }
             if let Some(t) = &content.tooltip
                 && pointer.is_some_and(|p| clip.contains(p))
@@ -379,19 +379,19 @@ pub fn show(
                     });
             }
         }
-        body_painter.hline(row_rect.x_range(), row_rect.bottom() - 0.5, Stroke::new(1.0, theme::GRID_LINE));
+        body_painter.hline(row_rect.x_range(), row_rect.bottom() - 0.5, Stroke::new(1.0, theme::pal().GRID_LINE));
         if cfg.row_numbers {
             let rr = Rect::from_min_size(row_rect.min, vec2(rn_w, cfg.row_height));
-            body_painter.rect_filled(rr, 0.0, if selected { theme::ACCENT_LIGHT } else { theme::HEADER_BG });
-            body_painter.vline(rr.right() - 0.5, rr.y_range(), Stroke::new(1.0, theme::GRID_LINE_STRONG));
-            body_painter.hline(rr.x_range(), rr.bottom() - 0.5, Stroke::new(1.0, theme::GRID_LINE));
+            body_painter.rect_filled(rr, 0.0, if selected { theme::pal().ACCENT_LIGHT } else { theme::pal().HEADER_BG });
+            body_painter.vline(rr.right() - 0.5, rr.y_range(), Stroke::new(1.0, theme::pal().GRID_LINE_STRONG));
+            body_painter.hline(rr.x_range(), rr.bottom() - 0.5, Stroke::new(1.0, theme::pal().GRID_LINE));
             if data_row {
                 body_painter.text(
                     pos2(rr.right() - 6.0, rr.center().y),
                     Align2::RIGHT_CENTER,
                     (row + 1).to_string(),
                     FontId::proportional(11.5),
-                    theme::TEXT_WEAK,
+                    theme::pal().TEXT_WEAK,
                 );
             }
         }
@@ -459,9 +459,15 @@ pub fn show(
         let edit = state.editing.as_mut().expect("editing");
         match editor {
             Editor::Choice(options) => {
-                body_painter.rect_filled(r, 0.0, theme::BG);
-                body_painter.rect_stroke(r.shrink(0.5), 0.0, Stroke::new(1.5, theme::ACCENT), StrokeKind::Inside);
-                body_painter.text(pos2(r.left() + 5.0, r.center().y), Align2::LEFT_CENTER, &edit.text, cell_font.clone(), theme::TEXT);
+                body_painter.rect_filled(r, 0.0, theme::pal().BG);
+                body_painter.rect_stroke(r.shrink(0.5), 0.0, Stroke::new(1.5, theme::pal().ACCENT), StrokeKind::Inside);
+                body_painter.text(
+                    pos2(r.left() + 5.0, r.center().y),
+                    Align2::LEFT_CENTER,
+                    &edit.text,
+                    cell_font.clone(),
+                    theme::pal().TEXT,
+                );
                 let area = egui::Area::new(cfg.id.with("choice"))
                     .order(egui::Order::Foreground)
                     .fixed_pos(pos2(r.left(), r.bottom()))
@@ -494,7 +500,7 @@ pub fn show(
                 let id = cfg.id.with(("edit", row, c));
                 let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r).layout(egui::Layout::left_to_right(Align::Center)));
                 child.set_clip_rect(clip);
-                body_painter.rect_filled(r, 0.0, theme::BG);
+                body_painter.rect_filled(r, 0.0, theme::pal().BG);
                 let te = egui::TextEdit::singleline(&mut edit.text)
                     .id(id)
                     .frame(egui::Frame::NONE)
@@ -503,7 +509,7 @@ pub fn show(
                     .desired_width(r.width() - 4.0)
                     .horizontal_align(cfg.columns[c].align);
                 let resp = child.add(te);
-                body_painter.rect_stroke(r.shrink(0.5), 0.0, Stroke::new(1.5, theme::ACCENT), StrokeKind::Inside);
+                body_painter.rect_stroke(r.shrink(0.5), 0.0, Stroke::new(1.5, theme::pal().ACCENT), StrokeKind::Inside);
                 if !edit.started {
                     resp.request_focus();
                     edit.started = true;
@@ -638,7 +644,7 @@ pub fn show(
         painter.rect_filled(
             Rect::from_min_max(pos2(body.left(), body.bottom()), pos2(body.left() + rn_w, rect.bottom())),
             0.0,
-            theme::PANEL_BG,
+            theme::pal().PANEL_BG,
         );
     }
     if cfg.show_vscroll {
@@ -647,7 +653,7 @@ pub fn show(
         painter.rect_filled(
             Rect::from_min_max(pos2(rect.right() - VSCROLL_W, rect.top()), pos2(rect.right(), header.bottom())),
             0.0,
-            theme::HEADER_BG,
+            theme::pal().HEADER_BG,
         );
     }
 

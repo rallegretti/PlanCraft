@@ -131,7 +131,7 @@ impl ResourceInfo {
                             ui.add(egui::TextEdit::singleline(&mut self.per_use).desired_width(80.0));
                             ui.end_row();
                         });
-                        ui.label(RichText::new("Max. units: 100% is one full-time person; a team of three is 300%. Rates are per hour for work resources and per unit for materials.").small().color(theme::TEXT_WEAK));
+                        ui.label(RichText::new("Max. units: 100% is one full-time person; a team of three is 300%. Rates are per hour for work resources and per unit for materials.").small().color(theme::pal().TEXT_WEAK));
                     }
                     Tab::TimeOff => {
                         ui.label("Personal exceptions to the base calendar: vacations, leave, part-time days or extra hours.");
@@ -220,14 +220,14 @@ impl ResourceInfo {
                     }
                 }
                 if let Some(e) = &self.error {
-                    ui.colored_label(theme::ERROR, e);
+                    ui.colored_label(theme::pal().ERROR, e);
                 }
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Cancel").clicked() {
                         close = true;
                     }
-                    if ui.add(egui::Button::new(RichText::new("  OK  ").color(egui::Color32::WHITE)).fill(theme::ACCENT)).clicked() {
+                    if ui.add(egui::Button::new(RichText::new("  OK  ").color(egui::Color32::WHITE)).fill(theme::pal().ACCENT)).clicked() {
                         let mut draft = self.draft.clone();
                         let parsed = (|| -> Result<(), String> {
                             draft.max_units = format::parse_units(&self.max_units).ok_or("Max. units must look like 100%")?;

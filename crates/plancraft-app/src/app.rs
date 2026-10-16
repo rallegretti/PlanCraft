@@ -45,8 +45,11 @@ enum CloseRequest {
 
 impl PlanCraftApp {
     pub fn new(cc: &eframe::CreationContext<'_>, ws: SharedWorkspace) -> Self {
-        theme::install(&cc.egui_ctx);
-        let settings = AppSettings::load();
+        let mut settings = AppSettings::load();
+        if let Some(t) = std::env::var("PLANCRAFT_THEME").ok().and_then(|v| theme::ThemeChoice::parse(&v)) {
+            settings.theme = t;
+        }
+        theme::install(&cc.egui_ctx, settings.theme);
         let has_doc = ws.lock().map(|w| !w.docs.is_empty()).unwrap_or(false);
         let st = UiState { table_width: settings.table_width, start_page: !has_doc, ..UiState::default() };
         let mut app = Self {
@@ -277,6 +280,11 @@ impl PlanCraftApp {
             Command::Filter(f) => self.st.filter = f,
             Command::Table(t) => self.st.table = t,
             Command::History => self.dialogs.history = !self.dialogs.history,
+            Command::SetTheme(t) => {
+                self.settings.theme = t;
+                self.settings.save();
+                theme::set_choice(ctx, t);
+            }
             other => {
                 let ws = self.ws.clone();
                 let mut ws = ws.lock().unwrap();
@@ -677,7 +685,7 @@ impl PlanCraftApp {
         }
         let rect = ui.available_rect_before_wrap();
         let rect = Rect::from_min_size(rect.min, vec2(rect.width(), 26.0));
-        ui.painter().rect_filled(rect, 0.0, theme::PANEL_BG);
+        ui.painter().rect_filled(rect, 0.0, theme::pal().PANEL_BG);
         let mut child =
             ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(8.0, 2.0))).layout(Layout::left_to_right(Align::Center)));
         let mut switch = None;
@@ -735,13 +743,13 @@ impl PlanCraftApp {
                 }
                 if self.st.filter != crate::state::TaskFilter::All {
                     ui.separator();
-                    ui.label(RichText::new(format!("Filter: {}", self.st.filter.label())).size(12.0).color(theme::ACCENT_MID));
+                    ui.label(RichText::new(format!("Filter: {}", self.st.filter.label())).size(12.0).color(theme::pal().ACCENT_MID));
                 }
                 let warnings = doc.project.sched.warnings.len();
                 if warnings > 0 {
                     ui.separator();
                     let r = ui.add(
-                        egui::Label::new(RichText::new(format!("⚠ {warnings} scheduling issue(s)")).size(12.0).color(theme::ERROR))
+                        egui::Label::new(RichText::new(format!("⚠ {warnings} scheduling issue(s)")).size(12.0).color(theme::pal().ERROR))
                             .sense(Sense::click()),
                     );
                     if r.on_hover_text(doc.project.sched.warnings.join("\n")).clicked() {
@@ -750,7 +758,7 @@ impl PlanCraftApp {
                 }
                 if let Some((label, ChangeSource::Agent)) = &doc.last_change {
                     ui.separator();
-                    ui.label(RichText::new(format!("⚡ Last AI change: {label}")).size(12.0).color(theme::ACCENT_MID));
+                    ui.label(RichText::new(format!("⚡ Last AI change: {label}")).size(12.0).color(theme::pal().ACCENT_MID));
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -776,7 +784,7 @@ impl PlanCraftApp {
 
     fn view_bar(&self, ui: &Ui, rect: Rect) {
         let p = ui.painter();
-        p.rect_filled(rect, 0.0, theme::ACCENT_DARK);
+        p.rect_filled(rect, 0.0, theme::pal().TITLE_BAR);
         let label = self.st.view.label().to_uppercase();
         let galley = p.layout_no_wrap(label, FontId::proportional(12.0), Color32::WHITE);
         let w = galley.size().x;
@@ -797,10 +805,10 @@ impl PlanCraftApp {
                 let mut dismiss = None;
                 for (i, t) in self.st.toasts.iter().enumerate() {
                     let (icon, color) = match t.kind {
-                        ToastKind::Info => ("ℹ", theme::ACCENT_MID),
-                        ToastKind::Success => ("✔", theme::OK),
-                        ToastKind::Warning => ("⚠", theme::WARN),
-                        ToastKind::Error => ("✖", theme::ERROR),
+                        ToastKind::Info => ("ℹ", theme::pal().ACCENT_MID),
+                        ToastKind::Success => ("✔", theme::pal().OK),
+                        ToastKind::Warning => ("⚠", theme::pal().WARN),
+                        ToastKind::Error => ("✖", theme::pal().ERROR),
                     };
                     let resp = egui::Frame::popup(ui.style())
                         .stroke(Stroke::new(1.0, color))
@@ -841,7 +849,7 @@ impl PlanCraftApp {
             ui.label(format!("Do you want to save changes to {}?", names.join(", ")));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if ui.add(egui::Button::new(RichText::new("Save").color(Color32::WHITE)).fill(theme::ACCENT)).clicked() {
+                if ui.add(egui::Button::new(RichText::new("Save").color(Color32::WHITE)).fill(theme::pal().ACCENT)).clicked() {
                     choice = Some(0);
                 }
                 if ui.button("Don't Save").clicked() {
@@ -967,7 +975,7 @@ impl PlanCraftApp {
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect));
         child.vertical_centered(|ui| {
             ui.add_space(rect.height() * 0.3);
-            ui.label(RichText::new("No project open").size(18.0).color(theme::TEXT_WEAK));
+            ui.label(RichText::new("No project open").size(18.0).color(theme::pal().TEXT_WEAK));
             if ui.button("Create a new project").clicked() {
                 out.push(Command::NewProject);
             }
@@ -980,11 +988,12 @@ impl PlanCraftApp {
 
 impl eframe::App for PlanCraftApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        theme::BG.to_normalized_gamma_f32()
+        theme::pal().BG.to_normalized_gamma_f32()
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        theme::sync(&ctx);
         self.screenshot_hook(&ctx);
         let mut out: Vec<Command> = Vec::new();
 
@@ -1055,7 +1064,7 @@ impl eframe::App for PlanCraftApp {
                 stats,
                 settings: &self.settings,
             };
-            egui::Panel::top("title").frame(egui::Frame::new().fill(theme::BG)).show(ui, |ui| {
+            egui::Panel::top("title").frame(egui::Frame::new().fill(theme::pal().BG)).show(ui, |ui| {
                 menubar::title_bar(ui, &info, &mut out);
             });
             egui::CentralPanel::no_frame().show(ui, |ui| {
@@ -1064,19 +1073,19 @@ impl eframe::App for PlanCraftApp {
                 }
             });
         } else {
-            egui::Panel::top("title").frame(egui::Frame::new().fill(theme::BG)).show(ui, |ui| {
+            egui::Panel::top("title").frame(egui::Frame::new().fill(theme::pal().BG)).show(ui, |ui| {
                 menubar::title_bar(ui, &info, &mut out);
                 menubar::command_bar(ui, &mut self.st, &info, &self.settings, &mut out);
                 self.doc_tabs(ui, &mut ws, &mut out);
             });
             egui::Panel::bottom("status")
-                .frame(egui::Frame::new().fill(theme::HEADER_BG).inner_margin(egui::Margin::symmetric(10, 3)))
+                .frame(egui::Frame::new().fill(theme::pal().HEADER_BG).inner_margin(egui::Margin::symmetric(10, 3)))
                 .show(ui, |ui| {
                     self.status_bar(ui, &mut ws, &mut out);
                 });
             egui::CentralPanel::no_frame().show(ui, |ui| {
                 let full = ui.max_rect();
-                ui.painter().rect_filled(full, 0.0, theme::BG);
+                ui.painter().rect_filled(full, 0.0, theme::pal().BG);
                 let Some(doc) = ws.active_doc_mut() else {
                     self.welcome(ui, full, &mut out);
                     return;

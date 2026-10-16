@@ -9,7 +9,7 @@ use crate::theme;
 
 fn code_line(ui: &mut egui::Ui, text: &str) {
     ui.horizontal(|ui| {
-        egui::Frame::new().fill(theme::HEADER_BG).corner_radius(4.0).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
+        egui::Frame::new().fill(theme::pal().HEADER_BG).corner_radius(4.0).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
             ui.label(RichText::new(text).monospace());
         });
         if ui.small_button("📋").on_hover_text("Copy").clicked() {
@@ -44,8 +44,8 @@ pub fn show(
                 if ui.button("■ Stop server").clicked() {
                     host.stop();
                 }
-                ui.label(RichText::new("⚡ running").color(theme::OK));
-            } else if ui.add(egui::Button::new(RichText::new("▶ Start server").color(egui::Color32::WHITE)).fill(theme::ACCENT)).clicked() {
+                ui.label(RichText::new("⚡ running").color(theme::pal().OK));
+            } else if ui.add(egui::Button::new(RichText::new("▶ Start server").color(egui::Color32::WHITE)).fill(theme::pal().ACCENT)).clicked() {
                 host.start(ws.clone(), ctx.clone(), settings.mcp_port);
             }
             let mut auto = settings.mcp_autostart;
@@ -55,13 +55,13 @@ pub fn show(
             }
         });
         if let Some(e) = &host.error {
-            ui.colored_label(theme::ERROR, e);
+            ui.colored_label(theme::pal().ERROR, e);
         }
         if let Some(url) = host.url() {
             let url = url.as_str();
             ui.label("Add it to Claude Code:");
             code_line(ui, &format!("claude mcp add --transport http plancraft {url}"));
-            ui.label(RichText::new(format!("Changes made by agents this session: {}", host.changes())).small().color(theme::TEXT_WEAK));
+            ui.label(RichText::new(format!("Changes made by agents this session: {}", host.changes())).small().color(theme::pal().TEXT_WEAK));
         }
         ui.add_space(10.0);
         ui.separator();
@@ -69,6 +69,6 @@ pub fn show(
         ui.label("Agents can also run PlanCraft without the window, working directly on files:");
         let exe = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "plancraft".into());
         code_line(ui, &format!("claude mcp add plancraft -- {exe} mcp path/to/project.plancraft"));
-        ui.label(RichText::new("Only connect agents you trust: they can change and save your project files.").small().color(theme::TEXT_WEAK));
+        ui.label(RichText::new("Only connect agents you trust: they can change and save your project files.").small().color(theme::pal().TEXT_WEAK));
     });
 }

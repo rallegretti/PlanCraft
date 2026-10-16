@@ -27,14 +27,14 @@ const CARD_RADIUS: u8 = 8;
 
 fn card_frame(hovered: bool) -> egui::Frame {
     egui::Frame::new()
-        .fill(theme::BG)
-        .stroke(Stroke::new(1.0, if hovered { theme::ACCENT_MID } else { theme::GRID_LINE }))
+        .fill(theme::pal().BG)
+        .stroke(Stroke::new(1.0, if hovered { theme::pal().ACCENT_MID } else { theme::pal().GRID_LINE }))
         .corner_radius(CARD_RADIUS)
         .inner_margin(egui::Margin::same(14))
 }
 
 fn section_title(ui: &mut Ui, text: &str) {
-    ui.label(RichText::new(text).size(15.0).strong().color(theme::TEXT));
+    ui.label(RichText::new(text).size(15.0).strong().color(theme::pal().TEXT));
     ui.add_space(6.0);
 }
 
@@ -47,13 +47,13 @@ fn action(ui: &mut Ui, id: &str, icon: &str, title: &str, subtitle: &str) -> boo
             ui.set_width(width - 30.0);
             ui.horizontal(|ui| {
                 let (badge, _) = ui.allocate_exact_size(vec2(38.0, 38.0), Sense::hover());
-                ui.painter().rect_filled(badge, 9.0, if hovered { theme::ACCENT_LIGHT } else { theme::ACCENT_PALE });
-                ui.painter().text(badge.center(), Align2::CENTER_CENTER, icon, FontId::proportional(18.0), theme::ACCENT);
+                ui.painter().rect_filled(badge, 9.0, if hovered { theme::pal().ACCENT_LIGHT } else { theme::pal().ACCENT_PALE });
+                ui.painter().text(badge.center(), Align2::CENTER_CENTER, icon, FontId::proportional(18.0), theme::pal().ACCENT);
                 ui.add_space(6.0);
                 ui.vertical(|ui| {
                     ui.add_space(1.0);
-                    ui.label(RichText::new(title).size(14.0).color(theme::TEXT));
-                    ui.label(RichText::new(subtitle).size(11.5).color(theme::TEXT_WEAK));
+                    ui.label(RichText::new(title).size(14.0).color(theme::pal().TEXT));
+                    ui.label(RichText::new(subtitle).size(11.5).color(theme::pal().TEXT_WEAK));
                 });
             });
         })
@@ -101,8 +101,8 @@ fn recent_list(ui: &mut Ui, settings: &AppSettings, out: &mut Vec<Command>) {
         if settings.recent.is_empty() {
             ui.add_space(18.0);
             ui.vertical_centered(|ui| {
-                ui.label(RichText::new("No recent projects yet").color(theme::TEXT_WEAK));
-                ui.label(RichText::new("Projects you open or save appear here.").size(11.5).color(theme::TEXT_WEAK));
+                ui.label(RichText::new("No recent projects yet").color(theme::pal().TEXT_WEAK));
+                ui.label(RichText::new("Projects you open or save appear here.").size(11.5).color(theme::pal().TEXT_WEAK));
             });
             ui.add_space(18.0);
             return;
@@ -115,25 +115,31 @@ fn recent_list(ui: &mut Ui, settings: &AppSettings, out: &mut Vec<Command>) {
                 ui.allocate_exact_size(vec2(ui.available_width(), 46.0), if exists { Sense::click() } else { Sense::hover() });
             let p = ui.painter();
             if exists && resp.hovered() {
-                p.rect_filled(rect, 6.0, theme::ACCENT_PALE);
+                p.rect_filled(rect, 6.0, theme::pal().ACCENT_PALE);
             }
             if i > 0 {
-                p.hline((rect.left() + 10.0)..=(rect.right() - 10.0), rect.top(), Stroke::new(1.0, theme::GRID_LINE));
+                p.hline((rect.left() + 10.0)..=(rect.right() - 10.0), rect.top(), Stroke::new(1.0, theme::pal().GRID_LINE));
             }
-            let icon_color = if exists { theme::ACCENT_MID } else { theme::GRID_LINE_STRONG };
+            let icon_color = if exists { theme::pal().ACCENT_MID } else { theme::pal().GRID_LINE_STRONG };
             p.text(pos2(rect.left() + 20.0, rect.center().y), Align2::CENTER_CENTER, "📄", FontId::proportional(16.0), icon_color);
-            let text_color = if exists { theme::TEXT } else { theme::TEXT_WEAK };
+            let text_color = if exists { theme::pal().TEXT } else { theme::pal().TEXT_WEAK };
             p.text(pos2(rect.left() + 40.0, rect.top() + 15.0), Align2::LEFT_CENTER, &name, FontId::proportional(13.5), text_color);
             let date = if exists { modified_label(path).unwrap_or_default() } else { "File not found".into() };
-            let date_w = p.layout_no_wrap(date.clone(), FontId::proportional(11.5), theme::TEXT_WEAK).size().x;
-            p.text(pos2(rect.right() - 12.0, rect.center().y), Align2::RIGHT_CENTER, &date, FontId::proportional(11.5), theme::TEXT_WEAK);
+            let date_w = p.layout_no_wrap(date.clone(), FontId::proportional(11.5), theme::pal().TEXT_WEAK).size().x;
+            p.text(
+                pos2(rect.right() - 12.0, rect.center().y),
+                Align2::RIGHT_CENTER,
+                &date,
+                FontId::proportional(11.5),
+                theme::pal().TEXT_WEAK,
+            );
             let folder_clip = Rect::from_min_max(pos2(rect.left() + 40.0, rect.top()), pos2(rect.right() - date_w - 24.0, rect.bottom()));
             p.with_clip_rect(folder_clip).text(
                 pos2(rect.left() + 40.0, rect.top() + 32.0),
                 Align2::LEFT_CENTER,
                 &folder,
                 FontId::proportional(11.0),
-                theme::TEXT_WEAK,
+                theme::pal().TEXT_WEAK,
             );
             if resp.on_hover_text(path.display().to_string()).clicked() {
                 out.push(Command::OpenPath(path.clone()));
@@ -144,8 +150,8 @@ fn recent_list(ui: &mut Ui, settings: &AppSettings, out: &mut Vec<Command>) {
 
 fn stat(ui: &mut Ui, label: &str, value: &str) {
     ui.vertical(|ui| {
-        ui.label(RichText::new(label).size(11.0).color(theme::TEXT_WEAK));
-        ui.label(RichText::new(value).size(13.5).color(theme::TEXT));
+        ui.label(RichText::new(label).size(11.0).color(theme::pal().TEXT_WEAK));
+        ui.label(RichText::new(value).size(13.5).color(theme::pal().TEXT));
     });
     ui.add_space(14.0);
 }
@@ -153,8 +159,8 @@ fn stat(ui: &mut Ui, label: &str, value: &str) {
 fn current_project(ui: &mut Ui, info: &StartInfo, out: &mut Vec<Command>) {
     let width = ui.available_width();
     let resp = egui::Frame::new()
-        .fill(theme::BG)
-        .stroke(Stroke::new(1.0, theme::GRID_LINE))
+        .fill(theme::pal().BG)
+        .stroke(Stroke::new(1.0, theme::pal().GRID_LINE))
         .corner_radius(CARD_RADIUS)
         .inner_margin(egui::Margin { left: 18, right: 14, top: 14, bottom: 14 })
         .show(ui, |ui| {
@@ -163,7 +169,9 @@ fn current_project(ui: &mut Ui, info: &StartInfo, out: &mut Vec<Command>) {
                 ui.vertical(|ui| {
                     ui.label(RichText::new(&info.doc_title).size(16.0).strong());
                     ui.label(
-                        RichText::new(info.doc_path.clone().unwrap_or_else(|| "Not saved yet".into())).size(11.5).color(theme::TEXT_WEAK),
+                        RichText::new(info.doc_path.clone().unwrap_or_else(|| "Not saved yet".into()))
+                            .size(11.5)
+                            .color(theme::pal().TEXT_WEAK),
                     );
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -184,12 +192,12 @@ fn current_project(ui: &mut Ui, info: &StartInfo, out: &mut Vec<Command>) {
                     stat(ui, "Milestones", &s.milestones.to_string());
                     stat(ui, "Resources", &s.resources.to_string());
                     ui.vertical(|ui| {
-                        ui.label(RichText::new("Complete").size(11.0).color(theme::TEXT_WEAK));
+                        ui.label(RichText::new("Complete").size(11.0).color(theme::pal().TEXT_WEAK));
                         ui.horizontal(|ui| {
                             let (bar, _) = ui.allocate_exact_size(vec2(120.0, 8.0), Sense::hover());
-                            ui.painter().rect_filled(bar, 4.0, Color32::from_rgb(0xE6, 0xEA, 0xF1));
+                            ui.painter().rect_filled(bar, 4.0, theme::pal().TRACK);
                             let w = bar.width() * (s.percent_complete / 100.0).clamp(0.0, 1.0);
-                            ui.painter().rect_filled(Rect::from_min_size(bar.min, vec2(w, bar.height())), 4.0, theme::ACCENT_MID);
+                            ui.painter().rect_filled(Rect::from_min_size(bar.min, vec2(w, bar.height())), 4.0, theme::pal().ACCENT_MID);
                             ui.label(RichText::new(format::percent(s.percent_complete)).size(13.5));
                         });
                     });
@@ -202,7 +210,7 @@ fn current_project(ui: &mut Ui, info: &StartInfo, out: &mut Vec<Command>) {
     ui.painter().rect_filled(
         Rect::from_min_max(r.min, pos2(r.left() + 4.0, r.bottom())),
         egui::CornerRadius { nw: CARD_RADIUS, sw: CARD_RADIUS, ne: 0, se: 0 },
-        theme::ACCENT,
+        theme::pal().ACCENT,
     );
 }
 
@@ -226,7 +234,7 @@ fn start_actions(ui: &mut Ui, width: f32, out: &mut Vec<Command>) {
 /// Draws the Start Page. Returns true when the user asks to go back to the open project.
 pub fn show(ui: &mut Ui, info: &StartInfo, out: &mut Vec<Command>) -> bool {
     let full = ui.max_rect();
-    ui.painter().rect_filled(full, 0.0, theme::PANEL_BG);
+    ui.painter().rect_filled(full, 0.0, theme::pal().PANEL_BG);
     let mut back = false;
     let width = (full.width() - 64.0).clamp(320.0, MAX_WIDTH);
     let column = Rect::from_min_size(pos2(full.center().x - width / 2.0, full.top()), vec2(width, full.height()));
@@ -242,13 +250,13 @@ pub fn show(ui: &mut Ui, info: &StartInfo, out: &mut Vec<Command>) -> bool {
             ui.add_space(10.0);
             ui.vertical(|ui| {
                 ui.add_space(2.0);
-                ui.label(RichText::new("PlanCraft").size(26.0).color(theme::ACCENT_DARK));
-                ui.label(RichText::new("Plan the work, then work the plan.").size(13.0).color(theme::TEXT_WEAK));
+                ui.label(RichText::new("PlanCraft").size(26.0).color(theme::pal().ACCENT_DARK));
+                ui.label(RichText::new("Plan the work, then work the plan.").size(13.0).color(theme::pal().TEXT_WEAK));
             });
             if info.has_doc {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let label = RichText::new(format!("Back to {}  ➡", info.doc_title)).color(Color32::WHITE);
-                    if ui.add(egui::Button::new(label).fill(theme::ACCENT).corner_radius(6.0).min_size(vec2(0.0, 30.0))).clicked() {
+                    if ui.add(egui::Button::new(label).fill(theme::pal().ACCENT).corner_radius(6.0).min_size(vec2(0.0, 30.0))).clicked() {
                         back = true;
                     }
                 });
@@ -283,16 +291,16 @@ pub fn show(ui: &mut Ui, info: &StartInfo, out: &mut Vec<Command>) -> bool {
         ui.separator();
         ui.add_space(6.0);
         ui.horizontal_wrapped(|ui| {
-            ui.label(RichText::new("Tips:").size(11.5).strong().color(theme::TEXT_WEAK));
+            ui.label(RichText::new("Tips:").size(11.5).strong().color(theme::pal().TEXT_WEAK));
             ui.label(
                 RichText::new(
                     "Insert adds a task · Alt+Shift+Right indents · drag a bar onto another to link · Ctrl+wheel zooms the timescale",
                 )
                 .size(11.5)
-                .color(theme::TEXT_WEAK),
+                .color(theme::pal().TEXT_WEAK),
             );
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).size(11.5).color(theme::TEXT_WEAK));
+                ui.label(RichText::new(format!("v{}", env!("CARGO_PKG_VERSION"))).size(11.5).color(theme::pal().TEXT_WEAK));
             });
         });
         ui.add_space(24.0);

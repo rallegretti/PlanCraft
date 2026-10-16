@@ -19,7 +19,7 @@ pub fn paint(painter: &Painter, rect: Rect) {
     let s = rect.width().min(rect.height());
     let o = rect.min;
     let p = |x: f32, y: f32| pos2(o.x + x * s, o.y + y * s);
-    painter.rect_filled(Rect::from_min_size(o, vec2(s, s)), s * TILE_RADIUS, theme::ACCENT);
+    painter.rect_filled(Rect::from_min_size(o, vec2(s, s)), s * TILE_RADIUS, theme::pal().ACCENT);
     // Subtle highlight in the upper half.
     painter.rect_filled(
         Rect::from_min_max(p(0.0, 0.0), p(1.0, 0.5)),
@@ -35,7 +35,7 @@ pub fn paint(painter: &Painter, rect: Rect) {
         painter.rect_filled(Rect::from_min_max(p(x0, y0), p(x1, y1)), s * BAR_RADIUS, Color32::WHITE);
     }
     let (cx, cy, r) = DIAMOND;
-    painter.add(Shape::convex_polygon(vec![p(cx, cy - r), p(cx + r, cy), p(cx, cy + r), p(cx - r, cy)], theme::GOLD, Stroke::NONE));
+    painter.add(Shape::convex_polygon(vec![p(cx, cy - r), p(cx + r, cy), p(cx, cy + r), p(cx - r, cy)], theme::pal().GOLD, Stroke::NONE));
 }
 
 fn rounded_rect_contains(x: f32, y: f32, x0: f32, y0: f32, x1: f32, y1: f32, r: f32) -> bool {
@@ -51,8 +51,8 @@ fn rounded_rect_contains(x: f32, y: f32, x0: f32, y0: f32, x1: f32, y1: f32, r: 
 pub fn rasterize(size: u32) -> Vec<u8> {
     const SS: u32 = 4;
     let mut out = vec![0u8; (size * size * 4) as usize];
-    let accent = theme::ACCENT;
-    let gold = theme::GOLD;
+    let accent = theme::pal().ACCENT;
+    let gold = theme::pal().GOLD;
     for py in 0..size {
         for px in 0..size {
             let (mut r, mut g, mut b, mut a) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);

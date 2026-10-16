@@ -39,8 +39,8 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     let cell_h = (area.height() - header_h) / weeks as f32;
     for (i, name) in ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"].iter().enumerate() {
         let r = Rect::from_min_size(pos2(area.left() + i as f32 * cell_w, area.top()), vec2(cell_w, header_h));
-        painter.rect_filled(r, 0.0, theme::HEADER_BG);
-        painter.text(r.center(), Align2::CENTER_CENTER, *name, FontId::proportional(12.0), theme::TEXT);
+        painter.rect_filled(r, 0.0, theme::pal().HEADER_BG);
+        painter.text(r.center(), Align2::CENTER_CENTER, *name, FontId::proportional(12.0), theme::pal().TEXT);
     }
     let cal = project_calendar(p);
     let today = chrono::Local::now().date_naive();
@@ -52,13 +52,13 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
         for dcol in 0..7 {
             let day = week_start + Duration::days(dcol);
             let r = Rect::from_min_size(pos2(area.left() + dcol as f32 * cell_w, wy), vec2(cell_w, cell_h));
-            let fill = if !cal.is_working_day(day) { theme::NONWORKING } else { theme::BG };
+            let fill = if !cal.is_working_day(day) { theme::pal().NONWORKING } else { theme::pal().BG };
             painter.rect_filled(r, 0.0, fill);
-            painter.rect_stroke(r, 0.0, Stroke::new(1.0, theme::GRID_LINE), egui::StrokeKind::Inside);
-            let color = if day.month() == month.month() { theme::TEXT } else { theme::TEXT_WEAK };
+            painter.rect_stroke(r, 0.0, Stroke::new(1.0, theme::pal().GRID_LINE), egui::StrokeKind::Inside);
+            let color = if day.month() == month.month() { theme::pal().TEXT } else { theme::pal().TEXT_WEAK };
             let label = if day.day() == 1 { day.format("%b %-d").to_string() } else { day.day().to_string() };
             if day == today {
-                painter.rect_filled(Rect::from_min_size(r.right_top() + vec2(-34.0, 3.0), vec2(30.0, 16.0)), 8.0, theme::ACCENT);
+                painter.rect_filled(Rect::from_min_size(r.right_top() + vec2(-34.0, 3.0), vec2(30.0, 16.0)), 8.0, theme::pal().ACCENT);
                 painter.text(r.right_top() + vec2(-19.0, 11.0), Align2::CENTER_CENTER, &label, FontId::proportional(11.5), Color32::WHITE);
             } else {
                 painter.text(r.right_top() + vec2(-6.0, 11.0), Align2::RIGHT_CENTER, &label, FontId::proportional(11.5), color);
@@ -87,17 +87,18 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
             let r = Rect::from_min_max(pos2(area.left() + c0 * cell_w + 3.0, y), pos2(area.left() + c1 * cell_w - 3.0, y + 15.0));
             let selected = st.sel.tasks.contains(&t.id);
             let fill = if t.is_milestone() {
-                theme::GOLD
+                theme::pal().GOLD
             } else if t.is_complete() {
-                Color32::from_rgb(0x8F, 0xA3, 0xC8)
+                theme::pal().BAR_COMPLETE
             } else {
-                theme::BAR_TASK
+                theme::pal().BAR_TASK
             };
             painter.rect_filled(r, 3.0, fill);
             if selected {
-                painter.rect_stroke(r, 3.0, Stroke::new(2.0, theme::ACCENT_DARK), egui::StrokeKind::Outside);
+                painter.rect_stroke(r, 3.0, Stroke::new(2.0, theme::pal().ACCENT_DARK), egui::StrokeKind::Outside);
             }
-            let text_color = if t.is_milestone() { theme::TEXT } else { Color32::WHITE };
+            // Gold milestone chips need dark text in both themes.
+            let text_color = if t.is_milestone() { theme::LIGHT.TEXT } else { Color32::WHITE };
             let label = if t.is_milestone() { format!("♦ {}", t.name) } else { t.name.clone() };
             painter.with_clip_rect(r).text(
                 pos2(r.left() + 4.0, r.center().y),
@@ -124,7 +125,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                 Align2::LEFT_CENTER,
                 format!("+{hidden} more"),
                 FontId::proportional(10.5),
-                theme::TEXT_WEAK,
+                theme::pal().TEXT_WEAK,
             );
         }
     }

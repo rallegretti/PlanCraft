@@ -156,8 +156,8 @@ pub fn splitter(ui: &mut Ui, x: f32, rect: Rect, width: &mut f32) {
     if resp.dragged() {
         *width = (*width + resp.drag_delta().x).clamp(120.0, rect.width() - 160.0);
     }
-    ui.painter().rect_filled(Rect::from_min_max(pos2(x - 2.0, rect.top()), pos2(x + 2.0, rect.bottom())), 0.0, theme::HEADER_BG);
-    ui.painter().vline(x + 2.0, rect.y_range(), Stroke::new(1.0, theme::GRID_LINE_STRONG));
+    ui.painter().rect_filled(Rect::from_min_max(pos2(x - 2.0, rect.top()), pos2(x + 2.0, rect.bottom())), 0.0, theme::pal().HEADER_BG);
+    ui.painter().vline(x + 2.0, rect.y_range(), Stroke::new(1.0, theme::pal().GRID_LINE_STRONG));
 }
 
 pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, tracking: bool, out: &mut Vec<Command>) {

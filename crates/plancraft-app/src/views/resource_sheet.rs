@@ -85,7 +85,7 @@ fn defs(p: &Project) -> Vec<ColumnDef> {
 fn cell(p: &Project, r: &Resource, col: Col, over: &HashSet<ResourceId>, work: &HashMap<ResourceId, (Minutes, f64)>) -> Cell {
     let red = |mut c: Cell| {
         if over.contains(&r.id) {
-            c.color = Some(theme::ERROR);
+            c.color = Some(theme::pal().ERROR);
         }
         c
     };
@@ -93,17 +93,17 @@ fn cell(p: &Project, r: &Resource, col: Col, over: &HashSet<ResourceId>, work: &
         Col::Indicators => {
             let mut icons = Vec::new();
             if over.contains(&r.id) {
-                icons.push(("⚠".to_string(), theme::ERROR, "This resource is overallocated and should be leveled.".to_string()));
+                icons.push(("⚠".to_string(), theme::pal().ERROR, "This resource is overallocated and should be leveled.".to_string()));
             }
             if !r.exceptions.is_empty() {
                 icons.push((
                     "📅".to_string(),
-                    theme::ACCENT_MID,
+                    theme::pal().ACCENT_MID,
                     format!("{} calendar exception(s): time off or altered hours", r.exceptions.len()),
                 ));
             }
             if !r.notes.is_empty() {
-                icons.push(("📝".to_string(), theme::TEXT_WEAK, r.notes.clone()));
+                icons.push(("📝".to_string(), theme::pal().TEXT_WEAK, r.notes.clone()));
             }
             icons.truncate(2);
             Cell { icons, ..Default::default() }

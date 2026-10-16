@@ -54,7 +54,7 @@ pub fn period_toolbar(ui: &mut Ui, st: &mut UiState, p: &Project) -> NaiveDate {
         if ui.button("⏵").on_hover_text("Later").clicked() {
             from = step(st.granularity, from, 4);
         }
-        ui.label(egui::RichText::new(format!("from {}", format::day(from))).color(theme::TEXT_WEAK));
+        ui.label(egui::RichText::new(format!("from {}", format::day(from))).color(theme::pal().TEXT_WEAK));
     });
     from = st.granularity.bucket_start(from);
     st.usage_from = Some(from);
@@ -128,7 +128,11 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                         expander: if rl.assignments.is_empty() { None } else { Some(!collapsed.contains(&res.id)) },
                         indent: if rl.assignments.is_empty() { 14.0 } else { 0.0 },
                         icons: if over {
-                            vec![("⚠".into(), theme::ERROR, format!("Overallocated on {} day(s) in view", rl.overallocated_days.len()))]
+                            vec![(
+                                "⚠".into(),
+                                theme::pal().ERROR,
+                                format!("Overallocated on {} day(s) in view", rl.overallocated_days.len()),
+                            )]
                         } else {
                             vec![]
                         },
@@ -138,7 +142,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                     Cell { text: format_work(rl.total_work), bold: true, ..Default::default() }
                 };
                 if over {
-                    cl.color = Some(theme::ERROR);
+                    cl.color = Some(theme::pal().ERROR);
                 }
                 cl
             }
@@ -177,9 +181,9 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
 
     // Right: time-phased grid.
     let painter = ui.painter_at(right);
-    painter.rect_filled(right, 0.0, theme::BG);
+    painter.rect_filled(right, 0.0, theme::pal().BG);
     let header = Rect::from_min_size(right.min, vec2(right.width() - 12.0, theme::HEADER_HEIGHT));
-    painter.rect_filled(header, 0.0, theme::HEADER_BG);
+    painter.rect_filled(header, 0.0, theme::pal().HEADER_BG);
     let body = Rect::from_min_max(pos2(right.left(), header.bottom()), pos2(right.right() - 12.0, right.bottom() - 12.0));
     let bp = painter.with_clip_rect(body);
     painter.text(
@@ -187,22 +191,22 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
         Align2::LEFT_CENTER,
         "Details: Work",
         FontId::proportional(11.0),
-        theme::TEXT_WEAK,
+        theme::pal().TEXT_WEAK,
     );
     for (i, d) in report.periods.iter().enumerate() {
         let x = right.left() + i as f32 * PERIOD_W;
         let cr = Rect::from_min_size(pos2(x, header.top() + 20.0), vec2(PERIOD_W, 20.0));
-        painter.vline(cr.right(), header.y_range(), Stroke::new(1.0, theme::GRID_LINE_STRONG));
+        painter.vline(cr.right(), header.y_range(), Stroke::new(1.0, theme::pal().GRID_LINE_STRONG));
         painter.with_clip_rect(cr).text(
             cr.center(),
             Align2::CENTER_CENTER,
             period_label(st.granularity, *d),
             FontId::proportional(11.0),
-            theme::TEXT,
+            theme::pal().TEXT,
         );
-        bp.vline(cr.right(), body.y_range(), Stroke::new(1.0, theme::GRID_LINE));
+        bp.vline(cr.right(), body.y_range(), Stroke::new(1.0, theme::pal().GRID_LINE));
     }
-    painter.hline(header.x_range(), header.bottom() - 0.5, Stroke::new(1.0, theme::GRID_LINE_STRONG));
+    painter.hline(header.x_range(), header.bottom() - 0.5, Stroke::new(1.0, theme::pal().GRID_LINE_STRONG));
     let rh = theme::ROW_HEIGHT;
     let font = FontId::proportional(12.0);
     for (r, row) in rows.iter().enumerate() {
@@ -225,7 +229,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
             }
             if val > 0.5 {
                 let over = util.is_some_and(|u| u > 1.0001);
-                let color = if over { theme::ERROR } else { theme::TEXT };
+                let color = if over { theme::pal().ERROR } else { theme::pal().TEXT };
                 let t = format::hours(val);
                 bp.text(pos2(cr.right() - 5.0, cr.center().y), Align2::RIGHT_CENTER, &t, font.clone(), color);
                 if bold {
@@ -233,7 +237,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                 }
             }
         }
-        bp.hline(body.x_range(), y + rh - 0.5, Stroke::new(1.0, theme::GRID_LINE));
+        bp.hline(body.x_range(), y + rh - 0.5, Stroke::new(1.0, theme::pal().GRID_LINE));
     }
     // Shared vertical scrollbar.
     let vs = Rect::from_min_max(pos2(right.right() - 12.0, body.top()), pos2(right.right(), body.bottom()));
@@ -248,7 +252,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     }
     // Legend.
     let legend = Rect::from_min_max(pos2(right.left(), right.bottom() - 12.0), right.max);
-    painter.rect_filled(legend, 0.0, theme::PANEL_BG);
+    painter.rect_filled(legend, 0.0, theme::pal().PANEL_BG);
     let resp = ui.interact(body, egui::Id::new("usage_body"), Sense::hover());
     let _ = resp;
     let _ = Color32::WHITE;

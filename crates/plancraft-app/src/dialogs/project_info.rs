@@ -116,7 +116,7 @@ impl ProjectInfo {
                     ui.add(egui::TextEdit::singleline(&mut self.status_date).hint_text("NA (today)"));
                     ui.end_row();
                     ui.label("Finish date:");
-                    ui.label(RichText::new(format::date_long(doc.project.sched.finish)).color(theme::TEXT_WEAK));
+                    ui.label(RichText::new(format::date_long(doc.project.sched.finish)).color(theme::pal().TEXT_WEAK));
                     ui.label("Manager:");
                     ui.text_edit_singleline(&mut self.manager);
                     ui.end_row();
@@ -168,14 +168,14 @@ impl ProjectInfo {
                     },
                 );
                 if let Some(e) = &self.error {
-                    ui.colored_label(theme::ERROR, e);
+                    ui.colored_label(theme::pal().ERROR, e);
                 }
                 ui.separator();
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui.button("Cancel").clicked() {
                         close = true;
                     }
-                    if ui.add(egui::Button::new(RichText::new("  OK  ").color(egui::Color32::WHITE)).fill(theme::ACCENT)).clicked() {
+                    if ui.add(egui::Button::new(RichText::new("  OK  ").color(egui::Color32::WHITE)).fill(theme::pal().ACCENT)).clicked() {
                         match doc.try_edit("Project Information", ChangeSource::User, |p| self.apply(p)) {
                             Ok(()) => close = true,
                             Err(e) => self.error = Some(e),

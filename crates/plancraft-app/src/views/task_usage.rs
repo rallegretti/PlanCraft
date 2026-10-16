@@ -117,7 +117,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                     Cell {
                         text: name,
                         indent: (t.outline_level - 1) as f32 * 14.0 + 22.0,
-                        color: Some(theme::ACCENT_DARK),
+                        color: Some(theme::pal().ACCENT_DARK),
                         italic: false,
                         ..Default::default()
                     }
@@ -148,9 +148,9 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     }
 
     let painter = ui.painter_at(right);
-    painter.rect_filled(right, 0.0, theme::BG);
+    painter.rect_filled(right, 0.0, theme::pal().BG);
     let header = Rect::from_min_size(right.min, vec2(right.width() - 12.0, theme::HEADER_HEIGHT));
-    painter.rect_filled(header, 0.0, theme::HEADER_BG);
+    painter.rect_filled(header, 0.0, theme::pal().HEADER_BG);
     let body = Rect::from_min_max(pos2(right.left(), header.bottom()), pos2(right.right() - 12.0, right.bottom() - 12.0));
     let bp = painter.with_clip_rect(body);
     painter.text(
@@ -158,22 +158,22 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
         Align2::LEFT_CENTER,
         "Details: Work",
         FontId::proportional(11.0),
-        theme::TEXT_WEAK,
+        theme::pal().TEXT_WEAK,
     );
     for (k, pd) in periods.iter().enumerate() {
         let x = right.left() + k as f32 * PERIOD_W;
         let cr = Rect::from_min_size(pos2(x, header.top() + 20.0), vec2(PERIOD_W, 20.0));
-        painter.vline(cr.right(), header.y_range(), Stroke::new(1.0, theme::GRID_LINE_STRONG));
+        painter.vline(cr.right(), header.y_range(), Stroke::new(1.0, theme::pal().GRID_LINE_STRONG));
         painter.with_clip_rect(cr).text(
             cr.center(),
             Align2::CENTER_CENTER,
             period_label(st.granularity, *pd),
             FontId::proportional(11.0),
-            theme::TEXT,
+            theme::pal().TEXT,
         );
-        bp.vline(cr.right(), body.y_range(), Stroke::new(1.0, theme::GRID_LINE));
+        bp.vline(cr.right(), body.y_range(), Stroke::new(1.0, theme::pal().GRID_LINE));
     }
-    painter.hline(header.x_range(), header.bottom() - 0.5, Stroke::new(1.0, theme::GRID_LINE_STRONG));
+    painter.hline(header.x_range(), header.bottom() - 0.5, Stroke::new(1.0, theme::pal().GRID_LINE_STRONG));
     let rh = theme::ROW_HEIGHT;
     for (r, row) in rows.iter().enumerate() {
         let y = body.top() + r as f32 * rh - st.usage_grid.scroll_y;
@@ -185,7 +185,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
             Row::Assignment(_, aid) => (per_assignment.get(aid).cloned().unwrap_or_default(), false),
         };
         if is_task {
-            bp.rect_filled(Rect::from_min_max(pos2(body.left(), y), pos2(body.right(), y + rh)), 0.0, theme::ACCENT_PALE);
+            bp.rect_filled(Rect::from_min_max(pos2(body.left(), y), pos2(body.right(), y + rh)), 0.0, theme::pal().ACCENT_PALE);
         }
         for (k, v) in vals.iter().enumerate() {
             if *v > 0.5 {
@@ -195,11 +195,11 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                     Align2::RIGHT_CENTER,
                     format::hours(*v),
                     FontId::proportional(12.0),
-                    theme::TEXT,
+                    theme::pal().TEXT,
                 );
             }
         }
-        bp.hline(body.x_range(), y + rh - 0.5, Stroke::new(1.0, theme::GRID_LINE));
+        bp.hline(body.x_range(), y + rh - 0.5, Stroke::new(1.0, theme::pal().GRID_LINE));
     }
     let vs = Rect::from_min_max(pos2(right.right() - 12.0, body.top()), pos2(right.right(), body.bottom()));
     st.usage_grid.scroll_y =

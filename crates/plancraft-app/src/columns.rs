@@ -197,33 +197,33 @@ fn var_text(p: &Project, m: Minutes) -> String {
 pub fn indicators(p: &Project, t: &Task, overallocated: &dyn Fn(TaskId) -> bool) -> Vec<(String, egui::Color32, String)> {
     let mut v = Vec::new();
     if t.is_complete() {
-        v.push(("✔".into(), theme::OK, "This task was completed".into()));
+        v.push(("✔".into(), theme::pal().OK, "This task was completed".into()));
     }
     if !t.sched.warnings.is_empty() {
-        v.push(("⚠".into(), theme::ERROR, t.sched.warnings.join("\n")));
+        v.push(("⚠".into(), theme::pal().ERROR, t.sched.warnings.join("\n")));
     } else if t.deadline.is_some() {
-        v.push(("⚑".into(), theme::DEADLINE, format!("Deadline: {}", format::date(t.deadline))));
+        v.push(("⚑".into(), theme::pal().DEADLINE, format!("Deadline: {}", format::date(t.deadline))));
     }
     if t.constraint.kind.needs_date() {
         v.push((
             "📌".into(),
-            theme::ACCENT_MID,
+            theme::pal().ACCENT_MID,
             format!("{} constraint on {}", t.constraint.kind.label(), format::date(t.constraint.date)),
         ));
     }
     if overallocated(t.id) {
-        v.push(("👤".into(), theme::ERROR, "A resource assigned to this task is overallocated".into()));
+        v.push(("👤".into(), theme::pal().ERROR, "A resource assigned to this task is overallocated".into()));
     }
     if t.predecessors.iter().any(|d| matches!(d.predecessor, TaskRef::External { .. }))
         || t.members.iter().any(|m| matches!(m, TaskRef::External { .. }))
     {
-        v.push(("🔗".into(), theme::ACCENT_MID, "Linked to a task in another project".into()));
+        v.push(("🔗".into(), theme::pal().ACCENT_MID, "Linked to a task in another project".into()));
     }
     if !t.notes.is_empty() {
-        v.push(("📝".into(), theme::TEXT_WEAK, t.notes.clone()));
+        v.push(("📝".into(), theme::pal().TEXT_WEAK, t.notes.clone()));
     }
     if !t.active {
-        v.push(("⏸".into(), theme::TEXT_WEAK, "Inactive task".into()));
+        v.push(("⏸".into(), theme::pal().TEXT_WEAK, "Inactive task".into()));
     }
     let _ = p;
     v.truncate(2);
@@ -249,7 +249,7 @@ pub fn cell(col: TaskCol, p: &Project, idx: usize, ctx: &CellCtx) -> Cell {
             };
             Cell {
                 text: g.into(),
-                color: Some(theme::ACCENT_MID),
+                color: Some(theme::pal().ACCENT_MID),
                 tooltip: Some(tip.into()),
                 edit_text: Some(tip.into()),
                 ..Default::default()
@@ -287,7 +287,11 @@ pub fn cell(col: TaskCol, p: &Project, idx: usize, ctx: &CellCtx) -> Cell {
                 _ => None,
             };
             match v {
-                Some(m) => Cell { text: var_text(p, m), color: Some(if m > 0 { theme::ERROR } else { theme::TEXT }), ..Default::default() },
+                Some(m) => Cell {
+                    text: var_text(p, m),
+                    color: Some(if m > 0 { theme::pal().ERROR } else { theme::pal().TEXT }),
+                    ..Default::default()
+                },
                 None => Cell::default(),
             }
         }
@@ -304,7 +308,7 @@ pub fn cell(col: TaskCol, p: &Project, idx: usize, ctx: &CellCtx) -> Cell {
         FreeSlack => Cell::text(format::slack(p, s.free_slack)),
         TotalSlack => Cell {
             text: format::slack(p, s.total_slack),
-            color: if s.total_slack < 0 { Some(theme::ERROR) } else { None },
+            color: if s.total_slack < 0 { Some(theme::pal().ERROR) } else { None },
             ..Default::default()
         },
         ConstraintType => Cell::text(t.constraint.kind.label()),
@@ -348,7 +352,7 @@ pub fn cell(col: TaskCol, p: &Project, idx: usize, ctx: &CellCtx) -> Cell {
         c.bold = true;
     }
     if !t.active {
-        c.color = Some(theme::TEXT_WEAK);
+        c.color = Some(theme::pal().TEXT_WEAK);
         c.strike = col == Name;
     }
     if col == Name && t.sched.critical && t.mode == ScheduleMode::Auto && !summary {

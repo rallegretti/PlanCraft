@@ -99,7 +99,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
     *scroll_y = scroll_y.clamp(0.0, (content_h - body.height() + rh).max(0.0));
 
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, theme::BG);
+    painter.rect_filled(rect, 0.0, theme::pal().BG);
 
     // ---- Timescale & background ----
     let ticks = timescale::paint_header(&painter.with_clip_rect(header), header, g);
@@ -114,7 +114,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
                 let t0 = d.and_hms_opt(0, 0, 0).unwrap();
                 let x0 = g.x_of(chart_left, t0);
                 let x1 = g.x_of(chart_left, t0 + Duration::days(1));
-                bp.rect_filled(Rect::from_x_y_ranges(x0..=x1, body.y_range()), 0.0, theme::NONWORKING);
+                bp.rect_filled(Rect::from_x_y_ranges(x0..=x1, body.y_range()), 0.0, theme::pal().NONWORKING);
             }
             d += Duration::days(1);
         }
@@ -122,7 +122,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
     let (_, bottom_unit) = timescale::tiers(g.px_per_day);
     for (x, _) in &ticks {
         if bottom_unit != timescale::Unit::Day || g.px_per_day >= 14.0 {
-            bp.vline(x.round() + 0.5, body.y_range(), Stroke::new(1.0, Color32::from_rgb(0xEC, 0xEE, 0xF2)));
+            bp.vline(x.round() + 0.5, body.y_range(), Stroke::new(1.0, theme::pal().CHART_GRID));
         }
     }
     // Row separators (light) for readability.
@@ -131,11 +131,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
     for r in first..last.min(input.rows.len()) {
         let y = body.top() + r as f32 * rh - *scroll_y;
         if (input.selected)(p.tasks[input.rows[r]].id) {
-            bp.rect_filled(
-                Rect::from_min_size(pos2(body.left(), y), vec2(body.width(), rh)),
-                0.0,
-                Color32::from_rgba_unmultiplied(0xD5, 0xE2, 0xFA, 110),
-            );
+            bp.rect_filled(Rect::from_min_size(pos2(body.left(), y), vec2(body.width(), rh)), 0.0, theme::pal().SELECTION_TINT);
         }
     }
 
@@ -143,17 +139,17 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
     let now = chrono::Local::now().naive_local();
     let xt = g.x_of(chart_left, now);
     if body.x_range().contains(xt) {
-        dashed_vline(&bp, xt, body.top(), body.bottom(), theme::TODAY);
+        dashed_vline(&bp, xt, body.top(), body.bottom(), theme::pal().TODAY);
     }
     if let Some(sd) = p.status_date {
         let xs = g.x_of(chart_left, proj_cal.day_finish(sd));
         if body.x_range().contains(xs) {
-            dashed_vline(&bp, xs, body.top(), body.bottom(), theme::STATUS_DATE);
+            dashed_vline(&bp, xs, body.top(), body.bottom(), theme::pal().STATUS_DATE);
         }
     }
     let xps = g.x_of(chart_left, p.start);
     if body.x_range().contains(xps) {
-        bp.vline(xps, body.y_range(), Stroke::new(1.0, Color32::from_rgb(0xB8, 0xC4, 0xDE)));
+        bp.vline(xps, body.y_range(), Stroke::new(1.0, theme::pal().PROJECT_START));
     }
 
     // ---- Geometry for all rows (links need off-screen ones too) ----
@@ -169,7 +165,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
 
     // ---- Links ----
     if g.show_links {
-        let link_stroke = Stroke::new(1.0, theme::LINK);
+        let link_stroke = Stroke::new(1.0, theme::pal().LINK);
         for &idx in input.rows {
             let t = &p.tasks[idx];
             let Some(sg) = geom.get(&t.id).copied() else {
@@ -188,7 +184,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
                     continue;
                 }
                 let critical = g.show_critical && t.sched.critical && p.task(pid).is_some_and(|pt| pt.sched.critical);
-                let stroke = if critical { Stroke::new(1.2, theme::BAR_CRITICAL_EDGE) } else { link_stroke };
+                let stroke = if critical { Stroke::new(1.2, theme::pal().BAR_CRITICAL_EDGE) } else { link_stroke };
                 let color = stroke.color;
                 let down = sg.y > pg.y;
                 let half = BAR_H / 2.0 + 1.0;
@@ -247,7 +243,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
 
     // Milestone membership: dashed connectors from member tasks to their milestone.
     if g.show_links {
-        let stroke = Stroke::new(1.0, Color32::from_rgb(0xC8, 0x96, 0x1E));
+        let stroke = Stroke::new(1.0, theme::pal().MEMBER_LINK);
         for &idx in input.rows {
             let t = &p.tasks[idx];
             if !t.is_milestone() || t.members.is_empty() {
@@ -289,9 +285,9 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
             let bx0 = g.x_of(chart_left, b.start);
             let bx1 = g.x_of(chart_left, b.finish);
             if t.is_milestone() {
-                diamond(&bp, pos2(bx0, y + 6.0), 4.0, theme::BAR_BASELINE, Stroke::NONE);
+                diamond(&bp, pos2(bx0, y + 6.0), 4.0, theme::pal().BAR_BASELINE, Stroke::NONE);
             } else {
-                bp.rect_filled(Rect::from_min_max(pos2(bx0, y + 3.0), pos2(bx1.max(bx0 + 1.0), y + 8.0)), 1.0, theme::BAR_BASELINE);
+                bp.rect_filled(Rect::from_min_max(pos2(bx0, y + 3.0), pos2(bx1.max(bx0 + 1.0), y + 8.0)), 1.0, theme::pal().BAR_BASELINE);
             }
         }
         let y_shift = if (g.show_baseline || input.tracking) && t.baseline.is_some() { -3.0 } else { 0.0 };
@@ -300,20 +296,20 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
 
         if t.is_milestone() {
             let fill = if critical {
-                theme::BAR_CRITICAL
+                theme::pal().BAR_CRITICAL
             } else if t.is_complete() {
-                theme::ACCENT_DARK
+                theme::pal().ACCENT_DARK
             } else {
-                theme::MILESTONE
+                theme::pal().MILESTONE
             };
-            diamond(&bp, pos2(x0, yc), 6.5, fill, Stroke::new(1.0, Color32::WHITE));
+            diamond(&bp, pos2(x0, yc), 6.5, fill, Stroke::new(1.0, theme::pal().BG));
             let label = t.sched.finish.map(|f| f.format("%-m/%-d").to_string()).unwrap_or_default().to_string();
-            bp.text(pos2(x0 + 10.0, yc), Align2::LEFT_CENTER, label, label_font.clone(), theme::TEXT);
+            bp.text(pos2(x0 + 10.0, yc), Align2::LEFT_CENTER, label, label_font.clone(), theme::pal().TEXT);
             if t.deadline.is_some_and(|dl| t.sched.finish.is_some_and(|f| f > dl)) {
-                bp.text(pos2(x0 - 10.0, yc), Align2::RIGHT_CENTER, "⚠", label_font.clone(), theme::ERROR);
+                bp.text(pos2(x0 - 10.0, yc), Align2::RIGHT_CENTER, "⚠", label_font.clone(), theme::pal().ERROR);
             }
         } else if summary {
-            let fill = if critical { theme::BAR_CRITICAL_EDGE } else { theme::BAR_SUMMARY };
+            let fill = if critical { theme::pal().BAR_CRITICAL_EDGE } else { theme::pal().BAR_SUMMARY };
             let r = Rect::from_min_max(pos2(x0, yc - 4.0), pos2(x1, yc + 1.0));
             bp.rect_filled(r, 0.0, fill);
             for x in [x0, x1] {
@@ -325,20 +321,20 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
             }
             if g.show_progress && t.sched.percent_complete > 0.0 {
                 let px = x0 + (x1 - x0) * t.sched.percent_complete / 100.0;
-                bp.rect_filled(Rect::from_min_max(pos2(x0, yc - 2.5), pos2(px, yc - 0.5)), 0.0, theme::GOLD);
+                bp.rect_filled(Rect::from_min_max(pos2(x0, yc - 2.5), pos2(px, yc - 0.5)), 0.0, theme::pal().GOLD);
             }
         } else {
             let manual = t.mode == ScheduleMode::Manual;
             let (fill, edge) = if !t.active {
-                (Color32::from_rgb(0xE6, 0xE8, 0xEC), theme::BAR_BASELINE)
+                (theme::pal().BAR_INACTIVE, theme::pal().BAR_BASELINE)
             } else if critical {
-                (theme::BAR_CRITICAL, theme::BAR_CRITICAL_EDGE)
+                (theme::pal().BAR_CRITICAL, theme::pal().BAR_CRITICAL_EDGE)
             } else if manual {
-                (theme::BAR_MANUAL, theme::BAR_TASK_EDGE)
+                (theme::pal().BAR_MANUAL, theme::pal().BAR_TASK_EDGE)
             } else if let Some([r, gg, b]) = t.bar_color {
                 (Color32::from_rgb(r, gg, b), Color32::from_rgb(r / 2, gg / 2, b / 2))
             } else {
-                (theme::BAR_TASK, theme::BAR_TASK_EDGE)
+                (theme::pal().BAR_TASK, theme::pal().BAR_TASK_EDGE)
             };
             bp.rect_filled(bar_rect, 2.0, fill);
             bp.rect_stroke(bar_rect, 2.0, Stroke::new(1.0, edge), StrokeKind::Inside);
@@ -351,18 +347,18 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
             }
             if g.show_progress && t.sched.percent_complete > 0.0 {
                 let px = x0 + (x1 - x0) * t.sched.percent_complete / 100.0;
-                bp.rect_filled(Rect::from_min_max(pos2(x0, yc - 1.5), pos2(px, yc + 1.5)), 0.0, theme::BAR_PROGRESS);
+                bp.rect_filled(Rect::from_min_max(pos2(x0, yc - 1.5), pos2(px, yc + 1.5)), 0.0, theme::pal().BAR_PROGRESS);
             }
             if g.show_slack && t.sched.total_slack > 0 {
                 let cal = task_calendar(p, idx);
                 if let Some(f) = t.sched.finish {
                     let lf = cal.add(f, t.sched.total_slack);
                     let sx = g.x_of(chart_left, lf);
-                    bp.hline(x1..=sx, yc + BAR_H / 2.0 + 2.0, Stroke::new(1.5, theme::BAR_SLACK));
+                    bp.hline(x1..=sx, yc + BAR_H / 2.0 + 2.0, Stroke::new(1.5, theme::pal().BAR_SLACK));
                 }
             }
             if t.deadline.is_some_and(|dl| t.sched.finish.is_some_and(|f| f > dl)) {
-                bp.text(pos2(x1 + 3.0, yc - 8.0), Align2::LEFT_CENTER, "⚠", FontId::proportional(10.0), theme::ERROR);
+                bp.text(pos2(x1 + 3.0, yc - 8.0), Align2::LEFT_CENTER, "⚠", FontId::proportional(10.0), theme::pal().ERROR);
             }
         }
         // Deadline marker.
@@ -370,16 +366,16 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
             let xd = g.x_of(chart_left, dl);
             bp.add(Shape::convex_polygon(
                 vec![pos2(xd, yc - 6.0), pos2(xd + 5.0, yc - 6.0), pos2(xd, yc - 1.0)],
-                theme::DEADLINE,
+                theme::pal().DEADLINE,
                 Stroke::NONE,
             ));
-            bp.vline(xd, (yc - 6.0)..=(yc + 6.0), Stroke::new(1.0, theme::DEADLINE));
+            bp.vline(xd, (yc - 6.0)..=(yc + 6.0), Stroke::new(1.0, theme::pal().DEADLINE));
         }
         // Resource names to the right.
         if g.show_resource_names && !summary && !t.is_milestone() {
             let names = p.format_resource_names(t.id);
             if !names.is_empty() {
-                bp.text(pos2(x1 + 6.0, yc), Align2::LEFT_CENTER, names, label_font.clone(), theme::TEXT);
+                bp.text(pos2(x1 + 6.0, yc), Align2::LEFT_CENTER, names, label_font.clone(), theme::pal().TEXT);
             }
         }
 
@@ -410,7 +406,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
     {
         let x0 = g.x_of(chart_left, s);
         let x1 = g.x_of(chart_left, f);
-        bp.rect_filled(Rect::from_min_max(pos2(x0, body.top() + 2.0), pos2(x1, body.top() + 5.0)), 0.0, theme::ACCENT_DARK);
+        bp.rect_filled(Rect::from_min_max(pos2(x0, body.top() + 2.0), pos2(x1, body.top() + 5.0)), 0.0, theme::pal().ACCENT_DARK);
     }
 
     // ---- Interaction ----
@@ -462,7 +458,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
                     if let Some(sg) = src {
                         let ghost =
                             Rect::from_min_max(pos2(x, sg.y - BAR_H / 2.0 - 1.0), pos2(x + dur_px.max(2.0), sg.y + BAR_H / 2.0 + 1.0));
-                        bp.rect_stroke(ghost, 2.0, Stroke::new(1.5, theme::ACCENT), StrokeKind::Outside);
+                        bp.rect_stroke(ghost, 2.0, Stroke::new(1.5, theme::pal().ACCENT), StrokeKind::Outside);
                     }
                     tooltip_at(ui, pp, &format!("{}\nStart: {}", t.name, format::date_long(Some(new_start))));
                     if resp.drag_stopped() {
@@ -481,7 +477,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
                     bp.rect_stroke(
                         Rect::from_min_max(pos2(sg.x0, sg.y - BAR_H / 2.0 - 1.0), pos2(x, sg.y + BAR_H / 2.0 + 1.0)),
                         2.0,
-                        Stroke::new(1.5, theme::ACCENT),
+                        Stroke::new(1.5, theme::pal().ACCENT),
                         StrokeKind::Outside,
                     );
                 }
@@ -495,7 +491,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
                 if let Some(sg) = geom.get(&task) {
                     let pct = (((pp.x - sg.x0) / (sg.x1 - sg.x0).max(1.0)) * 100.0).clamp(0.0, 100.0).round() as u8;
                     let px = sg.x0 + (sg.x1 - sg.x0) * pct as f32 / 100.0;
-                    bp.rect_filled(Rect::from_min_max(pos2(sg.x0, sg.y - 2.0), pos2(px, sg.y + 2.0)), 0.0, theme::GOLD);
+                    bp.rect_filled(Rect::from_min_max(pos2(sg.x0, sg.y - 2.0), pos2(px, sg.y + 2.0)), 0.0, theme::pal().GOLD);
                     tooltip_at(ui, pp, &format!("{pct}% complete"));
                     if resp.drag_stopped() {
                         g.drag = None;
@@ -505,7 +501,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
             }
             BarDrag::Link { from } => {
                 if let Some(sg) = geom.get(&from) {
-                    bp.line_segment([pos2(sg.x1, sg.y), pp], Stroke::new(1.5, theme::ACCENT));
+                    bp.line_segment([pos2(sg.x1, sg.y), pp], Stroke::new(1.5, theme::pal().ACCENT));
                     let target = row_at(pp.y).map(|r| p.tasks[input.rows[r]].id).filter(|id| *id != from);
                     let msg = match target {
                         Some(to) => format!(
@@ -588,7 +584,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
     painter.rect_filled(
         Rect::from_min_max(pos2(rect.right() - 12.0, rect.top()), pos2(rect.right(), header.bottom())),
         0.0,
-        theme::HEADER_BG,
+        theme::pal().HEADER_BG,
     );
     let hs = Rect::from_min_max(pos2(body.left(), body.bottom()), pos2(body.right(), rect.bottom()));
     // Horizontal range: project span with margins.
@@ -600,8 +596,8 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
     if (new - cur).abs() > 0.5 {
         g.left = span_start + Duration::minutes((new / g.px_per_day * 1440.0) as i64);
     }
-    painter.rect_filled(Rect::from_min_max(pos2(rect.right() - 12.0, body.bottom()), rect.max), 0.0, theme::PANEL_BG);
-    painter.vline(rect.left() + 0.5, rect.y_range(), Stroke::new(1.0, theme::GRID_LINE_STRONG));
+    painter.rect_filled(Rect::from_min_max(pos2(rect.right() - 12.0, body.bottom()), rect.max), 0.0, theme::pal().PANEL_BG);
+    painter.vline(rect.left() + 0.5, rect.y_range(), Stroke::new(1.0, theme::pal().GRID_LINE_STRONG));
 
     actions
 }

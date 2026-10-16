@@ -53,9 +53,9 @@ impl AssignResources {
                             continue;
                         }
                         let assigned_all = !tasks.is_empty() && tasks.iter().all(|t| p.assignments.iter().any(|a| a.task == *t && a.resource == r.id));
-                        ui.label(if assigned_all { RichText::new("✔").color(theme::OK) } else { RichText::new("") });
+                        ui.label(if assigned_all { RichText::new("✔").color(theme::pal().OK) } else { RichText::new("") });
                         ui.label(&r.name);
-                        ui.label(RichText::new(r.category.label()).color(theme::TEXT_WEAK));
+                        ui.label(RichText::new(r.category.label()).color(theme::pal().TEXT_WEAK));
                         let current = tasks.first().and_then(|t| p.assignments.iter().find(|a| a.task == *t && a.resource == r.id)).map(|a| format::units(a.units));
                         let text = self.units.entry(r.id).or_insert_with(|| current.unwrap_or_else(|| "100%".into()));
                         ui.add(egui::TextEdit::singleline(text).desired_width(56.0));
@@ -93,7 +93,7 @@ impl AssignResources {
                 }
             }
             ui.add_space(4.0);
-            ui.label(RichText::new("Tip: units are a percentage of the resource's time (100% = full time). Type new names in the Resource Names column to create resources on the fly.").small().color(theme::TEXT_WEAK));
+            ui.label(RichText::new("Tip: units are a percentage of the resource's time (100% = full time). Type new names in the Resource Names column to create resources on the fly.").small().color(theme::pal().TEXT_WEAK));
         });
         open
     }
@@ -129,9 +129,9 @@ pub fn statistics(ctx: &Context, doc: &Document, open: &mut bool) {
                 ui.label("Variance");
                 ui.label("");
                 ui.label(RichText::new(p.format_duration(s.finish_variance, false)).color(if s.finish_variance > 0 {
-                    theme::ERROR
+                    theme::pal().ERROR
                 } else {
-                    theme::TEXT
+                    theme::pal().TEXT
                 }));
                 ui.end_row();
             });
@@ -173,12 +173,20 @@ pub fn statistics(ctx: &Context, doc: &Document, open: &mut bool) {
                     ui.label("Planned value (BCWS)");
                     ui.label(format::money(p, ev.bcws));
                     ui.label("Schedule perf. (SPI)");
-                    ui.label(RichText::new(format!("{:.2}", ev.spi)).color(if ev.spi < 0.95 { theme::ERROR } else { theme::OK }));
+                    ui.label(RichText::new(format!("{:.2}", ev.spi)).color(if ev.spi < 0.95 {
+                        theme::pal().ERROR
+                    } else {
+                        theme::pal().OK
+                    }));
                     ui.end_row();
                     ui.label("Earned value (BCWP)");
                     ui.label(format::money(p, ev.bcwp));
                     ui.label("Cost perf. (CPI)");
-                    ui.label(RichText::new(format!("{:.2}", ev.cpi)).color(if ev.cpi < 0.95 { theme::ERROR } else { theme::OK }));
+                    ui.label(RichText::new(format!("{:.2}", ev.cpi)).color(if ev.cpi < 0.95 {
+                        theme::pal().ERROR
+                    } else {
+                        theme::pal().OK
+                    }));
                     ui.end_row();
                     ui.label("Actual cost (ACWP)");
                     ui.label(format::money(p, ev.acwp));
@@ -190,14 +198,14 @@ pub fn statistics(ctx: &Context, doc: &Document, open: &mut bool) {
                 ui.label(
                     RichText::new("Set a baseline (Project > Set Baseline) to track variance and earned value.")
                         .small()
-                        .color(theme::TEXT_WEAK),
+                        .color(theme::pal().TEXT_WEAK),
                 );
             }
             if !s.warnings.is_empty() {
                 ui.separator();
-                ui.label(RichText::new("Scheduling warnings").strong().color(theme::ERROR));
+                ui.label(RichText::new("Scheduling warnings").strong().color(theme::pal().ERROR));
                 for w in &s.warnings {
-                    ui.label(RichText::new(format!("⚠ {w}")).color(theme::ERROR));
+                    ui.label(RichText::new(format!("⚠ {w}")).color(theme::pal().ERROR));
                 }
             }
         });
@@ -224,7 +232,7 @@ impl ExternalLinks {
             .default_pos(ctx.content_rect().center_top() + egui::vec2(0.0, 120.0)).open(&mut open).default_width(640.0).show(ctx, |ui| {
             ui.label("Tasks and milestones can depend on tasks stored in other PlanCraft files. Linked dates are cached in this file and refreshed when it opens.");
             if doc.path.is_none() {
-                ui.colored_label(theme::WARN, "Save this project first so links can be stored relative to its location.");
+                ui.colored_label(theme::pal().WARN, "Save this project first so links can be stored relative to its location.");
             }
             ui.horizontal(|ui| {
                 if ui.button("➕ Add Project File…").clicked()
@@ -264,7 +272,7 @@ impl ExternalLinks {
                         resp.on_hover_text(format!("{}\nLast refreshed: {}", e.path, format::date_long(e.last_sync)));
                     }
                     if doc.project.external_projects.is_empty() {
-                        ui.label(RichText::new("None yet").color(theme::TEXT_WEAK));
+                        ui.label(RichText::new("None yet").color(theme::pal().TEXT_WEAK));
                     }
                 });
                 ui.separator();
@@ -301,7 +309,7 @@ impl ExternalLinks {
                                     continue;
                                 }
                                 ui.label(if t.milestone { format!("♦ {}", t.name) } else { t.name.clone() });
-                                ui.label(RichText::new(format!("{} – {}", format::date(t.start), format::date(t.finish))).color(theme::TEXT_WEAK));
+                                ui.label(RichText::new(format!("{} – {}", format::date(t.start), format::date(t.finish))).color(theme::pal().TEXT_WEAK));
                                 if ui.add_enabled(target.is_some(), egui::Button::new("Predecessor")).on_hover_text("Selected task starts after this external task finishes").clicked() {
                                     link = Some((t.id, false));
                                 }
@@ -328,7 +336,7 @@ impl ExternalLinks {
                 });
             });
             if let Some(e) = &self.error {
-                ui.colored_label(theme::ERROR, e);
+                ui.colored_label(theme::pal().ERROR, e);
             }
         });
         open
@@ -372,14 +380,14 @@ pub fn history(ctx: &Context, doc: &mut Document, open: &mut bool) {
         .show(ctx, |ui| {
             let items = doc.history();
             if items.is_empty() {
-                ui.label(RichText::new("No changes yet").color(theme::TEXT_WEAK));
+                ui.label(RichText::new("No changes yet").color(theme::pal().TEXT_WEAK));
             }
             let mut undo_to = None;
             egui::ScrollArea::vertical().max_height(400.0).show(ui, |ui| {
                 for (i, (label, src)) in items.iter().enumerate() {
                     let tag = match src {
-                        plancraft_core::workspace::ChangeSource::Agent => RichText::new("⚡ AI").color(theme::ACCENT_MID),
-                        plancraft_core::workspace::ChangeSource::User => RichText::new("👤").color(theme::TEXT_WEAK),
+                        plancraft_core::workspace::ChangeSource::Agent => RichText::new("⚡ AI").color(theme::pal().ACCENT_MID),
+                        plancraft_core::workspace::ChangeSource::User => RichText::new("👤").color(theme::pal().TEXT_WEAK),
                     };
                     ui.horizontal(|ui| {
                         ui.label(tag);
