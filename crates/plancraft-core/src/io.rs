@@ -446,8 +446,14 @@ mod tests {
 
     #[test]
     fn relative_paths() {
-        assert_eq!(relative_path(Path::new("/a/b/c.plancraft"), Path::new("/a/b")), PathBuf::from("c.plancraft"));
-        assert_eq!(relative_path(Path::new("/a/x/c.plancraft"), Path::new("/a/b")), PathBuf::from("../x/c.plancraft"));
-        assert_eq!(resolve_external_path("../x/c.plancraft", Some(Path::new("/a/b/doc.plancraft"))), PathBuf::from("/a/x/c.plancraft"));
+        // An absolute root on this platform ("/a" is not absolute on Windows).
+        let root = PathBuf::from(if cfg!(windows) { "C:\\" } else { "/" }).join("a");
+        let up = Path::new("..");
+        assert_eq!(relative_path(&root.join("b").join("c.plancraft"), &root.join("b")), PathBuf::from("c.plancraft"));
+        assert_eq!(relative_path(&root.join("x").join("c.plancraft"), &root.join("b")), up.join("x").join("c.plancraft"));
+        assert_eq!(
+            resolve_external_path("../x/c.plancraft", Some(&root.join("b").join("doc.plancraft"))),
+            root.join("x").join("c.plancraft")
+        );
     }
 }
