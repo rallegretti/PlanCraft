@@ -5,181 +5,168 @@
 <h1 align="center">PlanCraft</h1>
 
 <p align="center">
-  Project planning and scheduling in the spirit of Microsoft Project, written entirely in Rust,
-  with a built-in MCP server so AI agents can plan alongside you.
+  <b>Plan the work, then work the plan.</b><br>
+  A desktop project planner for tasks, milestones, people and schedules,
+  with an AI assistant that can plan right alongside you.
 </p>
 
-![Gantt chart with critical path](docs/images/gantt.png)
+<p align="center">
+  Windows · macOS · Linux · Free and open source
+</p>
 
-## Highlights
+![The Gantt chart with the critical path highlighted](docs/images/gantt.png)
 
-- **Tasks, milestones and summaries.** Outline your work breakdown structure. Indent, outdent and move whole blocks, edit in place like a spreadsheet, and paste or cut.
-- **Milestones that mean something.** A milestone is a checkpoint with a *deliverable* and a set of *member tasks*. It is reached when all of its members (and predecessors) finish, and it reports its progress, lateness and baseline slip.
-- **Dependencies across files.** Use Finish-to-Start, Start-to-Start, Finish-to-Finish and Start-to-Finish links, with lags or leads in working time, elapsed time or a percentage of the predecessor. Any task or milestone can depend on a task in **another `.plancraft` document**. Linked dates are cached in the file and refreshed when it opens.
-- **A real scheduling engine.**
-  - Calendar-aware critical path method (CPM) with forward and backward passes.
-  - Total and free slack, and critical path detection.
-  - All eight Microsoft Project constraint types, deadlines, manual tasks and inactive tasks.
-  - Actual start, finish and progress.
-- **Resources of every kind:**
-  - team members, teams, partner companies, vendors, contractors, equipment and facilities
-  - *work*, *material* and *cost* resources, each with its own rates and cost per use
-- **Time and availability.** Use project, task and resource calendars, holidays (including yearly ones), personal time off and part-time days. Availability periods change a resource's maximum units over time. An assigned task is scheduled in working time that all of its resources share, so a vacation delays the work.
-- **Workload.**
-  - Time-phased loads per resource, by day, week or month, compared against each resource's real capacity.
-  - Overallocation detection, a heat-mapped Resource Usage view and a Resource Graph.
-  - **Resource leveling** with one click.
-- **Estimates.** Size work by **complexity points**, a **three-point (PERT)** estimate or plain work, before any resources are assigned. Estimates feed the workload and set the work and duration of the first assignment.
-- **Time tracking.**
-  - A weekly **Timesheet** to log hours per resource and task.
-  - Actual work and actual starts roll up automatically.
-  - "Update progress from time" sets each task's % complete from tracked hours.
-- **Baselines and variance:** baseline start, finish, work and cost, variance columns, a Tracking Gantt, and earned value (SPI and CPI).
-- **Built-in MCP server** (Model Context Protocol). Agents such as Claude Code can read and change *everything* through 67 tools:
-  - **Live mode:** the agent works in the open window. You see its edits immediately and can undo them; they are marked ⚡ in the undo history.
-  - **Headless mode:** the agent works directly on files.
+## What you can do with PlanCraft
+
+**Plan your project**
+- Break work down into tasks and subtasks, typing straight into the task list like a spreadsheet.
+- See everything on a **Gantt chart**: drag bars to reschedule, stretch them to change a duration, or drag one task onto another to link them.
+- Link tasks so one starts when another finishes, or overlap them with leads and lags. Dates update automatically when anything changes.
+- Mark the deadlines that matter and see the **critical path**, the chain of tasks that sets your finish date.
+
+**Hit your milestones**
+- A milestone is a checkpoint with a **deliverable**, for example "Signed project charter" or "Beta ready", and the tasks that must be done to reach it.
+- The Milestones view shows each one's date, deliverable, progress, and whether it's on track, slipping or late.
+
+**Manage people and partners**
+- Add team members, whole teams, partner companies, vendors, contractors and equipment, with their hourly rates.
+- Record vacations, holidays and part-time schedules. Work is automatically scheduled around them.
+- Spot overbooked people instantly in **Resource Usage** and **Workload**, then let **Level All** spread the work out for you.
+- Move work between people by dragging it in the **Team Planner**.
+
+**Estimate and track**
+- Estimate tasks in hours, with optimistic/likely/pessimistic ranges, or with simple complexity points before anyone is assigned.
+- Log hours on a weekly **Timesheet** and turn tracked time into progress with one click.
+- Save a **baseline** and compare it with the current plan: what slipped, what costs more, and how the project is trending.
+
+**Work across projects**
+- Make a task in one project depend on a task in another project file. When the other project slips, yours picks up the new dates the next time you open it or refresh links.
+- Open several projects at once in tabs.
+
+**Plan with AI**
+- Connect an AI assistant such as **Claude Code**. It can read and change everything in your plan: build a whole task breakdown from a description, link tasks, assign people, log time, level workloads and report on status.
+- You watch the changes appear live, and you can undo anything the AI did.
+
+**Make it yours**
+- Light and **dark mode**, following your system setting or chosen under **View ▸ Theme**.
+- Ten views (Gantt Chart, Tracking Gantt, Task Usage, Calendar, Milestones, Resource Sheet, Resource Usage, Workload, Team Planner and Timesheet), with filters, search and different column layouts.
+- Undo and redo (up to 200 steps), plus export to CSV for spreadsheets.
+
+## Screenshots
 
 | | |
 |---|---|
-| ![Resource Usage](docs/images/resource-usage.png) | ![Workload](docs/images/workload.png) |
-| ![Team Planner](docs/images/team-planner.png) | ![Milestones](docs/images/milestones.png) |
-| ![Task Information](docs/images/task-information.png) | ![MCP panel](docs/images/mcp-panel.png) |
-| ![Start Page](docs/images/start-page.png) | |
+| ![Dark mode](docs/images/gantt-dark.png) **Dark mode**, here with the critical path shown | ![Milestones](docs/images/milestones.png) **Milestones**, each with its deliverable, progress and status |
+| ![Resource Usage](docs/images/resource-usage.png) **Resource Usage** shows hours per person per day; overbooked days stand out | ![Workload](docs/images/workload.png) **Workload** compares each person's planned hours with what they have available |
+| ![Team Planner](docs/images/team-planner.png) **Team Planner**: drag work from one person to another | ![Calendar](docs/images/calendar.png) **Calendar** gives a month-at-a-glance view |
+| ![Task Information](docs/images/task-information.png) **Task Information** collects every detail of a task in one place | ![Start Page](docs/images/start-page.png) **Start Page** opens your recent projects or starts a new one |
 
-## The interface
+## Installing
 
-PlanCraft follows the layout of a familiar desktop scheduler without copying it:
+Download the package for your computer from the [Releases page](https://github.com/rallegretti/PlanCraft/releases).
 
-- a deep-blue title band with quick-access save, undo and redo
-- a two-row command bar:
-  - a **view selector** on the left that spans both rows
-  - plain tabs: a **File** menu, then **Task**, **Resource**, **Project**, **Report**, **View** and **Format**
-  - one compact toolbar row of icon-and-label buttons for the active tab
-- a **Start Page** for New, Open and Recent
-- a **Timeline** strip, a vertical view label, and a split **task sheet + Gantt chart**
-- a status bar with view shortcuts and a zoom slider
+### Windows
 
-**Views:**
+1. Download `PlanCraft-<version>-windows-x64.zip` and extract it anywhere you like.
+2. Double-click **PlanCraft.exe**.
 
-- *Task views:* Gantt Chart, Tracking Gantt, Task Usage, Calendar, Milestones
-- *Resource views:* Resource Sheet, Resource Usage, Workload, Team Planner (drag tasks between people to reassign them)
-- *Time tracking:* Timesheet
+PlanCraft isn't signed with a Microsoft certificate yet, so Windows may show *"Windows protected your PC"* the first time. Click **More info**, then **Run anyway**.
 
-**Dialogs:** Task Information, Resource Information (with time off and availability), Project Information and Options, Change Working Time, Assign Resources, Links Between Projects, Project Statistics, and the MCP server panel.
+### macOS
 
-**Useful shortcuts:**
+1. Download `PlanCraft-<version>-macos-universal.dmg` and open it.
+2. Drag **PlanCraft** into your **Applications** folder.
+3. Open PlanCraft from Applications.
 
-| Shortcut | Action |
-|---|---|
-| `Insert` | New task |
-| `Delete` | Delete the selection |
-| `Alt+Shift+→` / `Alt+Shift+←` | Indent / outdent |
-| `Alt+Shift+↑` / `Alt+Shift+↓` | Move up / down |
-| `Ctrl+F2` / `Ctrl+Shift+F2` | Link / unlink tasks |
-| `Shift+F2` | Task Information |
-| `F2` (or just type) | Edit a cell |
-| `Ctrl+Z` / `Ctrl+Y` | Undo / redo |
-| `Ctrl+S` | Save |
-| `Ctrl+wheel` | Zoom the timescale |
-| `Shift+wheel` | Scroll in time |
+PlanCraft isn't notarized by Apple yet, so the first time you open it macOS may say it can't verify the developer. Open **System Settings ▸ Privacy & Security**, scroll down and click **Open Anyway**. The app runs natively on both Apple Silicon and Intel Macs.
 
-In the chart:
+### Linux
 
-- Drag a bar to move it. This sets a *Start No Earlier Than* constraint, just like Microsoft Project.
-- Drag its right edge to change the duration, or its left edge to set progress.
-- Drag a bar onto another row to link the two tasks.
+1. Download `plancraft-<version>-linux-x86_64.tar.gz`, then extract it:
+   ```bash
+   tar xzf plancraft-*-linux-x86_64.tar.gz
+   ```
+2. Install it for your user. This adds PlanCraft to your applications menu and makes `.plancraft` files open with it:
+   ```bash
+   ./plancraft-*-linux-x86_64/install.sh
+   ```
 
-## Getting started
+You can also run `bin/plancraft` directly without installing. To remove PlanCraft later, run `./install.sh --uninstall`.
 
-You need a recent stable Rust toolchain (edition 2024, Rust 1.90 or later).
+### Building it yourself
+
+If you have [Rust](https://rustup.rs) installed, you can build and run PlanCraft from source:
 
 ```bash
-cargo run --release -p plancraft-app -- --demo
+git clone https://github.com/rallegretti/PlanCraft.git
 ```
 
-`--demo` opens a sample "Product Launch" project. Other ways to start:
-
 ```bash
-cargo run --release -p plancraft-app -- path/to/project.plancraft
+cd PlanCraft
 ```
 
 ```bash
 cargo run --release -p plancraft-app
 ```
 
-Without arguments, the app opens the Start Page.
+## Getting started
 
-On Linux the app talks to Wayland or X11 directly, and file dialogs go through the XDG desktop portal. No GTK or C toolkit is required.
+1. **Try the sample.** On the Start Page, choose **Sample project** to explore a ready-made product launch with milestones, a team and some progress.
+2. **Start your own.** Choose **Blank project**, then type task names into the task list. Press **Insert** to add a task above the selected one.
+3. **Organize.** Select tasks and press **Alt+Shift+→** to indent them under a summary task.
+4. **Link.** Select tasks in order and press **Ctrl+F2**, or drag one bar onto another in the chart.
+5. **Assign people.** Type names into the *Resource Names* column; new names are added to your team automatically. You can also use **Resource ▸ Assign Resources**.
+6. **Add milestones.** Use **Task ▸ Milestone**, then open it (double-click) to set its deliverable and the tasks that make it up.
+7. **Track progress.** Use the % complete buttons on the Task toolbar, or log hours in the **Timesheet** view.
 
-## Connecting an AI agent (MCP)
+### Handy shortcuts
 
-**Live, in the open window.** Open **Project ▸ MCP Server** (or click *MCP off* in the title bar) and press **Start server**. Then:
+| Shortcut | Does |
+|---|---|
+| `Insert` / `Delete` | Add / remove a task |
+| `F2`, or just start typing | Edit the selected cell |
+| `Alt+Shift+→` / `Alt+Shift+←` | Indent / outdent |
+| `Alt+Shift+↑` / `Alt+Shift+↓` | Move a task up / down |
+| `Ctrl+F2` / `Ctrl+Shift+F2` | Link / unlink the selected tasks |
+| `Shift+F2` | Task Information |
+| `Ctrl+Z` / `Ctrl+Y` | Undo / redo |
+| `Ctrl+S` | Save |
+| `Ctrl` + mouse wheel | Zoom the timeline in and out |
+| `Shift` + mouse wheel | Scroll the chart through time |
 
-```bash
-claude mcp add --transport http plancraft http://127.0.0.1:7878/mcp
-```
+On a Mac, use `Cmd` instead of `Ctrl`.
 
-**Headless, on files.** The app binary doubles as a stdio MCP server:
+## Planning with an AI assistant
 
-```bash
-claude mcp add plancraft -- /path/to/plancraft mcp /path/to/project.plancraft
-```
+PlanCraft has built-in support for the **Model Context Protocol (MCP)**, the open standard AI assistants use to work with apps. Once connected, you can ask things like:
 
-A standalone `plancraft-mcp` binary is also built from `crates/plancraft-mcp`. See [docs/MCP.md](docs/MCP.md) for every tool, resource and prompt.
+> *"Plan a website redesign with design, build and launch phases, about eight weeks, for Ana, Ben and our design agency."*
 
-Agents get tools for:
+> *"Who's overbooked next week, and what would you move?"*
 
-- **projects:** documents, project settings and calendars
-- **tasks:** bulk creation of a whole WBS in one call, links, milestones and cross-file links
-- **people:** resources, assignments, time off and availability
-- **tracking:** time entries, progress and baselines
-- **analysis:** schedule, critical path, workload, overallocations, leveling, statistics, earned value and variance
-- **history:** undo and redo
+> *"Log 6 hours for Ben on Backend services yesterday and tell me how the Beta milestone is looking."*
 
-## Project layout
+**To connect Claude Code to the PlanCraft window:**
+1. In PlanCraft, open **Project ▸ AI Agents** and click **Start server**. You can tick *Start automatically* so it's always ready.
+2. Run the command the panel shows you:
+   ```bash
+   claude mcp add --transport http plancraft http://127.0.0.1:7878/mcp
+   ```
 
-```
-crates/
-  plancraft-core/   model, calendars, CPM scheduler, workload, leveling, reports, file I/O, undo workspace
-  plancraft-mcp/    MCP server: JSON-RPC 2.0 over stdio and Streamable HTTP (tiny_http), 67 tools
-  plancraft-app/    desktop app (egui/eframe): command bar, views, dialogs, live MCP host
-xtask/              cargo xtask: build and package for macOS, Windows and Linux (locally or over SSH)
-docs/               architecture, building, MCP reference, roadmap, screenshots
-assets/             logo (SVG) and icon (PNG)
-```
+Changes the AI makes appear in the window as they happen. They're marked with ⚡ in **View ▸ History**, and **Ctrl+Z** undoes them like your own edits.
 
-More detail:
+AI assistants can also work on project files without the window open. The AI Agents panel shows the exact command to use, and [docs/MCP.md](docs/MCP.md) lists everything an assistant can do.
 
-- **Design:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
-- **Building and packaging:** [docs/BUILDING.md](docs/BUILDING.md)
-- **What's next:** [docs/ROADMAP.md](docs/ROADMAP.md)
+> Only connect assistants you trust. They can change your plans and save files.
 
-## Packaging
+## Your files
 
-`cargo xtask dist all` builds the macOS `.dmg`, Windows `.zip` and Linux `.tar.gz`. Platforms other than the one you're on are built on your own machines over SSH. See [docs/BUILDING.md](docs/BUILDING.md).
-
-## Development
-
-```bash
-cargo test --workspace
-```
-
-```bash
-cargo clippy --workspace
-```
-
-**Screenshot automation** (used for the images above):
-
-```bash
-PLANCRAFT_VIEW="Resource Usage" PLANCRAFT_SCREENSHOT=out.png cargo run -p plancraft-app -- --demo
-```
-
-`PLANCRAFT_CMD=TaskInfo,Critical,Level,Mcp,…` runs commands before capturing, and `PLANCRAFT_SELECT=<row>` picks the selected task.
-
-### Pure Rust
-
-Everything is Rust: the scheduler, the UI (egui and wgpu), file dialogs (rfd over the XDG portal), the MCP server, and PNG encoding. The only non-Rust code is what the operating system and GPU drivers provide.
+Projects are saved as `.plancraft` files. They are plain text, so they work well with backup tools and version control, and you can open the same project on any computer running PlanCraft.
 
 ## License
 
-[CC0 1.0 Universal](LICENSE): dedicated to the public domain.
+PlanCraft is free and open source, dedicated to the public domain under [CC0 1.0 Universal](LICENSE).
+
+---
+
+<sub>Developers: see [docs/BUILDING.md](docs/BUILDING.md) for building release packages and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how PlanCraft is put together.</sub>

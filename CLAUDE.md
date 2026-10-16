@@ -11,3 +11,4 @@
 - UI chrome: a two-row command bar (`menubar.rs`): plain tabs plus one compact toolbar row, with the view selector spanning both rows. Do NOT reintroduce a Microsoft-Ribbon-style UI (large icon buttons, stacked small buttons, group captions under button groups); the owner explicitly wants to avoid resembling the Ribbon.
 - The Start Page (`start_page.rs`) is a centered card layout under the title band. Avoid Office-backstage patterns (full-height colored left nav, Back arrow, Info/Account/Options nav list).
 - Packaging: `cargo xtask dist <mac|linux|windows|all>` (see docs/BUILDING.md). Build hosts are SSH aliases in the git-ignored `dist-hosts.toml`. The owner prefers their own machines over cloud CI (no GitHub Actions). Packages are unsigned for now.
+- Colors: always paint with `theme::pal().<COLOR>` (light and dark palettes in theme.rs); never hard-code `Color32` values in views, or dark mode breaks. The contrast test in theme.rs guards text readability.
