@@ -34,8 +34,8 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     if args.first().map(String::as_str) == Some("--write-icon") {
-        // Developer helper: writes the rasterized logo as a PNG file.
-        let size = 512u32;
+        // Writes the rasterized logo as a PNG: `--write-icon [PATH] [SIZE]` (used by packaging).
+        let size: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(512).clamp(16, 2048);
         let img = image::RgbaImage::from_raw(size, size, logo::rasterize(size)).expect("icon buffer");
         img.save(args.get(1).map(String::as_str).unwrap_or("plancraft-icon.png"))?;
         return Ok(());

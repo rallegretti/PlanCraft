@@ -1,0 +1,3 @@
+# Copy to dist-hosts.toml and set the SSH aliases of your build machines.
+mac = "my-mac"
+windows = "my-windows-pc"

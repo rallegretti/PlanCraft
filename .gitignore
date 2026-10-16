@@ -2,3 +2,5 @@
 **/*.rs.bk
 *.plancraft.bak
 .DS_Store
+/dist
+/dist-hosts.toml
