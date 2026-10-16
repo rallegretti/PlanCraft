@@ -5,6 +5,10 @@
 //! plancraft mcp [FILE...] [--http ADDR]  run the MCP server without a window
 //! ```
 
+// Release builds on Windows are GUI applications (no console window). Command-line
+// modes reattach to the console they were started from; see `attach_parent_console`.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app;
 mod columns;
 mod commands;
@@ -22,8 +26,42 @@ mod widgets;
 
 use plancraft_core::workspace::Workspace;
 
+/// On Windows, a GUI-subsystem process has no console. When started from a terminal
+/// for a command-line mode, attach to that terminal so output is visible. Inherited
+/// pipes (e.g. an MCP client talking to `plancraft mcp`) already work and are left alone.
+#[cfg(windows)]
+fn attach_parent_console() {
+    use windows_sys::Win32::System::Console::{ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_OUTPUT_HANDLE};
+    // SAFETY: plain Win32 calls without pointers; failure just means there is no console.
+    unsafe {
+        let out = GetStdHandle(STD_OUTPUT_HANDLE);
+        if out.is_null() || out == windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+            AttachConsole(ATTACH_PARENT_PROCESS);
+        }
+    }
+}
+
+/// Graphics backend selection. On Windows we use Direct3D 12 by default: it is always
+/// present on Windows 10+, while some Vulkan drivers (e.g. older Intel HD Graphics)
+/// crash during surface creation. `WGPU_BACKEND` still overrides the choice.
+fn wgpu_options() -> eframe::WgpuConfiguration {
+    #[allow(unused_mut)]
+    let mut config = eframe::WgpuConfiguration::default();
+    #[cfg(windows)]
+    if std::env::var_os("WGPU_BACKEND").is_none()
+        && let eframe::egui_wgpu::WgpuSetup::CreateNew(setup) = &mut config.wgpu_setup
+    {
+        setup.instance_descriptor.backends = eframe::wgpu::Backends::DX12;
+    }
+    config
+}
+
 fn main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    #[cfg(windows)]
+    if matches!(args.first().map(String::as_str), Some("mcp" | "--version" | "--write-icon")) {
+        attach_parent_console();
+    }
     if args.first().map(String::as_str) == Some("mcp") {
         // Headless MCP server: `plancraft mcp [FILE...] [--http ADDR]`.
         let code = plancraft_mcp::cli::run(args[1..].to_vec());
@@ -64,6 +102,7 @@ fn main() -> anyhow::Result<()> {
             .with_inner_size([1440.0, 900.0])
             .with_min_inner_size([900.0, 560.0])
             .with_icon(logo::icon_data()),
+        wgpu_options: wgpu_options(),
         ..Default::default()
     };
     eframe::run_native("PlanCraft", options, Box::new(move |cc| Ok(Box::new(app::PlanCraftApp::new(cc, shared)))))

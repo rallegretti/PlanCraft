@@ -49,6 +49,31 @@ fn ssh(host: &str) -> Command {
     c
 }
 
+/// Wraps a PowerShell script as `powershell -EncodedCommand …` so no quoting survives
+/// the trip through ssh and the Windows command line.
+fn powershell(script: &str) -> String {
+    let script = format!("$ProgressPreference = 'SilentlyContinue'\n{script}");
+    let utf16: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    format!("powershell -NoProfile -NonInteractive -EncodedCommand {}", base64(&utf16))
+}
+
+fn base64(data: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
+    for chunk in data.chunks(3) {
+        let b = [chunk[0], *chunk.get(1).unwrap_or(&0), *chunk.get(2).unwrap_or(&0)];
+        let n = (b[0] as u32) << 16 | (b[1] as u32) << 8 | b[2] as u32;
+        for i in 0..4 {
+            if i <= chunk.len() {
+                out.push(ALPHABET[(n >> (18 - 6 * i)) as usize & 63] as char);
+            } else {
+                out.push('=');
+            }
+        }
+    }
+    out
+}
+
 /// The git tree to send: HEAD, or a snapshot commit that includes uncommitted changes.
 fn source_revision() -> Result<String> {
     let root = util::root();
@@ -82,12 +107,13 @@ pub fn dist(target: Target, host: &str) -> Result<Vec<PathBuf>> {
     step(format!("sending source to {host}:~/{REMOTE_DIR}"));
     let rev = source_revision()?;
     let extract = if windows_host {
-        // PowerShell (the default shell configured for the Windows build host).
-        format!(
-            "$ErrorActionPreference='Stop'; New-Item -ItemType Directory -Force -Path '{REMOTE_DIR}' | Out-Null; \
-             Get-ChildItem -Force '{REMOTE_DIR}' | Where-Object {{ $_.Name -notin @('target','dist') }} | Remove-Item -Recurse -Force; \
-             tar -x -f - -C '{REMOTE_DIR}'"
-        )
+        powershell(&format!(
+            "$ErrorActionPreference = 'Stop'
+             New-Item -ItemType Directory -Force -Path '{REMOTE_DIR}' | Out-Null
+             Get-ChildItem -Force '{REMOTE_DIR}' | Where-Object {{ $_.Name -notin @('target','dist') }} | Remove-Item -Recurse -Force
+             tar -x -f - -C '{REMOTE_DIR}'
+             exit $LASTEXITCODE"
+        ))
     } else {
         format!(
             "set -e; mkdir -p {REMOTE_DIR}; cd {REMOTE_DIR}; \
@@ -113,7 +139,13 @@ pub fn dist(target: Target, host: &str) -> Result<Vec<PathBuf>> {
 
     step(format!("packaging on {host}"));
     let build = if windows_host {
-        format!("cd '{REMOTE_DIR}'; & \"$env:USERPROFILE\\.cargo\\bin\\cargo.exe\" xtask package {}", target.name())
+        // Merge stderr into stdout as plain text (PowerShell 5.1 otherwise wraps it as errors).
+        powershell(&format!(
+            "Set-Location '{REMOTE_DIR}'
+             & \"$env:USERPROFILE\\.cargo\\bin\\cargo.exe\" xtask package {} 2>&1 | ForEach-Object {{ if ($_ -is [System.Management.Automation.ErrorRecord]) {{ \"$($_.TargetObject)\" }} else {{ \"$_\" }} }}
+             exit $LASTEXITCODE",
+            target.name()
+        ))
     } else {
         format!("export PATH=\"$HOME/.cargo/bin:$PATH\"; cd {REMOTE_DIR} && cargo xtask package {}", target.name())
     };
@@ -144,4 +176,16 @@ pub fn dist(target: Target, host: &str) -> Result<Vec<PathBuf>> {
         fetched.push(local);
     }
     Ok(fetched)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn base64_matches_rfc4648() {
+        assert_eq!(super::base64(b""), "");
+        assert_eq!(super::base64(b"f"), "Zg==");
+        assert_eq!(super::base64(b"fo"), "Zm8=");
+        assert_eq!(super::base64(b"foo"), "Zm9v");
+        assert_eq!(super::base64(b"foobar"), "Zm9vYmFy");
+    }
 }

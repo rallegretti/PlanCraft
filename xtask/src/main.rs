@@ -1,8 +1,8 @@
 //! PlanCraft build tasks.
 //!
 //! ```text
-//! cargo xtask package <mac|linux>          build + package on this machine
-//! cargo xtask dist <mac|linux|all> [--host ALIAS]
+//! cargo xtask package <mac|linux|windows> build + package on this machine
+//! cargo xtask dist <mac|linux|windows|all> [--host ALIAS]
 //!                                          package here, or on a build host over SSH,
 //!                                          and collect the results in dist/
 //! ```
@@ -18,6 +18,7 @@ mod linux;
 mod mac;
 mod remote;
 mod util;
+mod windows;
 
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -62,10 +63,13 @@ const USAGE: &str = "\
 PlanCraft build tasks
 
 USAGE:
-    cargo xtask package <mac|linux>
+    cargo xtask package <mac|linux|windows>
         Build release binaries and package them on this machine.
 
-    cargo xtask dist <mac|linux|all> [--host SSH_ALIAS]
+    cargo xtask icons
+        Regenerate assets/plancraft.ico (the Windows executable icon) from the logo.
+
+    cargo xtask dist <mac|linux|windows|all> [--host SSH_ALIAS]
         Package locally when the target matches this machine, otherwise on a
         build host over SSH. Results (with .sha256 files) land in dist/.
         'all' packages every target that is local or has a configured host.
@@ -79,7 +83,7 @@ fn package(target: Target) -> Result<Vec<PathBuf>> {
     match target {
         Target::Mac => mac::package(),
         Target::Linux => linux::package(),
-        Target::Windows => bail!("Windows packaging is not implemented yet"),
+        Target::Windows => windows::package(),
     }
 }
 
@@ -112,16 +116,13 @@ fn real_main() -> Result<()> {
     }
     let results = match positional.as_slice() {
         ["package", t] => package(Target::parse(t)?)?,
+        ["icons"] => vec![util::write_app_ico()?],
         ["dist", "all"] => {
             if host.is_some() {
                 bail!("--host cannot be combined with 'all'");
             }
             let mut all = Vec::new();
             for t in [Target::Linux, Target::Mac, Target::Windows] {
-                if t == Target::Windows {
-                    eprintln!("==> skipping windows (not implemented yet)");
-                    continue;
-                }
                 if t.is_local() || remote::host_for(t, None)?.is_some() {
                     all.extend(dist(t, None)?);
                 } else {

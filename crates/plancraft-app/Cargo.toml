@@ -25,3 +25,6 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 
 [dev-dependencies]
 egui_kittest = { version = "0.36", features = ["eframe"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }

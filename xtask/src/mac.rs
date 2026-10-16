@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 
 use crate::util::{self, artifact, copy, fresh_dir, output, run, step};
 
@@ -84,7 +84,7 @@ pub fn package() -> Result<Vec<PathBuf>> {
 
     step("creating the disk image");
     #[cfg(unix)]
-    std::os::unix::fs::symlink("/Applications", dmg_root.join("Applications")).context("creating Applications link")?;
+    anyhow::Context::context(std::os::unix::fs::symlink("/Applications", dmg_root.join("Applications")), "creating Applications link")?;
     let dmg = root.join(format!("dist/PlanCraft-{version}-macos-universal.dmg"));
     if dmg.exists() {
         std::fs::remove_file(&dmg)?;

@@ -133,3 +133,46 @@ pub fn render_icon(app_binary: &Path, out: &Path, size: u32) -> Result<()> {
     output(Command::new(app_binary).arg("--write-icon").arg(out).arg(size.to_string()))?;
     Ok(())
 }
+
+/// Encodes a Windows `.ico` file whose images are PNG-compressed (Windows Vista and later).
+pub fn ico(images: &[(u32, Vec<u8>)]) -> Vec<u8> {
+    let mut out = Vec::new();
+    out.extend_from_slice(&0u16.to_le_bytes()); // reserved
+    out.extend_from_slice(&1u16.to_le_bytes()); // type: icon
+    out.extend_from_slice(&(images.len() as u16).to_le_bytes());
+    let mut offset = 6 + 16 * images.len() as u32;
+    for (size, png) in images {
+        let dim = if *size >= 256 { 0 } else { *size as u8 }; // 0 means 256
+        out.extend_from_slice(&[dim, dim, 0, 0]);
+        out.extend_from_slice(&1u16.to_le_bytes()); // colour planes
+        out.extend_from_slice(&32u16.to_le_bytes()); // bits per pixel
+        out.extend_from_slice(&(png.len() as u32).to_le_bytes());
+        out.extend_from_slice(&offset.to_le_bytes());
+        offset += png.len() as u32;
+    }
+    for (_, png) in images {
+        out.extend_from_slice(png);
+    }
+    out
+}
+
+/// Regenerates `assets/plancraft.ico` (embedded into the Windows executable) from the logo.
+pub fn write_app_ico() -> Result<PathBuf> {
+    let root = root();
+    step("building the app to render icons");
+    let mut c = cargo();
+    c.args(["build", "-p", "plancraft-app"]);
+    run(&mut c)?;
+    let exe = root.join(if cfg!(windows) { "target/debug/plancraft.exe" } else { "target/debug/plancraft" });
+    let tmp = root.join("target/icons");
+    std::fs::create_dir_all(&tmp)?;
+    let mut images = Vec::new();
+    for size in [16u32, 20, 24, 32, 40, 48, 64, 128, 256] {
+        let png = tmp.join(format!("icon_{size}.png"));
+        render_icon(&exe, &png, size)?;
+        images.push((size, std::fs::read(&png)?));
+    }
+    let out = root.join("assets/plancraft.ico");
+    std::fs::write(&out, ico(&images))?;
+    Ok(out)
+}

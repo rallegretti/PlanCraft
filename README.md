@@ -143,14 +143,20 @@ crates/
   plancraft-core/   model, calendars, CPM scheduler, workload, leveling, reports, file I/O, undo workspace
   plancraft-mcp/    MCP server: JSON-RPC 2.0 over stdio and Streamable HTTP (tiny_http), 67 tools
   plancraft-app/    desktop app (egui/eframe): command bar, views, dialogs, live MCP host
-docs/               architecture, MCP reference, roadmap, screenshots
+xtask/              cargo xtask: build and package for macOS, Windows and Linux (locally or over SSH)
+docs/               architecture, building, MCP reference, roadmap, screenshots
 assets/             logo (SVG) and icon (PNG)
 ```
 
 More detail:
 
 - **Design:** [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+- **Building and packaging:** [docs/BUILDING.md](docs/BUILDING.md)
 - **What's next:** [docs/ROADMAP.md](docs/ROADMAP.md)
+
+## Packaging
+
+`cargo xtask dist all` builds the macOS `.dmg`, Windows `.zip` and Linux `.tar.gz`. Platforms other than the one you're on are built on your own machines over SSH. See [docs/BUILDING.md](docs/BUILDING.md).
 
 ## Development
 
