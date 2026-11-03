@@ -1,4 +1,4 @@
-//! `cargo xtask ci`: the same quality gates GitHub Actions runs, on this machine.
+//! `cargo xtask ci`: every quality gate, run on this machine (there is no cloud CI).
 //!
 //! Formatting, clippy with warnings denied (including the never-crash lints), the whole test
 //! suite, the scheduler speed gate in release mode, and `cargo deny` (licences, advisories,

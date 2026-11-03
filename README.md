@@ -15,7 +15,6 @@
   <img alt="Windows · macOS · Linux" src="https://img.shields.io/badge/Windows%20%C2%B7%20macOS%20%C2%B7%20Linux-native-1B3A8C?style=flat-square">
   <img alt="License: CC0 1.0" src="https://img.shields.io/badge/license-CC0%201.0-3a3a3a?style=flat-square">
   <img alt="Status: early preview" src="https://img.shields.io/badge/status-early%20preview-F2B11C?style=flat-square">
-  <a href="https://github.com/rallegretti/PlanCraft/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/rallegretti/PlanCraft/actions/workflows/ci.yml/badge.svg"></a>
 </p>
 
 <p align="center">
