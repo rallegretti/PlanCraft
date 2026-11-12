@@ -214,6 +214,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
         row_count: n,
         blank_rows: 20,
         row_numbers: true,
+        row_label: None,
         show_vscroll: true,
         header_height: 30.0,
         row_height: theme::ROW_HEIGHT,
@@ -282,7 +283,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                 }
             }
             GridEvent::ClickEmpty { .. } => st.sel.resources.clear(),
-            GridEvent::ToggleExpand(_) => {}
+            GridEvent::ToggleExpand(_) | GridEvent::HeaderClick { .. } | GridEvent::HeaderMenu { .. } => {}
         }
     }
 }

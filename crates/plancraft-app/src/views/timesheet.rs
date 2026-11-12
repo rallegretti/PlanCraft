@@ -112,6 +112,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
         row_count: lines.len() + 1,
         blank_rows: 0,
         row_numbers: false,
+        row_label: None,
         show_vscroll: true,
         header_height: 30.0,
         row_height: theme::ROW_HEIGHT,

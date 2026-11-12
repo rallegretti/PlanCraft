@@ -15,6 +15,50 @@ use crate::ops::{PlanError, PlanResult};
 use crate::schedule::{recalculate, try_recalculate};
 
 const UNDO_LIMIT: usize = 200;
+/// Memory the undo history of one document may use (estimated). Every step is a whole-project
+/// snapshot, so 200 steps of a plan near the size limits would need gigabytes; older steps are
+/// dropped first, and the latest step is always kept.
+/// (Unit tests use a small budget so a small plan exercises the trimming.)
+const UNDO_BUDGET_BYTES: usize = if cfg!(test) { 4 * 1024 * 1024 } else { 256 * 1024 * 1024 };
+
+/// Rough heap size of a project: proportional to its items and text, cheap to compute.
+fn approx_bytes(p: &Project) -> usize {
+    use std::mem::size_of;
+    let text = |s: &String| s.len();
+    let tasks: usize = p
+        .tasks
+        .iter()
+        .map(|t| {
+            size_of::<crate::model::Task>()
+                + text(&t.name)
+                + text(&t.notes)
+                + text(&t.deliverable)
+                + t.predecessors.len() * size_of::<crate::model::Dependency>()
+                + t.members.len() * size_of::<crate::model::TaskRef>()
+                + t.sched.warnings.iter().map(|w| size_of::<String>() + w.len()).sum::<usize>()
+        })
+        .sum();
+    let resources: usize = p
+        .resources
+        .iter()
+        .map(|r| size_of::<crate::model::Resource>() + text(&r.name) + r.exceptions.len() * size_of::<crate::calendar::CalendarException>())
+        .sum();
+    let calendars: usize = p
+        .calendars
+        .iter()
+        .map(|c| size_of::<crate::calendar::Calendar>() + c.exceptions.len() * size_of::<crate::calendar::CalendarException>())
+        .sum();
+    let external: usize =
+        p.external_projects.iter().map(|e| e.tasks.len() * size_of::<crate::model::ExternalTaskSnapshot>() + e.path.len()).sum();
+    size_of::<Project>()
+        + text(&p.notes)
+        + tasks
+        + resources
+        + calendars
+        + external
+        + p.assignments.len() * size_of::<crate::model::Assignment>()
+        + p.time_entries.len() * size_of::<crate::model::TimeEntry>()
+}
 
 /// Who made a change (shown in the undo history and status bar).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -29,6 +73,15 @@ struct Snapshot {
     label: String,
     source: ChangeSource,
     project: Project,
+    /// Estimated size, computed once when the snapshot is taken.
+    bytes: usize,
+}
+
+impl Snapshot {
+    fn new(label: String, source: ChangeSource, project: Project) -> Self {
+        let bytes = approx_bytes(&project);
+        Self { label, source, project, bytes }
+    }
 }
 
 /// An open project document.
@@ -39,11 +92,17 @@ pub struct Document {
     pub path: Option<PathBuf>,
     pub project: Project,
     pub dirty: bool,
+    /// Unsaved changes include some the user made (not only an agent's). An agent may discard
+    /// its own unsaved work, never the user's.
+    pub user_changes: bool,
     /// Incremented on every change (edits, undo, redo, reload).
     pub revision: u64,
     pub last_change: Option<(String, ChangeSource)>,
     /// What opening the file adjusted (values clamped into range), shown once by the app.
     pub load_notes: Vec<String>,
+    /// The file as it was when last loaded or saved; `save` refuses to overwrite a file that has
+    /// changed since (another program or PlanCraft instance wrote it).
+    disk_stamp: Option<io::DiskStamp>,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
 }
@@ -55,9 +114,11 @@ impl Document {
             path,
             project,
             dirty: false,
+            user_changes: false,
             revision: 1,
             last_change: None,
             load_notes: Vec::new(),
+            disk_stamp: None,
             undo: Vec::new(),
             redo: Vec::new(),
         }
@@ -76,6 +137,9 @@ impl Document {
 
     fn touched(&mut self, label: &str, source: ChangeSource) {
         self.dirty = true;
+        if source == ChangeSource::User {
+            self.user_changes = true;
+        }
         self.revision = self.revision.wrapping_add(1);
         self.last_change = Some((label.into(), source));
     }
@@ -109,11 +173,9 @@ impl Document {
         });
         match outcome {
             Ok(Ok(r)) => {
-                self.undo.push(Snapshot { label: label.into(), source, project: before });
-                if self.undo.len() > UNDO_LIMIT {
-                    self.undo.remove(0);
-                }
+                self.undo.push(Snapshot::new(label.into(), source, before));
                 self.redo.clear();
+                self.trim_undo();
                 self.touched(label, source);
                 Ok(r)
             }
@@ -146,36 +208,100 @@ impl Document {
         self.undo.iter().rev().map(|s| (s.label.clone(), s.source)).collect()
     }
 
+    /// Drops the oldest undo steps beyond the step limit or the memory budget (the latest step
+    /// always stays, so the last change can be undone).
+    fn trim_undo(&mut self) {
+        let excess = self.undo.len().saturating_sub(UNDO_LIMIT);
+        if excess > 0 {
+            self.undo.drain(..excess);
+        }
+        let sizes: Vec<usize> = self.undo.iter().map(|s| s.bytes).collect();
+        let mut total: usize = sizes.iter().sum();
+        let mut drop = 0;
+        for size in &sizes {
+            if total <= UNDO_BUDGET_BYTES || drop + 1 >= sizes.len() {
+                break;
+            }
+            total = total.saturating_sub(*size);
+            drop += 1;
+        }
+        if drop > 0 {
+            self.undo.drain(..drop);
+        }
+    }
+
+    /// Undoes the last change on the user's behalf.
     pub fn undo(&mut self) -> bool {
+        self.undo_as(ChangeSource::User)
+    }
+
+    /// Redoes the last undone change on the user's behalf.
+    pub fn redo(&mut self) -> bool {
+        self.redo_as(ChangeSource::User)
+    }
+
+    /// Undoes the last change, attributed to `source`.
+    pub fn undo_as(&mut self, source: ChangeSource) -> bool {
         let Some(s) = self.undo.pop() else {
             return false;
         };
         let current = std::mem::replace(&mut self.project, s.project);
-        self.redo.push(Snapshot { label: s.label.clone(), source: s.source, project: current });
-        self.touched(&format!("Undo {}", s.label), ChangeSource::User);
+        self.redo.push(Snapshot::new(s.label.clone(), s.source, current));
+        self.touched(&format!("Undo {}", s.label), source);
         true
     }
 
-    pub fn redo(&mut self) -> bool {
+    /// Redoes the last undone change, attributed to `source`.
+    pub fn redo_as(&mut self, source: ChangeSource) -> bool {
         let Some(s) = self.redo.pop() else {
             return false;
         };
         let current = std::mem::replace(&mut self.project, s.project);
-        self.undo.push(Snapshot { label: s.label.clone(), source: s.source, project: current });
-        self.touched(&format!("Redo {}", s.label), ChangeSource::User);
+        self.undo.push(Snapshot::new(s.label.clone(), s.source, current));
+        self.touched(&format!("Redo {}", s.label), source);
         true
     }
 
-    /// Saves to the current path.
+    /// Saves to the current path. Fails with [`io::FileError::ChangedOnDisk`] when another program
+    /// changed the file since it was opened or last saved; [`Document::save_overwriting`] replaces
+    /// it anyway.
     pub fn save(&mut self) -> FileResult<()> {
+        self.save_checked(true)
+    }
+
+    /// Saves to the current path even if the file changed on disk since it was opened.
+    pub fn save_overwriting(&mut self) -> FileResult<()> {
+        self.save_checked(false)
+    }
+
+    /// Whether the file changed on disk since it was opened or last saved (a deleted file has not:
+    /// saving simply writes it again).
+    pub fn changed_on_disk(&self) -> bool {
+        match (&self.path, self.disk_stamp) {
+            (Some(path), Some(known)) => io::disk_stamp(path).is_some_and(|now| now != known),
+            _ => false,
+        }
+    }
+
+    /// Records the file's current stamp as the version this document matches (after loading).
+    pub fn mark_in_sync_with_disk(&mut self) {
+        self.disk_stamp = self.path.as_ref().and_then(io::disk_stamp);
+    }
+
+    fn save_checked(&mut self, check: bool) -> FileResult<()> {
         let Some(path) = self.path.clone() else {
             return Err(io::FileError::Io {
                 path: PathBuf::new(),
                 source: std::io::Error::new(std::io::ErrorKind::NotFound, "document has no file path; use save as"),
             });
         };
+        if check && self.changed_on_disk() {
+            return Err(io::FileError::ChangedOnDisk { path });
+        }
         io::save(&self.project, &path)?;
+        self.disk_stamp = io::disk_stamp(&path);
         self.dirty = false;
+        self.user_changes = false;
         Ok(())
     }
 
@@ -185,24 +311,40 @@ impl Document {
         let old = self.path.clone();
         let new_dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
         let new_dir = if new_dir.is_absolute() { new_dir } else { std::env::current_dir().map(|c| c.join(&new_dir)).unwrap_or(new_dir) };
-        for e in &mut self.project.external_projects {
+        // Rewrite the links on a copy: a failed save must leave the document's links pointing
+        // where they did, or the next plain Save writes paths relative to a folder never used.
+        let mut saved = self.project.clone();
+        for e in &mut saved.external_projects {
             let abs = io::resolve_external_path(&e.path, old.as_deref());
             let abs = if abs.is_absolute() { abs } else { std::env::current_dir().map(|c| c.join(&abs)).unwrap_or(abs) };
             e.path = io::relative_path(&abs, &new_dir).to_string_lossy().replace('\\', "/");
         }
-        io::save(&self.project, &path)?;
+        io::save(&saved, &path)?;
+        self.disk_stamp = io::disk_stamp(&path);
+        self.project.external_projects = saved.external_projects;
         self.path = Some(path);
         self.dirty = false;
+        self.user_changes = false;
         Ok(())
     }
 
     /// Re-reads external documents and recalculates. Returns warnings.
     pub fn refresh_external(&mut self) -> Vec<String> {
+        self.refresh_external_with(io::refresh_external)
+    }
+
+    /// The refresh done when a document opens: network-share links wait for an explicit refresh,
+    /// so opening someone else's file never connects to a server it names.
+    pub fn refresh_external_on_open(&mut self) -> Vec<String> {
+        self.refresh_external_with(io::refresh_external_on_open)
+    }
+
+    fn refresh_external_with(&mut self, refresh: fn(&mut Project, Option<&Path>) -> Vec<String>) -> Vec<String> {
         if self.project.external_projects.is_empty() {
             return Vec::new();
         }
         let before = self.project.clone();
-        let warnings = io::refresh_external(&mut self.project, self.path.as_deref());
+        let warnings = refresh(&mut self.project, self.path.as_deref());
         recalculate(&mut self.project);
         if self.project.external_projects != before.external_projects {
             self.revision = self.revision.wrapping_add(1);
@@ -231,7 +373,7 @@ impl Workspace {
         self.next_handle = self.next_handle.saturating_add(1);
         recalculate(&mut project);
         let mut doc = Document::new(self.next_handle, project, path);
-        let _ = doc.refresh_external();
+        let _ = doc.refresh_external_on_open();
         self.docs.push(doc);
         self.active = self.docs.len().checked_sub(1);
         self.next_handle
@@ -248,10 +390,13 @@ impl Workspace {
             self.active = Some(i);
             return Ok(doc.handle);
         }
+        // Stamp before reading: if the file changes while it loads, the next save notices.
+        let stamp = io::disk_stamp(&abs);
         let (project, notes) = io::load_with_notes(&abs)?;
         let handle = self.add(project, Some(abs));
         if let Some(doc) = self.active_doc_mut() {
             doc.load_notes = notes;
+            doc.disk_stamp = stamp;
         }
         Ok(handle)
     }
@@ -348,5 +493,65 @@ mod tests {
         assert!(matches!(r, Err(PlanError::Limit(_))));
         assert_eq!(doc.project, before, "an out-of-range edit is rolled back");
         assert_eq!(doc.history().len(), steps, "failed edits leave no undo step");
+    }
+
+    /// Regression: undo history kept 200 whole-project snapshots with no memory limit, so a
+    /// large plan edited many times (by an agent, say) could exhaust memory.
+    #[test]
+    fn undo_history_stays_within_its_memory_budget() {
+        let mut ws = Workspace::default();
+        let mut p = Project::new("Big", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        // About 64 KB per snapshot by the estimate; the test budget holds about 64 of them.
+        for i in 0..32 {
+            let id = p.add_task(format!("Task {i}"), None);
+            p.task_mut(id).unwrap().notes = "x".repeat(2000);
+        }
+        let h = ws.add(p, None);
+        let i = ws.index_of(h).unwrap();
+        let doc = &mut ws.docs[i];
+        let per_step = approx_bytes(&doc.project);
+        assert!(per_step > 60_000 && per_step < 100_000, "{per_step}");
+        for k in 0..120 {
+            doc.edit("Rename", |p| p.tasks[0].name = format!("Renamed {k}")).unwrap();
+        }
+        let kept = doc.history().len();
+        let total: usize = doc.undo.iter().map(|s| s.bytes).sum();
+        assert!(total <= UNDO_BUDGET_BYTES, "{total}");
+        assert!((50..120).contains(&kept), "kept {kept} steps");
+        // The most recent steps are the ones kept.
+        assert_eq!(doc.history()[0].0, "Rename");
+        assert!(doc.undo());
+        assert_eq!(doc.project.tasks[0].name, "Renamed 118");
+    }
+
+    /// Regression: a failed Save As left the external links rewritten relative to the folder it
+    /// could not write to, so the next plain Save stored broken links.
+    #[test]
+    fn failed_save_as_keeps_external_links() {
+        let dir = std::env::temp_dir().join(format!("plancraft-saveas-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("plans")).unwrap();
+        let mut ws = Workspace::default();
+        let mut p = Project::new("P", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        p.external_projects.push(crate::model::ExternalProject {
+            id: uuid::Uuid::new_v4(),
+            name: "Other".into(),
+            path: "other.plancraft".into(),
+            tasks: Vec::new(),
+            last_sync: None,
+        });
+        let h = ws.add(p, Some(dir.join("plans").join("main.plancraft")));
+        let i = ws.index_of(h).unwrap();
+        let doc = &mut ws.docs[i];
+
+        let missing = dir.join("no").join("such").join("folder").join("copy.plancraft");
+        assert!(doc.save_as(&missing).is_err());
+        assert_eq!(doc.project.external_projects[0].path, "other.plancraft");
+        assert_eq!(doc.path.as_deref(), Some(dir.join("plans").join("main.plancraft").as_path()));
+
+        // A successful Save As still rewrites the link relative to the new folder.
+        std::fs::create_dir_all(dir.join("copies")).unwrap();
+        doc.save_as(dir.join("copies").join("copy.plancraft")).unwrap();
+        assert_eq!(doc.project.external_projects[0].path, "../plans/other.plancraft");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

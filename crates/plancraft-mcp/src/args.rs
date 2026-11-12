@@ -43,7 +43,12 @@ impl From<plancraft_core::ops::PlanError> for ToolError {
 }
 impl From<plancraft_core::io::FileError> for ToolError {
     fn from(e: plancraft_core::io::FileError) -> Self {
-        ToolError(e.to_string())
+        match e {
+            plancraft_core::io::FileError::ChangedOnDisk { .. } => ToolError(format!(
+                "{e}. Ask the user before replacing it: save_project with overwrite: true replaces it, or pass a new path to keep both"
+            )),
+            other => ToolError(other.to_string()),
+        }
     }
 }
 

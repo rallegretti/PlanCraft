@@ -190,6 +190,10 @@ enum Op {
     Summary(usize, usize),
     Level,
     Baseline,
+    AddField(usize, String, Vec<String>),
+    SetCustom(usize, usize, String),
+    DeleteField(usize),
+    Columns(String, Vec<String>),
 }
 
 fn edit_op() -> impl Strategy<Value = Op> {
@@ -218,7 +222,16 @@ fn edit_op() -> impl Strategy<Value = Op> {
         (i(), i()).prop_map(|(a, b)| Op::Summary(a, b)),
         Just(Op::Level),
         Just(Op::Baseline),
+        (0usize..6, cell_text(), prop::collection::vec(cell_text(), 0..4)).prop_map(|(k, n, c)| Op::AddField(k, n, c)),
+        (i(), i(), cell_text()).prop_map(|(a, f, t)| Op::SetCustom(a, f, t)),
+        i().prop_map(Op::DeleteField),
+        (cell_text(), prop::collection::vec(prop_oneof![cell_text(), (0u32..8).prop_map(|n| format!("custom:{n}"))], 0..6))
+            .prop_map(|(n, c)| Op::Columns(n, c)),
     ]
+}
+
+fn field_at(p: &Project, i: usize) -> CustomFieldId {
+    p.custom_fields.get(i % p.custom_fields.len().max(1)).map_or(CustomFieldId(9999), |f| f.id)
 }
 
 fn task_at(p: &Project, i: usize) -> TaskId {
@@ -280,6 +293,17 @@ fn apply(p: &mut Project, op: &Op) -> PlanResult<()> {
             plancraft_core::leveling::level_resources(p, &plancraft_core::leveling::LevelingOptions::default());
         }
         Op::Baseline => p.set_baseline(&[]),
+        Op::AddField(k, name, choices) => {
+            let kind = CustomFieldKind::ALL[k % CustomFieldKind::ALL.len()];
+            p.add_custom_field(&name, kind, &choices)?;
+        }
+        Op::SetCustom(i, f, text) => {
+            let field = field_at(p, f);
+            let v = p.parse_custom_value(field, &text)?;
+            p.set_custom_value(task_at(p, i), field, v)?;
+        }
+        Op::DeleteField(f) => p.delete_custom_field(field_at(p, f))?,
+        Op::Columns(name, cols) => p.set_table_columns(&name, &cols)?,
     }
     Ok(())
 }

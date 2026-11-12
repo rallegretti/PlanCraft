@@ -5,7 +5,7 @@
 //! here.  Callers should run [`crate::schedule::recalculate`] afterwards.
 
 use chrono::{NaiveDate, NaiveDateTime};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::duration::{DurationUnit, Lag, Minutes, parse_duration};
 use crate::ids::*;
@@ -261,46 +261,74 @@ impl Project {
     // Dependencies
     // ------------------------------------------------------------------
 
-    /// Whether `to` is reachable from `from` following successor links (local only, summaries expanded).
+    /// Whether `to` is reachable from `from` following successor links (local only, summaries
+    /// expanded: a link to or from a summary relates to its whole subtree, and a summary's links
+    /// apply to all of its subtasks).
+    ///
+    /// The successor lists and the outline (parents, subtree ends) are built once per call, so the
+    /// search is linear in tasks plus links.
     fn reaches(&self, from: TaskId, to: TaskId) -> bool {
-        // Build successor map including summary inheritance: a link to/from a summary relates to its subtree.
-        let group = |id: TaskId| -> Vec<TaskId> {
-            match self.task_index(id) {
-                Some(i) => {
-                    let mut v = vec![id];
-                    v.extend(self.tasks.get(self.descendants_range(i)).unwrap_or_default().iter().map(|t| t.id));
-                    // ancestors too: their links apply to this task
-                    let mut a = self.parent_index(i);
-                    while let Some(ai) = a {
-                        v.extend(self.tasks.get(ai).map(|t| t.id));
-                        a = self.parent_index(ai);
-                    }
-                    v
-                }
-                None => vec![id],
-            }
+        let n = self.tasks.len();
+        let index: HashMap<TaskId, usize> = self.tasks.iter().enumerate().map(|(i, t)| (t.id, i)).collect();
+        let (Some(&from_i), Some(&to_i)) = (index.get(&from), index.get(&to)) else {
+            return false;
         };
-        let mut stack = vec![from];
-        let mut seen = HashSet::new();
-        while let Some(cur) = stack.pop() {
-            if !seen.insert(cur) {
-                continue;
+        // Parent of each row and the end of its subtree (exclusive), from one pass over levels.
+        let mut parent = vec![None; n];
+        let mut end = vec![n; n];
+        let mut stack: Vec<usize> = Vec::new();
+        for (i, t) in self.tasks.iter().enumerate() {
+            while let Some(&top) = stack.last() {
+                if self.tasks.get(top).is_some_and(|s| s.outline_level >= t.outline_level) {
+                    if let Some(e) = end.get_mut(top) {
+                        *e = i;
+                    }
+                    stack.pop();
+                } else {
+                    break;
+                }
             }
-            let cur_group: HashSet<TaskId> = group(cur).into_iter().collect();
-            if cur_group.contains(&to) && cur != from {
+            if let Some(slot) = parent.get_mut(i) {
+                *slot = stack.last().copied();
+            }
+            stack.push(i);
+        }
+        // Successors of each row (as predecessor index -> successor indices).
+        let mut succs: Vec<Vec<usize>> = vec![Vec::new(); n];
+        for (si, t) in self.tasks.iter().enumerate() {
+            for pid in t.predecessors.iter().map(|d| d.predecessor).chain(t.members.iter().copied()).filter_map(|r| r.local()) {
+                if let Some(list) = index.get(&pid).and_then(|&pi| succs.get_mut(pi)) {
+                    list.push(si);
+                }
+            }
+        }
+        let subtree = |i: usize| i..end.get(i).copied().unwrap_or(i.saturating_add(1));
+        // `to` is in the group of `i` when it is `i`, inside `i`'s subtree, or one of its ancestors.
+        let in_group = |i: usize| subtree(i).contains(&to_i) || subtree(to_i).contains(&i);
+
+        let mut visited = vec![false; n];
+        // Rows whose successors were already queued (groups overlap; each row is expanded once).
+        let mut expanded = vec![false; n];
+        let mut queue = vec![from_i];
+        while let Some(cur) = queue.pop() {
+            match visited.get_mut(cur) {
+                Some(v) if !*v => *v = true,
+                _ => continue,
+            }
+            if cur != from_i && in_group(cur) {
                 return true;
             }
-            for t in &self.tasks {
-                let preds = t.predecessors.iter().map(|d| d.predecessor).chain(t.members.iter().copied());
-                for p in preds {
-                    if let Some(pid) = p.local()
-                        && cur_group.contains(&pid)
-                    {
-                        if t.id == to {
-                            return true;
-                        }
-                        stack.push(t.id);
+            let ancestors = std::iter::successors(parent.get(cur).copied().flatten(), |&a| parent.get(a).copied().flatten());
+            for g in subtree(cur).chain(ancestors) {
+                match expanded.get_mut(g) {
+                    Some(e) if !*e => *e = true,
+                    _ => continue,
+                }
+                for &s in succs.get(g).map(Vec::as_slice).unwrap_or_default() {
+                    if s == to_i {
+                        return true;
                     }
+                    queue.push(s);
                 }
             }
         }

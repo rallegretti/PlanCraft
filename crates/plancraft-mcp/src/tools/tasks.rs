@@ -363,6 +363,11 @@ pub fn apply_task_fields(p: &mut Project, id: TaskId, a: &Args) -> ToolResult<()
             row_mut(p, i)?.bar_color = parse_color(a.map().get("bar_color").unwrap_or(&Value::Null))?;
         }
     }
+    match a.get("custom") {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(values)) => super::custom_fields::apply_custom_values(p, id, values)?,
+        Some(_) => return err("'custom' must be an object of field name: value"),
+    }
     if a.is_clear("calendar") {
         let i = idx_of(p, id)?;
         row_mut(p, i)?.calendar = None;

@@ -56,7 +56,8 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
 
     let task_rows = super::visible_rows(p, st);
     let mut rows = Vec::new();
-    for &i in &task_rows {
+    // Group headers are left out here: the usage grid lists tasks and their assignments.
+    for i in task_rows.iter().filter_map(super::Row::task) {
         let Some(t) = p.tasks.get(i) else { continue };
         rows.push(Row::Task(i, t));
         for a in p.assignments_for_task(t.id) {
@@ -96,6 +97,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
         row_count: rows.len(),
         blank_rows: 0,
         row_numbers: false,
+        row_label: None,
         show_vscroll: false,
         header_height: theme::HEADER_HEIGHT,
         row_height: theme::ROW_HEIGHT,

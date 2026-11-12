@@ -144,6 +144,9 @@ pub fn task_row(p: &Project, idx: usize) -> Value {
     if t.sched.is_summary {
         m.insert("is_summary".into(), json!(true));
     }
+    if !t.custom.is_empty() {
+        m.insert("custom".into(), crate::tools::custom_fields::custom_values_json(p, t));
+    }
     if t.is_milestone() {
         m.insert("is_milestone".into(), json!(true));
     }
@@ -338,6 +341,7 @@ pub fn task_detail(p: &Project, id: TaskId) -> Value {
         "deliverable": t.deliverable,
         "show_on_timeline": t.show_on_timeline,
         "bar_color": t.bar_color.map(|c| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])),
+        "custom": crate::tools::custom_fields::custom_values_json(p, t),
         "late": report::is_late(t, at, p),
         "parent": parent,
         "children": children,

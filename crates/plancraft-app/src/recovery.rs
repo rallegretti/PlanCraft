@@ -8,12 +8,13 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local};
 use plancraft_core::io::{self, FileResult, Privacy, create_private_dir, write_atomic};
 use plancraft_core::model::{FILE_EXTENSION, Project};
-use plancraft_core::workspace::{Document, Workspace};
+use plancraft_core::workspace::{Document, SharedWorkspace, Workspace};
 use serde::{Deserialize, Serialize};
 
 /// How often modified documents are copied.
@@ -155,12 +156,59 @@ pub struct Recovery {
     last_write: Instant,
     /// Copies left by an earlier session, offered on the Start Page.
     pub found: Vec<RecoveredItem>,
+    /// Outcome of the last timed copy (`tick`), shown by the app once per distinct error.
+    pub last_error: Option<String>,
+    /// Set on a clean exit: no more copies may be written after they were deleted.
+    stopped: bool,
+}
+
+/// Recovery state shared by the app and its background writer.
+pub type SharedRecovery = Arc<Mutex<Recovery>>;
+
+/// Locks the shared recovery state (a panic elsewhere never makes it unusable).
+pub fn lock(r: &SharedRecovery) -> MutexGuard<'_, Recovery> {
+    r.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// How often the background writer checks whether a copy is due.
+const WRITER_POLL: Duration = Duration::from_secs(5);
+
+/// Starts a thread that keeps recovery copies current even when no frames are drawn (the window
+/// is minimized, hidden or simply idle; egui only runs the UI on input). It takes the workspace
+/// lock before the recovery lock, the same order as the UI, and ends with the app.
+pub fn spawn_background_writer(rec: &SharedRecovery, ws: &SharedWorkspace, ctx: egui::Context) {
+    spawn_writer_every(rec, ws, ctx, WRITER_POLL);
+}
+
+fn spawn_writer_every(rec: &SharedRecovery, ws: &SharedWorkspace, ctx: egui::Context, poll: Duration) {
+    let rec: Weak<Mutex<Recovery>> = Arc::downgrade(rec);
+    let ws = Arc::downgrade(ws);
+    let spawned = std::thread::Builder::new().name("plancraft-recovery".into()).spawn(move || {
+        loop {
+            std::thread::sleep(poll);
+            let (Some(rec), Some(ws)) = (rec.upgrade(), ws.upgrade()) else { return };
+            let ws = ws.lock().unwrap_or_else(PoisonError::into_inner);
+            let mut r = lock(&rec);
+            if r.stopped {
+                return;
+            }
+            let before = r.last_error.clone();
+            // Already guarded inside: a failure is reported, never raised.
+            let _ = r.tick(&ws);
+            if r.last_error != before {
+                ctx.request_repaint();
+            }
+        }
+    });
+    if let Err(e) = spawned {
+        eprintln!("plancraft: could not start the recovery writer ({e}); copies are written while the window is in use");
+    }
 }
 
 impl Recovery {
     pub fn new(store: Option<RecoveryStore>) -> Self {
         let found = store.as_ref().map(RecoveryStore::list).unwrap_or_default();
-        Self { store, written: HashMap::new(), last_write: Instant::now(), found }
+        Self { store, written: HashMap::new(), last_write: Instant::now(), found, last_error: None, stopped: false }
     }
 
     pub fn store(&self) -> Option<&RecoveryStore> {
@@ -170,12 +218,17 @@ impl Recovery {
     /// Called every frame: drops copies of documents that were saved or closed and, once a
     /// minute, copies documents that changed. Returns an error message when a copy failed.
     pub fn tick(&mut self, ws: &Workspace) -> Result<(), String> {
+        if self.stopped {
+            return Ok(());
+        }
         self.prune(ws);
         if self.last_write.elapsed() < INTERVAL {
             return Ok(());
         }
         self.last_write = Instant::now();
-        self.write_dirty(ws).map(|_| ())
+        let r = self.write_dirty(ws).map(|_| ());
+        self.last_error = r.clone().err();
+        r
     }
 
     /// Deletes the copies of documents that are no longer open or no longer modified.
@@ -231,8 +284,9 @@ impl Recovery {
         self.written.get(&handle).map(|(s, _)| s.as_str())
     }
 
-    /// Clean exit: deletes every copy this session wrote.
+    /// Clean exit: deletes every copy this session wrote and stops timed copies.
     pub fn forget_all(&mut self) {
+        self.stopped = true;
         if let Some(store) = &self.store {
             for (stem, _) in self.written.values() {
                 store.remove(stem);
@@ -373,6 +427,31 @@ pub mod tests {
         assert_eq!(item.name, old);
         assert!(item.original_path.is_none());
         assert!(store.load(&item).is_err());
+    }
+
+    /// Regression: copies were only written while frames were drawn, and egui draws none while
+    /// the window is idle, hidden or minimized, so a crash after a quiet spell lost the work.
+    #[test]
+    fn the_background_writer_copies_without_frames_and_stops_on_exit() {
+        let tmp = TempDir::new("recovery-writer");
+        let store = RecoveryStore::new(&tmp.0);
+        let ws = workspace_with_edit().shared();
+        let mut rec = Recovery::new(Some(store.clone()));
+        rec.last_write = Instant::now().checked_sub(INTERVAL).unwrap();
+        let rec: SharedRecovery = Arc::new(Mutex::new(rec));
+        spawn_writer_every(&rec, &ws, egui::Context::default(), Duration::from_millis(10));
+        let waited = Instant::now();
+        while store.list().is_empty() && waited.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(store.list().len(), 1, "a copy appears with no frame drawn");
+
+        // A clean exit deletes the copies and no later tick writes new ones.
+        lock(&rec).forget_all();
+        ws.lock().unwrap().active_doc_mut().unwrap().edit("More", |p| p.add_task("More", None)).unwrap();
+        lock(&rec).last_write = Instant::now().checked_sub(INTERVAL).unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(store.list().is_empty());
     }
 
     #[test]

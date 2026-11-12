@@ -27,7 +27,7 @@ pub enum ChartAction {
 
 pub struct ChartInput<'a> {
     pub project: &'a Project,
-    pub rows: &'a [usize],
+    pub rows: &'a [super::Row],
     pub selected: &'a dyn Fn(TaskId) -> bool,
     pub tracking: bool,
     pub row_height: f32,
@@ -154,7 +154,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
 
     // ---- Geometry for all rows (links need off-screen ones too) ----
     let mut geom: HashMap<TaskId, BarGeom> = HashMap::with_capacity(input.rows.len());
-    for (r, &idx) in input.rows.iter().enumerate() {
+    for (r, idx) in input.rows.iter().enumerate().filter_map(|(r, row)| row.task().map(|i| (r, i))) {
         let Some(t) = p.tasks.get(idx) else { continue };
         let (Some(s), Some(f)) = (t.sched.start, t.sched.finish) else {
             continue;
@@ -166,7 +166,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
     // ---- Links ----
     if g.show_links {
         let link_stroke = Stroke::new(1.0, theme::pal().LINK);
-        for &idx in input.rows {
+        for idx in input.rows.iter().filter_map(super::Row::task) {
             let Some(t) = p.tasks.get(idx) else { continue };
             let Some(sg) = geom.get(&t.id).copied() else {
                 continue;
@@ -244,7 +244,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
     // Milestone membership: dashed connectors from member tasks to their milestone.
     if g.show_links {
         let stroke = Stroke::new(1.0, theme::pal().MEMBER_LINK);
-        for &idx in input.rows {
+        for idx in input.rows.iter().filter_map(super::Row::task) {
             let Some(t) = p.tasks.get(idx) else { continue };
             if !t.is_milestone() || t.members.is_empty() {
                 continue;
@@ -267,7 +267,24 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
     let mut hovered: Option<(TaskId, &'static str)> = None;
     let pointer = ui.input(|i| i.pointer.hover_pos());
     for r in first..last.min(input.rows.len()) {
-        let Some(&idx) = input.rows.get(r) else { continue };
+        let idx = match input.rows.get(r) {
+            Some(super::Row::Task(idx)) => *idx,
+            Some(super::Row::Group(group)) => {
+                // A group header spans its tasks, drawn like a summary bar on a tinted row.
+                let y = body.top() + r as f32 * rh - *scroll_y;
+                bp.rect_filled(Rect::from_min_size(pos2(body.left(), y), vec2(body.width(), rh)), 0.0, theme::pal().HEADER_BG);
+                let tasks = group.tasks.iter().filter_map(|&i| p.tasks.get(i));
+                let start = tasks.clone().filter_map(|t| t.sched.start).min();
+                let finish = tasks.filter_map(|t| t.sched.finish).max();
+                if let (Some(s), Some(f)) = (start, finish) {
+                    let (x0, x1) = (g.x_of(chart_left, s), g.x_of(chart_left, f).max(g.x_of(chart_left, s) + 1.0));
+                    let yc = y + rh / 2.0;
+                    bp.rect_filled(Rect::from_min_max(pos2(x0, yc - 3.0), pos2(x1, yc + 2.0)), 0.0, theme::pal().ACCENT_MID);
+                }
+                continue;
+            }
+            None => continue,
+        };
         let Some(t) = p.tasks.get(idx) else { continue };
         let Some(bg) = geom.get(&t.id).copied() else {
             continue;

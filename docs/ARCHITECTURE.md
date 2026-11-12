@@ -16,11 +16,12 @@ This crate is pure logic with no UI. Every other component builds on it.
 | `model` | `Project`, `Task`, `Resource`, `Assignment`, `TimeEntry`, `ExternalProject`, `TaskRef`, `Dependency`, `Constraint`, `Estimate`, `Baseline`, and computed `TaskSchedule` / `ProjectSchedule` |
 | `ids` | Stable unique ids (`TaskId`, `ResourceId`, …) and their monotonic counters |
 | `duration` | Working-minute durations: formatting and parsing (`3d`, `4h`, `2w`, `3d?`) and lags (`2d`, `-1d`, `50%`, `3ed`) |
+| `custom` | Custom field definitions and values, and saved table layouts (column keys per table) |
 | `calendar` | Working weeks, exceptions (including yearly ones), and `WorkCal` date arithmetic: add/sub working time, snapping, and working minutes between two times |
 | `schedule` | The CPM engine (`recalculate`) |
 | `ops` | All editing operations: outline, links, milestones, the duration/work/units rules, assignments, progress, time logging, baselines, calendars, and text parsing for the table columns |
 | `workload` | Time-phased distribution (with contours), capacity, overallocation, and workload reports |
-| `leveling` | Serial resource leveling that writes `leveling_delay` |
+| `leveling` | Serial resource leveling that writes `leveling_delay`. It keeps loads incrementally and recalculates only when a delay can move other tasks. |
 | `report` | Statistics, milestone status, lateness, earned value |
 | `io` | `.plancraft` JSON load/save, relative paths, external-link refresh |
 | `workspace` | Open documents with undo/redo snapshots and change attribution (user vs agent) |
@@ -55,14 +56,17 @@ So a vacation of any assigned person pauses the task. Lags and summary durations
 4. **Topological sort** (Kahn). Cycles are reported and broken.
 5. **Forward pass:**
    - Applies all four link types with lags.
-   - Applies constraints: SNET/FNET push the task later; MSO/MFO pin it; SNLT/FNLT are honored and flagged when violated.
+   - Applies constraints: SNET/FNET push the task later; MSO/MFO pin it; SNLT/FNLT are honored and flagged when violated. A Start No Earlier Than date on a summary drives all of its subtasks.
    - Adds leveling delays.
    - Uses actual start and finish when they are set.
    - Manual tasks keep their entered dates.
-6. **Backward pass.** It computes late dates, limited by the project finish, deadlines and constraints.
+6. **Backward pass.** It computes late dates, limited by the project finish, deadlines (a task's own and its summaries') and constraints. Inactive successors are skipped. A link from a summary's start binds only the subtask that sets that start.
 7. **ALAP pass.** As-late-as-possible tasks are pinned to their late start, and the passes run again so successors stay consistent.
 8. **Slack.** Total and free slack are computed per leaf. A task is critical when total slack ≤ the threshold.
-9. **Roll up summaries and the project:** dates, work, cost and duration-weighted % complete.
+9. **Roll up summaries and the project:**
+   - Dates, work and cost. A summary's own fixed cost and assignments are added on top of its subtasks'.
+   - % complete, weighted by the durations of all subtasks below. Nested summaries and the project agree.
+   - A missed summary deadline is flagged.
 
 ### Duration, work and units
 
@@ -82,7 +86,7 @@ Scheduling only ever reads the snapshots, so a file opens and schedules even whe
 
 ### Undo and attribution
 
-`Document::edit` and `Document::try_edit` snapshot the project, apply the change, validate it against `limits`, recalculate and bump `revision`. Both return a `Result` and roll back on error. Each snapshot records whether the user or an agent made the change. Projects are small, so whole-project snapshots are simple and reliable.
+`Document::edit` and `Document::try_edit` snapshot the project, apply the change, validate it against `limits`, recalculate and bump `revision`. Both return a `Result` and roll back on error. Each snapshot records whether the user or an agent made the change. Whole-project snapshots are simple and reliable. The history keeps up to 200 steps within an estimated 256 MiB per document, dropping the oldest first.
 
 ### Robustness
 
@@ -99,7 +103,7 @@ The MCP server is a hand-rolled JSON-RPC 2.0 server. It has no async runtime, wh
   - Tool errors come back as `isError` results.
   - Each request locks the shared workspace briefly.
   - The change callback runs after the lock is released.
-- **`tools/*`:** 67 tools grouped by domain.
+- **`tools/*`:** 71 tools grouped by domain.
   - All mutations go through `Document::try_edit(…, ChangeSource::Agent, …)`.
   - Unknown arguments are rejected so agents find their typos.
 - **Transports:**

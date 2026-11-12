@@ -35,6 +35,8 @@ pub struct MenuInfo {
     pub resource_selected: bool,
     pub mcp_running: bool,
     pub mcp_url: Option<String>,
+    /// Fields offered for sorting and grouping: (key, title), the table's columns first.
+    pub fields: Vec<(String, String)>,
 }
 
 const TAB_ROW_H: f32 = 28.0;
@@ -377,6 +379,15 @@ fn toolbar(ui: &mut Ui, st: &mut UiState, info: &MenuInfo, settings: &AppSetting
             b(ui, "🔗", Some("Links Between Projects"), "Depend on tasks in other project files", doc, Command::ExternalLinks);
             b(ui, "⟳", None, "Refresh links to other projects", doc, Command::RefreshExternal);
             sep(ui);
+            b(
+                ui,
+                "🏷",
+                Some("Custom Fields"),
+                "Define your own task fields: text with a pick-list, number, cost, date, duration, flag",
+                doc,
+                Command::CustomFields,
+            );
+            sep(ui);
             b(ui, "📏", Some("Set Baseline"), "Save the current schedule as the baseline", doc, Command::SetBaseline);
             b(ui, "✖", None, "Clear the baseline", doc, Command::ClearBaseline);
             sep(ui);
@@ -406,6 +417,40 @@ fn toolbar(ui: &mut Ui, st: &mut UiState, info: &MenuInfo, settings: &AppSetting
                 for t in TaskTable::ALL {
                     if ui.selectable_label(st.table == t, t.label()).clicked() {
                         push(Command::Table(t));
+                    }
+                }
+            });
+            let title_of = |key: &Option<String>, none: &str| {
+                key.as_ref().and_then(|k| info.fields.iter().find(|(fk, _)| fk == k)).map_or_else(|| none.to_string(), |(_, t)| t.clone())
+            };
+            combo_label(ui, "Sort");
+            let sort_key = st.sort.as_ref().map(|(k, _)| k.clone());
+            let sort_text = match &st.sort {
+                Some((_, desc)) => format!("{} ({})", title_of(&sort_key, "Outline"), if *desc { "desc" } else { "asc" }),
+                None => "Outline".to_string(),
+            };
+            egui::ComboBox::from_id_salt("tb_sort").width(120.0).selected_text(sort_text).show_ui(ui, |ui| {
+                if ui.selectable_label(st.sort.is_none(), "Outline (no sort)").clicked() {
+                    push(Command::SortBy(None));
+                }
+                for (key, title) in &info.fields {
+                    let current = st.sort.as_ref().filter(|(k, _)| k == key).map(|(_, d)| *d);
+                    if ui.selectable_label(current == Some(false), format!("{title}, ascending")).clicked() {
+                        push(Command::SortBy(Some((key.clone(), false))));
+                    }
+                    if ui.selectable_label(current == Some(true), format!("{title}, descending")).clicked() {
+                        push(Command::SortBy(Some((key.clone(), true))));
+                    }
+                }
+            });
+            combo_label(ui, "Group");
+            egui::ComboBox::from_id_salt("tb_group").width(110.0).selected_text(title_of(&st.group, "No Group")).show_ui(ui, |ui| {
+                if ui.selectable_label(st.group.is_none(), "No Group").clicked() {
+                    push(Command::GroupBy(None));
+                }
+                for (key, title) in &info.fields {
+                    if ui.selectable_label(st.group.as_ref() == Some(key), title).clicked() {
+                        push(Command::GroupBy(Some(key.clone())));
                     }
                 }
             });

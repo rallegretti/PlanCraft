@@ -34,7 +34,11 @@ fn step(ctx: &Ctx, a: &Args, redo: bool) -> ToolResult {
         for _ in 0..steps {
             let label = if redo { doc.redo_label() } else { doc.undo_label() }.map(str::to_string);
             let Some(label) = label else { break };
-            let ok = if redo { doc.redo() } else { doc.undo() };
+            let ok = if redo {
+                doc.redo_as(plancraft_core::workspace::ChangeSource::Agent)
+            } else {
+                doc.undo_as(plancraft_core::workspace::ChangeSource::Agent)
+            };
             if !ok {
                 break;
             }

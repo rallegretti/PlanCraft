@@ -184,3 +184,24 @@ fn attach_bridge_relays_and_follows_a_new_token() {
     assert_eq!(reply["id"], 9);
     assert!(reply["error"]["message"].as_str().unwrap().contains("not reachable"));
 }
+
+/// Regression: tiny_http switches to chunked transfer encoding for replies of 32 KiB or more, and
+/// the bridge used to hand the chunk framing to the JSON parser ("trailing characters").
+#[test]
+fn attach_bridge_relays_large_replies() {
+    use plancraft_mcp::attach::run_attach_with;
+    use plancraft_mcp::session::{SessionInfo, new_token};
+
+    let token = new_token();
+    let server = Arc::new(McpServer::new(Workspace::default().shared()));
+    let handle = serve_http(server, "127.0.0.1:0", &token).unwrap();
+    let session = || Ok(SessionInfo { url: handle.url(), token: token.clone(), pid: 1 });
+    let input = json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }).to_string();
+    let mut out = Vec::new();
+    run_attach_with(std::io::Cursor::new(input), &mut out, &session).unwrap();
+    assert!(out.len() > 32 * 1024, "tools/list should be a large reply ({} bytes)", out.len());
+    let reply: Value = serde_json::from_slice(&out).unwrap();
+    assert!(reply.get("error").is_none(), "{reply}");
+    assert!(reply["result"]["tools"].as_array().unwrap().len() > 50);
+    handle.shutdown();
+}

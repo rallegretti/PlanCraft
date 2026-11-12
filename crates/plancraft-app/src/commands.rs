@@ -71,6 +71,23 @@ pub enum Command {
     ZoomSelected,
     Filter(TaskFilter),
     Table(TaskTable),
+    /// Sort task views by a field key (`true` = descending); `None` restores the outline order.
+    SortBy(Option<(String, bool)>),
+    /// Group task views by a field key; `None` ungroups.
+    GroupBy(Option<String>),
+    /// Insert a column showing field `key` before column `at` of the current table.
+    InsertColumn {
+        at: usize,
+        key: String,
+    },
+    HideColumn(usize),
+    MoveColumn {
+        at: usize,
+        right: bool,
+    },
+    /// Back to the current table's default columns.
+    ResetColumns,
+    CustomFields,
     CollapseAll,
     ExpandAll,
     History,

@@ -23,11 +23,17 @@ pub struct ColumnDef {
     pub width: f32,
     pub align: Align,
     pub editor: Editor,
+    /// The view is sorted by this column: `Some(descending)` draws an arrow in the header.
+    pub sort: Option<bool>,
 }
 
 impl ColumnDef {
     pub fn new(title: impl Into<String>, width: f32) -> Self {
-        Self { title: title.into(), width, align: Align::Min, editor: Editor::Text }
+        Self { title: title.into(), width, align: Align::Min, editor: Editor::Text, sort: None }
+    }
+    pub fn sorted(mut self, descending: Option<bool>) -> Self {
+        self.sort = descending;
+        self
     }
     pub fn right(mut self) -> Self {
         self.align = Align::Max;
@@ -79,7 +85,18 @@ pub struct Edit {
     pub row: usize,
     pub col: usize,
     pub text: String,
+    /// The value the editor opened with. Finishing with the text unchanged commits nothing, so
+    /// clicking through a cell never rewrites it (a display-rounded value or a date without its
+    /// time would otherwise change the data).
+    original: Option<String>,
     started: bool,
+}
+
+impl Edit {
+    /// Whether finishing this edit should report a commit.
+    fn changed(&self) -> bool {
+        self.original.as_deref().is_none_or(|o| o.trim() != self.text.trim())
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -96,7 +113,13 @@ pub struct GridState {
 impl GridState {
     pub fn begin_edit(&mut self, row: usize, col: usize, text: String) {
         self.cursor = Some((row, col));
-        self.editing = Some(Edit { row, col, text, started: false });
+        self.editing = Some(Edit { row, col, original: Some(text.clone()), text, started: false });
+    }
+
+    /// Starts editing with typed text that replaces the cell's value (always committed).
+    pub fn begin_typed_edit(&mut self, row: usize, col: usize, text: String) {
+        self.cursor = Some((row, col));
+        self.editing = Some(Edit { row, col, original: None, text, started: false });
     }
 }
 
@@ -134,6 +157,15 @@ pub enum GridEvent {
     ClickEmpty {
         row: usize,
     },
+    /// Click on a column header.
+    HeaderClick {
+        col: usize,
+    },
+    /// Right-click on a column header.
+    HeaderMenu {
+        col: usize,
+        pos: Pos2,
+    },
 }
 
 pub struct GridConfig<'a> {
@@ -143,6 +175,8 @@ pub struct GridConfig<'a> {
     /// Extra empty rows painted (and editable) below the data, like a spreadsheet.
     pub blank_rows: usize,
     pub row_numbers: bool,
+    /// Text of each row's number cell (default: the display row, counting from 1).
+    pub row_label: Option<&'a dyn Fn(usize) -> String>,
     pub show_vscroll: bool,
     pub header_height: f32,
     pub row_height: f32,
@@ -263,7 +297,29 @@ pub fn show(
             Align::Min => Align2::LEFT_CENTER,
         };
         let hp = hdr_painter.with_clip_rect(r.shrink2(vec2(2.0, 0.0)).intersect(header));
+        let text_pos = if def.sort.is_some() && def.align == Align::Max { text_pos - vec2(12.0, 0.0) } else { text_pos };
         hp.text(text_pos, anchor, &def.title, font.clone(), theme::pal().TEXT);
+        if let Some(desc) = def.sort {
+            // A small triangle (drawn, not a glyph): up for ascending, down for descending.
+            let c = pos2(r.right() - 9.0, r.center().y);
+            let pts = if desc {
+                vec![c + vec2(-4.0, -2.5), c + vec2(4.0, -2.5), c + vec2(0.0, 3.0)]
+            } else {
+                vec![c + vec2(-4.0, 2.5), c + vec2(4.0, 2.5), c + vec2(0.0, -3.0)]
+            };
+            hp.add(egui::Shape::convex_polygon(pts, theme::pal().ACCENT_MID, Stroke::NONE));
+        }
+        // Click to sort, right-click for the column menu (the resize handle below wins at the edge).
+        let visible = r.intersect(Rect::from_min_max(pos2(header.left() + rn_w, header.top()), header.max));
+        if visible.width() > 4.0 {
+            let hr = ui.interact(visible, cfg.id.with(("header", c)), Sense::click());
+            if hr.clicked() {
+                events.push(GridEvent::HeaderClick { col: c });
+            }
+            if hr.secondary_clicked() {
+                events.push(GridEvent::HeaderMenu { col: c, pos: hr.interact_pointer_pos().unwrap_or(r.left_bottom()) });
+            }
+        }
         // Resize handle.
         let handle = Rect::from_center_size(pos2(r.right(), header.center().y), vec2(6.0, header.height()));
         if handle.left() > header.left() + rn_w && handle.right() < header.right() + 3.0 {
@@ -390,7 +446,7 @@ pub fn show(
                 body_painter.text(
                     pos2(rr.right() - 6.0, rr.center().y),
                     Align2::RIGHT_CENTER,
-                    (row + 1).to_string(),
+                    cfg.row_label.map_or_else(|| (row + 1).to_string(), |f| f(row)),
                     FontId::proportional(11.5),
                     theme::pal().TEXT_WEAK,
                 );
@@ -551,7 +607,7 @@ pub fn show(
     if let Some((commit, mv)) = finished
         && let Some(e) = state.editing.take()
     {
-        if commit {
+        if commit && e.changed() {
             events.push(GridEvent::Commit { row: e.row, col: e.col, text: e.text.trim().to_string() });
         }
         if let Some((dr, dc)) = mv {
@@ -619,7 +675,7 @@ pub fn show(
         {
             if let Some(t) = typed.filter(|t| !t.trim().is_empty()) {
                 if matches!(def.editor, Editor::Text) {
-                    state.begin_edit(r, c, t);
+                    state.begin_typed_edit(r, c, t);
                     if let Some(e) = state.editing.as_mut() {
                         // Place cursor at end of the typed text.
                         let id = cfg.id.with(("edit", r, c));

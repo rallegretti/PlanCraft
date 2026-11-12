@@ -434,3 +434,100 @@ fn workspace_from_files_handles_new_and_existing() {
     assert!(plancraft_mcp::workspace_from_files(&[dir.path().join("missing-dir/x.plancraft")]).is_err());
     assert!(plancraft_mcp::workspace_from_files::<&str>(&[]).unwrap().lock().unwrap().docs.is_empty());
 }
+
+/// Regression: `close_project` with `discard_changes` closed a document holding the user's
+/// unsaved edits from the app, and the app then pruned its recovery copy, so the work was gone.
+#[test]
+fn agents_cannot_discard_the_users_unsaved_work() {
+    use plancraft_core::workspace::ChangeSource;
+    let c = Client::new();
+    c.call("new_project", json!({ "name": "Shared", "start": "2026-10-19" }));
+    c.call("create_task", json!({ "name": "Agent task" }));
+    // The user edits the same document in the app.
+    {
+        let mut ws = c.server.workspace().lock().unwrap();
+        let doc = ws.active_doc_mut().unwrap();
+        doc.edit_as("Add task", ChangeSource::User, |p| p.add_task("User task", None)).unwrap();
+    }
+    let e = c.call_err("close_project", json!({ "discard_changes": true }));
+    assert!(e.contains("made by the user"), "{e}");
+    assert_eq!(c.call("list_tasks", json!({}))["total"], 2, "the document is still open");
+
+    // Undo through MCP is the agent's change, not the user's.
+    c.call("new_project", json!({ "name": "Agent only", "start": "2026-10-19" }));
+    c.call("create_task", json!({ "name": "Draft" }));
+    c.call("undo", json!({}));
+    {
+        let ws = c.server.workspace().lock().unwrap();
+        let doc = ws.active_doc().unwrap();
+        assert_eq!(doc.last_change.as_ref().map(|(_, s)| *s), Some(ChangeSource::Agent));
+        assert!(!doc.user_changes);
+    }
+    // An agent may still throw away its own unsaved work.
+    c.call("close_project", json!({ "discard_changes": true }));
+    assert_eq!(c.call("get_project", json!({}))["project"]["name"], "Shared");
+}
+
+/// Regression: saving overwrote a file another program (a second PlanCraft, a standalone MCP
+/// server, a sync tool) had changed since it was opened, silently losing that program's work.
+#[test]
+fn saving_never_silently_overwrites_another_programs_changes() {
+    let dir = std::env::temp_dir().join(format!("plancraft-conflict-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("plan.plancraft");
+    let c = Client::new();
+    c.call("new_project", json!({ "name": "Plan", "start": "2026-10-19" }));
+    c.call("save_project", json!({ "path": path.to_str().unwrap() }));
+
+    // Another program rewrites the file (different size, so the change is visible at once).
+    let mut other = plancraft_core::io::load(&path).unwrap();
+    other.add_task("Written elsewhere", None);
+    plancraft_core::io::save(&other, &path).unwrap();
+
+    c.call("create_task", json!({ "name": "Mine" }));
+    let e = c.call_err("save_project", json!({}));
+    assert!(e.contains("changed by another program") && e.contains("overwrite"), "{e}");
+    assert!(plancraft_core::io::load(&path).unwrap().tasks.iter().any(|t| t.name == "Written elsewhere"), "the other version is intact");
+
+    c.call("save_project", json!({ "overwrite": true }));
+    let saved = plancraft_core::io::load(&path).unwrap();
+    assert!(saved.tasks.iter().any(|t| t.name == "Mine"));
+    // Once saved, ordinary saves work again.
+    c.call("create_task", json!({ "name": "More" }));
+    c.call("save_project", json!({}));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn custom_fields_are_defined_set_and_shown() {
+    let c = Client::new();
+    c.call("new_project", json!({ "name": "Custom", "start": "2026-10-19" }));
+    let t = c.call("create_task", json!({ "name": "Design" }));
+    let id = t["id"].as_u64().unwrap();
+    c.call("create_custom_field", json!({ "name": "Status", "choices": ["To do", "Doing", "Done"] }));
+    c.call("create_custom_field", json!({ "name": "Budget", "type": "cost" }));
+    c.call("create_custom_field", json!({ "name": "Approved", "type": "flag" }));
+
+    let task = c.call("update_task", json!({ "task": id, "custom": { "status": "doing", "Budget": 1250.5, "Approved": true } }));
+    assert_eq!(task["custom"]["Status"], "Doing", "{task}");
+    assert_eq!(task["custom"]["Budget"], "$1250.50");
+    assert_eq!(task["custom"]["Approved"], "Yes");
+    let e = c.call_err("update_task", json!({ "task": id, "custom": { "Status": "Blocked" } }));
+    assert!(e.contains("not one of the choices"), "{e}");
+    let e = c.call_err("update_task", json!({ "task": id, "custom": { "Colour": "red" } }));
+    assert!(e.contains("Status") && e.contains("Budget"), "lists the fields: {e}");
+
+    let list = c.call("list_tasks", json!({}));
+    assert_eq!(list["tasks"][0]["custom"]["Status"], "Doing");
+    let fields = c.call("list_custom_fields", json!({}));
+    assert_eq!(fields["custom_fields"][0]["tasks_with_value"], 1);
+
+    c.call("update_custom_field", json!({ "field": "Status", "name": "Stage", "choices": ["Doing", "Done"] }));
+    c.call("update_task", json!({ "task": id, "custom": { "Stage": null } }));
+    assert!(c.call("get_task", json!({ "task": id }))["custom"].get("Stage").is_none());
+    let left = c.call("delete_custom_field", json!({ "field": "Budget" }));
+    assert_eq!(left["custom_fields"].as_array().unwrap().len(), 2);
+    // Undo restores the deleted field and its value.
+    c.call("undo", json!({}));
+    assert_eq!(c.call("get_task", json!({ "task": id }))["custom"]["Budget"], "$1250.50");
+}

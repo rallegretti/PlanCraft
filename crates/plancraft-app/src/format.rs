@@ -53,12 +53,15 @@ pub fn units(u: f64) -> String {
 /// Parses "50%", "50", "0.5" into units (fraction).
 pub fn parse_units(text: &str) -> Option<f64> {
     let t = text.trim();
-    if let Some(p) = t.strip_suffix('%') {
-        return p.trim().parse::<f64>().ok().map(|v| v / 100.0);
-    }
-    let v: f64 = t.parse().ok()?;
-    // Bare numbers are percentages ("50" = 50%) unless written as a small fraction ("0.5", "1.5").
-    Some(if t.contains('.') && v <= 10.0 { v } else { v / 100.0 })
+    let units = if let Some(p) = t.strip_suffix('%') {
+        p.trim().parse::<f64>().ok()? / 100.0
+    } else {
+        let v: f64 = t.parse().ok()?;
+        // Bare numbers are percentages ("50" = 50%) unless written as a small fraction ("0.5", "1.5").
+        if t.contains('.') && v <= 10.0 { v } else { v / 100.0 }
+    };
+    // "NaN", "inf" and negative values parse as floats but are not units.
+    (units.is_finite() && units >= 0.0).then_some(units)
 }
 
 /// Parses money like "$1,200.50".
@@ -80,6 +83,9 @@ mod tests {
         assert_eq!(parse_units("50%"), Some(0.5));
         assert_eq!(parse_units("150"), Some(1.5));
         assert_eq!(parse_units("0.25"), Some(0.25));
+        for bad in ["abc", "", "NaN", "inf", "-50%", "-1"] {
+            assert_eq!(parse_units(bad), None, "{bad}");
+        }
         assert_eq!(parse_money("$1,200.50"), Some(1200.5));
         let p = Project::new("x", chrono::NaiveDate::from_ymd_opt(2026, 1, 5).unwrap());
         assert_eq!(money(&p, 1234567.891), "$1,234,567.89");

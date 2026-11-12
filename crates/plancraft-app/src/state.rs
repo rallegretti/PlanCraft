@@ -211,6 +211,7 @@ impl GanttState {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToastKind {
     Info,
     Success,
@@ -269,6 +270,14 @@ pub struct UiState {
     pub collapsed_resources: HashSet<ResourceId>,
     pub filter: TaskFilter,
     pub search: String,
+    /// Sort of task views: field key and descending.
+    pub sort: Option<(String, bool)>,
+    /// Field key task views are grouped by.
+    pub group: Option<String>,
+    /// Collapsed group headers (by label).
+    pub collapsed_groups: HashSet<String>,
+    /// Column widths of task tables, by table and field key (survive column changes).
+    pub column_widths: std::collections::HashMap<(TaskTable, String), f32>,
     pub table: TaskTable,
     pub gantt: GanttState,
     pub table_width: f32,
@@ -300,6 +309,10 @@ impl Default for UiState {
             collapsed_resources: HashSet::new(),
             filter: TaskFilter::All,
             search: String::new(),
+            sort: None,
+            group: None,
+            collapsed_groups: HashSet::new(),
+            column_widths: std::collections::HashMap::new(),
             table: TaskTable::Entry,
             gantt: GanttState::default(),
             table_width: 720.0,
