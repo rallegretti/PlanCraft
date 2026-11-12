@@ -13,6 +13,10 @@ serde_json.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
+# Printing: font metrics, the bundled UI font (embedded in PDFs), PDF stream compression. All pure Rust.
+skrifa = "0.44"
+epaint_default_fonts = "0.36"
+miniz_oxide = "0.8"
 
 [dev-dependencies]
 proptest = "1"

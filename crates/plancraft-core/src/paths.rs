@@ -27,6 +27,12 @@ pub fn recovery_dir() -> Option<PathBuf> {
     config_dir().map(|d| d.join("recovery"))
 }
 
+/// Where the desktop app writes PDFs on their way to the printer (private: plans hold people's
+/// names and rates). Files are removed once the print system has them.
+pub fn print_spool_dir() -> Option<PathBuf> {
+    config_dir().map(|d| d.join("print"))
+}
+
 /// The file through which the desktop app tells local MCP clients (`plancraft mcp --attach`)
 /// where its server listens and which bearer token it expects. Readable by the owner only.
 pub fn mcp_session_file() -> Option<PathBuf> {

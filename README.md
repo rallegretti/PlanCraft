@@ -87,6 +87,7 @@
 **Make it yours**
 - Light and **dark mode**, following your system setting or chosen under **View ▸ Theme**.
 - Ten views (Gantt Chart, Tracking Gantt, Task Usage, Calendar, Milestones, Resource Sheet, Resource Usage, Workload, Team Planner and Timesheet), with filters, search and different column layouts.
+- **Print** any Gantt chart, task table or resource sheet with a live print preview, or save it as a **PDF**. Choose paper, orientation, scale, how many pages wide the timescale spreads, the legend, and headers and footers.
 - Undo and redo (up to 200 steps), plus export to CSV for spreadsheets.
 
 ## Screenshots

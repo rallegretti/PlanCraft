@@ -191,22 +191,57 @@ fn commit(p: &mut Project, id: ResourceId, col: Col, text: &str) -> Result<(), S
     Ok(())
 }
 
-pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: &mut Vec<Command>) {
-    let defs = defs(&doc.project);
-    let over: HashSet<ResourceId> = plancraft_core::workload::overallocations(&doc.project).into_iter().map(|(r, _)| r).collect();
+/// Work and cost per resource over all its assignments.
+fn totals(p: &Project) -> HashMap<ResourceId, (Minutes, f64)> {
     let mut work: HashMap<ResourceId, (Minutes, f64)> = HashMap::new();
-    for a in &doc.project.assignments {
-        let Some(r) = doc.project.resource(a.resource) else {
+    for a in &p.assignments {
+        let Some(r) = p.resource(a.resource) else {
             continue;
         };
         let e = work.entry(a.resource).or_default();
-        e.0 += a.work;
+        e.0 = e.0.saturating_add(a.work);
         e.1 += match r.kind {
             ResourceType::Work => a.work as f64 / 60.0 * r.standard_rate + r.cost_per_use,
             ResourceType::Material => a.units * r.standard_rate + r.cost_per_use,
             ResourceType::Cost => a.cost,
         };
     }
+    work
+}
+
+/// The Resource Sheet for printing (without the indicator column; overallocated resources in red).
+pub fn print_sheet(p: &Project, pal: &plancraft_core::print::layout::Palette) -> plancraft_core::print::Sheet {
+    use plancraft_core::print::{Align, PrintCell, PrintColumn, PrintRow, RowKind, Sheet};
+    let defs = defs(p);
+    let over: HashSet<ResourceId> = plancraft_core::workload::overallocations(p).into_iter().map(|(r, _)| r).collect();
+    let work = totals(p);
+    let cols: Vec<(Col, &ColumnDef)> = COLS.iter().copied().zip(&defs).filter(|(c, _)| *c != Col::Indicators).collect();
+    let mut columns = vec![PrintColumn { title: "ID".into(), width: 26.0, align: Align::Right }];
+    columns.extend(cols.iter().map(|(_, d)| PrintColumn {
+        title: d.title.clone(),
+        width: d.width * 0.75,
+        align: if d.align == egui::Align::Max { Align::Right } else { Align::Left },
+    }));
+    let rows = p
+        .resources
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let mut cells = vec![PrintCell::text((i + 1).to_string())];
+            cells.extend(cols.iter().map(|(c, _)| {
+                let cell = cell(p, r, *c, &over, &work);
+                PrintCell { text: cell.text, color: cell.color.map(|_| pal.error), ..Default::default() }
+            }));
+            PrintRow { kind: RowKind::Other, cells }
+        })
+        .collect();
+    Sheet { title: "Resource Sheet".into(), columns, rows }
+}
+
+pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: &mut Vec<Command>) {
+    let defs = defs(&doc.project);
+    let over: HashSet<ResourceId> = plancraft_core::workload::overallocations(&doc.project).into_iter().map(|(r, _)| r).collect();
+    let work = totals(&doc.project);
     let n = doc.project.resources.len();
     let cfg = GridConfig {
         id: egui::Id::new("resource_sheet"),

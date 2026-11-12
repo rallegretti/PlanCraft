@@ -280,6 +280,15 @@ entity; read-only tools are annotated with `readOnlyHint`.
 
 Set or clear values with the `custom` argument of `create_task`/`update_task`, e.g. `{"custom": {"Status": "In progress", "Budget": 1200, "Approved": true}}`. A `null` value clears a field. Tasks show their values under `custom`.
 
+### Printing
+
+| Tool | Arguments (required in **bold**) | Description |
+|---|---|---|
+| `set_page_setup` | footer, header, legend, margin_mm, orientation, pages_wide, paper, print_blank_pages, repeat_columns, scale_percent | Change the plan's Page Setup (saved with the plan, undoable). Omitted settings keep their values. Returns the whole setup. |
+| `export_pdf` | footer, from, header, legend, margin_mm, orientation, overwrite, pages_wide, paper, **path**, print_blank_pages, repeat_columns, scale_percent, to, view | Print the plan to a PDF: the Gantt chart (`view: "gantt"`, the default), the Tracking Gantt with baselines (`"tracking"`) or the task table alone (`"table"`), paginated with the plan's Page Setup. Page Setup arguments apply to this export only. Needs file access; never replaces an existing file unless `overwrite` is true, and only writes `.pdf` files. |
+
+Header and footer texts take codes: `[Project]`, `[Manager]`, `[Company]`, `[View]`, `[Date]`, `[Page]`, `[Pages]`, `[Start]` and `[Finish]`. `pages_wide: 0` prints the timescale at a fixed zoom instead of fitting it to pages.
+
 ### Time tracking
 
 | Tool | Arguments (required in **bold**) | Description |

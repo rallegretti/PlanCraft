@@ -186,7 +186,7 @@ pub struct GridOutput {
     pub events: Vec<GridEvent>,
 }
 
-const ROW_NUM_W: f32 = 34.0;
+pub const ROW_NUM_W: f32 = 34.0;
 const HSCROLL_H: f32 = 12.0;
 const VSCROLL_W: f32 = 12.0;
 

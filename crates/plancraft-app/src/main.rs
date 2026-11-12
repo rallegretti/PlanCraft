@@ -19,6 +19,7 @@ mod format;
 mod logo;
 mod mcp_host;
 mod menubar;
+mod printing;
 mod recovery;
 mod settings;
 mod start_page;

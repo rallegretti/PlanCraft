@@ -26,7 +26,7 @@ pub fn blank_rows(st: &UiState) -> usize {
 
 /// The cell of a group header row: the value and count under the name column, the span and
 /// totals under date, work and cost columns.
-fn group_cell(field: Field, p: &Project, g: &GroupRow) -> grid::Cell {
+pub(crate) fn group_cell(field: Field, p: &Project, g: &GroupRow) -> grid::Cell {
     let tasks: Vec<&Task> = g.tasks.iter().filter_map(|&i| p.tasks.get(i)).collect();
     let start = tasks.iter().filter_map(|t| t.sched.start).min();
     let finish = tasks.iter().filter_map(|t| t.sched.finish).max();

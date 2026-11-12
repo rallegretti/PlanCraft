@@ -18,6 +18,10 @@ pub enum Command {
     Undo,
     Redo,
     ExportCsv,
+    /// The Print window (preview, page setup, print, save as PDF).
+    Print,
+    /// Save the current view as a PDF with the plan's page setup.
+    ExportPdf,
     Quit,
     StartPage,
     /// Restore a recovery copy (by its stem in the recovery folder).

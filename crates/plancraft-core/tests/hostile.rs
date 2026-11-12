@@ -156,6 +156,23 @@ proptest! {
             let mut copy = doc.project.clone();
             prop_assert!(limits::sanitize(&mut copy).is_empty(), "{op:?} left values out of range");
         }
+        // Whatever the edits left, the plan prints (table and chart) to a valid PDF.
+        let p = &doc.project;
+        for chart in [true, false] {
+            let sheet = plancraft_core::print::task_sheet(p, chart);
+            let out = plancraft_core::print::layout(&plancraft_core::print::PrintJob {
+                project: p,
+                setup: &p.page_setup,
+                sheet: &sheet,
+                chart: chart.then(|| plancraft_core::print::ChartOptions { critical: true, baseline: true, slack: true, ..Default::default() }),
+                from: None,
+                to: None,
+                printed: start().and_hms_opt(9, 0, 0).unwrap(),
+                palette: plancraft_core::print::layout::Palette::default(),
+            });
+            prop_assert!(!out.pages.is_empty() && out.pages.len() <= plancraft_core::print::layout::MAX_PAGES);
+            prop_assert!(plancraft_core::print::pdf::write(&out).starts_with(b"%PDF"));
+        }
     }
 }
 
@@ -194,6 +211,7 @@ enum Op {
     SetCustom(usize, usize, String),
     DeleteField(usize),
     Columns(String, Vec<String>),
+    PageSetup(usize, bool, f32, u16, u8, u8, usize, String),
 }
 
 fn edit_op() -> impl Strategy<Value = Op> {
@@ -227,6 +245,17 @@ fn edit_op() -> impl Strategy<Value = Op> {
         i().prop_map(Op::DeleteField),
         (cell_text(), prop::collection::vec(prop_oneof![cell_text(), (0u32..8).prop_map(|n| format!("custom:{n}"))], 0..6))
             .prop_map(|(n, c)| Op::Columns(n, c)),
+        (
+            0usize..5,
+            any::<bool>(),
+            prop_oneof![any::<f32>(), Just(f32::NAN), 0.0f32..60.0],
+            any::<u16>(),
+            any::<u8>(),
+            any::<u8>(),
+            0usize..3,
+            cell_text()
+        )
+            .prop_map(|(a, b, c, d, e, f, g, h)| Op::PageSetup(a, b, c, d, e, f, g, h)),
     ]
 }
 
@@ -304,6 +333,22 @@ fn apply(p: &mut Project, op: &Op) -> PlanResult<()> {
         }
         Op::DeleteField(f) => p.delete_custom_field(field_at(p, f))?,
         Op::Columns(name, cols) => p.set_table_columns(&name, &cols)?,
+        Op::PageSetup(paper, portrait, margin, scale, wide, repeat, legend, text) => {
+            use plancraft_core::print::{LegendPlacement, Orientation, PageSetup, Paper, TimescaleFit};
+            p.set_page_setup(PageSetup {
+                paper: Paper::ALL[paper % Paper::ALL.len()],
+                orientation: if portrait { Orientation::Portrait } else { Orientation::Landscape },
+                margin_mm: margin,
+                scale_percent: scale,
+                timescale: if wide % 4 == 0 { TimescaleFit::AsShown } else { TimescaleFit::PagesWide(wide) },
+                repeat_columns: repeat,
+                legend: LegendPlacement::ALL[legend % 3],
+                header: [text.clone(), "[Page] of [Pages]".into(), text],
+                footer: Default::default(),
+                print_blank_pages: wide % 2 == 0,
+                print_all_columns: portrait,
+            });
+        }
     }
     Ok(())
 }
@@ -338,4 +383,28 @@ fn edits_beyond_the_task_limit_are_rolled_back() {
 /// The number of random cases: `default`, or `PROPTEST_CASES` when set (to search harder locally).
 fn cases(default: u32) -> u32 {
     std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+#[test]
+fn hostile_page_setup_in_a_file_is_clamped_on_open() {
+    let p = demo_project(start());
+    let mut v = serde_json::to_value(&p).unwrap();
+    v["page_setup"] = serde_json::json!({
+        "paper": "A3",
+        "margin_mm": 1e30,
+        "scale_percent": 0,
+        "timescale": { "PagesWide": 255 },
+        "repeat_columns": 255,
+        "header": ["x".repeat(10_000), "a\nb", ""],
+    });
+    let (loaded, notes) = plancraft_core::io::from_json_with_notes(&v.to_string(), std::path::Path::new("x.plancraft")).unwrap();
+    assert!(notes.iter().any(|n| n.contains("page setup")), "{notes:?}");
+    let s = &loaded.page_setup;
+    assert_eq!(s.paper, plancraft_core::print::Paper::A3);
+    assert_eq!(s.margin_mm, plancraft_core::print::MAX_MARGIN_MM);
+    assert_eq!(s.scale_percent, plancraft_core::print::MIN_SCALE);
+    assert_eq!(s.timescale, plancraft_core::print::TimescaleFit::PagesWide(plancraft_core::print::MAX_PAGES_WIDE));
+    assert!(s.header[0].chars().count() <= plancraft_core::print::MAX_HEADER_CHARS);
+    // A plan with the default setup does not store one.
+    assert!(!plancraft_core::io::to_json(&p).unwrap().contains("page_setup"));
 }

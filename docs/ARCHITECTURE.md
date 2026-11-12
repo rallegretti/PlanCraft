@@ -17,6 +17,8 @@ This crate is pure logic with no UI. Every other component builds on it.
 | `ids` | Stable unique ids (`TaskId`, `ResourceId`, …) and their monotonic counters |
 | `duration` | Working-minute durations: formatting and parsing (`3d`, `4h`, `2w`, `3d?`) and lags (`2d`, `-1d`, `50%`, `3ed`) |
 | `custom` | Custom field definitions and values, and saved table layouts (column keys per table) |
+| `print` | Page Setup, page layout of a table with a Gantt chart (pages across and down, timescale, bars, links, legend, header/footer), PDF writer with an embedded TrueType subset of the UI font (`print::pdf`, `print::subset`). The app's Print Preview paints the same pages |
+| `timescale` | Timescale units and tiers shared by the chart, usage views, timeline and printing |
 | `calendar` | Working weeks, exceptions (including yearly ones), and `WorkCal` date arithmetic: add/sub working time, snapping, and working minutes between two times |
 | `schedule` | The CPM engine (`recalculate`) |
 | `ops` | All editing operations: outline, links, milestones, the duration/work/units rules, assignments, progress, time logging, baselines, calendars, and text parsing for the table columns |
@@ -103,7 +105,7 @@ The MCP server is a hand-rolled JSON-RPC 2.0 server. It has no async runtime, wh
   - Tool errors come back as `isError` results.
   - Each request locks the shared workspace briefly.
   - The change callback runs after the lock is released.
-- **`tools/*`:** 71 tools grouped by domain.
+- **`tools/*`:** 73 tools grouped by domain.
   - All mutations go through `Document::try_edit(…, ChangeSource::Agent, …)`.
   - Unknown arguments are rejected so agents find their typos.
 - **Transports:**
@@ -120,7 +122,8 @@ The desktop app uses egui and eframe 0.36 with the wgpu renderer.
 - **`start_page`:** the Start Page, a centered launcher with start actions, recent projects (with file dates) and a summary of the open project.
 - **`commands`:** the `Command` enum shared by the menu bar, toolbar, context menus and shortcuts.
 - **`widgets::grid`:** a virtualized spreadsheet grid with in-place text and choice editors, column resizing, keyboard navigation, and blank rows for entering new items.
-- **`widgets::timescale`:** the two-tier timescale.
+- **`widgets::timescale`:** the two-tier timescale (units from `plancraft_core::timescale`).
+- **`printing` / `dialogs::print`:** the printed sheet built from the current view (columns left of the divider, sort, group and filter as on screen), the Print window with its preview, and hand-off to the system print service (`lp`; the PDF viewer on Windows) in a background thread with a timeout.
 - **`views/*`:** the ten views. The Gantt view combines the task grid with `gantt_chart`, which draws bars, links, milestone connectors and baselines and handles drag-to-move, resize, progress and link.
 - **`columns`:** task table definitions. Each column defines how to display, edit and commit its value. Tables: Entry, Schedule, Tracking, Work, Cost, Estimates, Variance, Summary.
 - **`dialogs/*`:** Task, Resource and Project Information, Change Working Time, Assign Resources, External Links, Statistics, History, About, and the MCP panel.

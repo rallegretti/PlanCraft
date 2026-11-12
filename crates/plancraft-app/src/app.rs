@@ -152,6 +152,7 @@ impl PlanCraftApp {
             (KeyboardShortcut::new(cmd, Key::O), Command::Open, true),
             (KeyboardShortcut::new(cmd | Modifiers::SHIFT, Key::S), Command::SaveAs, true),
             (KeyboardShortcut::new(cmd, Key::S), Command::Save, true),
+            (KeyboardShortcut::new(cmd, Key::P), Command::Print, true),
             (KeyboardShortcut::new(cmd | Modifiers::SHIFT, Key::Z), Command::Redo, false),
             (KeyboardShortcut::new(cmd, Key::Z), Command::Undo, false),
             (KeyboardShortcut::new(cmd, Key::Y), Command::Redo, false),
@@ -255,6 +256,33 @@ impl PlanCraftApp {
                 self.st.toast(ToastKind::Error, e.to_string());
                 false
             }
+        }
+    }
+
+    /// Saves the current view as a PDF, laid out with the plan's page setup.
+    fn export_pdf(&mut self) {
+        let Some(pending) = self.with_doc(|doc, st| {
+            let view = crate::printing::PrintView::for_view(st.view);
+            let pages = crate::printing::document(&doc.project, st, view, &doc.project.page_setup, None, None);
+            dialogs::print::PendingPdf {
+                bytes: plancraft_core::print::pdf::write(&pages),
+                name: format!("{} - {}.pdf", doc.project.name, view.label()),
+            }
+        }) else {
+            return;
+        };
+        self.save_pdf(pending);
+    }
+
+    /// Asks where to save a PDF and writes it (no workspace lock is held while the file dialog is open).
+    fn save_pdf(&mut self, pdf: dialogs::print::PendingPdf) {
+        let name: String =
+            pdf.name.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '-' } else { c }).collect();
+        let Some(path) = rfd::FileDialog::new().add_filter("PDF", &["pdf"]).set_file_name(name).save_file() else { return };
+        let path = if path.extension().is_none() { path.with_extension("pdf") } else { path };
+        match plancraft_core::io::write_atomic(&path, &pdf.bytes, plancraft_core::io::Privacy::KeepExisting) {
+            Ok(()) => self.set_status(format!("Saved {}", path.display())),
+            Err(e) => self.st.toast(ToastKind::Error, format!("Could not save the PDF: {e}")),
         }
     }
 
@@ -362,6 +390,15 @@ impl PlanCraftApp {
                 self.set_status("Recovery copy discarded");
             }
             Command::ExportCsv => self.export_csv(),
+            Command::Print => {
+                let ws = self.ws.clone();
+                let ws = lock(&ws);
+                if let Some(doc) = ws.active_doc() {
+                    self.dialogs.print = Some(Bound::new(doc, dialogs::print::PrintDialog::new(doc, &self.st)));
+                    self.st.start_page = false;
+                }
+            }
+            Command::ExportPdf => self.export_pdf(),
             Command::McpPanel => {
                 self.dialogs.mcp = true;
                 self.st.start_page = false;
@@ -1213,6 +1250,7 @@ impl PlanCraftApp {
                         continue;
                     }
                     "CustomFields" => Command::CustomFields,
+                    "Print" => Command::Print,
                     // `GroupBy=<field>` and `SortBy=<field>[ desc]`, by column key or custom field name.
                     other => {
                         let field_key = |name: &str| {
@@ -1517,6 +1555,8 @@ impl PlanCraftApp {
         {
             let st = &mut self.st;
             dialogs::show_bound(&mut self.dialogs.external, &mut ws, |d, doc| d.show(&ctx, doc, st));
+            let st = &*st;
+            dialogs::show_bound(&mut self.dialogs.print, &mut ws, |d, doc| d.show(&ctx, doc, st));
         }
         // Assign Resources works on the active document's selection: start afresh when the
         // active document changes, so typed units never carry over to another plan.
@@ -1550,6 +1590,9 @@ impl PlanCraftApp {
         if self.dialogs.mcp {
             let ws = self.ws.clone();
             dialogs::mcp_panel::show(&ctx, &mut self.dialogs.mcp, &mut self.mcp, &mut self.settings, &ws);
+        }
+        if let Some(pdf) = self.dialogs.print.as_mut().and_then(|b| b.dialog.pending_pdf.take()) {
+            self.save_pdf(pdf);
         }
         self.confirm_dialog(&ctx);
         self.overwrite_dialog(&ctx);
@@ -1709,6 +1752,33 @@ mod ui_tests {
         h.run_steps(2);
         let ws = h.state().ws.lock().unwrap();
         assert_eq!(table_fields(&ws.active_doc().unwrap().project, crate::columns::TaskTable::Entry), before);
+    }
+
+    #[test]
+    fn print_window_previews_and_saves_page_setup_with_the_plan() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = harness();
+        h.key_press_modifiers(Modifiers::COMMAND, egui::Key::P);
+        h.run_steps(3);
+        assert!(h.state().dialogs.print.is_some(), "Ctrl+P opens the Print window");
+        h.get_by_label("Portrait").click();
+        h.run_steps(2);
+        h.get_by_label("Close").click();
+        h.run_steps(3);
+        assert!(h.state().dialogs.print.is_none());
+        let orientation =
+            |h: &Harness<'static, PlanCraftApp>| h.state().ws.lock().unwrap().active_doc().unwrap().project.page_setup.orientation;
+        assert_eq!(orientation(&h), plancraft_core::print::Orientation::Portrait, "saved with the plan");
+        let ctx = h.ctx.clone();
+        h.state_mut().exec(&ctx, Command::Undo);
+        assert_eq!(orientation(&h), plancraft_core::print::Orientation::Landscape, "one undoable edit");
+        // Every printable view renders in the preview.
+        h.state_mut().exec(&ctx, Command::Print);
+        for v in [ViewKind::ResourceSheet, ViewKind::TrackingGantt, ViewKind::Calendar] {
+            h.state_mut().st.view = v;
+            h.state_mut().exec(&ctx, Command::Print);
+            h.run_steps(2);
+        }
     }
 
     #[test]

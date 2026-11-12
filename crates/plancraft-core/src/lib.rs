@@ -26,9 +26,11 @@ pub mod limits;
 pub mod model;
 pub mod ops;
 pub mod paths;
+pub mod print;
 pub mod report;
 pub mod sample;
 pub mod schedule;
+pub mod timescale;
 pub mod workload;
 pub mod workspace;
 
