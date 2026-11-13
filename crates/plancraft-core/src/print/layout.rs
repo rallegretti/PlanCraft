@@ -401,13 +401,17 @@ impl Chart<'_> {
     /// Whether anything is drawn for rows `rows` in the chart stretch `[off, off + w)`.
     fn has_bars(&self, rows: std::ops::Range<usize>, off: f32, w: f32) -> bool {
         let (a, b) = (self.time_at(off), self.time_at(off + w));
-        self.job.sheet.rows.get(rows).unwrap_or_default().iter().any(|r| {
-            let span = match &r.kind {
-                RowKind::Task(id) => self.task(*id).and_then(|t| Some((t.sched.start?, t.sched.finish?))),
-                RowKind::Group { start, finish } => start.zip(*finish),
-                RowKind::Other => None,
-            };
-            span.is_some_and(|(s, f)| s <= b && f >= a)
+        let slots = self.opts.baseline_slots();
+        let shows = |s: NaiveDateTime, f: NaiveDateTime| s <= b && f >= a;
+        self.job.sheet.rows.get(rows).unwrap_or_default().iter().any(|r| match &r.kind {
+            RowKind::Task(id) => self.task(*id).is_some_and(|t| {
+                // The Multiple Baselines Gantt draws only baseline bars; the others draw the
+                // scheduled bar and maybe one baseline under it.
+                let scheduled = self.opts.baselines == 0 && t.sched.start.zip(t.sched.finish).is_some_and(|(s, f)| shows(s, f));
+                scheduled || slots.iter().filter_map(|&n| t.baseline_in(n)).any(|bl| shows(bl.start, bl.finish))
+            }),
+            RowKind::Group { start, finish } => start.zip(*finish).is_some_and(|(s, f)| shows(s, f)),
+            RowKind::Other => false,
         })
     }
 
@@ -571,13 +575,16 @@ impl Chart<'_> {
             if o.baselines != 0 {
                 // Multiple Baselines Gantt: only the baselines, stacked.
                 let slots = o.baseline_slots();
+                // Fit the stack inside the row, gaps shrinking first when many baselines show.
                 let n = slots.len().max(1) as f32;
-                let h = ((10.0 - (n - 1.0) * 0.6) / n).clamp(0.8, 3.0);
-                let top = yc - (h * n + (n - 1.0) * 0.6) / 2.0;
+                let band = ROW_H - 2.0;
+                let gap = if n > 5.0 { 0.3 } else { 0.6 };
+                let h = ((band - (n - 1.0) * gap) / n).clamp(0.5, 3.0);
+                let top = yc - (h * n + (n - 1.0) * gap) / 2.0;
                 for (k, &slot) in slots.iter().enumerate() {
                     let Some(b) = t.baseline_in(slot) else { continue };
                     let color = pal.baseline_series.get(usize::from(slot)).copied().unwrap_or(pal.bar_baseline);
-                    let y0 = top + k as f32 * (h + 0.6);
+                    let y0 = top + k as f32 * (h + gap);
                     let (bx0, bx1) = (xs(b.start), xs(b.finish));
                     if t.is_milestone() {
                         diamond(out, pt(bx0, y0 + h / 2.0), (h / 2.0 + 0.6).max(1.5), color);
@@ -1357,6 +1364,39 @@ mod tests {
         assert!(some < all, "{some} < {all}");
     }
     const MAX_PAGES_WIDE_TEST: u8 = 12;
+
+    /// Regression: with blank pages skipped, the Multiple Baselines Gantt dropped the pages that
+    /// held only baseline bars, because a page counted as blank unless a scheduled bar crossed it.
+    #[test]
+    fn pages_with_only_baseline_bars_are_not_blank() {
+        fn fills(items: &[Item], colour: Rgb) -> usize {
+            items
+                .iter()
+                .map(|i| match i {
+                    Item::Rect { fill: Some(f), .. } if *f == colour => 1,
+                    Item::Clip { items, .. } => fills(items, colour),
+                    _ => 0,
+                })
+                .sum()
+        }
+        let mut p = sample::demo_project(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap());
+        // Baseline1: the whole plan as it stood two years earlier, far from every scheduled bar.
+        for t in &mut p.tasks {
+            if let Some(b) = t.baseline {
+                let back = |d: NaiveDateTime| crate::calendar::shift(d, -2 * 365 * 1440);
+                t.baselines.insert(1, crate::model::Baseline { start: back(b.start), finish: back(b.finish), ..b });
+            }
+        }
+        let sheet = task_sheet(&p, true);
+        let setup = PageSetup { timescale: TimescaleFit::PagesWide(MAX_PAGES_WIDE_TEST), print_blank_pages: false, ..Default::default() };
+        let chart = ChartOptions { baselines: 0b10, ..Default::default() };
+        let out = layout(&PrintJob { chart: Some(chart), ..job(&p, &setup, &sheet, true) });
+        let colour = Palette::default().baseline_series[1];
+        assert!(out.pages.iter().map(|pg| fills(&pg.items, colour)).sum::<usize>() > 0, "Baseline1 bars are printed");
+        // Pages with only scheduled bars are blank in this view: nothing is drawn on them.
+        let a_bar = out.pages.iter().all(|pg| fills(&pg.items, colour) > 0 || texts(pg).iter().any(|t| t.contains("Baseline1")));
+        assert!(a_bar, "every page kept shows Baseline1 bars (or the legend naming them)");
+    }
 
     #[test]
     fn hostile_input_never_panics_and_stays_bounded() {

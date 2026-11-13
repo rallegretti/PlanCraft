@@ -956,6 +956,24 @@ fn interim_plans_hold_dates_and_baseline_copies_hold_everything() {
     assert_eq!(p.task(a).unwrap().interim_in(2).map(|i| (i.start, i.finish)), Some((b0.start, b0.finish)));
 }
 
+// Source: https://learn.microsoft.com/en-us/office/vba/api/project.pjsavebaselinefrom — the constants table
+// (with https://learn.microsoft.com/en-us/office/vba/api/project.application.baselinesave — "Parameters")
+// The Start1/Finish1 … Start10/Finish10 dates are listed as a source to copy from, and a baseline
+// is a target, so an interim plan's dates can be copied into a baseline. PlanCraft refuses this
+// because an interim plan has no duration, work or cost to put in the baseline.
+#[test]
+#[ignore = "parity gap: an interim plan can't be copied into a baseline"]
+fn interim_plans_can_be_copied_into_a_baseline() {
+    let mut p = project();
+    let a = task(&mut p, "A", 2 * DAY);
+    recalculate(&mut p);
+    let all = Scope::entire_project();
+    p.save_plan(PlanSlot::Scheduled, PlanSlot::Interim(1), &all).unwrap();
+    p.save_plan(PlanSlot::Interim(1), PlanSlot::Baseline(1), &all).unwrap();
+    let b = p.task(a).unwrap().baseline_in(1).copied().unwrap();
+    assert_eq!((b.start, b.finish), (dt(2026, 10, 19, 8), dt(2026, 10, 20, 17)));
+}
+
 // Source: https://learn.microsoft.com/en-us/office/vba/api/project.application.baselineclear — "Parameters"
 // Clearing works on all tasks or only the selected ones, for a baseline or for a Start/Finish
 // (interim) pair.

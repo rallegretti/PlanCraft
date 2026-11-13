@@ -61,16 +61,18 @@ pub fn baseline_slots(mask: u16) -> impl Iterator<Item = u8> {
 
 /// The bars of `slots` stacked in the row centred on `y` (Multiple Baselines Gantt). Returns the
 /// span drawn, for hit testing.
-fn baseline_stack(bp: &Painter, g: &GanttState, chart_left: f32, t: &Task, y: f32, slots: &[u8]) -> Option<Rect> {
+fn baseline_stack(bp: &Painter, g: &GanttState, chart_left: f32, t: &Task, y: f32, rh: f32, slots: &[u8]) -> Option<Rect> {
+    // Fit the stack inside the row: gaps shrink first, then the bars.
     let n = slots.len().max(1) as f32;
-    let band = 16.0;
-    let h = ((band - (n - 1.0)) / n).clamp(1.5, 5.0);
-    let top = y - (h * n + (n - 1.0)) / 2.0;
+    let band = (rh - 4.0).max(4.0);
+    let gap = if n > 5.0 { 0.5 } else { 1.0 };
+    let h = ((band - (n - 1.0) * gap) / n).clamp(0.8, 5.0);
+    let top = y - (h * n + (n - 1.0) * gap) / 2.0;
     let mut span: Option<Rect> = None;
     for (k, &slot) in slots.iter().enumerate() {
         let Some(b) = t.baseline_in(slot) else { continue };
         let color = theme::pal().BASELINE_SERIES.get(usize::from(slot)).copied().unwrap_or(theme::pal().BAR_BASELINE);
-        let y0 = top + k as f32 * (h + 1.0);
+        let y0 = top + k as f32 * (h + gap);
         let (x0, x1) = (g.x_of(chart_left, b.start), g.x_of(chart_left, b.finish));
         let r = if t.is_milestone() {
             let r = (h / 2.0 + 1.0).max(2.5);
@@ -370,7 +372,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
 
         if multi {
             // Only the baselines: no current bar to drag, but a click still selects the task.
-            if let Some(span) = baseline_stack(&bp, g, chart_left, t, y, &multi_slots)
+            if let Some(span) = baseline_stack(&bp, g, chart_left, t, y, rh, &multi_slots)
                 && let Some(pp) = pointer
                 && body.contains(pp)
                 && span.expand2(vec2(2.0, 3.0)).contains(pp)
@@ -674,7 +676,23 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
         }
     } else if let Some((tid, _)) = hovered {
         // Tooltip with task details.
-        if let Some(t) = p.task(tid)
+        if multi
+            && let Some(t) = p.task(tid)
+            && let Some(pp) = pointer
+        {
+            // The bars here are baselines: list the ones shown, not the current schedule.
+            let mut text = t.name.clone();
+            for &n in &multi_slots {
+                let name = plancraft_core::baseline::PlanSlot::Baseline(n).name();
+                match t.baseline_in(n) {
+                    Some(b) => {
+                        text += &format!("\n{name}: {} – {}", format::date(Some(b.start)), format::date(Some(b.finish)));
+                    }
+                    None => text += &format!("\n{name}: NA"),
+                }
+            }
+            tooltip_at(ui, pp + vec2(12.0, 12.0), &text);
+        } else if let Some(t) = p.task(tid)
             && let Some(pp) = pointer
         {
             let mut text = format!(

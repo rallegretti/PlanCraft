@@ -579,15 +579,22 @@ fn hostile_baselines_in_a_file_are_clamped_on_open() {
     assert_eq!(t.baselines.keys().copied().collect::<Vec<_>>(), [3], "only Baseline1–10 are kept");
     assert_eq!(t.interim.keys().copied().collect::<Vec<_>>(), [10]);
     let b3 = t.baseline_in(3).unwrap();
-    assert!(b3.start.date() >= chrono::NaiveDate::from_ymd_opt(1900, 1, 1).unwrap() && b3.work <= limits::MAX_MINUTES && b3.duration >= 0);
-    assert!(b3.cost.abs() <= limits::MAX_MONEY);
+    assert!(
+        b3.start.date() >= chrono::NaiveDate::from_ymd_opt(1900, 1, 1).unwrap() && b3.work <= limits::MAX_TOTAL_MINUTES && b3.duration >= 0
+    );
+    assert!(b3.cost.abs() <= limits::MAX_TOTAL_MONEY);
     assert_eq!(loaded.settings.earned_value_baseline, 0);
     assert!(limits::sanitize(&mut loaded).is_empty(), "loading left nothing out of range");
     let report = recalculate(&mut loaded);
     assert!(!report.warnings.iter().any(|w| w.contains("internal error")), "{:?}", report.warnings);
-    // A number too big for a baseline key refuses the file cleanly.
-    v["tasks"][1]["baselines"] = serde_json::json!({ "999": b("2026-10-19T08:00:00", 480, 1.0) });
-    assert!(plancraft_core::io::from_json_with_notes(&v.to_string(), std::path::Path::new("x.plancraft")).is_err());
+    // Regression: a key that isn't a small number refused the whole file; now it is dropped.
+    v["tasks"][1]["baselines"] = serde_json::json!({ "999": b("2026-10-19T08:00:00", 480, 1.0), "x": b("2026-10-19T08:00:00", 1, 1.0), "2": b("2026-10-19T08:00:00", 480, 1.0) });
+    let (loaded, notes) = plancraft_core::io::from_json_with_notes(&v.to_string(), std::path::Path::new("x.plancraft")).unwrap();
+    assert!(notes.iter().any(|n| n.contains("baseline or interim plan number")), "{notes:?}");
+    assert_eq!(loaded.tasks[1].baselines.keys().copied().collect::<Vec<_>>(), [2]);
+    // A baseline that starts after it finishes is put in order.
+    let bl = loaded.tasks[1].baseline_in(2).unwrap();
+    assert!(bl.start <= bl.finish);
 }
 
 #[test]

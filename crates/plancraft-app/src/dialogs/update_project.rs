@@ -50,6 +50,11 @@ impl UpdateProject {
         }
     }
 
+    /// Follows the selection in the window's document while it is open.
+    pub fn set_selection(&mut self, selection: Vec<TaskId>) {
+        self.selection = selection;
+    }
+
     /// Applies the update as one undoable edit; returns the message to show.
     fn apply(&mut self, doc: &mut Document) -> Result<String, String> {
         let default = status_or_today(&doc.project);

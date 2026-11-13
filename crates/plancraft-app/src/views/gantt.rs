@@ -317,7 +317,7 @@ pub fn column_menu_popup(ctx: &egui::Context, p: &Project, st: &UiState, out: &m
             let numbered = |f: &Field, n: u8| matches!(f, Field::Builtin(TaskCol::Baseline(m, _)) if *m == n);
             let interim = |f: &Field| matches!(f, Field::Builtin(TaskCol::Interim(..)));
             egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                for f in hidden.iter().filter(|f| !interim(f) && !(1..=10).any(|n| numbered(f, n))) {
+                for f in hidden.iter().filter(|f| !interim(f) && !(1..=plancraft_core::baseline::MAX_BASELINE).any(|n| numbered(f, n))) {
                     pick(ui, f);
                 }
                 ui.separator();

@@ -392,10 +392,10 @@ pub struct Task {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline: Option<Baseline>,
     /// Baselines 1–10, by number (see [`crate::baseline`]).
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty", deserialize_with = "crate::baseline::lenient_slots")]
     pub baselines: std::collections::BTreeMap<u8, Baseline>,
     /// Interim plans 1–10, by number.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty", deserialize_with = "crate::baseline::lenient_slots")]
     pub interim: std::collections::BTreeMap<u8, Interim>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub show_on_timeline: bool,

@@ -132,7 +132,7 @@ impl Field {
         if let Some((c, _)) = BUILTIN.iter().find(|(_, k)| *k == key) {
             return Some(Field::Builtin(*c));
         }
-        generated().find(|c| Field::Builtin(*c).key() == key).map(Field::Builtin)
+        generated_from_key(key).map(Field::Builtin)
     }
 
     pub fn title(&self, p: &Project) -> String {
@@ -303,6 +303,21 @@ fn generated() -> impl Iterator<Item = TaskCol> {
     baselines.chain(interim)
 }
 
+/// The Baseline1–10 or interim plan column a key names ("baseline3_cost", "start4", "finish4").
+fn generated_from_key(key: &str) -> Option<TaskCol> {
+    let num = |s: &str| -> Option<u8> { s.bytes().all(|b| b.is_ascii_digit()).then(|| s.parse().ok()).flatten() };
+    let col = if let Some(rest) = key.strip_prefix("baseline") {
+        let (n, field) = rest.split_once('_')?;
+        TaskCol::Baseline(num(n)?, BlField::ALL.into_iter().find(|f| f.key() == field)?)
+    } else if let Some(n) = key.strip_prefix("start") {
+        TaskCol::Interim(num(n)?, false)
+    } else {
+        TaskCol::Interim(num(key.strip_prefix("finish")?)?, true)
+    };
+    // Only the generated range (Baseline1–10 and interim plans 1–10), so keys stay unique.
+    (generated().any(|c| c == col) && Field::Builtin(col).key() == key).then_some(col)
+}
+
 /// Every field a column can show: the built-in columns, the numbered baselines and interim plans,
 /// then the custom fields.
 pub fn all_fields(p: &Project) -> Vec<Field> {
@@ -335,6 +350,20 @@ mod tests {
             assert_eq!(Field::from_key(&p, &f.key()), Some(*f));
         }
         assert!(Field::from_key(&p, "custom:999").is_none());
+        for bad in [
+            "baseline01_cost",
+            "baseline0_cost",
+            "baseline11_start",
+            "baseline3_",
+            "baseline3_size",
+            "start0",
+            "start11",
+            "finish00",
+            "start+1",
+        ] {
+            assert!(Field::from_key(&p, bad).is_none(), "{bad}");
+        }
+        assert_eq!(Field::from_key(&p, "finish10"), Some(Field::Builtin(TaskCol::Interim(10, true))));
         assert!(Field::from_key(&p, "nonsense").is_none());
     }
 

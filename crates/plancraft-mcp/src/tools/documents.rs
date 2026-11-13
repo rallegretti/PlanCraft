@@ -123,7 +123,7 @@ pub fn tools() -> Vec<Tool> {
                     "new_tasks_auto": boolean("New tasks are auto-scheduled (true) or manual (false)."),
                     "use_resource_calendars": boolean("Assigned tasks follow resource calendars and personal time off."),
                     "progress_from_time": boolean("Compute task % complete from tracked time automatically."),
-                    "earned_value_baseline": integer("Baseline (0-10) earned value is measured against; 0 is Baseline (default)."),
+                    "earned_value_baseline": { "type": ["integer", "string"], "description": "Baseline earned value is measured against: 0-10 or \"baseline\"..\"baseline10\" (default Baseline)." },
                     "critical_slack": duration("Tasks with total slack at or below this are critical (default 0)."),
                 }),
                 &[],
@@ -386,8 +386,8 @@ fn update_project(ctx: &Ctx, a: &Args) -> ToolResult {
             if let Some(b) = a.bool("progress_from_time")? {
                 p.settings.progress_from_time = b;
             }
-            if let Some(n) = a.u64("earned_value_baseline")? {
-                p.set_earned_value_baseline(u8::try_from(n).unwrap_or(u8::MAX))?;
+            if let Some(n) = super::analysis::baseline_number(a, "earned_value_baseline")? {
+                p.set_earned_value_baseline(n)?;
             }
             if let Some(v) = a.get("critical_slack") {
                 p.settings.critical_slack = parse_duration_value(p, v, "critical_slack")?.0;

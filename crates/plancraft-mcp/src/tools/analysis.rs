@@ -119,7 +119,8 @@ pub fn tools() -> Vec<Tool> {
                 &["copy", "into"],
             ),
             set_interim_plan,
-        ),
+        )
+        .destructive(),
         Tool::new(
             "clear_baseline",
             "Clear baseline",
@@ -127,7 +128,7 @@ pub fn tools() -> Vec<Tool> {
             schema(
                 json!({
                     "baseline": baseline_ref("Which baseline to clear: 0-10 or \"baseline\"..\"baseline10\" (default Baseline)."),
-                    "interim_plan": integer("Clear this interim plan (1-10) instead of a baseline."),
+                    "interim_plan": { "type": ["integer", "string"], "description": "Clear this interim plan instead of a baseline: 1-10 or \"interim1\"..\"interim10\"." },
                     "tasks": task_refs("Only these tasks (default all)."),
                 }),
                 &[],
@@ -138,7 +139,7 @@ pub fn tools() -> Vec<Tool> {
         Tool::new(
             "list_baselines",
             "List baselines",
-            "Which baselines and interim plans hold values: per slot the number of tasks, when it was last saved, its start and finish, and its total work and cost. Also says which baseline earned value uses.",
+            "Every baseline (Baseline, Baseline1-10) and the interim plans that hold values: per slot the number of tasks with a value, when it was last saved, its start and finish, and its total work and cost. Also says which baseline variance and earned value use.",
             schema(json!({}), &[]),
             list_baselines,
         )
@@ -464,6 +465,42 @@ fn baseline_arg(a: &Args, key: &str, default: u8) -> ToolResult<u8> {
     }
 }
 
+/// The interim plan an argument names, if given (null counts as not given).
+fn interim_arg(a: &Args, key: &str) -> ToolResult<Option<u8>> {
+    let n = match a.get(key) {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::Number(_)) => a.u64(key)?.and_then(|n| u8::try_from(n).ok()),
+        Some(Value::String(s)) => match s.trim().parse::<u8>() {
+            Ok(n) => Some(n),
+            Err(_) => match PlanSlot::parse(s) {
+                Some(PlanSlot::Interim(n)) => Some(n),
+                _ => None,
+            },
+        },
+        Some(_) => None,
+    };
+    match n {
+        Some(n) if (1..=MAX_INTERIM).contains(&n) => Ok(Some(n)),
+        _ => err(format!("'{key}' must be an interim plan from 1 to 10 (or \"interim1\"..\"interim10\")")),
+    }
+}
+
+/// The tasks a baseline tool works on: all when `tasks` is left out. An empty list is refused,
+/// so a filter that matched nothing never turns into "the entire project".
+fn scope_tasks(p: &Project, a: &Args) -> ToolResult<Vec<TaskId>> {
+    if matches!(a.get("tasks"), Some(Value::Array(v)) if v.is_empty()) {
+        return err("'tasks' is empty; leave it out to cover the entire project");
+    }
+    task_list_arg(p, a, "tasks")
+}
+
+pub fn baseline_number(a: &Args, key: &str) -> ToolResult<Option<u8>> {
+    match a.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(_) => baseline_arg(a, key, 0).map(Some),
+    }
+}
+
 fn slot_arg(a: &Args, key: &str) -> ToolResult<PlanSlot> {
     let s = a.req_str(key)?;
     PlanSlot::parse(s).ok_or_else(|| {
@@ -477,11 +514,12 @@ fn plan_info_json(p: &Project, slot: PlanSlot) -> Value {
         "name": slot.name(),
         "key": slot.key(),
         "tasks": info.tasks,
-        "tasks_with_baseline": info.tasks,
         "start": fmt_dt(info.start),
         "finish": fmt_dt(info.finish),
     });
     if let PlanSlot::Baseline(_) = slot {
+        // Kept from the single-baseline tools.
+        set(&mut v, "tasks_with_baseline", json!(info.tasks));
         set(&mut v, "saved", fmt_dt(info.saved));
         set(&mut v, "work", json!(format_work(info.work)));
         set(&mut v, "cost", json!(round2(info.cost)));
@@ -496,7 +534,7 @@ fn set_baseline(ctx: &Ctx, a: &Args) -> ToolResult {
         |p, _| {
             let n = baseline_arg(a, "baseline", 0)?;
             let scope = Scope {
-                tasks: task_list_arg(p, a, "tasks")?,
+                tasks: scope_tasks(p, a)?,
                 roll_up_to_summaries: a.bool("roll_up_to_summaries")?.unwrap_or(false),
                 roll_up_from_subtasks: a.bool("roll_up_from_subtasks")?.unwrap_or(false),
             };
@@ -517,7 +555,7 @@ fn set_interim_plan(ctx: &Ctx, a: &Args) -> ToolResult {
         "Set interim plan",
         |p, _| {
             let (copy, into) = (slot_arg(a, "copy")?, slot_arg(a, "into")?);
-            let scope = Scope::selected(task_list_arg(p, a, "tasks")?);
+            let scope = Scope::selected(scope_tasks(p, a)?);
             let written = p.save_plan(copy, into, &scope)?;
             Ok((copy, into, written))
         },
@@ -535,13 +573,12 @@ fn clear_baseline(ctx: &Ctx, a: &Args) -> ToolResult {
         a,
         "Clear baseline",
         |p, _| {
-            let slot = match a.u64("interim_plan")? {
-                Some(_) if a.present("baseline") => return err("give 'baseline' or 'interim_plan', not both"),
-                Some(n) if (1..=u64::from(MAX_INTERIM)).contains(&n) => PlanSlot::Interim(n as u8),
-                Some(_) => return err("'interim_plan' must be from 1 to 10"),
-                None => PlanSlot::Baseline(baseline_arg(a, "baseline", 0)?),
+            let slot = match (interim_arg(a, "interim_plan")?, baseline_number(a, "baseline")?) {
+                (Some(_), Some(_)) => return err("give 'baseline' or 'interim_plan', not both"),
+                (Some(n), None) => PlanSlot::Interim(n),
+                (None, n) => PlanSlot::Baseline(n.unwrap_or(0)),
             };
-            let ids = task_list_arg(p, a, "tasks")?;
+            let ids = scope_tasks(p, a)?;
             let cleared = p.clear_plan(slot, &ids)?;
             Ok((slot, cleared))
         },

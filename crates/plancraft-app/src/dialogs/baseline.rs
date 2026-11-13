@@ -91,6 +91,11 @@ impl SetBaseline {
         }
     }
 
+    /// Follows the selection in the window's document while it is open.
+    pub fn set_selection(&mut self, selection: Vec<TaskId>) {
+        self.selection = selection;
+    }
+
     /// The source and target of the copy this window would make.
     fn plan(&self) -> (PlanSlot, PlanSlot) {
         if self.interim { (self.copy, self.into) } else { (PlanSlot::Scheduled, self.baseline) }
@@ -102,7 +107,7 @@ impl SetBaseline {
         if self.selected_only && self.selection.is_empty() {
             return Err("No tasks were selected; choose Entire project or select tasks first.".into());
         }
-        let rolls = self.selected_only && matches!(into, PlanSlot::Baseline(_));
+        let rolls = !self.interim && self.selected_only && matches!(into, PlanSlot::Baseline(_));
         let scope = Scope {
             tasks: if self.selected_only { self.selection.clone() } else { Vec::new() },
             roll_up_to_summaries: rolls && self.to_summaries,
@@ -153,7 +158,7 @@ impl SetBaseline {
                 ui.add_space(6.0);
                 scope_row(ui, &mut self.selected_only, self.selection.len());
                 let (copy, into) = self.plan();
-                let rolls = self.selected_only && matches!(into, PlanSlot::Baseline(_));
+                let rolls = !self.interim && self.selected_only && matches!(into, PlanSlot::Baseline(_));
                 ui.add_enabled_ui(rolls, |ui| {
                     ui.indent("rollup", |ui| {
                         ui.label("Roll up baselines:");
@@ -165,6 +170,8 @@ impl SetBaseline {
                     ui.colored_label(theme::pal().ERROR, "An interim plan holds only dates, so it can't be copied into a baseline.");
                 } else if copy == into {
                     ui.colored_label(theme::pal().ERROR, "Choose a different plan to copy into.");
+                } else if copy != PlanSlot::Scheduled && p.plan_info(copy).tasks == 0 {
+                    ui.colored_label(theme::pal().ERROR, format!("{} holds no values to copy.", copy.name()));
                 } else if p.plan_info(into).tasks > 0 {
                     note(ui, format!("{} already holds values; they will be replaced (Undo restores them).", into.name()));
                 }
@@ -203,6 +210,11 @@ pub struct ClearBaseline {
 impl ClearBaseline {
     pub fn new(selection: Vec<TaskId>) -> Self {
         Self { interim: false, baseline: PlanSlot::Baseline(0), plan: PlanSlot::Interim(1), selected_only: false, selection, error: None }
+    }
+
+    /// Follows the selection in the window's document while it is open.
+    pub fn set_selection(&mut self, selection: Vec<TaskId>) {
+        self.selection = selection;
     }
 
     fn apply(&self, doc: &mut Document) -> Result<String, String> {

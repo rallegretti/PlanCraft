@@ -542,6 +542,7 @@ pub fn settings_json(p: &Project) -> Value {
         "new_tasks_auto": s.new_tasks_auto,
         "use_resource_calendars": s.use_resource_calendars,
         "progress_from_time": s.progress_from_time,
+        "earned_value_baseline": plancraft_core::baseline::PlanSlot::Baseline(s.earned_value_baseline).name(),
     })
 }
 

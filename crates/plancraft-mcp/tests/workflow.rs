@@ -261,8 +261,15 @@ fn full_project_workflow() {
     assert_eq!(listed["baselines"][1]["tasks"], 8);
     assert_eq!(listed["baselines"][2]["tasks"], 0);
     assert_eq!(listed["interim_plans"].as_array().unwrap().len(), 1);
-    assert_eq!(c.call("clear_baseline", json!({ "interim_plan": 2 }))["tasks_cleared"], 1);
-    c.call("update_project", json!({ "earned_value_baseline": 1 }));
+    // Review fixes: an empty task list never means "everything"; copying an empty plan is
+    // refused rather than erasing the target; names and null work like everywhere else.
+    c.call_err("set_interim_plan", json!({ "copy": "scheduled", "into": "interim3", "tasks": [] }));
+    c.call_err("clear_baseline", json!({ "tasks": [] }));
+    c.call_err("set_interim_plan", json!({ "copy": "baseline7", "into": "baseline" }));
+    assert_eq!(c.call("list_baselines", json!({}))["baselines"][0]["tasks"], 8, "Baseline is untouched");
+    assert_eq!(c.call("clear_baseline", json!({ "baseline": null, "interim_plan": "interim2" }))["tasks_cleared"], 1);
+    let ev = c.call("update_project", json!({ "earned_value_baseline": "baseline1" }));
+    assert_eq!(ev["settings"]["earned_value_baseline"], "Baseline1", "{ev}");
     assert_eq!(c.call("project_statistics", json!({}))["earned_value"]["baseline"], "Baseline1");
     c.call_err("update_project", json!({ "earned_value_baseline": 11 }));
     c.call("update_project", json!({ "earned_value_baseline": 0 }));
