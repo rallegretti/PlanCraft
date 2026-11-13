@@ -408,3 +408,46 @@ fn hostile_page_setup_in_a_file_is_clamped_on_open() {
     // A plan with the default setup does not store one.
     assert!(!plancraft_core::io::to_json(&p).unwrap().contains("page_setup"));
 }
+
+/// Hostile custom fields in a file are clamped when it is opened: values of the wrong kind or
+/// for a missing field are dropped, pick-lists on non-text fields cleared, oversized lists cut,
+/// repeated names renamed, and table columns of missing fields removed.
+#[test]
+fn hostile_custom_fields_in_a_file_are_clamped_on_open() {
+    use plancraft_core::custom::{CustomFieldKind, MAX_CHOICES};
+    let mut p = Project::new("Fields", start());
+    let t = p.add_task("A", None);
+    p.add_custom_field("Status", CustomFieldKind::Text, &[]).unwrap();
+    let mut v: serde_json::Value = serde_json::from_str(&to_json(&p).unwrap()).unwrap();
+    v["custom_fields"] = serde_json::json!([
+        { "id": 1, "name": "Status", "kind": "text" },
+        { "id": 2, "name": "status", "kind": "number", "choices": ["a", "b"] },
+        { "id": 3, "name": "Field 2", "kind": "flag" },
+        { "id": 4, "name": "Many", "kind": "text", "choices": vec!["x"; MAX_CHOICES + 50] },
+    ]);
+    v["tasks"][0]["custom"] =
+        serde_json::json!({ "1": { "number": 5.0 }, "2": { "number": 1e300 }, "3": { "flag": true }, "99": { "text": "orphan" } });
+    v["tables"] = serde_json::json!([{ "name": "Entry", "columns": ["name", "custom:3", "custom:99", ""] }]);
+    let (q, notes) = from_json_with_notes(&v.to_string(), Path::new("fields.plancraft")).unwrap();
+    assert!(!notes.is_empty());
+
+    let names: Vec<&str> = q.custom_fields.iter().map(|f| f.name.as_str()).collect();
+    let lower: std::collections::HashSet<String> = names.iter().map(|n| n.to_lowercase()).collect();
+    assert_eq!(lower.len(), names.len(), "names are unique after loading: {names:?}");
+    let field = |id: u32| q.custom_field(CustomFieldId(id)).unwrap();
+    assert!(field(2).choices.is_empty(), "no pick-list on a number field");
+    assert_eq!(field(4).choices.len(), MAX_CHOICES);
+
+    let task = q.task(t).unwrap();
+    assert!(!task.custom.contains_key(&CustomFieldId(1)), "a number in a text field is dropped");
+    assert!(!task.custom.contains_key(&CustomFieldId(99)), "a value of a missing field is dropped");
+    assert!(task.custom.contains_key(&CustomFieldId(3)));
+    match task.custom.get(&CustomFieldId(2)) {
+        Some(CustomValue::Number(n)) => assert!(n.is_finite() && n.abs() <= plancraft_core::custom::MAX_CUSTOM_NUMBER),
+        other => panic!("number kept and clamped: {other:?}"),
+    }
+    assert_eq!(q.table_layout("Entry").unwrap().columns, vec!["name".to_string(), "custom:3".to_string()]);
+    // What loaded passes the edit checks, so the next edit is not refused.
+    let mut q = q;
+    assert!(limits::check_edit(&mut q).is_ok());
+}

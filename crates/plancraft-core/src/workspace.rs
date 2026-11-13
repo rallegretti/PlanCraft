@@ -25,6 +25,9 @@ const UNDO_BUDGET_BYTES: usize = if cfg!(test) { 4 * 1024 * 1024 } else { 256 * 
 fn approx_bytes(p: &Project) -> usize {
     use std::mem::size_of;
     let text = |s: &String| s.len();
+    let custom_value = |v: &crate::custom::CustomValue| {
+        size_of::<crate::custom::CustomValue>() + if let crate::custom::CustomValue::Text(s) = v { s.len() } else { 0 }
+    };
     let tasks: usize = p
         .tasks
         .iter()
@@ -36,28 +39,68 @@ fn approx_bytes(p: &Project) -> usize {
                 + t.predecessors.len() * size_of::<crate::model::Dependency>()
                 + t.members.len() * size_of::<crate::model::TaskRef>()
                 + t.sched.warnings.iter().map(|w| size_of::<String>() + w.len()).sum::<usize>()
+                + t.custom.values().map(custom_value).sum::<usize>()
         })
         .sum();
     let resources: usize = p
         .resources
         .iter()
-        .map(|r| size_of::<crate::model::Resource>() + text(&r.name) + r.exceptions.len() * size_of::<crate::calendar::CalendarException>())
+        .map(|r| {
+            size_of::<crate::model::Resource>()
+                + text(&r.name)
+                + text(&r.initials)
+                + text(&r.group)
+                + text(&r.email)
+                + text(&r.material_label)
+                + text(&r.notes)
+                + r.availability.len() * size_of::<crate::model::AvailabilityPeriod>()
+                + r.exceptions.iter().map(|e| size_of::<crate::calendar::CalendarException>() + e.name.len()).sum::<usize>()
+        })
+        .sum();
+    let fields: usize = p
+        .custom_fields
+        .iter()
+        .map(|f| {
+            size_of::<crate::custom::CustomFieldDef>()
+                + text(&f.name)
+                + f.choices.iter().map(|c| size_of::<String>() + c.len()).sum::<usize>()
+        })
+        .sum();
+    let tables: usize = p
+        .tables
+        .iter()
+        .map(|t| {
+            size_of::<crate::custom::TableLayout>() + text(&t.name) + t.columns.iter().map(|c| size_of::<String>() + c.len()).sum::<usize>()
+        })
         .sum();
     let calendars: usize = p
         .calendars
         .iter()
-        .map(|c| size_of::<crate::calendar::Calendar>() + c.exceptions.len() * size_of::<crate::calendar::CalendarException>())
+        .map(|c| {
+            size_of::<crate::calendar::Calendar>()
+                + text(&c.name)
+                + c.exceptions.iter().map(|e| size_of::<crate::calendar::CalendarException>() + e.name.len()).sum::<usize>()
+        })
         .sum();
-    let external: usize =
-        p.external_projects.iter().map(|e| e.tasks.len() * size_of::<crate::model::ExternalTaskSnapshot>() + e.path.len()).sum();
+    let external: usize = p
+        .external_projects
+        .iter()
+        .map(|e| e.path.len() + e.tasks.iter().map(|t| size_of::<crate::model::ExternalTaskSnapshot>() + t.name.len()).sum::<usize>())
+        .sum();
     size_of::<Project>()
         + text(&p.notes)
         + tasks
         + resources
         + calendars
         + external
+        + fields
+        + tables
+        + text(&p.name)
+        + text(&p.manager)
+        + text(&p.company)
+        + text(&p.author)
         + p.assignments.len() * size_of::<crate::model::Assignment>()
-        + p.time_entries.len() * size_of::<crate::model::TimeEntry>()
+        + p.time_entries.iter().map(|e| size_of::<crate::model::TimeEntry>() + e.note.len()).sum::<usize>()
 }
 
 /// Who made a change (shown in the undo history and status bar).
@@ -279,7 +322,10 @@ impl Document {
     pub fn changed_on_disk(&self) -> bool {
         match (&self.path, self.disk_stamp) {
             (Some(path), Some(known)) => io::disk_stamp(path).is_some_and(|now| now != known),
-            _ => false,
+            // A file this document never read or wrote (a restored recovery copy bound to its
+            // original): its version is unknown, so treat it as changed rather than overwrite it.
+            (Some(path), None) => io::disk_stamp(path).is_some(),
+            (None, _) => false,
         }
     }
 
@@ -522,6 +568,40 @@ mod tests {
         assert_eq!(doc.history()[0].0, "Rename");
         assert!(doc.undo());
         assert_eq!(doc.project.tasks[0].name, "Renamed 118");
+    }
+
+    /// Regression: custom-field pick-lists, resource notes and other text were left out of the
+    /// estimate, so an agent could fill undo history with huge snapshots counted as tiny.
+    #[test]
+    fn undo_estimate_counts_custom_fields_and_resource_text() {
+        let mut p = Project::new("Big", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let base = approx_bytes(&p);
+        let choices: Vec<String> = (0..100).map(|i| format!("{i}{}", "c".repeat(900))).collect();
+        p.add_custom_field("Status", crate::custom::CustomFieldKind::Text, &choices).unwrap();
+        let r = p.add_resource("Ana");
+        p.resource_mut(r).unwrap().notes = "n".repeat(50_000);
+        p.set_table_columns("Entry", &["name".into(), "duration".into()]).unwrap();
+        assert!(approx_bytes(&p) > base + 140_000, "{}", approx_bytes(&p));
+    }
+
+    /// Regression: a recovery copy restored against its original file had no record of that
+    /// file's version, so Save replaced a newer file (from a sync tool, say) without asking.
+    #[test]
+    fn a_document_bound_to_a_file_it_never_read_does_not_overwrite_it() {
+        let dir = std::env::temp_dir().join(format!("plancraft-unknown-stamp-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("plan.plancraft");
+        std::fs::write(&path, "newer work").unwrap();
+        let mut ws = Workspace::default();
+        let h = ws.add(Project::new("Restored", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), Some(path.clone()));
+        let i = ws.index_of(h).unwrap();
+        let doc = &mut ws.docs[i];
+        assert!(doc.changed_on_disk());
+        assert!(matches!(doc.save(), Err(io::FileError::ChangedOnDisk { .. })));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "newer work");
+        doc.save_overwriting().unwrap();
+        assert!(!doc.changed_on_disk(), "after saving, the file is known");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// Regression: a failed Save As left the external links rewritten relative to the folder it

@@ -1,6 +1,6 @@
 //! The PlanCraft desktop application: layout, command execution and document management.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration as StdDuration, Instant};
@@ -19,7 +19,7 @@ use crate::menubar::{self, MenuInfo};
 use crate::recovery::{self, Recovery, RecoveryStore, SharedRecovery};
 use crate::settings::AppSettings;
 use crate::start_page;
-use crate::state::{ToastKind, UiState, ViewKind};
+use crate::state::{ToastKind, UiState, ViewKind, ViewOrder};
 use crate::theme;
 use crate::views;
 
@@ -48,6 +48,9 @@ pub struct PlanCraftApp {
     inject_panic: bool,
     /// A Save stopped because another program changed the file: asks to overwrite (by handle).
     confirm_overwrite: Option<u64>,
+    /// The close (of a document or the app) to carry on with once the overwrite question is
+    /// answered and the save went through.
+    close_after_save: Option<CloseRequest>,
 }
 
 /// Locks the shared workspace. A panic caught while it was held must not lock the user out of
@@ -96,6 +99,7 @@ impl PlanCraftApp {
             status: None,
             confirm_close: None,
             confirm_overwrite: None,
+            close_after_save: None,
             allow_exit: false,
             last_title: String::new(),
             shot: std::env::var_os("PLANCRAFT_SCREENSHOT").map(|p| (PathBuf::from(p), 0)),
@@ -291,10 +295,11 @@ impl PlanCraftApp {
             let p = &doc.project;
             // UTF-8 byte order mark: Excel then reads names with accents correctly.
             let mut s = String::from("\u{feff}ID,Unique ID,WBS,Outline Level,Name,Milestone,Duration,Start,Finish,% Complete,Work (h),Cost,Predecessors,Resources,Critical");
-            // A cell starting with = + - @ (or a tab/CR) would run as a formula in a spreadsheet:
-            // prefix it with an apostrophe so it stays text.
+            // A cell starting with = + - @ (or a tab/CR/LF, also after leading spaces) would run as
+            // a formula in a spreadsheet: prefix it with an apostrophe so it stays text.
             let q = |v: &str| {
-                let guarded = if v.starts_with(['=', '+', '-', '@', '\t', '\r']) { format!("'{v}") } else { v.to_string() };
+                let risky = v.starts_with(['\t', '\r', '\n']) || v.trim_start().starts_with(['=', '+', '-', '@', '＝', '＋', '－', '＠']);
+                let guarded = if risky { format!("'{v}") } else { v.to_string() };
                 format!("\"{}\"", guarded.replace('"', "\"\""))
             };
             for f in &p.custom_fields {
@@ -518,9 +523,14 @@ impl PlanCraftApp {
                 if let Some(r) = doc.project.task_index(id) {
                     let rows = views::visible_rows(&doc.project, st);
                     if let Some(row) = views::row_of_task(&rows, r) {
-                        let name_col = st.table.columns().iter().position(|c| *c == crate::columns::TaskCol::Name).unwrap_or(0);
+                        // The plan's own columns: Name may have been moved, or columns inserted.
+                        let name_col = crate::fields::table_fields(&doc.project, st.table)
+                            .iter()
+                            .position(|f| *f == crate::fields::Field::Builtin(crate::columns::TaskCol::Name))
+                            .unwrap_or(0);
                         st.task_grid.begin_edit(row, name_col, String::new());
                         st.task_grid.scroll_to = Some(row);
+                        st.cursor_task = Some((row, id));
                     }
                 }
             }
@@ -845,27 +855,38 @@ impl PlanCraftApp {
             Command::ExpandAll => st.collapsed.clear(),
             Command::InsertColumn { .. } | Command::HideColumn(_) | Command::MoveColumn { .. } | Command::ResetColumns => {
                 let table = st.table;
-                let r = doc.edit_msg("Change Columns", |p| {
-                    let mut cols = crate::fields::table_fields(p, table);
-                    match &cmd {
-                        Command::InsertColumn { at, key } => {
-                            let field = crate::fields::Field::from_key(p, key).ok_or("that field no longer exists")?;
-                            cols.retain(|f| *f != field);
-                            cols.insert((*at).min(cols.len()), field);
-                        }
-                        Command::HideColumn(at) if cols.len() > 1 && *at < cols.len() => {
-                            cols.remove(*at);
-                        }
-                        Command::MoveColumn { at, right } => {
-                            let to = if *right { at.saturating_add(1) } else { at.saturating_sub(1) };
-                            if *at < cols.len() && to < cols.len() {
-                                cols.swap(*at, to);
-                            }
-                        }
-                        Command::ResetColumns => return p.set_table_columns(table.label(), &[]).map_err(|e| e.to_string()),
-                        _ => {}
+                let before = crate::fields::table_fields(&doc.project, table);
+                let mut cols = before.clone();
+                match &cmd {
+                    Command::InsertColumn { at, key } => {
+                        let Some(field) = crate::fields::Field::from_key(&doc.project, key) else {
+                            return st.toast(ToastKind::Warning, "that field no longer exists");
+                        };
+                        cols.retain(|f| *f != field);
+                        cols.insert((*at).min(cols.len()), field);
                     }
-                    crate::fields::save_columns(p, table, &cols)
+                    Command::HideColumn(at) if cols.len() > 1 && *at < cols.len() => {
+                        cols.remove(*at);
+                    }
+                    Command::MoveColumn { at, right } => {
+                        let to = if *right { at.saturating_add(1) } else { at.saturating_sub(1) };
+                        if *at < cols.len() && to < cols.len() {
+                            cols.swap(*at, to);
+                        }
+                    }
+                    _ => {}
+                }
+                let reset = cmd == Command::ResetColumns;
+                // Nothing to change: no undo step, and the plan stays unmodified.
+                if (reset && doc.project.table_layout(table.label()).is_none()) || (!reset && cols == before) {
+                    return;
+                }
+                let r = doc.edit_msg("Change Columns", |p| {
+                    if reset {
+                        p.set_table_columns(table.label(), &[]).map_err(|e| e.to_string())
+                    } else {
+                        crate::fields::save_columns(p, table, &cols)
+                    }
                 });
                 if let Err(e) = r {
                     st.toast(ToastKind::Warning, e);
@@ -1105,6 +1126,8 @@ impl PlanCraftApp {
                 }
                 if self.save(false) {
                     self.close_doc(h);
+                } else if self.confirm_overwrite.is_some() {
+                    self.close_after_save = Some(CloseRequest::Document(h));
                 }
                 self.confirm_close = None;
             }
@@ -1117,7 +1140,15 @@ impl PlanCraftApp {
                 let mut all = true;
                 for i in dirty {
                     lock(&self.ws).active = Some(i);
-                    all &= self.save(false);
+                    if !self.save(false) {
+                        // Stop at the first file that needs an answer (or failed); exiting carries
+                        // on once the overwrite question is answered.
+                        all = false;
+                        if self.confirm_overwrite.is_some() {
+                            self.close_after_save = Some(CloseRequest::App);
+                        }
+                        break;
+                    }
                 }
                 self.confirm_close = None;
                 if all {
@@ -1178,10 +1209,8 @@ impl PlanCraftApp {
             let mut ws = lock(&self.ws);
             ws.active = ws.index_of(handle);
         }
-        match choice {
-            0 => {
-                self.save(true);
-            }
+        let saved = match choice {
+            0 => self.save(true),
             1 => {
                 let r = {
                     let mut ws = lock(&self.ws);
@@ -1191,11 +1220,22 @@ impl PlanCraftApp {
                     Some(Ok(p)) => {
                         self.settings.add_recent(p.clone());
                         self.set_status(format!("Saved {}", p.display()));
+                        true
                     }
-                    Some(Err(e)) => self.st.toast(ToastKind::Error, e.to_string()),
-                    None => {}
+                    Some(Err(e)) => {
+                        self.st.toast(ToastKind::Error, e.to_string());
+                        false
+                    }
+                    None => false,
                 }
             }
+            _ => false,
+        };
+        // Carry on with the close that stopped to ask (Cancel or a failed save stops it).
+        match self.close_after_save.take() {
+            Some(CloseRequest::Document(h)) if saved => self.close_doc(h),
+            // Asks again about any other unsaved plans, then exits.
+            Some(CloseRequest::App) if saved => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             _ => {}
         }
     }
@@ -1460,6 +1500,21 @@ impl PlanCraftApp {
             }
             self.st.sel = Default::default();
             self.st.gantt.initialized_for = None;
+            self.st.cursor_task = None;
+            // Each document keeps its own sort and grouping.
+            let st = &mut self.st;
+            let leaving =
+                ViewOrder { sort: st.sort.take(), group: st.group.take(), collapsed_groups: std::mem::take(&mut st.collapsed_groups) };
+            if let Some(old) = self.last_active {
+                st.view_orders.insert(old, leaving);
+            }
+            let open: HashSet<u64> = ws.docs.iter().map(|d| d.handle).collect();
+            st.view_orders.retain(|h, _| open.contains(h));
+            if let Some(order) = active.and_then(|h| st.view_orders.remove(&h)) {
+                st.sort = order.sort;
+                st.group = order.group;
+                st.collapsed_groups = order.collapsed_groups;
+            }
             self.last_active = active;
         }
         // Drop selections that no longer exist (e.g. deleted by an agent).
@@ -1690,6 +1745,120 @@ mod ui_tests {
         let names = tasks(&h);
         assert_eq!(names.len(), n + 1);
         assert_eq!(names[2], "Inserted step", "{names:?}");
+    }
+
+    /// Regression: the name editor of a new task used the default column positions, so with the
+    /// Name column moved it opened on another column.
+    #[test]
+    fn insert_edits_the_name_column_wherever_it_is() {
+        let mut h = harness();
+        let ctx = h.ctx.clone();
+        let name_at = |h: &Harness<'static, PlanCraftApp>| {
+            let ws = h.state().ws.lock().unwrap();
+            crate::fields::table_fields(&ws.active_doc().unwrap().project, crate::columns::TaskTable::Entry)
+                .iter()
+                .position(|f| *f == crate::fields::Field::Builtin(crate::columns::TaskCol::Name))
+                .unwrap()
+        };
+        let at = name_at(&h);
+        h.state_mut().exec(&ctx, Command::MoveColumn { at, right: false });
+        assert_eq!(name_at(&h), at - 1);
+        let target = { h.state().ws.lock().unwrap().active_doc().unwrap().project.tasks[2].id };
+        h.state_mut().st.sel.select_task(target);
+        h.state_mut().exec(&ctx, Command::InsertTask);
+        h.run_steps(2);
+        assert_eq!(h.state().st.task_grid.editing.as_ref().map(|e| e.col), Some(at - 1));
+    }
+
+    /// Regression: in a sorted view the grid cursor stayed on its row number when an edit
+    /// re-sorted the rows, so the next keystroke edited a different task from the selected one.
+    #[test]
+    fn the_cursor_follows_its_task_when_an_edit_re_sorts_the_rows() {
+        let mut h = harness();
+        let ctx = h.ctx.clone();
+        h.state_mut().exec(&ctx, Command::SortBy(Some(("duration".into(), false))));
+        h.run_steps(2);
+        let rows_now = |h: &Harness<'static, PlanCraftApp>| {
+            let ws = h.state().ws.lock().unwrap();
+            views::visible_rows(&ws.active_doc().unwrap().project, &h.state().st)
+        };
+        let rows = rows_now(&h);
+        let (row, id) = {
+            let ws = h.state().ws.lock().unwrap();
+            let p = &ws.active_doc().unwrap().project;
+            let row =
+                rows.iter().position(|r| r.task().is_some_and(|i| !p.tasks[i].sched.is_summary && !p.tasks[i].is_milestone())).unwrap();
+            (row, p.tasks[rows[row].task().unwrap()].id)
+        };
+        h.state_mut().st.sel.select_task(id);
+        h.state_mut().st.task_grid.cursor = Some((row, 3));
+        h.run_steps(2);
+        // The edit makes it the longest task, so it sorts to another row.
+        {
+            let mut ws = h.state().ws.lock().unwrap();
+            ws.active_doc_mut().unwrap().edit("Longer", |p| p.set_duration(id, 400 * 480, false)).unwrap().unwrap();
+        }
+        h.run_steps(3);
+        let rows = rows_now(&h);
+        let (now, _) = h.state().st.task_grid.cursor.unwrap();
+        let ws = h.state().ws.lock().unwrap();
+        let p = &ws.active_doc().unwrap().project;
+        let pos = rows.iter().position(|r| r.task().is_some_and(|i| p.tasks[i].id == id));
+        assert_ne!(now, row, "the task moved: was {row}, now at {pos:?}; rows {:?}", rows.iter().map(|r| r.task()).collect::<Vec<_>>());
+        assert_eq!(rows[now].task().map(|i| p.tasks[i].id), Some(id), "the cursor is on the edited task");
+    }
+
+    /// Regression: sort and grouping were shared by every open plan, and a custom-field key names
+    /// a different field in another plan.
+    #[test]
+    fn each_open_plan_keeps_its_own_sort_and_grouping() {
+        let mut ws = Workspace::default();
+        let a = ws.add(plancraft_core::sample::demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+        let b = ws.add(Project::new("Other plan", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+        ws.active = ws.index_of(a);
+        let shared = ws.shared();
+        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).build_eframe(move |cc| PlanCraftApp::new(cc, shared));
+        h.run_steps(3);
+        let ctx = h.ctx.clone();
+        h.state_mut().exec(&ctx, Command::SortBy(Some(("start".into(), true))));
+        h.state_mut().exec(&ctx, Command::GroupBy(Some("custom:1".into())));
+        let activate = |h: &mut Harness<'static, PlanCraftApp>, handle: u64| {
+            {
+                let mut ws = h.state().ws.lock().unwrap();
+                ws.active = ws.index_of(handle);
+            }
+            h.run_steps(2);
+        };
+        activate(&mut h, b);
+        assert_eq!((h.state().st.sort.clone(), h.state().st.group.clone()), (None, None), "the other plan starts unsorted");
+        activate(&mut h, a);
+        assert_eq!(h.state().st.sort, Some(("start".into(), true)));
+        assert_eq!(h.state().st.group.as_deref(), Some("custom:1"));
+    }
+
+    /// Regression: arrowing onto a group header selected every task in the group, so a Delete
+    /// pressed next removed them all.
+    #[test]
+    fn arrowing_onto_a_group_header_selects_nothing() {
+        let mut h = harness();
+        let ctx = h.ctx.clone();
+        let status = { h.state().ws.lock().unwrap().active_doc().unwrap().project.find_custom_field("Status").unwrap().id };
+        h.state_mut().exec(&ctx, Command::GroupBy(Some(plancraft_core::custom::custom_column_key(status))));
+        h.run_steps(2);
+        let first = {
+            let ws = h.state().ws.lock().unwrap();
+            let p = &ws.active_doc().unwrap().project;
+            let rows = views::visible_rows(p, &h.state().st);
+            assert!(matches!(rows[0], views::Row::Group(_)));
+            p.tasks[rows[1].task().unwrap()].id
+        };
+        h.state_mut().st.sel.select_task(first);
+        h.state_mut().st.task_grid.cursor = Some((1, 3));
+        focus_task_grid(&mut h);
+        h.key_press(egui::Key::ArrowUp);
+        h.run_steps(2);
+        assert_eq!(h.state().st.task_grid.cursor.map(|c| c.0), Some(0));
+        assert!(h.state().st.sel.tasks.is_empty(), "{:?}", h.state().st.sel.tasks);
     }
 
     #[test]

@@ -464,3 +464,45 @@ fn nested_summaries_weigh_progress_by_subtask_duration() {
     assert!((top_pct - 200.0 / 3.0).abs() < 0.01, "{top_pct}");
     assert!((p.sched.percent_complete - top_pct).abs() < 0.01);
 }
+
+/// Regression: an inactive summary still passed its Start No Earlier Than date and deadline down
+/// to its active subtasks.
+#[test]
+fn an_inactive_summary_passes_no_constraint_or_deadline_down() {
+    let mut p = project();
+    let s = p.add_task("S", None);
+    let a = task(&mut p, "A", 5);
+    p.indent(a).unwrap();
+    {
+        let st = p.task_mut(s).unwrap();
+        st.constraint = Constraint { kind: ConstraintKind::Snet, date: Some(dt(2026, 12, 1, 8)) };
+        st.deadline = Some(dt(2026, 10, 20, 17));
+        st.active = false;
+    }
+    recalculate(&mut p);
+    assert_eq!(start(&p, a), dt(2026, 10, 19, 8));
+    assert!(p.task(a).unwrap().sched.total_slack >= 0, "no slack lost to the inactive summary's deadline");
+}
+
+/// Regression: inactive subtasks still counted when a link from a summary's start was resolved,
+/// so an inactive subtask that started earliest took the link and its active sibling was left
+/// with slack it did not have.
+#[test]
+fn inactive_subtasks_do_not_take_a_link_from_their_summarys_start() {
+    let mut p = project();
+    let s = p.add_task("S", None);
+    let a = task(&mut p, "A", 5);
+    let b = task(&mut p, "B", 5);
+    p.indent(a).unwrap();
+    p.indent(b).unwrap();
+    p.task_mut(b).unwrap().constraint = Constraint { kind: ConstraintKind::Snet, date: Some(dt(2026, 10, 21, 8)) };
+    p.task_mut(a).unwrap().active = false;
+    let c = task(&mut p, "C", 20);
+    while p.task(c).unwrap().outline_level > 1 {
+        p.outdent(c).unwrap();
+    }
+    p.link(s.into(), c, LinkType::SS, Lag::None).unwrap();
+    recalculate(&mut p);
+    assert_eq!(start(&p, c), dt(2026, 10, 21, 8), "C follows the active subtask's start");
+    assert_eq!(p.task(b).unwrap().sched.total_slack, 0, "B's start drives C, which drives the finish");
+}

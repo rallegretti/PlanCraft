@@ -487,7 +487,17 @@ fn saving_never_silently_overwrites_another_programs_changes() {
     c.call("create_task", json!({ "name": "Mine" }));
     let e = c.call_err("save_project", json!({}));
     assert!(e.contains("changed by another program") && e.contains("overwrite"), "{e}");
+    // Regression: naming the document's own file as 'path' went through Save As, which skipped
+    // the check.
+    let e = c.call_err("save_project", json!({ "path": path.to_str().unwrap() }));
+    assert!(e.contains("changed by another program"), "{e}");
     assert!(plancraft_core::io::load(&path).unwrap().tasks.iter().any(|t| t.name == "Written elsewhere"), "the other version is intact");
+    // Save As onto another existing file needs overwrite too.
+    let other_file = dir.join("other.plancraft");
+    std::fs::write(&other_file, "keep me").unwrap();
+    let e = c.call_err("save_project", json!({ "path": other_file.to_str().unwrap() }));
+    assert!(e.contains("already exists"), "{e}");
+    assert_eq!(std::fs::read_to_string(&other_file).unwrap(), "keep me");
 
     c.call("save_project", json!({ "overwrite": true }));
     let saved = plancraft_core::io::load(&path).unwrap();
