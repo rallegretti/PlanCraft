@@ -543,7 +543,10 @@ impl PlanCraftApp {
                     Err(e) => return st.toast(ToastKind::Warning, e.to_string()),
                 };
                 st.sel.select_task(id);
-                if let Some(r) = doc.project.task_index(id) {
+                if st.view == ViewKind::NetworkDiagram {
+                    // No table to type the name into: show the new box (double-click names it).
+                    st.network.reveal_pending = true;
+                } else if let Some(r) = doc.project.task_index(id) {
                     let rows = views::visible_rows(&doc.project, st);
                     if let Some(row) = views::row_of_task(&rows, r) {
                         // The plan's own columns: Name may have been moved, or columns inserted.
@@ -693,6 +696,7 @@ impl PlanCraftApp {
                     st.timeline_visible = true;
                 }
             }
+            Command::ScrollToTask if st.view == ViewKind::NetworkDiagram => st.network.reveal_pending = true,
             Command::ScrollToTask => {
                 if let Some(id) = sel.first()
                     && let Some(t) = doc.project.task(*id)
@@ -834,6 +838,16 @@ impl PlanCraftApp {
                 }
             }
             Command::Statistics => self.dialogs.stats = true,
+            Command::ZoomIn | Command::ZoomOut if st.view == ViewKind::NetworkDiagram => {
+                let n = &mut st.network;
+                let half = n.view_rect.size().max(egui::Vec2::ZERO) / 2.0;
+                let centre = n.offset + half / n.zoom;
+                let factor = if cmd == Command::ZoomIn { 1.25 } else { 0.8 };
+                n.zoom = (n.zoom * factor).clamp(views::network::MIN_ZOOM, views::network::MAX_ZOOM);
+                n.offset = centre - half / n.zoom;
+            }
+            Command::ZoomEntire if st.view == ViewKind::NetworkDiagram => st.network.fit_pending = true,
+            Command::ZoomSelected if st.view == ViewKind::NetworkDiagram => st.network.fit_selected_pending = true,
             Command::ZoomIn | Command::ZoomOut => {
                 let g = &mut st.gantt;
                 g.zoom(if cmd == Command::ZoomIn { 1 } else { -1 }, 400.0, 0.0);
@@ -1027,13 +1041,33 @@ impl PlanCraftApp {
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let mut z = self.st.gantt.px_per_day;
-                if ui
-                    .add(egui::Slider::new(&mut z, 1.0..=140.0).logarithmic(true).show_value(false))
-                    .on_hover_text("Timescale zoom")
-                    .changed()
-                {
-                    self.st.gantt.px_per_day = z;
+                if self.st.view == ViewKind::NetworkDiagram {
+                    let n = &mut self.st.network;
+                    let mut z = n.zoom;
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut z, views::network::MIN_ZOOM..=views::network::MAX_ZOOM)
+                                .logarithmic(true)
+                                .show_value(false),
+                        )
+                        .on_hover_text("Diagram zoom")
+                        .changed()
+                    {
+                        // About the centre of the view.
+                        let half = n.view_rect.size().max(egui::Vec2::ZERO) / 2.0;
+                        let centre = n.offset + half / n.zoom;
+                        n.zoom = z;
+                        n.offset = centre - half / n.zoom;
+                    }
+                } else {
+                    let mut z = self.st.gantt.px_per_day;
+                    if ui
+                        .add(egui::Slider::new(&mut z, 1.0..=140.0).logarithmic(true).show_value(false))
+                        .on_hover_text("Timescale zoom")
+                        .changed()
+                    {
+                        self.st.gantt.px_per_day = z;
+                    }
                 }
                 ui.label(RichText::new("🔍").size(12.0));
                 ui.separator();
@@ -1280,6 +1314,7 @@ impl PlanCraftApp {
                         self.st.gantt.show_critical = true;
                         continue;
                     }
+                    "ZoomEntire" => Command::ZoomEntire,
                     "FileMenu" => {
                         egui::Popup::open_id(ctx, egui::Id::new("tab_file").with("popup"));
                         continue;
@@ -1619,6 +1654,7 @@ impl PlanCraftApp {
                 match st.view {
                     ViewKind::Gantt => views::gantt::show(ui, rect, doc, st, false, &mut out),
                     ViewKind::TrackingGantt => views::gantt::show(ui, rect, doc, st, true, &mut out),
+                    ViewKind::NetworkDiagram => views::network::show(ui, rect, doc, st, &mut out),
                     ViewKind::TaskUsage => views::task_usage::show(ui, rect, doc, st, &mut out),
                     ViewKind::Milestones => views::milestones::show(ui, rect, doc, st, &mut out),
                     ViewKind::Calendar => views::calendar::show(ui, rect, doc, st, &mut out),
@@ -2035,6 +2071,126 @@ mod ui_tests {
         assert!(h.state().dialogs.print.is_none(), "switching plans closes the window");
         assert_eq!(orientation(&h, a), Orientation::Portrait, "and keeps its plan's change");
         assert_eq!(orientation(&h, b), Orientation::Landscape);
+    }
+
+    /// The Network Diagram: a click selects a box, a double-click opens Task Information,
+    /// dragging from one box to another links them, and zoom and the Format options apply.
+    #[test]
+    fn network_diagram_selects_opens_and_links_tasks() {
+        fn pointer(h: &mut Harness<'static, PlanCraftApp>, pos: egui::Pos2, pressed: Option<bool>) {
+            h.input_mut().events.push(egui::Event::PointerMoved(pos));
+            if let Some(pressed) = pressed {
+                h.input_mut().events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            h.run_steps(1);
+        }
+        let mut h = harness();
+        let ctx = h.ctx.clone();
+        h.state_mut().st.view = ViewKind::NetworkDiagram;
+        h.state_mut().exec(&ctx, Command::ZoomEntire);
+        h.run_steps(3);
+        let task_named = |h: &Harness<'static, PlanCraftApp>, name: &str| {
+            let ws = h.state().ws.lock().unwrap();
+            let p = &ws.active_doc().unwrap().project;
+            let i = p.tasks.iter().position(|t| t.name == name).unwrap();
+            (i, p.tasks[i].id)
+        };
+        let centre_of = |h: &Harness<'static, PlanCraftApp>, idx: usize| {
+            let n = &h.state().st.network;
+            let d = n.cache.as_ref().unwrap().1.clone();
+            let r = d.rect(d.node_of(idx).unwrap()).unwrap();
+            let (x, y) = (r.x + r.w / 2.0, r.y + r.h / 2.0);
+            egui::pos2(n.view_rect.left() + (x - n.offset.x) * n.zoom, n.view_rect.top() + (y - n.offset.y) * n.zoom)
+        };
+        let (scope_idx, scope) = task_named(&h, "Define scope and goals");
+        let (infra_idx, infra) = task_named(&h, "Hosting and infrastructure");
+
+        // Click selects.
+        let a = centre_of(&h, scope_idx);
+        pointer(&mut h, a, None);
+        pointer(&mut h, a, Some(true));
+        pointer(&mut h, a, Some(false));
+        h.run_steps(2);
+        assert_eq!(h.state().st.sel.single_task(), Some(scope));
+        // Double-click opens Task Information.
+        h.run_steps(30); // past the double-click window
+        // (Each test frame is a quarter of a second: both clicks' presses and releases land in
+        // two frames so they count as one double-click.)
+        for _ in 0..2 {
+            let button = |pressed| egui::Event::PointerButton {
+                pos: a,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            h.input_mut().events.extend([button(true), button(false)]);
+            h.run_steps(1);
+        }
+        h.run_steps(3);
+        assert!(h.state().dialogs.task_info.is_some(), "double-click opens Task Information");
+        h.state_mut().dialogs.task_info = None;
+        h.run_steps(2);
+
+        // Drag from one box to another links them.
+        let b = centre_of(&h, infra_idx);
+        h.run_steps(30); // past the double-click window
+        pointer(&mut h, a, Some(true));
+        for k in 1..=10 {
+            pointer(&mut h, a + (b - a) * (k as f32 / 10.0), None);
+        }
+        pointer(&mut h, b, Some(false));
+        h.run_steps(2);
+        {
+            let ws = h.state().ws.lock().unwrap();
+            let p = &ws.active_doc().unwrap().project;
+            let t = p.task(infra).unwrap();
+            assert!(t.predecessors.iter().any(|d| d.predecessor == TaskRef::Local(scope)), "{:?}", t.predecessors);
+        }
+        h.state_mut().exec(&ctx, Command::Undo);
+        let linked = |h: &Harness<'static, PlanCraftApp>| {
+            let ws = h.state().ws.lock().unwrap();
+            ws.active_doc().unwrap().project.task(infra).unwrap().predecessors.iter().any(|d| d.predecessor == TaskRef::Local(scope))
+        };
+        assert!(!linked(&h), "one undoable edit");
+
+        // Grouping applies to tables, not to the diagram (it kept a stale layout, then lost
+        // every summary box on the next edit).
+        let summaries = |h: &Harness<'static, PlanCraftApp>| {
+            let d = h.state().st.network.cache.as_ref().unwrap().1.clone();
+            let ws = h.state().ws.lock().unwrap();
+            let p = &ws.active_doc().unwrap().project;
+            d.nodes.iter().filter(|n| p.tasks[n.task].sched.is_summary).count()
+        };
+        let before = summaries(&h);
+        assert!(before > 0);
+        h.state_mut().st.group = Some("duration".into());
+        h.state_mut().exec(&ctx, Command::LevelAll);
+        h.run_steps(2);
+        assert_eq!(summaries(&h), before);
+        h.state_mut().st.group = None;
+
+        // Zoom and the Format options.
+        let z = h.state().st.network.zoom;
+        h.state_mut().exec(&ctx, Command::ZoomIn);
+        assert!(h.state().st.network.zoom > z);
+        h.state_mut().st.network.opts.ids_only = true;
+        h.state_mut().st.network.opts.critical_first = true;
+        h.state_mut().st.network.link_labels = true;
+        h.state_mut().st.network.show_summaries = false;
+        h.state_mut().st.menu_tab = crate::state::MenuTab::Format;
+        h.run_steps(3);
+        let d = h.state().st.network.cache.as_ref().unwrap().1.clone();
+        let ws = h.state().ws.lock().unwrap();
+        let p = &ws.active_doc().unwrap().project;
+        assert!(d.nodes.iter().all(|n| !p.tasks[n.task].sched.is_summary), "summaries hidden");
+        assert!(d.geometry.box_w < 60.0, "IDs only: small boxes");
+        let critical_on_top = d.nodes.iter().filter(|n| n.row == 0).all(|n| p.tasks[n.task].sched.critical);
+        assert!(critical_on_top, "Critical First: the top row is the critical path");
     }
 
     #[test]

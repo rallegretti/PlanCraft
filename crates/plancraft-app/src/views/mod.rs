@@ -4,6 +4,7 @@ pub mod calendar;
 pub mod gantt;
 pub mod gantt_chart;
 pub mod milestones;
+pub mod network;
 pub mod resource_sheet;
 pub mod resource_usage;
 pub mod task_usage;
@@ -68,6 +69,12 @@ fn matches_filter(p: &Project, t: &Task, f: TaskFilter) -> bool {
     }
 }
 
+/// Whether a task passes the view's filter and search text.
+pub fn task_matches(p: &Project, st: &UiState, t: &Task) -> bool {
+    let search = st.search.trim().to_lowercase();
+    matches_filter(p, t, st.filter) && (search.is_empty() || t.name.to_lowercase().contains(&search))
+}
+
 /// Orders task indices by the sort field (ties keep outline order; empty values stay last in
 /// either direction).
 fn sort_indices(p: &Project, items: &mut [usize], field: &Field, descending: bool) {
@@ -130,6 +137,16 @@ pub fn visible_rows(p: &Project, st: &UiState) -> Vec<Row> {
         return rows;
     }
 
+    outline_rows(p, st)
+}
+
+/// Rows of the outline (no grouping), honoring the filter and search text, the sort within the
+/// outline and collapsed summaries.
+pub fn outline_rows(p: &Project, st: &UiState) -> Vec<Row> {
+    let search = st.search.trim().to_lowercase();
+    let filtering = st.filter != TaskFilter::All || !search.is_empty();
+    let matches = |t: &Task| matches_filter(p, t, st.filter) && (search.is_empty() || t.name.to_lowercase().contains(&search));
+    let sort = st.sort.as_ref().and_then(|(k, desc)| Field::from_key(p, k).map(|f| (f, *desc)));
     let mut keep: Vec<bool> = vec![!filtering; p.tasks.len()];
     if filtering {
         for (i, t) in p.tasks.iter().enumerate() {

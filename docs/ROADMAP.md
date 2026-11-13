@@ -13,7 +13,8 @@
 - **Tracking:** time entries, the weekly timesheet, progress from tracked time, baselines, variance and earned value
   - Status date, Update Project (progress through a date; reschedule uncompleted work after it) and Mark on Track.
   - Stop and Resume dates: a task in progress can pause and resume later (a split bar); each reschedule adds a pause and keeps the earlier ones. Resource usage and leveling leave the pauses free. Actual and remaining duration entry.
-- **Desktop app:** two-row command bar, ten views, the major dialogs, undo/redo with history, multiple open documents, CSV export
+- **Desktop app:** two-row command bar, eleven views, the major dialogs, undo/redo with history, multiple open documents, CSV export
+- **Network Diagram:** a box per task, laid out automatically (each path along its own row, optionally critical path first), summaries beside their subtasks, collapsed summaries as one box, critical boxes and links highlighted, in-progress and complete marks, link labels, ID-only boxes, drag-to-link.
 - **Custom fields and tables:**
   - Custom task fields: text with an optional pick-list, number, cost, date, duration and flag.
   - Table columns you can insert, hide and move, saved with the plan.
@@ -29,8 +30,7 @@
 ## Next
 
 - **Interchange:** import CSV and Excel (pure Rust).
-- **Network Diagram view:** PERT boxes laid out automatically, with critical highlighting.
-- **Reports:** a project overview dashboard, cost overview and a milestone report (printable). Printing of the usage, calendar and Network Diagram views.
+- **Reports:** a project overview dashboard, cost overview and a milestone report (printable). Printing of the usage, calendar and Network Diagram views. Network Diagram box styles and manual box positioning.
 - **Saved filters and multi-level sort.** Also custom-field formulas and summary rollups.
 - **Recurring tasks and task splitting:** splitting tasks that have not started, dragging split parts on the Gantt, and the status-date calculation options (move completed parts back to the status date, remaining parts forward).
 - **Leveling options:** level within slack only, a priority-driven order, splitting, and a leveling preview (MS Project's "Leveling Gantt").

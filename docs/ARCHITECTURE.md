@@ -18,6 +18,7 @@ This crate is pure logic with no UI. Every other component builds on it.
 | `duration` | Working-minute durations: formatting and parsing (`3d`, `4h`, `2w`, `3d?`) and lags (`2d`, `-1d`, `50%`, `3ed`) |
 | `custom` | Custom field definitions and values, and saved table layouts (column keys per table) |
 | `print` | Page Setup, page layout of a table with a Gantt chart (pages across and down, timescale, bars, links, legend, header/footer), PDF writer with an embedded TrueType subset of the UI font (`print::pdf`, `print::subset`). The app's Print Preview paints the same pages |
+| `network` | Network Diagram layout: columns by dependency depth (loops, found as strongly connected components, are released once everything leading into them is placed), rows by path (optionally critical first), summaries beside their subtasks, collapsed summaries as one box, right-angled link routes and hit testing |
 | `timescale` | Timescale units and tiers shared by the chart, usage views, timeline and printing |
 | `calendar` | Working weeks, exceptions (including yearly ones), and `WorkCal` date arithmetic: add/sub working time, snapping, and working minutes between two times |
 | `schedule` | The CPM engine (`recalculate`) |
@@ -124,7 +125,7 @@ The desktop app uses egui and eframe 0.36 with the wgpu renderer.
 - **`widgets::grid`:** a virtualized spreadsheet grid with in-place text and choice editors, column resizing, keyboard navigation, and blank rows for entering new items.
 - **`widgets::timescale`:** the two-tier timescale (units from `plancraft_core::timescale`).
 - **`printing` / `dialogs::print`:** the printed sheet built from the current view (columns left of the divider, sort, group and filter as on screen), the Print window with its preview, and hand-off to the system print service (`lp`; the PDF viewer on Windows) in a background thread with a timeout.
-- **`views/*`:** the ten views. The Gantt view combines the task grid with `gantt_chart`, which draws bars, links, milestone connectors and baselines and handles drag-to-move, resize, progress and link.
+- **`views/*`:** the eleven views. The Gantt view combines the task grid with `gantt_chart`, which draws bars, links, milestone connectors and baselines and handles drag-to-move, resize, progress and link. `network` draws the core's Network Diagram layout (cached per edit) and handles selection, Task Information, drag-to-link, panning and zoom.
 - **`columns`:** task table definitions. Each column defines how to display, edit and commit its value. Tables: Entry, Schedule, Tracking, Work, Cost, Estimates, Variance, Summary.
 - **`dialogs/*`:** Task, Resource and Project Information, Change Working Time, Assign Resources, External Links, Statistics, History, About, and the MCP panel.
 - **`mcp_host`:** starts and stops the HTTP MCP server on the app's `SharedWorkspace`, and repaints the window when agents make changes.

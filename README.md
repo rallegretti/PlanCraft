@@ -60,6 +60,7 @@
 - See everything on a **Gantt chart**: drag bars to reschedule, stretch them to change a duration, or drag one task onto another to link them.
 - Link tasks so one starts when another finishes, or overlap them with leads and lags. Dates update automatically when anything changes.
 - Mark the deadlines that matter and see the **critical path**, the chain of tasks that sets your finish date.
+- See how the work flows in the **Network Diagram**: a box per task, laid out automatically, with the critical path in red. Drag from one box to another to link them.
 
 **Hit your milestones**
 - A milestone is a checkpoint with a **deliverable**, for example "Signed project charter" or "Beta ready", and the tasks that must be done to reach it.
@@ -87,7 +88,7 @@
 
 **Make it yours**
 - Light and **dark mode**, following your system setting or chosen under **View ▸ Theme**.
-- Ten views (Gantt Chart, Tracking Gantt, Task Usage, Calendar, Milestones, Resource Sheet, Resource Usage, Workload, Team Planner and Timesheet), with filters, search and different column layouts.
+- Eleven views (Gantt Chart, Tracking Gantt, Network Diagram, Task Usage, Calendar, Milestones, Resource Sheet, Resource Usage, Workload, Team Planner and Timesheet), with filters, search and different column layouts.
 - **Print** any Gantt chart, task table or resource sheet with a live print preview, or save it as a **PDF**. Choose paper, orientation, scale, how many pages wide the timescale spreads, the legend, and headers and footers.
 - Undo and redo (up to 200 steps), plus export to CSV for spreadsheets.
 

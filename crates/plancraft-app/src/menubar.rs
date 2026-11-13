@@ -501,12 +501,32 @@ fn toolbar(ui: &mut Ui, st: &mut UiState, info: &MenuInfo, settings: &AppSetting
             });
         }
         MenuTab::Format => {
-            let g = &mut st.gantt;
             let toggle = |ui: &mut Ui, icon: &str, label: &str, tip: &str, v: &mut bool| {
                 if button(ui, icon, Some(label), tip, doc, *v).clicked() {
                     *v = !*v;
                 }
             };
+            if st.view == ViewKind::NetworkDiagram {
+                let n = &mut st.network;
+                toggle(ui, "⚠", "Critical First", "Lay out the critical path on the top row", &mut n.opts.critical_first);
+                toggle(ui, "☰", "Summary Tasks", "Show summary tasks, left of their subtasks", &mut n.show_summaries);
+                sep(ui);
+                toggle(ui, "🔗", "Link Labels", "Show the link type and lag on each line", &mut n.link_labels);
+                toggle(
+                    ui,
+                    "▣",
+                    "Progress Marks",
+                    "One diagonal through tasks in progress, an X through complete tasks",
+                    &mut n.progress_marks,
+                );
+                toggle(ui, "#", "IDs Only", "Small boxes that show only the task ID", &mut n.opts.ids_only);
+                sep(ui);
+                if button(ui, "⛶", Some("Fit"), "Zoom to show the whole diagram", doc, false).clicked() {
+                    n.fit_pending = true;
+                }
+                return;
+            }
+            let g = &mut st.gantt;
             toggle(ui, "⚠", "Critical Path", "Highlight critical tasks", &mut g.show_critical);
             toggle(ui, "⌛", "Slack", "Show total slack after each task", &mut g.show_slack);
             toggle(ui, "📏", "Baseline", "Show baseline bars", &mut g.show_baseline);
