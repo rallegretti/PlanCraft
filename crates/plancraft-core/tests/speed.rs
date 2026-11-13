@@ -181,7 +181,8 @@ fn laying_out_a_10000_task_network_diagram_is_fast() {
     for i in 0..10_000 {
         let id = p.add_task(format!("Task {i}"), None);
         if i % 25 == 0 {
-            continue; // a phase
+            p.task_mut(id).unwrap().outline_level = 1; // a phase (new rows copy the level above)
+            continue;
         }
         p.task_mut(id).unwrap().outline_level = 2;
         p.set_duration(id, 480, false).unwrap();
@@ -201,6 +202,7 @@ fn laying_out_a_10000_task_network_diagram_is_fast() {
         for opts in [NetworkOptions::default(), NetworkOptions { critical_first: true, ..Default::default() }] {
             let d = layout(&p, &boxes_for(&p, &shown, &Default::default()), opts);
             assert_eq!(d.nodes.len(), 10_000);
+            assert_eq!(p.tasks.iter().filter(|t| t.sched.is_summary).count(), 400);
         }
     });
     let limit = if cfg!(debug_assertions) { Duration::from_secs(10) } else { Duration::from_millis(500) };

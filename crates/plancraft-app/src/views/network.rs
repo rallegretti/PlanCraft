@@ -36,13 +36,13 @@ fn cache_key(doc: &Document, st: &UiState) -> u64 {
     h.finish()
 }
 
-/// Lays out the tasks the task views show (filter, search, collapsed summaries), or every
-/// subtask passing the filter when summaries are hidden.
+/// Lays out the tasks of the outline the task views show (filter, search, collapsed summaries;
+/// grouping does not apply here), or every subtask passing the filter when summaries are hidden.
 fn diagram(doc: &Document, st: &UiState) -> Arc<Diagram> {
     let p = &doc.project;
     let boxes = if st.network.show_summaries {
         let mut shown = vec![false; p.tasks.len()];
-        for i in super::visible_rows(p, st).iter().filter_map(super::Row::task) {
+        for i in super::outline_rows(p, st).iter().filter_map(super::Row::task) {
             if let Some(s) = shown.get_mut(i) {
                 *s = true;
             }
@@ -102,6 +102,26 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
         // Centred when it fits.
         let (vw, vh) = (rect.width() / net.zoom, rect.height() / net.zoom);
         net.offset = pos2(((dw - vw) / 2.0).min(0.0), ((dh - vh) / 2.0).min(0.0));
+    }
+    if net.fit_selected_pending {
+        net.fit_selected_pending = false;
+        let rects: Vec<BoxRect> = p
+            .tasks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| st.sel.tasks.contains(&t.id))
+            .filter_map(|(i, _)| d.node_of(i))
+            .filter_map(|n| d.rect(n))
+            .collect();
+        let (x0, y0) = rects.iter().fold((f32::MAX, f32::MAX), |(x, y), r| (x.min(r.x), y.min(r.y)));
+        let (x1, y1) = rects.iter().fold((f32::MIN, f32::MIN), |(x, y), r| (x.max(r.right()), y.max(r.bottom())));
+        if !rects.is_empty() {
+            let m = d.geometry.margin;
+            let (w, h) = (x1 - x0 + 2.0 * m, y1 - y0 + 2.0 * m);
+            net.zoom = (rect.width() / w).min(rect.height() / h).clamp(MIN_ZOOM, 1.0);
+            let (vw, vh) = (rect.width() / net.zoom, rect.height() / net.zoom);
+            net.offset = pos2((x0 + x1) / 2.0 - vw / 2.0, (y0 + y1) / 2.0 - vh / 2.0);
+        }
     }
     if net.reveal_pending {
         net.reveal_pending = false;
@@ -173,7 +193,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                 let width = if l.critical { 1.6 } else { 1.0 };
                 painter.add(Shape::line(pts.clone(), Stroke::new(width, color)));
                 arrow(&painter, &pts, z, color);
-                if net.link_labels && z >= 0.45 {
+                if net.link_labels && z >= 0.45 && !l.merged {
                     let label = format!("{}{}", kind.code(), lag.format(&p.settings.time));
                     if let [.., a, b] = pts.as_slice() {
                         let at = pos2((a.x + b.x) / 2.0, a.y.min(b.y) - 2.0);
@@ -244,17 +264,18 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
             let name = line(ui, &t.name, fs * 1.05, text_color, inner);
             painter.galley(pos2(r.left() + pad + 0.55, y0), name.clone(), text_color);
             painter.galley(pos2(r.left() + pad, y0), name, text_color);
-            let half = inner / 2.0;
+            // Dates on the left, ID and duration on the right.
+            let (left_w, right_x) = (inner * 0.6, inner * 0.62);
             let cells: [(&str, String, &str, String); 2] = [
                 ("Start", format::date(t.sched.start), "ID", id_text.clone()),
                 ("Finish", format::date(t.sched.finish), "Dur", p.format_duration(t.sched.duration, t.estimated)),
             ];
             for (row, (l1, v1, l2, v2)) in cells.iter().enumerate() {
                 let y = y0 + row_h * (row as f32 + 1.0);
-                painter.galley(pos2(r.left() + pad, y), line(ui, &format!("{l1}: {v1}"), fs, text_color, half * 1.25), text_color);
+                painter.galley(pos2(r.left() + pad, y), line(ui, &format!("{l1}: {v1}"), fs, text_color, left_w), text_color);
                 painter.galley(
-                    pos2(r.left() + pad + half * 1.3, y),
-                    line(ui, &format!("{l2}: {v2}"), fs, text_color, half * 0.7),
+                    pos2(r.left() + pad + right_x, y),
+                    line(ui, &format!("{l2}: {v2}"), fs, text_color, inner - right_x),
                     text_color,
                 );
             }
@@ -297,8 +318,9 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
 
     // Dragging: from a box draws a link, from the background moves the view.
     let task_of = |k: usize| d.nodes.get(k).and_then(|n| p.tasks.get(n.task)).map(|t| t.id);
+    // Where the button went down: a drag only starts once the pointer has moved a little.
     if resp.drag_started_by(egui::PointerButton::Primary)
-        && let Some(pos) = resp.interact_pointer_pos()
+        && let Some(pos) = ui.input(|i| i.pointer.press_origin()).or(resp.interact_pointer_pos())
     {
         let (x, y) = to_diagram(pos);
         net.drag = Some(match d.node_at(x, y).and_then(task_of) {
@@ -375,10 +397,34 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
         painter.text(rect.center(), Align2::CENTER_CENTER, "No tasks to show", FontId::proportional(14.0), theme::pal().TEXT_WEAK);
     }
 
+    // Keys, once the diagram has been clicked: Delete, Insert, and Enter for Task Information.
+    if resp.clicked() || resp.secondary_clicked() || resp.drag_started() {
+        resp.request_focus();
+    }
+    if resp.has_focus() && !ui.ctx().egui_wants_keyboard_input() {
+        let (del, ins, enter) =
+            ui.input(|i| (i.key_pressed(egui::Key::Delete), i.key_pressed(egui::Key::Insert), i.key_pressed(egui::Key::Enter)));
+        if del && !st.sel.tasks.is_empty() {
+            out.push(Command::DeleteSelection);
+        }
+        if ins {
+            out.push(Command::InsertTask);
+        }
+        if enter && st.sel.single_task().is_some() {
+            out.push(Command::TaskInfo);
+        }
+    }
+
     if let Some((from, to)) = link {
-        let r = doc.edit_msg("Link Tasks", |p| p.link(TaskRef::Local(from), to, LinkType::FS, Lag::None).map_err(|e| e.to_string()));
-        if let Err(e) = r {
-            st.toast(ToastKind::Warning, e);
+        let linked = p.task(to).is_some_and(|t| t.predecessors.iter().any(|d| d.predecessor == TaskRef::Local(from)));
+        if linked {
+            // Dropping onto a task already linked would reset that link's type and lag.
+            st.toast(ToastKind::Info, "These tasks are already linked; change the link in Task Information.");
+        } else {
+            let r = doc.edit_msg("Link Tasks", |p| p.link(TaskRef::Local(from), to, LinkType::FS, Lag::None).map_err(|e| e.to_string()));
+            if let Err(e) = r {
+                st.toast(ToastKind::Warning, e);
+            }
         }
     }
 }

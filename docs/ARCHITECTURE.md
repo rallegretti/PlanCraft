@@ -18,7 +18,7 @@ This crate is pure logic with no UI. Every other component builds on it.
 | `duration` | Working-minute durations: formatting and parsing (`3d`, `4h`, `2w`, `3d?`) and lags (`2d`, `-1d`, `50%`, `3ed`) |
 | `custom` | Custom field definitions and values, and saved table layouts (column keys per table) |
 | `print` | Page Setup, page layout of a table with a Gantt chart (pages across and down, timescale, bars, links, legend, header/footer), PDF writer with an embedded TrueType subset of the UI font (`print::pdf`, `print::subset`). The app's Print Preview paints the same pages |
-| `network` | Network Diagram layout: columns by dependency depth, rows by path (optionally critical first), summaries beside their subtasks, collapsed summaries as one box, right-angled link routes and hit testing |
+| `network` | Network Diagram layout: columns by dependency depth (loops, found as strongly connected components, are released once everything leading into them is placed), rows by path (optionally critical first), summaries beside their subtasks, collapsed summaries as one box, right-angled link routes and hit testing |
 | `timescale` | Timescale units and tiers shared by the chart, usage views, timeline and printing |
 | `calendar` | Working weeks, exceptions (including yearly ones), and `WorkCal` date arithmetic: add/sub working time, snapping, and working minutes between two times |
 | `schedule` | The CPM engine (`recalculate`) |

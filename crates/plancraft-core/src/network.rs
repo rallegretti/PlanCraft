@@ -38,7 +38,7 @@ impl Geometry {
         if ids_only {
             Self { box_w: 44.0, box_h: 26.0, col_gap: 34.0, row_gap: 18.0, margin: 16.0 }
         } else {
-            Self { box_w: 176.0, box_h: 76.0, col_gap: 48.0, row_gap: 26.0, margin: 16.0 }
+            Self { box_w: 196.0, box_h: 76.0, col_gap: 48.0, row_gap: 26.0, margin: 16.0 }
         }
     }
 }
@@ -71,6 +71,9 @@ pub struct NetLink {
     pub kind: NetLinkKind,
     /// Both tasks are critical.
     pub critical: bool,
+    /// The line stands for more than one link (for example from several subtasks folded into a
+    /// collapsed summary), so no single link type and lag describe it.
+    pub merged: bool,
 }
 
 /// A rectangle in diagram units.
@@ -212,7 +215,7 @@ pub fn layout(p: &Project, boxes: &[Option<usize>], opts: NetworkOptions) -> Dia
     // Dependencies between boxes (one line per pair of boxes).
     let index: HashMap<TaskId, usize> = p.tasks.iter().enumerate().map(|(i, t)| (t.id, i)).collect();
     let mut links: Vec<NetLink> = Vec::new();
-    let mut seen: HashSet<(usize, usize)> = HashSet::new();
+    let mut seen: HashMap<(usize, usize), usize> = HashMap::new();
     for (si, t) in p.tasks.iter().enumerate() {
         let Some(to) = box_of(si).and_then(|b| node_of.get(&b).copied()) else { continue };
         let deps = t.predecessors.iter().map(|d| (d.predecessor, NetLinkKind::Dependency { kind: d.kind, lag: d.lag }));
@@ -222,8 +225,19 @@ pub fn layout(p: &Project, boxes: &[Option<usize>], opts: NetworkOptions) -> Dia
             let Some(from) = index.get(&pid).and_then(|&pi| box_of(pi)).and_then(|b| node_of.get(&b).copied()) else {
                 continue;
             };
-            if from != to && seen.insert((from, to)) {
-                links.push(NetLink { from, to, kind, critical: critical(from) && critical(to) });
+            if from == to {
+                continue;
+            }
+            match seen.get(&(from, to)) {
+                Some(&k) => {
+                    if let Some(l) = links.get_mut(k) {
+                        l.merged = true;
+                    }
+                }
+                None => {
+                    seen.insert((from, to), links.len());
+                    links.push(NetLink { from, to, kind, critical: critical(from) && critical(to), merged: false });
+                }
             }
         }
     }
@@ -288,15 +302,73 @@ pub fn layout(p: &Project, boxes: &[Option<usize>], opts: NetworkOptions) -> Dia
         }
     }
 
-    // Columns: longest path from the start (Kahn's algorithm; nodes on a cycle, which a damaged
-    // file could hold, go after the rest).
+    // Columns: longest path from the start (Kahn's algorithm). A loop (from a damaged file, or a
+    // collapsed summary with a task linked between two of its subtasks) is released once
+    // everything leading into it from outside is placed, at its first task in outline order: only
+    // the links that close the loop point left.
+    let comp = strongly_connected(&succ);
+    let n_comp = comp.iter().copied().max().map_or(0, |m| m.saturating_add(1));
+    let mut members: Vec<Vec<usize>> = vec![Vec::new(); n_comp];
+    for (i, &c) in comp.iter().enumerate() {
+        if let Some(m) = members.get_mut(c) {
+            m.push(i); // in outline order
+        }
+    }
+    // Links into each loop from outside it, not yet placed.
+    let mut outside_left: Vec<usize> = vec![0; n_comp];
+    for (a, list) in succ.iter().enumerate() {
+        for &b in list {
+            let (ca, cb) = (comp.get(a).copied(), comp.get(b).copied());
+            if ca != cb
+                && let Some(o) = cb.and_then(|c| outside_left.get_mut(c))
+            {
+                *o += 1;
+            }
+        }
+    }
+    let mut ready_loops: VecDeque<usize> = (0..n_comp).filter(|&c| outside_left.get(c) == Some(&0)).collect();
+    let mut member_cursor: Vec<usize> = vec![0; n_comp];
     let mut col: Vec<u32> = vec![0; n];
     let mut left = indeg.clone();
-    let mut queue: VecDeque<usize> = (0..n).filter(|&i| left.get(i) == Some(&0)).collect();
+    let mut queued: Vec<bool> = left.iter().map(|&l| l == 0).collect();
+    let mut queue: VecDeque<usize> = (0..n).filter(|&i| queued.get(i) == Some(&true)).collect();
     let mut done = vec![false; n];
     let mut max_col = 0;
     let mut topo: Vec<usize> = Vec::with_capacity(n);
-    while let Some(a) = queue.pop_front() {
+    loop {
+        let a = match queue.pop_front() {
+            Some(a) => a,
+            None => {
+                // Stalled on loops: release the first waiting task of a loop that nothing outside
+                // it is still waiting on.
+                let mut next = None;
+                while let Some(&c) = ready_loops.front() {
+                    let (Some(list), Some(cur)) = (members.get(c), member_cursor.get_mut(c)) else {
+                        ready_loops.pop_front();
+                        continue;
+                    };
+                    while list.get(*cur).is_some_and(|&m| queued.get(m).copied().unwrap_or(true)) {
+                        *cur += 1;
+                    }
+                    match list.get(*cur) {
+                        Some(&m) => {
+                            next = Some(m);
+                            break;
+                        }
+                        None => {
+                            ready_loops.pop_front();
+                        }
+                    }
+                }
+                match next {
+                    Some(m) => m,
+                    None => break,
+                }
+            }
+        };
+        if let Some(q) = queued.get_mut(a) {
+            *q = true;
+        }
         if let Some(d) = done.get_mut(a) {
             *d = true;
         }
@@ -304,23 +376,42 @@ pub fn layout(p: &Project, boxes: &[Option<usize>], opts: NetworkOptions) -> Dia
         let ca = col.get(a).copied().unwrap_or(0);
         max_col = max_col.max(ca);
         for &b in succ.get(a).map(Vec::as_slice).unwrap_or(&[]) {
+            if done.get(b).copied().unwrap_or(true) {
+                continue; // a link closing a loop
+            }
             if let Some(cb) = col.get_mut(b) {
                 *cb = (*cb).max(ca.saturating_add(1));
             }
+            let (comp_a, comp_b) = (comp.get(a).copied(), comp.get(b).copied());
+            if comp_a != comp_b
+                && let Some(c) = comp_b
+                && let Some(o) = outside_left.get_mut(c)
+            {
+                *o = o.saturating_sub(1);
+                if *o == 0 {
+                    ready_loops.push_back(c);
+                }
+            }
             if let Some(l) = left.get_mut(b) {
                 *l = l.saturating_sub(1);
-                if *l == 0 {
+                if *l == 0
+                    && let Some(q) = queued.get_mut(b)
+                    && !*q
+                {
+                    *q = true;
                     queue.push_back(b);
                 }
             }
         }
     }
+    // Anything left (it should not happen) goes after the rest.
     for i in 0..n {
         if !done.get(i).copied().unwrap_or(true) {
             max_col = max_col.saturating_add(1);
             if let Some(c) = col.get_mut(i) {
                 *c = max_col;
             }
+            topo.push(i);
         }
     }
 
@@ -340,8 +431,8 @@ pub fn layout(p: &Project, boxes: &[Option<usize>], opts: NetworkOptions) -> Dia
     for (child, o) in owner.iter().enumerate() {
         let Some(s) = *o else { continue };
         let adjacent = col.get(child).copied() == col.get(s).map(|c| c.saturating_add(1));
-        if adjacent && !has_sibling_pred.get(child).copied().unwrap_or(false) {
-            links.push(NetLink { from: s, to: child, kind: NetLinkKind::Outline, critical: false });
+        if adjacent && !has_sibling_pred.get(child).copied().unwrap_or(false) && !seen.contains_key(&(s, child)) {
+            links.push(NetLink { from: s, to: child, kind: NetLinkKind::Outline, critical: false, merged: false });
         }
     }
 
@@ -372,6 +463,20 @@ pub fn layout(p: &Project, boxes: &[Option<usize>], opts: NetworkOptions) -> Dia
     let mut starts: Vec<usize> = (0..n).filter(|&i| !summary(i) && link_indeg.get(i) == Some(&0)).collect();
     if opts.critical_first {
         starts.sort_by_key(|&s| !critical(s));
+        // The critical path may begin after tasks already done (which are not critical): start
+        // the top row at its first critical task.
+        let mut critical_pred = vec![false; n];
+        for (a, list) in link_succ.iter().enumerate() {
+            if critical(a) {
+                for &b in list {
+                    if let Some(c) = critical_pred.get_mut(b) {
+                        *c = true;
+                    }
+                }
+            }
+        }
+        let heads = (0..n).filter(|&i| !summary(i) && critical(i) && !critical_pred.get(i).copied().unwrap_or(false));
+        starts = heads.chain(starts).collect();
     }
     // Nodes on a cycle have no start of their own.
     starts.extend((0..n).filter(|&i| !summary(i)));
@@ -457,6 +562,74 @@ pub fn layout(p: &Project, boxes: &[Option<usize>], opts: NetworkOptions) -> Dia
     let by_cell = nodes.iter().enumerate().map(|(k, nd)| ((nd.col, nd.row), k)).collect();
     let cols = if n == 0 { 0 } else { max_col.saturating_add(1) };
     Diagram { nodes, links, cols, rows: next_row, geometry: Geometry::new(opts.ids_only), by_task: node_of, by_cell }
+}
+
+/// Strongly connected components of a graph given by successor lists (Tarjan's algorithm,
+/// without recursion): `out[i]` is the component of node `i`. Nodes on one loop share a
+/// component; every other node has its own.
+fn strongly_connected(succ: &[Vec<usize>]) -> Vec<usize> {
+    let n = succ.len();
+    const UNSEEN: usize = usize::MAX;
+    let mut index = vec![UNSEEN; n];
+    let mut low = vec![0usize; n];
+    let mut on_stack = vec![false; n];
+    let mut stack: Vec<usize> = Vec::new();
+    let mut comp = vec![UNSEEN; n];
+    let mut next_index = 0usize;
+    let mut next_comp = 0usize;
+    // (node, position in its successor list)
+    let mut work: Vec<(usize, usize)> = Vec::new();
+    for root in 0..n {
+        if index.get(root) != Some(&UNSEEN) {
+            continue;
+        }
+        work.push((root, 0));
+        while let Some(&mut (v, ref mut pos)) = work.last_mut() {
+            if *pos == 0 && index.get(v) == Some(&UNSEEN) {
+                if let (Some(iv), Some(lv), Some(sv)) = (index.get_mut(v), low.get_mut(v), on_stack.get_mut(v)) {
+                    *iv = next_index;
+                    *lv = next_index;
+                    *sv = true;
+                }
+                next_index += 1;
+                stack.push(v);
+            }
+            let list = succ.get(v).map(Vec::as_slice).unwrap_or(&[]);
+            if let Some(&w) = list.get(*pos) {
+                *pos += 1;
+                if index.get(w) == Some(&UNSEEN) {
+                    work.push((w, 0));
+                } else if on_stack.get(w).copied().unwrap_or(false) {
+                    let iw = index.get(w).copied().unwrap_or(0);
+                    if let Some(lv) = low.get_mut(v) {
+                        *lv = (*lv).min(iw);
+                    }
+                }
+                continue;
+            }
+            // All successors seen: close the component if `v` is its root.
+            work.pop();
+            let lv = low.get(v).copied().unwrap_or(0);
+            if let Some(&(parent, _)) = work.last()
+                && let Some(lp) = low.get_mut(parent)
+            {
+                *lp = (*lp).min(lv);
+            }
+            if index.get(v) == Some(&lv) {
+                while let Some(w) = stack.pop() {
+                    if let (Some(sw), Some(cw)) = (on_stack.get_mut(w), comp.get_mut(w)) {
+                        *sw = false;
+                        *cw = next_comp;
+                    }
+                    if w == v {
+                        break;
+                    }
+                }
+                next_comp += 1;
+            }
+        }
+    }
+    comp
 }
 
 #[cfg(test)]
@@ -547,6 +720,61 @@ mod tests {
         assert!(d.links.is_empty());
     }
 
+    /// Regression: a loop made by collapsing a summary (a task linked between two of its
+    /// subtasks) put every task after it in a column of its own, some left of their predecessors.
+    #[test]
+    fn a_loop_from_collapsing_leaves_the_tasks_after_it_in_order() {
+        let mut p = project();
+        let s = p.add_task("S", None);
+        let a = p.add_task("a", None);
+        let b = p.add_task("b", None);
+        p.task_mut(a).unwrap().outline_level = 2;
+        p.task_mut(b).unwrap().outline_level = 2;
+        let x = p.add_task("X", None);
+        p.task_mut(x).unwrap().outline_level = 1;
+        let y1 = p.add_task("Y1", None);
+        let y3 = p.add_task("Y3", None);
+        let y2 = p.add_task("Y2", None);
+        let w = p.add_task("W", None);
+        let w2 = p.add_task("W2", None);
+        for (from, to) in [(a, x), (x, b), (b, y1), (y1, y2), (y2, y3), (w, w2), (x, w2)] {
+            p.link(from.into(), to, LinkType::FS, Lag::None).unwrap();
+        }
+        recalculate(&mut p);
+        let mut shown = vec![true; p.tasks.len()];
+        shown[1] = false;
+        shown[2] = false;
+        let collapsed: HashSet<TaskId> = [s].into();
+        let d = layout(&p, &boxes_for(&p, &shown, &collapsed), NetworkOptions::default());
+        let col = |id: TaskId| at(&d, p.task_index(id).unwrap()).0;
+        // Only the loop between S and X points left; the rest keeps its order.
+        for (from, to) in [(s, y1), (y1, y2), (y2, y3), (w, w2), (x, w2)] {
+            assert!(col(to) > col(from), "{:?}", d.nodes);
+        }
+        assert!(d.cols <= 5, "{} columns", d.cols);
+        // The S -> Y1 line stands for b -> Y1 only; S <-> X are single links too.
+        assert!(d.links.iter().all(|l| !l.merged));
+    }
+
+    #[test]
+    fn lines_standing_for_several_links_are_marked() {
+        let mut p = project();
+        let s = p.add_task("S", None);
+        let a = p.add_task("a", None);
+        let b = p.add_task("b", None);
+        let after = p.add_task("After", None);
+        p.task_mut(a).unwrap().outline_level = 2;
+        p.task_mut(b).unwrap().outline_level = 2;
+        p.task_mut(after).unwrap().outline_level = 1;
+        p.link(a.into(), after, LinkType::FS, Lag::None).unwrap();
+        p.link(b.into(), after, LinkType::SS, Lag::Working(2 * DAY)).unwrap();
+        recalculate(&mut p);
+        let collapsed: HashSet<TaskId> = [s].into();
+        let d = layout(&p, &boxes_for(&p, &[true, false, false, true], &collapsed), NetworkOptions::default());
+        assert_eq!(d.links.len(), 1);
+        assert!(d.links[0].merged);
+    }
+
     #[test]
     fn critical_first_puts_the_critical_path_on_the_top_row() {
         let mut p = project();
@@ -565,6 +793,31 @@ mod tests {
         let d = layout(&p, &boxes_for(&p, &shown, &HashSet::new()), NetworkOptions { critical_first: true, ..Default::default() });
         assert_eq!((at(&d, 1).1, at(&d, 2).1), (0, 0), "Long and End share the top row");
         assert!(d.links.iter().any(|l| l.critical));
+    }
+
+    /// Regression: with work already done before the critical path (done tasks are not
+    /// critical), Critical First put that work, not the critical path, on the top row.
+    #[test]
+    fn critical_first_starts_at_the_critical_path_after_work_already_done() {
+        let mut p = project();
+        let side = p.add_task("Side", None);
+        let done = p.add_task("Done", None);
+        let main = p.add_task("Main", None);
+        let end = p.add_task("End", None);
+        p.set_duration(side, DAY, false).unwrap();
+        p.set_duration(done, DAY, false).unwrap();
+        p.set_duration(main, 5 * DAY, false).unwrap();
+        p.link(done.into(), main, LinkType::FS, Lag::None).unwrap();
+        p.link(main.into(), end, LinkType::FS, Lag::None).unwrap();
+        p.link(side.into(), end, LinkType::FS, Lag::None).unwrap();
+        recalculate(&mut p);
+        p.set_percent_complete(done, 100).unwrap();
+        recalculate(&mut p);
+        assert!(p.task(main).unwrap().sched.critical && !p.task(done).unwrap().sched.critical);
+        let shown = vec![true; 4];
+        let d = layout(&p, &boxes_for(&p, &shown, &HashSet::new()), NetworkOptions { critical_first: true, ..Default::default() });
+        assert_eq!((at(&d, 2).1, at(&d, 3).1), (0, 0), "Main and End on the top row");
+        assert!(at(&d, 1).0 < at(&d, 2).0, "Done still left of Main");
     }
 
     #[test]

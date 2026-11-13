@@ -925,9 +925,11 @@ fn network_diagram_links_leave_on_the_right_and_enter_on_the_left() {
     let b = task(&mut p, "B", DAY);
     let c = task(&mut p, "C", DAY);
     p.link(a.into(), b, LinkType::FS, Lag::None).unwrap();
+    p.link(b.into(), c, LinkType::FS, Lag::None).unwrap();
     p.link(a.into(), c, LinkType::SS, Lag::None).unwrap();
     recalculate(&mut p);
     let d = network(&p, false);
+    assert!(d.links.iter().any(|l| d.route(l).len() == 6), "A -> C skips B's column");
     for l in &d.links {
         let (from, to) = (d.rect(l.from).unwrap(), d.rect(l.to).unwrap());
         let pts = d.route(l);

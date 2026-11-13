@@ -589,8 +589,14 @@ proptest! {
         recalculate(&mut p);
         let shown: Vec<bool> = shown.into_iter().take(n).collect();
         let collapsed: std::collections::HashSet<TaskId> = ids.iter().zip(&collapse).filter(|(_, c)| **c).map(|(id, _)| *id).collect();
-        let d = layout(&p, &boxes_for(&p, &shown, &collapsed), NetworkOptions { critical_first, ids_only });
-        prop_assert!(d.nodes.len() <= shown.iter().filter(|s| **s).count());
+        let boxes = boxes_for(&p, &shown, &collapsed);
+        let d = layout(&p, &boxes, NetworkOptions { critical_first, ids_only });
+        let shown_count = shown.iter().filter(|s| **s).count();
+        if collapse.iter().all(|c| !c) {
+            prop_assert_eq!(d.nodes.len(), shown_count);
+        } else {
+            prop_assert!(d.nodes.len() <= shown_count);
+        }
         let mut cells = std::collections::HashSet::new();
         for (k, node) in d.nodes.iter().enumerate() {
             prop_assert!(cells.insert((node.col, node.row)), "two boxes at {:?}", (node.col, node.row));
@@ -598,13 +604,56 @@ proptest! {
             let r = d.rect(k).unwrap();
             prop_assert_eq!(d.node_at(r.x + 1.0, r.y + 1.0), Some(k));
         }
-        for l in &d.links {
-            prop_assert!(d.route(l).len() >= 2);
-            // Collapsing can loop too: a task linked between two subtasks of one summary links
-            // into its box and back out.
-            if !cyclic && collapse.iter().all(|c| !c) && matches!(l.kind, NetLinkKind::Dependency { .. }) {
-                prop_assert!(d.nodes[l.to].col > d.nodes[l.from].col, "{:?}", l);
+        // Every link between tasks in two different boxes has its line.
+        let node = |task: usize| boxes.get(task).copied().flatten().and_then(|b| d.node_of(b));
+        let lines: std::collections::HashSet<(usize, usize)> = d.links.iter().map(|l| (l.from, l.to)).collect();
+        for (si, t) in p.tasks.iter().enumerate() {
+            for dep in &t.predecessors {
+                let TaskRef::Local(pid) = dep.predecessor else { continue };
+                let pi = p.task_index(pid).unwrap();
+                if let (Some(a), Some(b)) = (node(pi), node(si))
+                    && a != b
+                {
+                    prop_assert!(lines.contains(&(a, b)), "no line for {pi} -> {si}");
+                }
             }
         }
+        // The graph the columns come from: the lines plus summary -> subtask.
+        let nn = d.nodes.len();
+        let mut succ: Vec<Vec<usize>> = vec![Vec::new(); nn];
+        for l in &d.links {
+            succ[l.from].push(l.to);
+        }
+        for (k, nd) in d.nodes.iter().enumerate() {
+            let mut a = p.parent_index(nd.task);
+            while let Some(ai) = a {
+                if let Some(s) = d.node_of(ai) {
+                    succ[s].push(k);
+                    break;
+                }
+                a = p.parent_index(ai);
+            }
+        }
+        let reaches = |from: usize, to: usize| {
+            let mut seen = vec![false; nn];
+            let mut stack = vec![from];
+            while let Some(x) = stack.pop() {
+                if x == to {
+                    return true;
+                }
+                if !std::mem::replace(&mut seen[x], true) {
+                    stack.extend(succ[x].iter().copied());
+                }
+            }
+            false
+        };
+        for l in &d.links {
+            prop_assert!(d.route(l).len() >= 2);
+            // Lines closing a loop may point left; every other one points right.
+            if matches!(l.kind, NetLinkKind::Dependency { .. } | NetLinkKind::Member) && !reaches(l.to, l.from) {
+                prop_assert!(d.nodes[l.to].col > d.nodes[l.from].col, "{:?} in {:?}", l, d.nodes);
+            }
+        }
+        let _ = cyclic;
     }
 }

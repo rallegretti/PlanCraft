@@ -158,6 +158,8 @@ pub struct NetworkState {
     pub fit_pending: bool,
     /// Scroll the selected task into view on the next frame.
     pub reveal_pending: bool,
+    /// Zoom to the selected tasks on the next frame.
+    pub fit_selected_pending: bool,
     /// Layout of the last frame, with the key it was made for.
     pub cache: Option<(u64, std::sync::Arc<plancraft_core::network::Diagram>)>,
     /// Document the view was last shown for (another one starts at the top left).
@@ -178,6 +180,7 @@ impl Default for NetworkState {
             drag: None,
             fit_pending: false,
             reveal_pending: true,
+            fit_selected_pending: false,
             cache: None,
             shown_for: None,
             view_rect: egui::Rect::NOTHING,

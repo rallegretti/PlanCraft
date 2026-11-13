@@ -543,7 +543,10 @@ impl PlanCraftApp {
                     Err(e) => return st.toast(ToastKind::Warning, e.to_string()),
                 };
                 st.sel.select_task(id);
-                if let Some(r) = doc.project.task_index(id) {
+                if st.view == ViewKind::NetworkDiagram {
+                    // No table to type the name into: show the new box (double-click names it).
+                    st.network.reveal_pending = true;
+                } else if let Some(r) = doc.project.task_index(id) {
                     let rows = views::visible_rows(&doc.project, st);
                     if let Some(row) = views::row_of_task(&rows, r) {
                         // The plan's own columns: Name may have been moved, or columns inserted.
@@ -693,6 +696,7 @@ impl PlanCraftApp {
                     st.timeline_visible = true;
                 }
             }
+            Command::ScrollToTask if st.view == ViewKind::NetworkDiagram => st.network.reveal_pending = true,
             Command::ScrollToTask => {
                 if let Some(id) = sel.first()
                     && let Some(t) = doc.project.task(*id)
@@ -843,7 +847,7 @@ impl PlanCraftApp {
                 n.offset = centre - half / n.zoom;
             }
             Command::ZoomEntire if st.view == ViewKind::NetworkDiagram => st.network.fit_pending = true,
-            Command::ZoomSelected if st.view == ViewKind::NetworkDiagram => st.network.reveal_pending = true,
+            Command::ZoomSelected if st.view == ViewKind::NetworkDiagram => st.network.fit_selected_pending = true,
             Command::ZoomIn | Command::ZoomOut => {
                 let g = &mut st.gantt;
                 g.zoom(if cmd == Command::ZoomIn { 1 } else { -1 }, 400.0, 0.0);
@@ -1037,13 +1041,33 @@ impl PlanCraftApp {
                 }
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let mut z = self.st.gantt.px_per_day;
-                if ui
-                    .add(egui::Slider::new(&mut z, 1.0..=140.0).logarithmic(true).show_value(false))
-                    .on_hover_text("Timescale zoom")
-                    .changed()
-                {
-                    self.st.gantt.px_per_day = z;
+                if self.st.view == ViewKind::NetworkDiagram {
+                    let n = &mut self.st.network;
+                    let mut z = n.zoom;
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut z, views::network::MIN_ZOOM..=views::network::MAX_ZOOM)
+                                .logarithmic(true)
+                                .show_value(false),
+                        )
+                        .on_hover_text("Diagram zoom")
+                        .changed()
+                    {
+                        // About the centre of the view.
+                        let half = n.view_rect.size().max(egui::Vec2::ZERO) / 2.0;
+                        let centre = n.offset + half / n.zoom;
+                        n.zoom = z;
+                        n.offset = centre - half / n.zoom;
+                    }
+                } else {
+                    let mut z = self.st.gantt.px_per_day;
+                    if ui
+                        .add(egui::Slider::new(&mut z, 1.0..=140.0).logarithmic(true).show_value(false))
+                        .on_hover_text("Timescale zoom")
+                        .changed()
+                    {
+                        self.st.gantt.px_per_day = z;
+                    }
                 }
                 ui.label(RichText::new("🔍").size(12.0));
                 ui.separator();
@@ -2128,6 +2152,27 @@ mod ui_tests {
             assert!(t.predecessors.iter().any(|d| d.predecessor == TaskRef::Local(scope)), "{:?}", t.predecessors);
         }
         h.state_mut().exec(&ctx, Command::Undo);
+        let linked = |h: &Harness<'static, PlanCraftApp>| {
+            let ws = h.state().ws.lock().unwrap();
+            ws.active_doc().unwrap().project.task(infra).unwrap().predecessors.iter().any(|d| d.predecessor == TaskRef::Local(scope))
+        };
+        assert!(!linked(&h), "one undoable edit");
+
+        // Grouping applies to tables, not to the diagram (it kept a stale layout, then lost
+        // every summary box on the next edit).
+        let summaries = |h: &Harness<'static, PlanCraftApp>| {
+            let d = h.state().st.network.cache.as_ref().unwrap().1.clone();
+            let ws = h.state().ws.lock().unwrap();
+            let p = &ws.active_doc().unwrap().project;
+            d.nodes.iter().filter(|n| p.tasks[n.task].sched.is_summary).count()
+        };
+        let before = summaries(&h);
+        assert!(before > 0);
+        h.state_mut().st.group = Some("duration".into());
+        h.state_mut().exec(&ctx, Command::LevelAll);
+        h.run_steps(2);
+        assert_eq!(summaries(&h), before);
+        h.state_mut().st.group = None;
 
         // Zoom and the Format options.
         let z = h.state().st.network.zoom;
@@ -2143,6 +2188,9 @@ mod ui_tests {
         let ws = h.state().ws.lock().unwrap();
         let p = &ws.active_doc().unwrap().project;
         assert!(d.nodes.iter().all(|n| !p.tasks[n.task].sched.is_summary), "summaries hidden");
+        assert!(d.geometry.box_w < 60.0, "IDs only: small boxes");
+        let critical_on_top = d.nodes.iter().filter(|n| n.row == 0).all(|n| p.tasks[n.task].sched.critical);
+        assert!(critical_on_top, "Critical First: the top row is the critical path");
     }
 
     #[test]
