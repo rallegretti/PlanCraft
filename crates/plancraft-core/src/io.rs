@@ -92,6 +92,11 @@ pub fn from_json_with_notes(text: &str, path: &Path) -> FileResult<(Project, Vec
     p.ids.calendar = p.ids.calendar.max(p.calendars.iter().map(|c| c.id.0).max().unwrap_or(0));
     p.ids.assignment = p.ids.assignment.max(p.assignments.iter().map(|a| a.id.0).max().unwrap_or(0));
     p.ids.time_entry = p.ids.time_entry.max(p.time_entries.iter().map(|e| e.id.0).max().unwrap_or(0));
+    p.ids.board_column = p.ids.board_column.max(p.board_columns.iter().map(|c| c.id.0).max().unwrap_or(0));
+    // Plans saved before the Task Board existed get its default columns.
+    if p.board_columns.is_empty() {
+        p.board_columns = crate::board::default_columns(&mut p.ids);
+    }
     if p.calendars.is_empty() {
         let id = p.ids.next_calendar();
         p.calendars.push(crate::calendar::Calendar::standard(id));

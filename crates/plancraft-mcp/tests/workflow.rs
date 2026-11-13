@@ -756,3 +756,46 @@ fn agents_split_tasks_and_create_recurring_tasks() {
     assert_eq!(m["row"], 1, "{m}");
     assert_eq!(c.call("get_task", json!({ "task": m["occurrences"][0]["id"] }))["kind"], "milestone");
 }
+
+#[test]
+fn agents_work_the_task_board() {
+    let c = Client::new();
+    c.call("new_project", json!({ "name": "Board", "start": "2026-10-19" }));
+    let a = c.call("create_task", json!({ "name": "Write copy", "duration": "2d" }))["id"].clone();
+    let b = c.call("create_task", json!({ "name": "Design banner", "duration": "1d" }))["id"].clone();
+    let board = c.call("get_board", json!({}));
+    let names: Vec<&str> = board["columns"].as_array().unwrap().iter().map(|c| c["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["Not Started", "Next up", "In progress", "Done"]);
+    assert_eq!(board["columns"][0]["count"], 2, "new tasks start in Not Started");
+    assert_eq!(board["columns"][3]["percent_complete"], 100);
+
+    // Moving a card to Done completes the task; to In progress keeps its progress.
+    let moved = c.call("move_cards", json!({ "tasks": [a], "column": "done" }));
+    assert_eq!(moved["columns"][0]["cards"][0]["percent_complete"], 100.0, "{moved}");
+    c.call("update_task", json!({ "task": b, "board_status": "In progress", "percent_complete": 30 }));
+    let t = c.call("get_task", json!({ "task": b }));
+    assert_eq!((t["board_status"].as_str(), t["percent_complete_entered"].as_u64()), (Some("In progress"), Some(30)), "{t}");
+
+    // Columns: add with a Set % Complete, rename, move, delete (cards go to the first column).
+    c.call("add_board_column", json!({ "name": "Review", "position": 4, "percent_complete": 90 }));
+    c.call("move_cards", json!({ "tasks": [b], "column": "Review" }));
+    assert_eq!(c.call("get_task", json!({ "task": b }))["percent_complete_entered"], 90);
+    let up = c.call("update_board_column", json!({ "column": "Review", "name": "QA", "position": 2, "percent_complete": null }));
+    assert_eq!(up["columns"][1]["name"], "QA", "{up}");
+    assert!(up["columns"][1]["percent_complete"].is_null());
+    let del = c.call("delete_board_column", json!({ "column": "QA" }));
+    assert_eq!(del["cards_moved_to_first_column"], 1);
+    assert_eq!(c.call("get_task", json!({ "task": b }))["board_status"], "Not Started");
+
+    // Hidden tasks have no card; errors are clear.
+    c.call("update_task", json!({ "task": b, "show_on_board": false }));
+    assert_eq!(c.call("get_board", json!({ "column": "Not Started" }))["columns"][0]["count"], 0);
+    c.call_err("move_cards", json!({ "tasks": [a], "column": "Nowhere" }));
+    c.call_err("add_board_column", json!({ "name": "done" }));
+    c.call_err("add_board_column", json!({ "name": "X", "percent_complete": 101 }));
+    c.call_err("update_board_column", json!({ "column": "Done", "position": 0 }));
+    for col in ["Not Started", "Next up", "In progress"] {
+        c.call("delete_board_column", json!({ "column": col }));
+    }
+    c.call_err("delete_board_column", json!({ "column": "Done" }));
+}

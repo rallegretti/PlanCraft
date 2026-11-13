@@ -53,6 +53,12 @@ id_type!(
     "F"
 );
 
+id_type!(
+    /// Unique id of a Task Board column.
+    BoardColumnId,
+    "B"
+);
+
 /// Monotonic id allocator persisted with the project so ids are never reused.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct IdCounters {
@@ -63,6 +69,8 @@ pub struct IdCounters {
     pub time_entry: u32,
     #[serde(default)]
     pub custom_field: u32,
+    #[serde(default)]
+    pub board_column: u32,
 }
 
 impl IdCounters {
@@ -89,5 +97,9 @@ impl IdCounters {
     pub fn next_custom_field(&mut self) -> CustomFieldId {
         self.custom_field = self.custom_field.saturating_add(1);
         CustomFieldId(self.custom_field)
+    }
+    pub fn next_board_column(&mut self) -> BoardColumnId {
+        self.board_column = self.board_column.saturating_add(1);
+        BoardColumnId(self.board_column)
     }
 }

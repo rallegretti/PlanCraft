@@ -77,6 +77,7 @@
 - Log hours on a weekly **Timesheet** and turn tracked time into progress with one click.
 - **Split** a task to pause its work and resume it later, and drag the parts around on the Gantt Chart.
 - Add **recurring tasks** such as a weekly stand-up or a monthly report: daily, weekly, monthly or yearly.
+- Work the plan on a **Task Board**: drag cards from Not Started to Done, add your own columns, and let a column set the task's % complete.
 - Set a **status date** and run **Update Project**: bring progress up to date as scheduled, or move work that didn't get done past the status date. Tasks in progress pause and resume after the date, so the work already done stays where it happened. **Mark on Track** brings the selected tasks' progress up to the status date.
 - Save a **baseline** and compare it with the current plan: what slipped, what costs more, and how the project is trending. Keep up to eleven baselines (for example one per phase) and compare them side by side in the **Multiple Baselines Gantt**, or save just the dates as interim plans.
 
@@ -90,7 +91,7 @@
 
 **Make it yours**
 - Light and **dark mode**, following your system setting or chosen under **View ▸ Theme**.
-- Twelve views (Gantt Chart, Tracking Gantt, Multiple Baselines Gantt, Network Diagram, Task Usage, Calendar, Milestones, Resource Sheet, Resource Usage, Workload, Team Planner and Timesheet), with filters, search and different column layouts.
+- Thirteen views (Gantt Chart, Tracking Gantt, Multiple Baselines Gantt, Network Diagram, Task Board, Task Usage, Calendar, Milestones, Resource Sheet, Resource Usage, Workload, Team Planner and Timesheet), with filters, search and different column layouts.
 - **Print** any Gantt chart, task table or resource sheet with a live print preview, or save it as a **PDF**. Choose paper, orientation, scale, how many pages wide the timescale spreads, the legend, and headers and footers.
 - Undo and redo (up to 200 steps), plus export to CSV for spreadsheets.
 

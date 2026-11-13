@@ -1228,6 +1228,95 @@ fn the_recurring_field_marks_the_series() {
 }
 
 // ---------------------------------------------------------------------------
+// Task Board
+// ---------------------------------------------------------------------------
+
+fn board_names(p: &Project) -> Vec<String> {
+    p.board_columns.iter().map(|c| c.name.clone()).collect()
+}
+
+fn column_of(p: &Project, id: TaskId) -> String {
+    let col = p.board_column_of(p.task_index(id).unwrap()).unwrap();
+    p.board_column(col).unwrap().name.clone()
+}
+
+// Source: https://support.microsoft.com/en-us/project/use-task-boards-in-microsoft-project-online-desktop-client — "Add tasks to your projects"
+// Every new task starts in the Not Started column; the board also has Next up, In progress and
+// Done ("Move tasks across the board").
+#[test]
+fn new_tasks_start_in_not_started() {
+    let mut p = project();
+    let a = task(&mut p, "A", DAY);
+    assert_eq!(board_names(&p), ["Not Started", "Next up", "In progress", "Done"]);
+    assert_eq!(column_of(&p, a), "Not Started");
+}
+
+// Source: https://support.microsoft.com/en-us/project/use-task-boards-in-microsoft-project-online-desktop-client — "Move tasks across the board"
+// A card is moved to the column matching its status, which is the task's Board Status; a column
+// can be renamed, and a new one is added to the right of the last.
+#[test]
+fn moving_cards_and_changing_columns() {
+    let mut p = project();
+    let a = task(&mut p, "A", DAY);
+    let next = p.find_board_column("Next up").unwrap();
+    p.set_board_status(&[a], next).unwrap();
+    assert_eq!(column_of(&p, a), "Next up");
+    assert_eq!(p.task(a).unwrap().board_status, Some(next));
+    p.rename_board_column(next, "Ready").unwrap();
+    assert_eq!(column_of(&p, a), "Ready");
+    p.add_board_column("Blocked", None, None).unwrap();
+    assert_eq!(board_names(&p).last().map(String::as_str), Some("Blocked"));
+}
+
+// Source: https://support.microsoft.com/en-us/project/use-task-boards-in-microsoft-project-online-desktop-client — "Manage your agile tasks in the Gantt chart"
+// Show on Board is Yes by default; setting it to No takes the task off the board views without
+// removing it from the plan.
+#[test]
+fn show_on_board_hides_a_card() {
+    let mut p = project();
+    let a = task(&mut p, "A", DAY);
+    assert!(p.task(a).unwrap().show_on_board);
+    p.set_show_on_board(&[a], false).unwrap();
+    assert!(p.board().iter().all(|(_, rows)| rows.is_empty()));
+    assert!(p.task(a).is_some());
+}
+
+// Source: https://support.microsoft.com/en-us/office/what-s-new-in-project-111bcaf9-bc27-4c15-80e6-85e726307520 — "Set percent complete from a task board"
+// A column's Set % Complete value updates the % complete of a task moved into it, and the Gantt
+// Chart shows the new value.
+#[test]
+fn a_column_can_set_percent_complete() {
+    let mut p = project();
+    let a = task(&mut p, "A", 2 * DAY);
+    let review = p.add_board_column("Review", None, Some(75)).unwrap();
+    p.set_board_status(&[a], review).unwrap();
+    recalculate(&mut p);
+    assert_eq!(p.task(a).unwrap().percent_complete, 75);
+    assert_eq!(p.task(a).unwrap().sched.percent_complete, 75.0);
+    // A column without one leaves progress alone.
+    let next = p.find_board_column("Next up").unwrap();
+    p.set_board_status(&[a], next).unwrap();
+    assert_eq!(p.task(a).unwrap().percent_complete, 75);
+}
+
+// Source: https://learn.microsoft.com/en-us/office-project/xml-data-interchange/boardcolumn-element?view=project-client-odc — "Occurrences"
+// A project has between 1 and 100 board columns.
+#[test]
+fn a_board_has_one_to_a_hundred_columns() {
+    let mut p = project();
+    while p.board_columns.len() < 100 {
+        let n = p.board_columns.len();
+        p.add_board_column(&format!("Column {n}"), None, None).unwrap();
+    }
+    assert!(p.add_board_column("One more", None, None).is_err());
+    while p.board_columns.len() > 1 {
+        let id = p.board_columns[0].id;
+        p.delete_board_column(id).unwrap();
+    }
+    assert!(p.delete_board_column(p.board_columns[0].id).is_err());
+}
+
+// ---------------------------------------------------------------------------
 // Network Diagram layout
 // ---------------------------------------------------------------------------
 

@@ -185,6 +185,13 @@ fn build(start: NaiveDate) -> PlanResult<Project> {
     for (task, value) in [(backend, "High"), (infra, "Medium"), (testing, "Medium"), (marketing, "Low")] {
         p.set_custom_value(task, risk, text(value))?;
     }
+    // The Task Board: work done, under way and up next.
+    let col = |p: &Project, k: usize| p.board_columns.get(k).map(|c| c.id);
+    if let (Some(next), Some(doing), Some(done)) = (col(&p, 1), col(&p, 2), col(&p, 3)) {
+        p.set_board_status(&[scope], done)?;
+        p.set_board_status(&[research], doing)?;
+        p.set_board_status(&[backend, frontend], next)?;
+    }
     let _ = planning;
     let _ = design;
     let _ = build;

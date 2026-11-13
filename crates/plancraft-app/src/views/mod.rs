@@ -1,5 +1,6 @@
 //! Main views.
 
+pub mod board;
 pub mod calendar;
 pub mod gantt;
 pub mod gantt_chart;

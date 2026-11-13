@@ -23,7 +23,7 @@ pub enum Field {
 }
 
 /// Built-in columns and their keys (as saved in table layouts). Keys never change.
-const BUILTIN: [(TaskCol, &str); 53] = [
+const BUILTIN: [(TaskCol, &str); 55] = [
     (TaskCol::Indicators, "indicators"),
     (TaskCol::Mode, "mode"),
     (TaskCol::Wbs, "wbs"),
@@ -77,6 +77,8 @@ const BUILTIN: [(TaskCol, &str); 53] = [
     (TaskCol::Notes, "notes"),
     (TaskCol::UniqueId, "unique_id"),
     (TaskCol::Recurring, "recurring"),
+    (TaskCol::BoardStatus, "board_status"),
+    (TaskCol::ShowOnBoard, "show_on_board"),
 ];
 
 /// A value to sort or group by. Empty values sort after everything else.

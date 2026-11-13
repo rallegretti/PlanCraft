@@ -356,6 +356,15 @@ pub fn apply_task_fields(p: &mut Project, id: TaskId, a: &Args) -> ToolResult<()
         if let Some(b) = a.bool("show_on_timeline")? {
             row_mut(p, i)?.show_on_timeline = b;
         }
+        if let Some(b) = a.bool("show_on_board")? {
+            p.set_show_on_board(&[id], b)?;
+        }
+        if a.is_clear("board_status") {
+            row_mut(p, i)?.board_status = None;
+        } else if let Some(v) = a.get("board_status") {
+            let col = super::board::column_arg(p, v, "board_status")?;
+            p.set_board_status(&[id], col)?;
+        }
         if let Some(b) = a.bool("ignore_resource_calendars")? {
             row_mut(p, i)?.ignore_resource_calendars = b;
         }

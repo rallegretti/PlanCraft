@@ -1771,6 +1771,7 @@ impl PlanCraftApp {
                 match st.view {
                     ViewKind::Gantt => views::gantt::show(ui, rect, doc, st, views::gantt_chart::ChartKind::Gantt, &mut out),
                     ViewKind::TrackingGantt => views::gantt::show(ui, rect, doc, st, views::gantt_chart::ChartKind::Tracking, &mut out),
+                    ViewKind::Board => views::board::show(ui, rect, doc, st, &mut out),
                     ViewKind::MultipleBaselines => {
                         views::gantt::show(ui, rect, doc, st, views::gantt_chart::ChartKind::Baselines, &mut out)
                     }
@@ -2392,6 +2393,99 @@ mod ui_tests {
         assert!(h.state().dialogs.print.is_none(), "switching plans closes the window");
         assert_eq!(orientation(&h, a), Orientation::Portrait, "and keeps its plan's change");
         assert_eq!(orientation(&h, b), Orientation::Landscape);
+    }
+
+    /// The Task Board: a click selects a card, dragging cards to Done completes them (one undo
+    /// step), a double-click opens Task Information, and the column menu edits a column.
+    #[test]
+    fn task_board_moves_cards_and_edits_columns() {
+        use egui_kittest::kittest::Queryable;
+        fn pointer(h: &mut Harness<'static, PlanCraftApp>, pos: egui::Pos2, button: Option<(egui::PointerButton, bool)>) {
+            h.input_mut().events.push(egui::Event::PointerMoved(pos));
+            if let Some((button, pressed)) = button {
+                h.input_mut().events.push(egui::Event::PointerButton { pos, button, pressed, modifiers: egui::Modifiers::NONE });
+            }
+            h.run_steps(1);
+        }
+        let primary = |pressed| Some((egui::PointerButton::Primary, pressed));
+        let mut h = harness();
+        let ctx = h.ctx.clone();
+        h.state_mut().exec(&ctx, Command::SetView(ViewKind::Board));
+        h.run_steps(3);
+        let (body, scroll) = (h.state().st.board.body, h.state().st.board.scroll);
+        let first_card = |h: &Harness<'static, PlanCraftApp>| {
+            let ws = h.state().ws.lock().unwrap();
+            let p = &ws.active_doc().unwrap().project;
+            let (_, rows) = p.board().into_iter().next().unwrap();
+            p.tasks[rows[0]].id
+        };
+        let card = first_card(&h);
+
+        // Click selects.
+        let a = views::board::card_centre(body, scroll, 0, 0);
+        pointer(&mut h, a, None);
+        pointer(&mut h, a, primary(true));
+        pointer(&mut h, a, primary(false));
+        h.run_steps(2);
+        assert_eq!(h.state().st.sel.single_task(), Some(card));
+
+        // Drag it to Done: it is 100% complete, in one undoable step.
+        h.run_steps(30);
+        let done = views::board::card_centre(body, scroll, 3, 1);
+        pointer(&mut h, a, primary(true));
+        for k in 1..=10 {
+            pointer(&mut h, a + (done - a) * (k as f32 / 10.0), None);
+        }
+        pointer(&mut h, done, primary(false));
+        h.run_steps(2);
+        let status = |h: &Harness<'static, PlanCraftApp>| {
+            let ws = h.state().ws.lock().unwrap();
+            let p = &ws.active_doc().unwrap().project;
+            let i = p.task_index(card).unwrap();
+            (p.board_column(p.board_column_of(i).unwrap()).unwrap().name.clone(), p.tasks[i].percent_complete)
+        };
+        assert_eq!(status(&h), ("Done".to_string(), 100));
+        h.state_mut().exec(&ctx, Command::Undo);
+        h.run_steps(2);
+        assert_eq!(status(&h).0, "Not Started", "one undo puts it back");
+
+        // Double-click opens Task Information.
+        h.run_steps(30);
+        for _ in 0..2 {
+            let button = |pressed| egui::Event::PointerButton {
+                pos: a,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            h.input_mut().events.extend([button(true), button(false)]);
+            h.run_steps(1);
+        }
+        h.run_steps(3);
+        assert!(h.state().dialogs.task_info.is_some(), "double-click opens Task Information");
+        h.state_mut().dialogs.task_info = None;
+        h.run_steps(2);
+
+        // Right-click a header: rename the column and give it a % complete.
+        let head = views::board::header_centre(body, scroll, 1);
+        pointer(&mut h, head, Some((egui::PointerButton::Secondary, true)));
+        pointer(&mut h, head, Some((egui::PointerButton::Secondary, false)));
+        h.run_steps(2);
+        h.get_by_label_contains("Rename / Set % Complete").click();
+        h.run_steps(2);
+        assert!(h.state().st.board.edit.as_ref().is_some_and(|e| e.name == "Next up"));
+        if let Some(e) = h.state_mut().st.board.edit.as_mut() {
+            e.name = "Ready".into();
+            e.percent = "10".into();
+        }
+        h.run_steps(1);
+        h.get_by_label("  OK  ").click();
+        h.run_steps(3);
+        assert!(h.state().st.board.edit.is_none());
+        let ws = h.state().ws.lock().unwrap();
+        let p = &ws.active_doc().unwrap().project;
+        let c = &p.board_columns[1];
+        assert_eq!((c.name.as_str(), c.percent_complete), ("Ready", Some(10)));
     }
 
     /// The Network Diagram: a click selects a box, a double-click opens Task Information,

@@ -16,6 +16,7 @@
 //! ```
 
 pub mod baseline;
+pub mod board;
 pub mod calendar;
 pub mod custom;
 pub mod duration;

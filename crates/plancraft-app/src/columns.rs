@@ -63,6 +63,10 @@ pub enum TaskCol {
     UniqueId,
     /// Yes for a recurring task and its occurrences.
     Recurring,
+    /// The Task Board column a task's card is in.
+    BoardStatus,
+    /// Whether the task has a card on the Task Board.
+    ShowOnBoard,
 }
 
 /// The values a baseline holds.
@@ -257,6 +261,11 @@ impl TaskCol {
             Notes => ColumnDef::new("Notes", 200.0),
             UniqueId => ColumnDef::new("Unique ID", 64.0).right().read_only(),
             Recurring => ColumnDef::new("Recurring", 70.0).center().read_only(),
+            BoardStatus => {
+                let names: Vec<&str> = p.board_columns.iter().map(|c| c.name.as_str()).collect();
+                ColumnDef::new("Board Status", 110.0).choice(&names)
+            }
+            ShowOnBoard => ColumnDef::new("Show on Board", 92.0).center().choice(&["Yes", "No"]),
         }
     }
 }
@@ -438,6 +447,10 @@ pub fn cell(col: TaskCol, p: &Project, idx: usize, ctx: &CellCtx) -> Cell {
         Notes => Cell::text(t.notes.lines().next().unwrap_or_default().to_string()),
         UniqueId => Cell::weak(t.id.0.to_string()),
         Recurring => Cell::text(if p.is_recurring(idx) { "Yes" } else { "No" }),
+        // Summary tasks have no card; their subtasks do.
+        BoardStatus if summary => Cell::default(),
+        BoardStatus => Cell::text(p.board_column_of(idx).and_then(|c| p.board_column(c)).map(|c| c.name.clone()).unwrap_or_default()),
+        ShowOnBoard => Cell::text(if t.show_on_board { "Yes" } else { "No" }),
     };
     if summary && col != Name && col != Indicators {
         c.bold = true;
@@ -515,6 +528,22 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
         Predecessors => {
             let deps = p.parse_predecessors(text).map_err(err)?;
             p.set_predecessors(id, deps).map_err(err)?;
+        }
+        BoardStatus => {
+            if summary {
+                return Err("summary tasks have no card on the board; their subtasks do".into());
+            }
+            let col = p.find_board_column(text).ok_or_else(|| format!("there is no board column named '{}'", text.trim()))?;
+            p.set_board_status(&[id], col).map_err(err)?;
+        }
+        ShowOnBoard => {
+            let yes = text.trim().to_lowercase();
+            let show = match yes.as_str() {
+                "yes" | "y" | "true" => true,
+                "no" | "n" | "false" => false,
+                _ => return Err("Show on Board is Yes or No".into()),
+            };
+            p.set_show_on_board(&[id], show).map_err(err)?;
         }
         Resources => p.apply_resource_names(id, text).map_err(err)?,
         PercentComplete => {
