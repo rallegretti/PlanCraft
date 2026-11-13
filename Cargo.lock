@@ -2459,9 +2459,12 @@ name = "plancraft-core"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "epaint_default_fonts",
+ "miniz_oxide 0.8.9",
  "proptest",
  "serde",
  "serde_json",
+ "skrifa",
  "tempfile",
  "thiserror 2.0.21",
  "uuid",

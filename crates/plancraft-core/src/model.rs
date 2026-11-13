@@ -791,6 +791,9 @@ pub struct Project {
     /// Columns chosen for task tables, by table name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tables: Vec<crate::custom::TableLayout>,
+    /// Page Setup for printing and PDF export.
+    #[serde(default, skip_serializing_if = "crate::print::PageSetup::is_default", deserialize_with = "crate::print::lenient_page_setup")]
+    pub page_setup: crate::print::PageSetup,
     #[serde(default)]
     pub ids: IdCounters,
     #[serde(default)]
@@ -827,6 +830,7 @@ impl Project {
             external_projects: Vec::new(),
             custom_fields: Vec::new(),
             tables: Vec::new(),
+            page_setup: crate::print::PageSetup::default(),
             ids,
             sched: ProjectSchedule::default(),
         }

@@ -541,3 +541,43 @@ fn custom_fields_are_defined_set_and_shown() {
     c.call("undo", json!({}));
     assert_eq!(c.call("get_task", json!({ "task": id }))["custom"]["Budget"], "$1250.50");
 }
+
+#[test]
+fn agents_set_page_setup_and_export_pdfs() {
+    let dir = tempfile::tempdir().unwrap();
+    let c = Client::new();
+    c.call("new_project", json!({ "name": "Print me", "start": "2026-10-19" }));
+    let a = c.call("create_task", json!({ "name": "Design", "duration": "5d" }));
+    let b = c.call("create_task", json!({ "name": "Build", "duration": "10d", "predecessors": [a["id"]] }));
+    assert!(b["id"].is_u64());
+
+    let s = c.call("set_page_setup", json!({ "paper": "a4", "orientation": "portrait", "header": ["", "[Project] plan", ""] }));
+    assert_eq!(s["page_setup"]["paper"], "A4", "{s}");
+    assert_eq!(s["page_setup"]["orientation"], "Portrait");
+    assert_eq!(s["page_setup"]["header"][1], "[Project] plan");
+    let e = c.call_err("set_page_setup", json!({ "paper": "napkin" }));
+    assert!(e.contains("letter"), "{e}");
+    // Page Setup is an undoable edit.
+    c.call("undo", json!({}));
+    let back = c.call("set_page_setup", json!({}));
+    assert_eq!(back["page_setup"]["paper"], "Letter", "undo put the old setup back: {back}");
+    assert!(c.call_err("set_page_setup", json!({ "scale_percent": 5 })).contains("at least"));
+
+    let path = dir.path().join("plan");
+    let out = c.call("export_pdf", json!({ "path": path.to_str().unwrap(), "pages_wide": 2 }));
+    assert_eq!(out["pages"], 2, "{out}");
+    let pdf = dir.path().join("plan.pdf");
+    let bytes = std::fs::read(&pdf).unwrap();
+    assert!(bytes.starts_with(b"%PDF-1.7"));
+    // Never silently replaces a file, never writes anything but a PDF.
+    let e = c.call_err("export_pdf", json!({ "path": pdf.to_str().unwrap() }));
+    assert!(e.contains("overwrite"), "{e}");
+    c.call("export_pdf", json!({ "path": pdf.to_str().unwrap(), "overwrite": true, "view": "table" }));
+    let e = c.call_err("export_pdf", json!({ "path": dir.path().join("plan.plancraft").to_str().unwrap() }));
+    assert!(e.contains(".pdf"), "{e}");
+    let e = c.call_err("export_pdf", json!({ "path": pdf.to_str().unwrap(), "overwrite": true, "from": "2026-12-01", "to": "2026-11-01" }));
+    assert!(e.contains("before"), "{e}");
+    // Dates outside 1900-2300 are refused, like everywhere else.
+    let e = c.call_err("export_pdf", json!({ "path": pdf.to_str().unwrap(), "overwrite": true, "from": "0001-01-01" }));
+    assert!(e.contains("between"), "{e}");
+}

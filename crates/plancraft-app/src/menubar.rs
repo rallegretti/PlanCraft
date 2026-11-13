@@ -235,6 +235,8 @@ fn file_menu(ui: &mut Ui, info: &MenuInfo, settings: &AppSettings, push: &dyn Fn
     ui.separator();
     item(ui, "Save", "Ctrl+S", doc, Command::Save);
     item(ui, "Save As…", "Ctrl+Shift+S", doc, Command::SaveAs);
+    item(ui, "Print…", "Ctrl+P", doc, Command::Print);
+    item(ui, "Export PDF…", "", doc, Command::ExportPdf);
     item(ui, "Export CSV…", "", doc, Command::ExportCsv);
     ui.separator();
     item(ui, "Project Information…", "", doc, Command::ProjectInfo);
@@ -401,6 +403,8 @@ fn toolbar(ui: &mut Ui, st: &mut UiState, info: &MenuInfo, settings: &AppSetting
             b(ui, "📶", Some("Workload"), "Resource utilization and resource graph", doc, Command::SetView(ViewKind::Workload));
             b(ui, "📈", Some("Tracking Gantt"), "Current schedule against the baseline", doc, Command::SetView(ViewKind::TrackingGantt));
             sep(ui);
+            b(ui, "🖶", Some("Print"), "Print preview, page setup and printing (Ctrl+P)", doc, Command::Print);
+            b(ui, "📄", Some("Export PDF"), "Save the current view as a PDF", doc, Command::ExportPdf);
             b(ui, "🗐", Some("Export CSV"), "Export the task list as CSV", doc, Command::ExportCsv);
         }
         MenuTab::View => {

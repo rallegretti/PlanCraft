@@ -1,107 +1,12 @@
 //! Two-tier timescale used by the Gantt chart, usage views and timeline.
 
-use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Timelike};
+use chrono::NaiveDateTime;
 use egui::{Align2, FontId, Painter, Rect, Stroke, pos2};
 
 use crate::state::GanttState;
 use crate::theme;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Unit {
-    Hours6,
-    Day,
-    Week,
-    Month,
-    Quarter,
-    Year,
-}
-
-impl Unit {
-    pub fn floor(self, t: NaiveDateTime) -> NaiveDateTime {
-        let d = t.date();
-        let midnight = |d: NaiveDate| d.and_time(NaiveTime::MIN);
-        match self {
-            Unit::Hours6 => midnight(d) + Duration::hours((t.hour() / 6 * 6) as i64),
-            Unit::Day => midnight(d),
-            Unit::Week => midnight(d - Duration::days(d.weekday().num_days_from_monday() as i64)),
-            Unit::Month => midnight(d.with_day(1).unwrap_or(d)),
-            Unit::Quarter => midnight(NaiveDate::from_ymd_opt(d.year(), (d.month0() / 3) * 3 + 1, 1).unwrap_or(d)),
-            Unit::Year => midnight(NaiveDate::from_ymd_opt(d.year(), 1, 1).unwrap_or(d)),
-        }
-    }
-
-    pub fn next(self, t: NaiveDateTime) -> NaiveDateTime {
-        let add_months = |t: NaiveDateTime, m: u32| {
-            let d = t.date();
-            let total = d.year() * 12 + d.month0() as i32 + m as i32;
-            // Out of chrono's range: still move forward so callers stepping through units terminate.
-            NaiveDate::from_ymd_opt(total.div_euclid(12), total.rem_euclid(12) as u32 + 1, 1)
-                .map_or(t + Duration::days(31 * i64::from(m)), |d| d.and_time(NaiveTime::MIN))
-        };
-        match self {
-            Unit::Hours6 => t + Duration::hours(6),
-            Unit::Day => t + Duration::days(1),
-            Unit::Week => t + Duration::days(7),
-            Unit::Month => add_months(t, 1),
-            Unit::Quarter => add_months(t, 3),
-            Unit::Year => add_months(t, 12),
-        }
-    }
-
-    pub fn label(self, t: NaiveDateTime, width: f32) -> String {
-        let d = t.date();
-        match self {
-            Unit::Hours6 => format!("{:02}", t.hour()),
-            Unit::Day => {
-                if width >= 90.0 {
-                    d.format("%a %b %-d").to_string()
-                } else if width >= 26.0 {
-                    d.format("%-d").to_string()
-                } else {
-                    d.format("%a").to_string().chars().next().map(String::from).unwrap_or_default()
-                }
-            }
-            Unit::Week => {
-                if width >= 110.0 {
-                    format!("Week of {}", d.format("%b %-d, '%y"))
-                } else if width >= 60.0 {
-                    d.format("%b %-d, '%y").to_string()
-                } else {
-                    d.format("%-d").to_string()
-                }
-            }
-            Unit::Month => {
-                if width >= 90.0 {
-                    d.format("%B %Y").to_string()
-                } else if width >= 40.0 {
-                    d.format("%b '%y").to_string()
-                } else {
-                    d.format("%b").to_string().chars().next().map(String::from).unwrap_or_default()
-                }
-            }
-            Unit::Quarter => {
-                let q = d.month0() / 3 + 1;
-                if width >= 60.0 { format!("Q{q} {}", d.year()) } else { format!("Q{q}") }
-            }
-            Unit::Year => d.year().to_string(),
-        }
-    }
-}
-
-/// (top tier, bottom tier) for a zoom level.
-pub fn tiers(px_per_day: f32) -> (Unit, Unit) {
-    if px_per_day >= 72.0 {
-        (Unit::Day, Unit::Hours6)
-    } else if px_per_day >= 14.0 {
-        (Unit::Week, Unit::Day)
-    } else if px_per_day >= 4.0 {
-        (Unit::Month, Unit::Week)
-    } else if px_per_day >= 1.5 {
-        (Unit::Quarter, Unit::Month)
-    } else {
-        (Unit::Year, Unit::Quarter)
-    }
-}
+pub use plancraft_core::timescale::{Unit, tiers};
 
 /// Paints the two-tier header into `rect`. Returns the bottom-tier boundaries (x positions) for gridlines.
 pub fn paint_header(painter: &Painter, rect: Rect, g: &GanttState) -> Vec<(f32, NaiveDateTime)> {

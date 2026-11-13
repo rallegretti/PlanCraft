@@ -16,7 +16,11 @@
   - Custom task fields: text with an optional pick-list, number, cost, date, duration and flag.
   - Table columns you can insert, hide and move, saved with the plan.
   - Sort within the outline, and group by any field.
-- **MCP server:** 71 tools, resources and prompts over stdio and Streamable HTTP. A live mode works inside the running app (bearer token per session, `plancraft mcp --attach` bridge), and the app binary has a headless `plancraft mcp` mode.
+- **Printing and PDF export:**
+  - The Print window: a live preview of the exact printed pages, Page Setup saved with the plan, printing through the system print service (CUPS) or the PDF viewer on Windows.
+  - PDF export written by PlanCraft itself (pure Rust, embedded font subset, searchable text).
+  - Gantt Chart, Tracking Gantt, task table and Resource Sheet; pages across and down, repeated columns, legend, header and footer codes.
+- **MCP server:** 73 tools, resources and prompts over stdio and Streamable HTTP. A live mode works inside the running app (bearer token per session, `plancraft mcp --attach` bridge), and the app binary has a headless `plancraft mcp` mode.
 - **Robustness:** no panics in shipped code (clippy-enforced), guarded edits with rollback, limits on hostile files and arguments, atomic saves, recovery copies, owner-only files.
 - **Quality gates:** `cargo xtask ci`, run locally on Linux, macOS and Windows (fmt, clippy, tests, cargo deny), a scheduler speed gate, hostile-input sweeps and parity tests against Microsoft's published scheduling examples.
 
@@ -24,7 +28,7 @@
 
 - **Interchange:** import CSV and Excel (pure Rust).
 - **Network Diagram view:** PERT boxes laid out automatically, with critical highlighting.
-- **Printing and PDF export** of views, plus reports: a project overview dashboard, cost overview and a milestone report.
+- **Reports:** a project overview dashboard, cost overview and a milestone report (printable). Printing of the usage, calendar and Network Diagram views.
 - **Saved filters and multi-level sort.** Also custom-field formulas and summary rollups.
 - **Recurring tasks, task splitting and the remaining-work model:**
   - Reschedule incomplete work after the status date.

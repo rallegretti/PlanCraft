@@ -277,6 +277,10 @@ pub fn parse_date(v: &Value, key: &str) -> ToolResult<NaiveDate> {
     let s = s.split([' ', 'T']).next().unwrap_or(s);
     for f in ["%Y-%m-%d", "%m/%d/%Y", "%d %b %Y", "%b %d %Y", "%b %d, %Y"] {
         if let Ok(d) = NaiveDate::parse_from_str(s, f) {
+            let (lo, hi) = (plancraft_core::limits::min_date(), plancraft_core::limits::max_date());
+            if !(lo..=hi).contains(&d) {
+                return err(format!("'{key}' must be between {lo} and {hi}"));
+            }
             return Ok(d);
         }
     }

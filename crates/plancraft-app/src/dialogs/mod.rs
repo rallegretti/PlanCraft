@@ -3,6 +3,7 @@
 pub mod custom_fields;
 pub mod mcp_panel;
 pub mod misc;
+pub mod print;
 pub mod project_info;
 pub mod resource_info;
 pub mod task_info;
@@ -44,6 +45,7 @@ pub struct Dialogs {
     pub project_info: Option<Bound<project_info::ProjectInfo>>,
     pub working_time: Option<Bound<working_time::WorkingTime>>,
     pub custom_fields: Option<Bound<custom_fields::CustomFields>>,
+    pub print: Option<Bound<print::PrintDialog>>,
     /// Follows the active document's selection; reset when the active document changes.
     pub assign: Option<Bound<misc::AssignResources>>,
     pub external: Option<Bound<misc::ExternalLinks>>,

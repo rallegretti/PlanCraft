@@ -151,6 +151,9 @@ pub fn sanitize(p: &mut Project) -> Vec<String> {
         s.task(t, &calendars);
     }
     s.custom_fields(p);
+    if p.page_setup.sanitize() {
+        s.note("page setup values were out of range");
+    }
     for r in &mut p.resources {
         s.resource(r, &calendars);
     }

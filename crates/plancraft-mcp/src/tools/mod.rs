@@ -16,6 +16,7 @@ pub mod dependencies;
 pub mod documents;
 pub mod history;
 pub mod milestones;
+pub mod print;
 pub mod resources;
 pub mod tasks;
 pub mod time;
@@ -117,6 +118,7 @@ pub fn all_tools() -> Vec<Tool> {
     v.extend(time::tools());
     v.extend(analysis::tools());
     v.extend(history::tools());
+    v.extend(print::tools());
     v
 }
 
