@@ -663,6 +663,183 @@ fn acwp_counts_progress_entered_as_percent_complete() {
     assert!((ev.cpi - 1.0).abs() < 1e-9);
 }
 
+// ---------------------------------------------------------------------------
+// Tracking: Stop/Resume, Update Project, Mark on Track
+// ---------------------------------------------------------------------------
+
+/// The plan used by the Update Project examples: A (2 days) → B (3 days) → C (2 days).
+fn chain_abc() -> (Project, TaskId, TaskId, TaskId) {
+    let mut p = project();
+    let a = task(&mut p, "A", 2 * DAY);
+    let b = task(&mut p, "B", 3 * DAY);
+    let c = task(&mut p, "C", 2 * DAY);
+    p.link_chain(&[a, b, c]).unwrap();
+    recalculate(&mut p);
+    (p, a, b, c)
+}
+
+fn pct(p: &Project, id: TaskId) -> u8 {
+    p.task(id).unwrap().percent_complete
+}
+
+// Source: https://support.microsoft.com/en-us/office/stop-task-field-9664ffef-0df9-4b37-aeb2-8e26bdadcbcf — "Example"
+// A two-day task marked 50% complete on its first day stops at the end of that day, and its
+// remaining half is scheduled from the next morning.
+#[test]
+fn stop_marks_the_end_of_the_completed_part() {
+    let mut p = project();
+    let t = task(&mut p, "Conduct client meetings", 2 * DAY);
+    recalculate(&mut p);
+    p.set_percent_complete(t, 50).unwrap();
+    recalculate(&mut p);
+    let s = &p.task(t).unwrap().sched;
+    assert_eq!(s.stop, Some(dt(2026, 10, 19, 17)));
+    assert_eq!(s.resume, Some(dt(2026, 10, 20, 8)));
+    assert_eq!(finish(&p, t), dt(2026, 10, 20, 17));
+}
+
+// Source: https://support.microsoft.com/en-us/office/resume-task-field-a6ae83cc-bde9-44f6-8bc0-aca8514de2b1 — "Examples"
+// When the remaining half of a two-day, 50%-complete task can only happen on a later date,
+// entering that date as the Resume date schedules the rest of the task there.
+#[test]
+fn resume_date_moves_the_remaining_work() {
+    let mut p = project();
+    let t = task(&mut p, "Conduct client meetings", 2 * DAY);
+    recalculate(&mut p);
+    p.set_percent_complete(t, 50).unwrap();
+    p.set_resume(t, Some(dt(2026, 11, 2, 8))).unwrap();
+    recalculate(&mut p);
+    let s = &p.task(t).unwrap().sched;
+    assert_eq!(start(&p, t), dt(2026, 10, 19, 8), "the actual start stays");
+    assert_eq!(s.stop, Some(dt(2026, 10, 19, 17)));
+    assert_eq!(s.resume, Some(dt(2026, 11, 2, 8)));
+    assert_eq!(finish(&p, t), dt(2026, 11, 2, 17));
+    // PlanCraft's choice (the page does not say): the pause does not count as duration.
+    assert_eq!(duration(&p, t), 2 * DAY, "the gap is not working time");
+}
+
+// Source: https://support.microsoft.com/en-us/office/update-completed-tasks-quickly-9c963543-f767-4b5b-ac5b-f0f465206fdb — "Update tasks to 100% complete for a specific date"
+// Update Project with "Set 0% or 100% complete only" marks the tasks that finish by the date as
+// 100% complete and leaves the others alone.
+#[test]
+fn update_project_zero_or_hundred_completes_tasks_finished_by_the_date() {
+    let (mut p, a, b, c) = chain_abc();
+    let through = p.end_of_working_day(d(2026, 10, 21));
+    let r = p.update_progress_through(&[], through, ProgressUpdate::ZeroOrHundred).unwrap();
+    recalculate(&mut p);
+    assert_eq!((pct(&p, a), pct(&p, b), pct(&p, c)), (100, 0, 0));
+    assert_eq!(r.updated, vec![a]);
+    assert_eq!(p.task(a).unwrap().actual_finish, Some(dt(2026, 10, 20, 17)));
+}
+
+// Source: https://support.microsoft.com/en-us/office/update-completed-tasks-quickly-9c963543-f767-4b5b-ac5b-f0f465206fdb — "Update tasks to scheduled percent complete for a specific date"
+// With "Set 0% - 100% complete" each task gets the progress its schedule says it should have by
+// the date: one day into a three-day task is a third done.
+#[test]
+fn update_project_sets_scheduled_percent_complete() {
+    let (mut p, a, b, c) = chain_abc();
+    let through = p.end_of_working_day(d(2026, 10, 21));
+    p.update_progress_through(&[], through, ProgressUpdate::Scheduled).unwrap();
+    recalculate(&mut p);
+    assert_eq!((pct(&p, a), pct(&p, b), pct(&p, c)), (100, 33, 0));
+    assert_eq!(p.task(b).unwrap().actual_start, Some(dt(2026, 10, 21, 8)));
+}
+
+// Source: https://support.microsoft.com/en-us/office/update-completed-tasks-quickly-9c963543-f767-4b5b-ac5b-f0f465206fdb — "Update tasks to scheduled percent complete for the current or status date"
+// Mark on Track sets the selected tasks to their scheduled percent complete as of the status date.
+#[test]
+fn mark_on_track_uses_the_status_date() {
+    let (mut p, a, b, c) = chain_abc();
+    p.set_status_date(Some(d(2026, 10, 22)));
+    p.mark_on_track(&[b]).unwrap();
+    recalculate(&mut p);
+    assert_eq!((pct(&p, a), pct(&p, b), pct(&p, c)), (0, 67, 0), "only the selected task changes");
+}
+
+// Source: https://support.microsoft.com/en-us/project/set-the-start-date-or-finish-date-for-your-project-in-project-desktop — "Move the start time of a project"
+// "Reschedule uncompleted work to start after" schedules work not yet done after the chosen date,
+// and actual dates on tasks do not move.
+#[test]
+fn reschedule_uncompleted_work_keeps_actuals_and_moves_the_rest() {
+    let mut p = project();
+    let a = task(&mut p, "A", 2 * DAY);
+    let b = task(&mut p, "B", 4 * DAY);
+    let c = task(&mut p, "C", 2 * DAY);
+    let free = task(&mut p, "Unlinked", DAY);
+    p.link_chain(&[a, b, c]).unwrap();
+    recalculate(&mut p);
+    p.set_percent_complete(a, 100).unwrap();
+    recalculate(&mut p);
+    p.set_percent_complete(b, 25).unwrap();
+    recalculate(&mut p);
+    assert_eq!(start(&p, b), dt(2026, 10, 21, 8));
+
+    let after = p.end_of_working_day(d(2026, 10, 26));
+    let r = p.reschedule_uncompleted_work(&[], after).unwrap();
+    recalculate(&mut p);
+    // How the work moves is PlanCraft's choice (the page only says it moves after the date and
+    // actual dates stay): a task in progress pauses until then, and an unlinked task not started
+    // gets a Start No Earlier Than date.
+    assert_eq!(r.split, vec![b]);
+    assert_eq!(r.constrained, vec![free], "C follows B through its link; only the unlinked task needs a date");
+    assert!(r.skipped.is_empty(), "{:?}", r.skipped);
+
+    assert_eq!((start(&p, a), finish(&p, a)), (dt(2026, 10, 19, 8), dt(2026, 10, 20, 17)), "actual dates stay");
+    let s = &p.task(b).unwrap().sched;
+    assert_eq!(start(&p, b), dt(2026, 10, 21, 8), "the actual start stays");
+    assert_eq!(s.stop, Some(dt(2026, 10, 21, 17)));
+    assert_eq!(s.resume, Some(dt(2026, 10, 27, 8)));
+    assert_eq!(finish(&p, b), dt(2026, 10, 29, 17));
+    assert_eq!(start(&p, c), dt(2026, 10, 30, 8));
+    assert_eq!(start(&p, free), dt(2026, 10, 27, 8));
+}
+
+// Source: https://support.microsoft.com/en-us/project/update-work-on-a-project — "Update actual and remaining duration"
+// Entering actual duration calculates % complete and remaining duration.
+#[test]
+fn actual_duration_sets_percent_complete() {
+    let mut p = project();
+    let t = task(&mut p, "Build", 10 * DAY);
+    recalculate(&mut p);
+    p.set_actual_duration(t, 4 * DAY).unwrap();
+    recalculate(&mut p);
+    let task = p.task(t).unwrap();
+    assert_eq!(task.percent_complete, 40);
+    assert_eq!(task.remaining_duration(), 6 * DAY);
+    assert_eq!(task.actual_start, Some(dt(2026, 10, 19, 8)));
+}
+
+// Source: https://support.microsoft.com/en-us/project/update-work-on-a-project — "Update actual and remaining duration"
+// Entering remaining duration recalculates the duration and % complete.
+#[test]
+fn remaining_duration_recalculates_duration_and_percent() {
+    let mut p = project();
+    let t = task(&mut p, "Build", 10 * DAY);
+    recalculate(&mut p);
+    p.set_percent_complete(t, 40).unwrap();
+    p.set_remaining_duration(t, 12 * DAY).unwrap();
+    recalculate(&mut p);
+    let task = p.task(t).unwrap();
+    assert_eq!(task.duration, 16 * DAY, "4 days done + 12 days left");
+    assert_eq!(task.percent_complete, 25);
+    assert_eq!(finish(&p, t), dt(2026, 11, 9, 17));
+}
+
+// Source: https://support.microsoft.com/en-us/project/update-work-on-a-project — "Update actual and remaining duration"
+// An actual duration longer than the scheduled duration raises the duration to match, leaves no
+// remaining duration and marks the task 100% complete.
+#[test]
+fn actual_duration_past_the_plan_completes_the_task() {
+    let mut p = project();
+    let t = task(&mut p, "Build", 2 * DAY);
+    recalculate(&mut p);
+    p.set_actual_duration(t, 3 * DAY).unwrap();
+    recalculate(&mut p);
+    let task = p.task(t).unwrap();
+    assert_eq!((task.duration, task.percent_complete, task.remaining_duration()), (3 * DAY, 100, 0));
+    assert_eq!(task.actual_finish, Some(dt(2026, 10, 21, 17)));
+}
+
 // Source: https://support.microsoft.com/en-us/office/create-or-update-a-baseline-or-an-interim-plan-in-project-desktop-7e775482-ac84-4f4a-bbd0-592f9ac91953 — "Update a baseline or an interim plan"
 // Saving a baseline for selected tasks only does not roll it up into their summary task unless
 // the roll-up options are chosen, so the summary (and the project total built from it) keeps

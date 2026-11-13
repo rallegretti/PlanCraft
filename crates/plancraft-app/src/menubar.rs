@@ -346,7 +346,14 @@ fn toolbar(ui: &mut Ui, st: &mut UiState, info: &MenuInfo, settings: &AppSetting
                     push(Command::SetPercent(pct));
                 }
             }
-            b(ui, "✔", Some("On Track"), "Set progress to where the schedule says it should be today", sel, Command::MarkOnTrack);
+            b(
+                ui,
+                "✔",
+                Some("On Track"),
+                "Set progress to where the schedule says it should be at the status date (today if none is set)",
+                sel,
+                Command::MarkOnTrack,
+            );
             sep(ui);
             b(ui, "⟳", None, "Auto schedule the selected tasks", sel, Command::SetMode(ScheduleMode::Auto));
             b(ui, "📌", None, "Manually schedule the selected tasks", sel, Command::SetMode(ScheduleMode::Manual));
@@ -388,6 +395,15 @@ fn toolbar(ui: &mut Ui, st: &mut UiState, info: &MenuInfo, settings: &AppSetting
                 "Define your own task fields: text with a pick-list, number, cost, date, duration, flag",
                 doc,
                 Command::CustomFields,
+            );
+            sep(ui);
+            b(
+                ui,
+                "⏭",
+                Some("Update Project"),
+                "Update progress through a date, or reschedule work not done yet to start after it",
+                doc,
+                Command::UpdateProject,
             );
             sep(ui);
             b(ui, "📏", Some("Set Baseline"), "Save the current schedule as the baseline", doc, Command::SetBaseline);

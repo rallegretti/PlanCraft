@@ -468,13 +468,34 @@ pub fn apply_task_links(p: &mut Project, id: TaskId, a: &Args, keys: Option<&Tas
     Ok(())
 }
 
-/// Applies % complete (needs an up-to-date schedule for actual dates).
+/// Progress arguments, applied after everything else on an up-to-date schedule.
+const PROGRESS_KEYS: [&str; 4] = ["percent_complete", "actual_duration", "remaining_duration", "resume"];
+
+/// Whether `a` carries any progress argument.
+pub fn has_progress(a: &Args) -> bool {
+    PROGRESS_KEYS.iter().any(|k| a.get(k).is_some())
+}
+
+/// Applies % complete, actual/remaining duration and the resume date (needs an up-to-date
+/// schedule for actual dates).
 pub fn apply_task_progress(p: &mut Project, id: TaskId, a: &Args) -> ToolResult<()> {
     if let Some(pct) = a.f64("percent_complete")? {
         if !(0.0..=100.0).contains(&pct) {
             return err("'percent_complete' must be between 0 and 100");
         }
         p.set_percent_complete(id, pct.round() as u8)?;
+    }
+    if let Some(v) = a.get("actual_duration") {
+        let (m, _) = parse_duration_value(p, v, "actual_duration")?;
+        p.set_actual_duration(id, m)?;
+    }
+    if let Some(v) = a.get("remaining_duration") {
+        let (m, _) = parse_duration_value(p, v, "remaining_duration")?;
+        p.set_remaining_duration(id, m)?;
+    }
+    if let Some(resume) = opt_dt(p, a, "resume", false)? {
+        recalculate(p);
+        p.set_resume(id, resume)?;
     }
     Ok(())
 }
@@ -483,7 +504,7 @@ pub fn apply_task_progress(p: &mut Project, id: TaskId, a: &Args) -> ToolResult<
 pub fn apply_all(p: &mut Project, id: TaskId, a: &Args) -> ToolResult<()> {
     apply_task_fields(p, id, a)?;
     apply_task_links(p, id, a, None)?;
-    if a.get("percent_complete").is_some() {
+    if has_progress(a) {
         recalculate(p);
         apply_task_progress(p, id, a)?;
     }
@@ -661,7 +682,7 @@ fn create_tasks(ctx: &Ctx, a: &Args) -> ToolResult {
                 apply_task_links(p, id, &it.args, Some(&keys))
                     .map_err(|e| ToolError(format!("task '{}': {e}", p.task(id).map(|t| t.name.clone()).unwrap_or_default())))?;
             }
-            if flat.iter().any(|it| it.args.get("percent_complete").is_some()) {
+            if flat.iter().any(|it| has_progress(&it.args)) {
                 recalculate(p);
                 for (it, &id) in flat.iter().zip(&created) {
                     apply_task_progress(p, id, &it.args)?;
@@ -733,7 +754,7 @@ fn update_tasks(ctx: &Ctx, a: &Args) -> ToolResult {
                 apply_task_links(p, id, ua, None).map_err(|e| ToolError(format!("update {} (task {}): {e}", n + 1, id.0)))?;
                 ids.push(id);
             }
-            if parsed.iter().any(|ua| ua.get("percent_complete").is_some()) {
+            if parsed.iter().any(has_progress) {
                 recalculate(p);
                 for (ua, id) in parsed.iter().zip(&ids) {
                     apply_task_progress(p, *id, ua)?;

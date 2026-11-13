@@ -633,32 +633,16 @@ impl PlanCraftApp {
                 }
             }
             Command::MarkOnTrack => {
-                // Progress up to the status date (or now).
-                let at = plancraft_core::report::status_moment(&doc.project);
-                let r = doc.try_edit("Mark on Track", ChangeSource::User, |p| {
-                    let targets: Vec<(TaskId, u8)> = {
-                        let wc = plancraft_core::schedule::project_calendar(p);
-                        sel.iter()
-                            .filter_map(|id| {
-                                let t = p.task(*id)?;
-                                let (s, f) = (t.sched.start?, t.sched.finish?);
-                                let pct = if at >= f {
-                                    100
-                                } else if at <= s {
-                                    0
-                                } else {
-                                    (wc.between(s, at) * 100 / wc.between(s, f).max(1)) as u8
-                                };
-                                Some((*id, pct))
-                            })
-                            .collect()
-                    };
-                    for (id, pct) in targets {
-                        p.set_percent_complete(id, pct)?;
-                    }
-                    Ok(())
-                });
-                report(st, r);
+                // Progress up to the status date (or now), never lowering what was entered.
+                let r = doc.try_edit("Mark on Track", ChangeSource::User, |p| p.mark_on_track(&sel));
+                match r {
+                    Ok(r) if r.updated.is_empty() => st.toast(ToastKind::Info, "Already on track: no progress needed adding"),
+                    Ok(_) => {}
+                    Err(e) => st.toast(ToastKind::Warning, e.to_string()),
+                }
+            }
+            Command::UpdateProject => {
+                self.dialogs.update_project = Some(Bound::new(doc, dialogs::update_project::UpdateProject::new(&doc.project, sel.clone())));
             }
             Command::ToggleActive => {
                 if !sel.is_empty() {
@@ -1314,6 +1298,24 @@ impl PlanCraftApp {
                     }
                     "CustomFields" => Command::CustomFields,
                     "Print" => Command::Print,
+                    "UpdateProject" => Command::UpdateProject,
+                    "Track" => {
+                        // Progress through day 10, then a week's pause: split bars to look at.
+                        if let Some(doc) = lock(&self.ws).active_doc_mut() {
+                            let _ = doc.try_edit("Track", ChangeSource::User, |p| {
+                                let day = |n: i64| plancraft_core::calendar::shift(p.start, n * 24 * 60).date();
+                                let (status, after) = (day(11), day(18));
+                                p.set_status_date(Some(status));
+                                p.update_progress_through(
+                                    &[],
+                                    p.end_of_working_day(status),
+                                    plancraft_core::ops::ProgressUpdate::Scheduled,
+                                )?;
+                                p.reschedule_uncompleted_work(&[], p.end_of_working_day(after))
+                            });
+                        }
+                        continue;
+                    }
                     // `GroupBy=<field>` and `SortBy=<field>[ desc]`, by column key or custom field name.
                     other => {
                         let field_key = |name: &str| {
@@ -1642,6 +1644,7 @@ impl PlanCraftApp {
         {
             let st = &mut self.st;
             dialogs::show_bound(&mut self.dialogs.external, &mut ws, |d, doc| d.show(&ctx, doc, st));
+            dialogs::show_bound(&mut self.dialogs.update_project, &mut ws, |d, doc| d.show(&ctx, doc, st));
             let st = &*st;
             dialogs::show_bound(&mut self.dialogs.print, &mut ws, |d, doc| d.show(&ctx, doc, st));
         }
@@ -2032,6 +2035,53 @@ mod ui_tests {
         assert!(h.state().dialogs.print.is_none(), "switching plans closes the window");
         assert_eq!(orientation(&h, a), Orientation::Portrait, "and keeps its plan's change");
         assert_eq!(orientation(&h, b), Orientation::Landscape);
+    }
+
+    #[test]
+    fn update_project_window_updates_progress_then_reschedules() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = harness();
+        let ctx = h.ctx.clone();
+        let complete = |h: &Harness<'static, PlanCraftApp>| {
+            let ws = h.state().ws.lock().unwrap();
+            ws.active_doc().unwrap().project.tasks.iter().filter(|t| t.percent_complete > 0).count()
+        };
+        {
+            let mut ws = h.state().ws.lock().unwrap();
+            let doc = ws.active_doc_mut().unwrap();
+            doc.edit("Status date", |p| p.set_status_date(NaiveDate::from_ymd_opt(2026, 10, 30))).unwrap();
+        }
+        let before = complete(&h);
+        // Defaults: update work as complete through the status date, as scheduled.
+        h.state_mut().exec(&ctx, Command::UpdateProject);
+        h.run_steps(2);
+        h.get_by_label("  OK  ").click();
+        h.run_steps(3);
+        assert!(h.state().dialogs.update_project.is_none(), "OK closes the window");
+        assert!(complete(&h) > before, "tasks scheduled before the status date have progress");
+
+        // Then move the work not done by the status date after it.
+        h.state_mut().exec(&ctx, Command::UpdateProject);
+        h.run_steps(2);
+        h.get_by_label("Reschedule uncompleted work to start after:").click();
+        h.run_steps(1);
+        h.get_by_label("  OK  ").click();
+        h.run_steps(3);
+        let ws = h.state().ws.lock().unwrap();
+        let p = &ws.active_doc().unwrap().project;
+        let after = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap().and_hms_opt(17, 0, 0).unwrap();
+        for t in p.tasks.iter().filter(|t| !t.sched.is_summary && t.active && !t.is_complete()) {
+            let left_from = t.sched.resume.or(t.sched.start).unwrap();
+            assert!(
+                left_from >= after || t.mode == ScheduleMode::Manual || t.constraint.kind != ConstraintKind::Asap,
+                "'{}' still has work before the status date ({left_from})",
+                t.name
+            );
+        }
+        drop(ws);
+        // The Tracking table's new columns and split bars draw.
+        h.state_mut().exec(&ctx, Command::Table(crate::columns::TaskTable::Tracking));
+        h.run_steps(2);
     }
 
     #[test]

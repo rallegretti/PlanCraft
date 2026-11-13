@@ -353,8 +353,31 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
             } else {
                 (theme::pal().BAR_TASK, theme::pal().BAR_TASK_EDGE)
             };
-            bp.rect_filled(bar_rect, 2.0, fill);
-            bp.rect_stroke(bar_rect, 2.0, Stroke::new(1.0, edge), StrokeKind::Inside);
+            // A split task: its working parts joined by dots across the pauses.
+            let split = t.sched.parts.len() > 1;
+            if split {
+                let clip = bp.clip_rect();
+                let mut prev: Option<f32> = None;
+                for &(a, b) in &t.sched.parts {
+                    let (xa, xb) = (g.x_of(chart_left, a), g.x_of(chart_left, b));
+                    if let Some(px) = prev {
+                        // Dots only across the visible part, so a far-off resume date stays cheap.
+                        let (lo, hi) = ((px + 2.0).max(clip.left() - 5.0), (xa - 1.0).min(clip.right() + 5.0));
+                        let mut x = lo;
+                        while x < hi {
+                            bp.hline(x..=(x + 2.0).min(hi), yc, Stroke::new(1.0, edge));
+                            x += 5.0;
+                        }
+                    }
+                    let r = Rect::from_min_max(pos2(xa, bar_rect.top()), pos2(xb.max(xa + 1.0), bar_rect.bottom()));
+                    bp.rect_filled(r, 2.0, fill);
+                    bp.rect_stroke(r, 2.0, Stroke::new(1.0, edge), StrokeKind::Inside);
+                    prev = Some(xb);
+                }
+            } else {
+                bp.rect_filled(bar_rect, 2.0, fill);
+                bp.rect_stroke(bar_rect, 2.0, Stroke::new(1.0, edge), StrokeKind::Inside);
+            }
             if manual {
                 // Bracket ends mark manually scheduled tasks.
                 for (x, dir) in [(bar_rect.left(), 1.0), (bar_rect.right(), -1.0)] {
@@ -363,8 +386,19 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
                 }
             }
             if g.show_progress && t.sched.percent_complete > 0.0 {
-                let px = x0 + (x1 - x0) * t.sched.percent_complete / 100.0;
-                bp.rect_filled(Rect::from_min_max(pos2(x0, yc - 1.5), pos2(px, yc + 1.5)), 0.0, theme::pal().BAR_PROGRESS);
+                match (split, t.sched.stop) {
+                    // The work done fills the parts up to the stop.
+                    (true, Some(stop)) => {
+                        for &(a, b) in t.sched.parts.iter().filter(|(a, _)| *a < stop) {
+                            let (xa, xb) = (g.x_of(chart_left, a), g.x_of(chart_left, b.min(stop)));
+                            bp.rect_filled(Rect::from_min_max(pos2(xa, yc - 1.5), pos2(xb, yc + 1.5)), 0.0, theme::pal().BAR_PROGRESS);
+                        }
+                    }
+                    _ => {
+                        let px = x0 + (x1 - x0) * t.sched.percent_complete / 100.0;
+                        bp.rect_filled(Rect::from_min_max(pos2(x0, yc - 1.5), pos2(px, yc + 1.5)), 0.0, theme::pal().BAR_PROGRESS);
+                    }
+                }
             }
             if g.show_slack && t.sched.total_slack > 0 {
                 let cal = task_calendar(p, idx);
@@ -506,8 +540,15 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
             }
             BarDrag::Progress { task } => {
                 if let Some(sg) = geom.get(&task) {
-                    let pct = (((pp.x - sg.x0) / (sg.x1 - sg.x0).max(1.0)) * 100.0).clamp(0.0, 100.0).round() as u8;
-                    let px = sg.x0 + (sg.x1 - sg.x0) * pct as f32 / 100.0;
+                    let linear = (((pp.x - sg.x0) / (sg.x1 - sg.x0).max(1.0)) * 100.0).clamp(0.0, 100.0).round() as u8;
+                    // A split task does no work during its pauses: count only its working parts.
+                    let split_pct = p.task(task).filter(|t| t.sched.parts.len() > 1 && t.duration > 0).and_then(|t| {
+                        let cal = task_calendar(p, p.task_index(task)?);
+                        let done = plancraft_core::schedule::work_done_by(&t.sched.parts, &cal, g.time_at(chart_left, pp.x));
+                        u8::try_from((done.saturating_mul(100).saturating_add(t.duration / 2) / t.duration).clamp(0, 100)).ok()
+                    });
+                    let pct = split_pct.unwrap_or(linear);
+                    let px = if split_pct.is_some() { pp.x.clamp(sg.x0, sg.x1) } else { sg.x0 + (sg.x1 - sg.x0) * pct as f32 / 100.0 };
                     bp.rect_filled(Rect::from_min_max(pos2(sg.x0, sg.y - 2.0), pos2(px, sg.y + 2.0)), 0.0, theme::pal().GOLD);
                     tooltip_at(ui, pp, &format!("{pct}% complete"));
                     if resp.drag_stopped() {

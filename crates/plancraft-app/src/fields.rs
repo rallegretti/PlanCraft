@@ -22,7 +22,7 @@ pub enum Field {
 }
 
 /// Built-in columns and their keys (as saved in table layouts). Keys never change.
-const BUILTIN: [(TaskCol, &str); 47] = [
+const BUILTIN: [(TaskCol, &str); 51] = [
     (TaskCol::Indicators, "indicators"),
     (TaskCol::Mode, "mode"),
     (TaskCol::Wbs, "wbs"),
@@ -49,6 +49,10 @@ const BUILTIN: [(TaskCol, &str); 47] = [
     (TaskCol::CostVariance, "cost_variance"),
     (TaskCol::ActualStart, "actual_start"),
     (TaskCol::ActualFinish, "actual_finish"),
+    (TaskCol::ActualDuration, "actual_duration"),
+    (TaskCol::RemainingDuration, "remaining_duration"),
+    (TaskCol::Stop, "stop"),
+    (TaskCol::Resume, "resume"),
     (TaskCol::EarlyStart, "early_start"),
     (TaskCol::EarlyFinish, "early_finish"),
     (TaskCol::LateStart, "late_start"),
@@ -216,6 +220,10 @@ impl Field {
             LateFinish => time(s.late_finish),
             ActualStart => time(t.actual_start),
             ActualFinish => time(t.actual_finish),
+            ActualDuration => mins(t.duration_progress().0),
+            RemainingDuration => mins(t.duration_progress().1),
+            Stop => time(s.stop),
+            Resume => time(s.resume),
             BaselineStart => time(t.baseline.map(|b| b.start)),
             BaselineFinish => time(t.baseline.map(|b| b.finish)),
             ConstraintDate => time(t.constraint.date),

@@ -48,6 +48,118 @@ struct Dates {
     ef: Option<NaiveDateTime>,
     ls: Option<NaiveDateTime>,
     lf: Option<NaiveDateTime>,
+    /// Completed and remaining parts of an in-progress task.
+    parts: Option<Parts>,
+}
+
+/// The completed and remaining parts of an in-progress task.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Parts {
+    /// End of the completed part (Microsoft Project's Stop field).
+    pub stop: NaiveDateTime,
+    /// Start of the remaining part: the next working moment after `stop`, or the start of the next
+    /// working part when the task pauses at `stop` (Microsoft Project's Resume field).
+    pub resume: NaiveDateTime,
+    /// Working minutes left to do.
+    pub remaining: Minutes,
+    /// End of the last working part: the task's finish.
+    pub finish: NaiveDateTime,
+    /// Start of the last working part and the working minutes in it (the part that can still
+    /// slip); the actual start and the whole duration when the task is not split.
+    pub last: (NaiveDateTime, Minutes),
+    /// The task has pauses (see [`segments_of`]).
+    pub split: bool,
+}
+
+/// Most pauses one task can have; further ones are ignored.
+pub const MAX_SPLITS: usize = 100;
+
+/// The working parts `(start, finish, work before it)` of an in-progress task laid out from its
+/// actual start: after each split's work the task stops until that split's resume date. Splits
+/// that would not leave a gap (or lie past the duration) are ignored, so a task with no real pause
+/// has one part.
+pub fn segments_of(start: NaiveDateTime, splits: &[Split], cal: &WorkCal, dur: Minutes) -> Vec<(NaiveDateTime, NaiveDateTime, Minutes)> {
+    let mut sorted: Vec<Split> = splits.iter().take(MAX_SPLITS).copied().collect();
+    sorted.sort_by_key(|s| s.work);
+    let mut out = Vec::new();
+    let (mut at, mut used) = (start, 0);
+    for s in sorted {
+        if s.work <= used {
+            continue;
+        }
+        if s.work >= dur {
+            break;
+        }
+        let end = cal.add(at, s.work - used);
+        let resume = cal.snap_forward(s.resume);
+        if resume <= cal.snap_forward(end) {
+            // No gap: the part simply goes on.
+            continue;
+        }
+        out.push((at, end, used));
+        at = resume;
+        used = s.work;
+    }
+    out.push((at, cal.add(at, dur.saturating_sub(used)), used));
+    out
+}
+
+/// Splits an in-progress task (actual start, 1-99% complete, no actual finish) into the part done
+/// and the part left; `None` for any other task.
+pub fn parts_of(t: &Task, cal: &WorkCal, dur: Minutes) -> Option<Parts> {
+    let start = t.actual_start?;
+    if t.actual_finish.is_some() || t.is_milestone() || dur <= 0 || t.mode == ScheduleMode::Manual {
+        return None;
+    }
+    let pct = Minutes::from(t.percent_complete);
+    if !(1..100).contains(&pct) {
+        return None;
+    }
+    let done = dur.saturating_mul(pct) / 100;
+    let remaining = dur.saturating_sub(done);
+    if t.splits.is_empty() {
+        let stop = cal.add(start, done);
+        return Some(Parts {
+            stop,
+            resume: cal.snap_forward(stop),
+            remaining,
+            finish: cal.add(start, dur),
+            last: (start, dur),
+            split: false,
+        });
+    }
+    let segs = segments_of(start, &t.splits, cal, dur);
+    let (stop, resume) = stop_and_resume(&segs, cal, done)?;
+    let &(last_start, finish, before) = segs.last()?;
+    Some(Parts { stop, resume, remaining, finish, last: (last_start, dur.saturating_sub(before)), split: segs.len() > 1 })
+}
+
+/// Where `done` working minutes end within `segs` (the Stop), and where the rest starts (the
+/// Resume: the next part when the work done ends exactly at a pause).
+fn stop_and_resume(
+    segs: &[(NaiveDateTime, NaiveDateTime, Minutes)],
+    cal: &WorkCal,
+    done: Minutes,
+) -> Option<(NaiveDateTime, NaiveDateTime)> {
+    for (k, &(s, f, before)) in segs.iter().enumerate() {
+        let next = segs.get(k + 1);
+        let len = next.map_or(Minutes::MAX, |n| n.2.saturating_sub(before));
+        if done.saturating_sub(before) < len {
+            let stop = cal.add(s, done.saturating_sub(before).max(0));
+            return Some((stop, cal.snap_forward(stop)));
+        }
+        if let Some(&(ns, _, nb)) = next
+            && done == nb
+        {
+            return Some((f, ns));
+        }
+    }
+    segs.last().map(|&(_, f, _)| (f, f))
+}
+
+/// Working minutes of `segs` done by `upto`.
+pub fn work_done_by(segs: &[(NaiveDateTime, NaiveDateTime)], cal: &WorkCal, upto: NaiveDateTime) -> Minutes {
+    segs.iter().filter(|(s, _)| *s < upto).map(|&(s, f)| cal.between(s, f.min(upto)).max(0)).fold(0, Minutes::saturating_add)
 }
 
 /// Summary of a recalculation.
@@ -183,6 +295,8 @@ struct Engine<'a> {
     order: Vec<usize>,
     warnings: Vec<String>,
     dates: Vec<Dates>,
+    /// Working parts of split tasks (by task index).
+    segments: HashMap<usize, Vec<(NaiveDateTime, NaiveDateTime)>>,
     /// Per task: the latest Start No Earlier Than date and the earliest deadline set on its
     /// ancestor summaries (both apply to every subtask).
     inherited: Vec<Inherited>,
@@ -263,6 +377,7 @@ impl<'a> Engine<'a> {
             order: Vec::new(),
             warnings: Vec::new(),
             dates: vec![Dates::default(); n],
+            segments: HashMap::new(),
             inherited,
         }
     }
@@ -323,6 +438,12 @@ impl<'a> Engine<'a> {
         if let Some(d) = self.dates.get_mut(i) {
             d.es = Some(es);
             d.ef = Some(ef);
+        }
+    }
+
+    fn set_parts(&mut self, i: usize, parts: Option<Parts>) {
+        if let Some(d) = self.dates.get_mut(i) {
+            d.parts = parts;
         }
     }
 
@@ -603,9 +724,14 @@ impl<'a> Engine<'a> {
             }
 
             let (mut s, mut f) = place(es);
+            let parts = parts_of(t, cal, dur);
             if let Some(a) = t.actual_start {
                 s = a;
-                f = if dur > 0 { cal.add(a, dur) } else { a };
+                f = match parts {
+                    Some(pt) => pt.finish,
+                    None if dur > 0 => cal.add(a, dur),
+                    None => a,
+                };
             }
             if let Some(af) = t.actual_finish {
                 if t.actual_start.is_none() {
@@ -613,7 +739,17 @@ impl<'a> Engine<'a> {
                 }
                 f = af.max(s);
             }
+            let segments = match (parts, t.actual_start) {
+                (Some(pt), Some(a)) if pt.split => segments_of(a, &t.splits, cal, dur).into_iter().map(|(s, f, _)| (s, f)).collect(),
+                _ => Vec::new(),
+            };
             self.warnings.extend(warnings);
+            self.set_parts(i, parts);
+            if segments.is_empty() {
+                self.segments.remove(&i);
+            } else {
+                self.segments.insert(i, segments);
+            }
             self.set_early(i, s, f);
         }
     }
@@ -674,7 +810,12 @@ impl<'a> Engine<'a> {
                 }
             }
             let lf = cal.snap_backward(lf);
-            let ls = if dur > 0 { cal.sub(lf, dur) } else { lf };
+            // A split task's last part is what can still move: its Late Start is that part's.
+            let ls = match self.date(i).parts {
+                Some(pt) if pt.split => cal.sub(lf, pt.last.1),
+                _ if dur > 0 => cal.sub(lf, dur),
+                _ => lf,
+            };
             self.set_late(i, ls, lf);
         }
     }
@@ -691,7 +832,11 @@ impl<'a> Engine<'a> {
             let (Some(es), Some(ef), Some(ls), Some(lf)) = (d.es, d.ef, d.ls, d.lf) else {
                 continue;
             };
-            let ts = cal.between(es, ls).min(cal.between(ef, lf));
+            let ts = match d.parts {
+                // The start of a split task is fixed; only its remaining part can slip.
+                Some(pt) if pt.split => cal.between(ef, lf),
+                _ => cal.between(es, ls).min(cal.between(ef, lf)),
+            };
             let dur = self.duration_of(i);
             let mut fs = Minutes::MAX;
             for &e in self.outgoing(i) {
@@ -803,7 +948,7 @@ fn calculate(p: &mut Project) -> ScheduleReport {
     }
     rollup_tracking(p);
 
-    let (dates, order_warn, total_slack, free_slack) = {
+    let (dates, order_warn, total_slack, free_slack, mut segments) = {
         let mut eng = Engine::new(p);
         eng.build_edges();
         eng.topo_sort();
@@ -824,7 +969,7 @@ fn calculate(p: &mut Project) -> ScheduleReport {
         eng.forward(&pins, true);
         eng.backward();
         let (total_slack, free_slack) = eng.slack();
-        (eng.dates, eng.warnings, total_slack, free_slack)
+        (eng.dates, eng.warnings, total_slack, free_slack, eng.segments)
     };
 
     let mut report = ScheduleReport { warnings: order_warn, ..Default::default() };
@@ -843,6 +988,9 @@ fn calculate(p: &mut Project) -> ScheduleReport {
         t.sched.early_finish = d.ef;
         t.sched.late_start = d.ls;
         t.sched.late_finish = d.lf;
+        t.sched.stop = d.parts.map(|pt| pt.stop);
+        t.sched.resume = d.parts.map(|pt| pt.resume);
+        t.sched.parts = segments.remove(&i).unwrap_or_default();
         t.sched.total_slack = ts;
         t.sched.free_slack = free_slack.get(i).copied().unwrap_or(0);
         t.sched.duration = if t.is_milestone() { 0 } else { t.duration };
@@ -1024,6 +1172,9 @@ fn rollup_summaries(p: &mut Project) -> Own {
         t.sched.critical = r.critical;
         t.sched.duration = duration;
         t.sched.percent_complete = r.percent;
+        t.sched.stop = None;
+        t.sched.resume = None;
+        t.sched.parts.clear();
         t.sched.warnings.clear();
         if let (Some(dl), Some(f)) = (t.deadline, r.finish)
             && f > dl

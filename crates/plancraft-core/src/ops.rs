@@ -50,6 +50,36 @@ impl From<crate::guard::Panicked> for PlanError {
 
 pub type PlanResult<T> = Result<T, PlanError>;
 
+/// How "Update work as complete through" sets progress.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ProgressUpdate {
+    /// Each task gets the % complete its schedule says it should have (0-100%).
+    #[default]
+    Scheduled,
+    /// Tasks that finish by the date become 100% complete; others are left alone.
+    ZeroOrHundred,
+}
+
+/// What a tracking update (Update Project, Mark on Track) changed.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TrackingReport {
+    /// Tasks whose % complete went up.
+    pub updated: Vec<TaskId>,
+    /// In-progress tasks whose remaining work now resumes later.
+    pub split: Vec<TaskId>,
+    /// Tasks not started that got a Start No Earlier Than constraint.
+    pub constrained: Vec<TaskId>,
+    /// Tasks left alone, and why.
+    pub skipped: Vec<(TaskId, String)>,
+}
+
+impl TrackingReport {
+    /// Number of tasks changed.
+    pub fn changed(&self) -> usize {
+        self.updated.len() + self.split.len() + self.constrained.len()
+    }
+}
+
 fn invalid<T>(msg: impl Into<String>) -> PlanResult<T> {
     Err(PlanError::Invalid(msg.into()))
 }
@@ -873,6 +903,10 @@ impl Project {
         }
         let t = self.row_mut(idx)?;
         t.percent_complete = pct;
+        if pct == 0 || pct == 100 {
+            // Nothing left to resume.
+            t.splits.clear();
+        }
         if pct == 0 {
             t.actual_start = None;
             t.actual_finish = None;
@@ -889,6 +923,260 @@ impl Project {
             }
         }
         Ok(())
+    }
+
+    /// Sets the status date: the date progress is reported as of (`None` = today).
+    pub fn set_status_date(&mut self, date: Option<NaiveDate>) {
+        self.status_date = date;
+    }
+
+    /// End of the working day `d` on the project calendar (17:00 on the standard calendar).
+    pub fn end_of_working_day(&self, d: NaiveDate) -> NaiveDateTime {
+        crate::calendar::WorkCal::single(self.base_calendar()).day_finish(d)
+    }
+
+    /// Leaf rows that a tracking update applies to: every active leaf when `ids` is empty,
+    /// otherwise the given tasks (summaries stand for their subtasks), in row order.
+    fn tracking_rows(&self, ids: &[TaskId]) -> PlanResult<Vec<usize>> {
+        let mut rows = Vec::new();
+        if ids.is_empty() {
+            rows.extend((0..self.tasks.len()).filter(|&i| !self.has_children(i)));
+        } else {
+            for &id in ids {
+                let idx = self.require_task(id)?;
+                rows.extend(self.descendants_range(idx).chain(std::iter::once(idx)).filter(|&i| !self.has_children(i)));
+            }
+            rows.sort_unstable();
+            rows.dedup();
+        }
+        rows.retain(|&i| self.tasks.get(i).is_some_and(|t| t.active));
+        Ok(rows)
+    }
+
+    /// Microsoft Project's "Update work as complete through": brings each task's % complete up to
+    /// where its schedule says it should be at `through` (`Scheduled`), or only marks the tasks
+    /// that finish by then as 100% complete (`ZeroOrHundred`). Progress already entered is never
+    /// lowered. `ids` empty = the entire project.
+    pub fn update_progress_through(&mut self, ids: &[TaskId], through: NaiveDateTime, how: ProgressUpdate) -> PlanResult<TrackingReport> {
+        crate::schedule::recalculate(self);
+        let mut report = TrackingReport::default();
+        for idx in self.tracking_rows(ids)? {
+            let t = self.row(idx)?;
+            let (Some(start), Some(finish)) = (t.sched.start, t.sched.finish) else { continue };
+            let pct = if finish <= through {
+                100
+            } else if how == ProgressUpdate::ZeroOrHundred || through <= start || t.duration <= 0 || t.is_milestone() {
+                0
+            } else {
+                let cal = crate::schedule::task_calendar(self, idx);
+                let upto = through.min(finish);
+                // A split task does no work during its pauses.
+                let done = if t.sched.parts.is_empty() {
+                    cal.between(start, upto).max(0)
+                } else {
+                    crate::schedule::work_done_by(&t.sched.parts, &cal, upto)
+                };
+                let pct = done.saturating_mul(100).saturating_add(t.duration / 2) / t.duration.max(1);
+                u8::try_from(pct.clamp(0, 99)).unwrap_or(99)
+            };
+            if pct > t.percent_complete {
+                let id = t.id;
+                self.set_percent_complete(id, pct)?;
+                report.updated.push(id);
+            }
+        }
+        Ok(report)
+    }
+
+    /// Microsoft Project's "Mark on Track": sets the tasks' % complete to what their schedule says
+    /// at the end of the status date (today when none is set), never lowering progress already
+    /// entered. Same moment as Update Project's default.
+    pub fn mark_on_track(&mut self, ids: &[TaskId]) -> PlanResult<TrackingReport> {
+        if ids.is_empty() {
+            return invalid("select the tasks to mark on track");
+        }
+        let day = self.status_date.unwrap_or_else(|| chrono::Local::now().date_naive());
+        let at = self.end_of_working_day(day);
+        self.update_progress_through(ids, at, ProgressUpdate::Scheduled)
+    }
+
+    /// Microsoft Project's "Reschedule uncompleted work to start after": work not done by `after`
+    /// moves to start after it, and actual dates stay where they are. A task in progress is split
+    /// (its remaining part resumes after `after`); a task not started gets a Start No Earlier
+    /// Than `after` constraint. `ids` empty = the entire project.
+    pub fn reschedule_uncompleted_work(&mut self, ids: &[TaskId], after: NaiveDateTime) -> PlanResult<TrackingReport> {
+        if crate::limits::clamp_datetime(after) != after {
+            return invalid("the date to reschedule after must be between 1900 and the end of 2300");
+        }
+        crate::schedule::recalculate(self);
+        let mut report = TrackingReport::default();
+        let rows = self.tracking_rows(ids)?;
+        // First the tasks in progress: their remaining work pauses until `after`.
+        let mut not_started = Vec::new();
+        for &idx in &rows {
+            let t = self.row(idx)?;
+            let id = t.id;
+            if t.is_complete() || t.actual_finish.is_some() {
+                continue;
+            }
+            if t.mode == ScheduleMode::Manual {
+                if t.sched.start.is_some_and(|s| s < after) {
+                    report.skipped.push((id, "it is manually scheduled".into()));
+                }
+                continue;
+            }
+            if t.percent_complete == 0 && t.actual_start.is_none() {
+                not_started.push(idx);
+                continue;
+            }
+            let Some(resume) = t.sched.resume.filter(|_| t.percent_complete > 0) else {
+                // Started but no work done yet: the whole task would move.
+                if t.sched.start.is_some_and(|s| s < after) {
+                    report.skipped.push((id, "it has an actual start but no progress".into()));
+                }
+                continue;
+            };
+            if resume < after {
+                self.pause_at_stop(idx, after)?;
+                report.split.push(id);
+            }
+        }
+        // Then the tasks not started, with the split tasks' successors already moved.
+        crate::schedule::recalculate(self);
+        for idx in not_started {
+            let t = self.row(idx)?;
+            let id = t.id;
+            if !t.sched.start.is_some_and(|s| s < after) {
+                continue;
+            }
+            match t.constraint.kind {
+                ConstraintKind::Asap => {}
+                ConstraintKind::Snet if t.constraint.date.is_none_or(|d| d < after) => {}
+                kind => {
+                    report.skipped.push((id, format!("its {} constraint was kept", kind.label())));
+                    continue;
+                }
+            }
+            self.row_mut(idx)?.constraint = Constraint { kind: ConstraintKind::Snet, date: Some(after) };
+            report.constrained.push(id);
+        }
+        Ok(report)
+    }
+
+    /// Makes the task at `idx` stop after the work done so far and resume at `resume`, replacing
+    /// any pause still ahead of it (earlier pauses, in work already done, stay).
+    fn pause_at_stop(&mut self, idx: usize, resume: NaiveDateTime) -> PlanResult<()> {
+        let t = self.row_mut(idx)?;
+        let done = t.actual_duration();
+        t.splits.retain(|s| s.work < done);
+        if t.splits.len() >= crate::schedule::MAX_SPLITS {
+            return invalid("a task can have at most 100 pauses");
+        }
+        t.splits.push(Split { work: done, resume });
+        Ok(())
+    }
+
+    /// The leaf task a duration-based progress entry applies to.
+    fn progress_leaf(&self, id: TaskId, what: &str) -> PlanResult<usize> {
+        let idx = self.require_task(id)?;
+        if self.has_children(idx) {
+            return invalid(format!("a summary task's {what} comes from its subtasks"));
+        }
+        if self.row(idx)?.is_milestone() {
+            return invalid("a milestone has no duration; mark it 0% or 100% complete instead");
+        }
+        Ok(idx)
+    }
+
+    /// Enters progress as actual duration: the working time spent so far. % complete follows; an
+    /// actual duration at or past the planned one stretches the duration to match and completes
+    /// the task.
+    pub fn set_actual_duration(&mut self, id: TaskId, minutes: Minutes) -> PlanResult<()> {
+        let idx = self.progress_leaf(id, "actual duration")?;
+        if !(0..=MAX_MINUTES).contains(&minutes) {
+            return invalid("actual duration must be between 0 and 5 years");
+        }
+        let t = self.row(idx)?;
+        let (dur, estimated, current) = (t.duration, t.estimated, t.percent_complete);
+        if minutes >= dur && minutes > 0 {
+            if minutes > dur {
+                self.set_duration(id, minutes, estimated)?;
+                // The actual finish is the new scheduled finish, even for a task already complete.
+                self.row_mut(idx)?.actual_finish = None;
+                crate::schedule::recalculate(self);
+            }
+            return self.set_percent_complete(id, 100);
+        }
+        let pct = percent_of(minutes, dur);
+        if pct == current {
+            // Unchanged: keep an actual start entered without progress.
+            return Ok(());
+        }
+        self.set_percent_complete(id, pct)
+    }
+
+    /// Enters progress as remaining duration: the working time still needed. The duration becomes
+    /// the time done so far plus `minutes`, and % complete follows.
+    pub fn set_remaining_duration(&mut self, id: TaskId, minutes: Minutes) -> PlanResult<()> {
+        let idx = self.progress_leaf(id, "remaining duration")?;
+        if !(0..=MAX_MINUTES).contains(&minutes) {
+            return invalid("remaining duration must be between 0 and 5 years");
+        }
+        let t = self.row(idx)?;
+        let (done, estimated) = (t.actual_duration(), t.estimated);
+        let total = done.saturating_add(minutes).min(MAX_MINUTES);
+        if total == 0 {
+            return invalid("a task needs some duration; enter remaining duration above zero");
+        }
+        let pct = if minutes == 0 { 100 } else { percent_of(done, total) };
+        let current = t.percent_complete;
+        if total != t.duration {
+            self.set_duration(id, total, estimated)?;
+            if pct == 100 {
+                // The actual finish is the new scheduled finish.
+                self.row_mut(idx)?.actual_finish = None;
+                crate::schedule::recalculate(self);
+            }
+        }
+        if pct == current {
+            // Unchanged: keep an actual start entered without progress.
+            return Ok(());
+        }
+        self.set_percent_complete(id, pct)
+    }
+
+    /// Sets when the remaining work of an in-progress task resumes (Microsoft Project's Resume).
+    /// A date later than the stop makes the task pause there and resume then (a split); `None`, or
+    /// the next working moment after the stop, removes that pause.
+    pub fn set_resume(&mut self, id: TaskId, resume: Option<NaiveDateTime>) -> PlanResult<()> {
+        let idx = self.require_task(id)?;
+        if resume.is_none() {
+            let t = self.row_mut(idx)?;
+            let done = t.actual_duration();
+            t.splits.retain(|s| s.work < done);
+            return Ok(());
+        }
+        if self.has_children(idx) {
+            return invalid("a summary task's dates come from its subtasks");
+        }
+        let t = self.row(idx)?;
+        if t.is_milestone() || t.mode == ScheduleMode::Manual || !(1..100).contains(&t.percent_complete) {
+            return invalid("only an automatically scheduled task that is 1-99% complete can resume later");
+        }
+        crate::schedule::recalculate(self);
+        let t = self.row(idx)?;
+        let (Some(stop), Some(date)) = (t.sched.stop, resume) else {
+            return invalid("the task has no stop yet; enter its actual start");
+        };
+        let cal = crate::schedule::task_calendar(self, idx);
+        let (date, next) = (cal.snap_forward(date), cal.snap_forward(stop));
+        if date < next {
+            return invalid(format!("Resume must be after Stop ({})", stop.format("%Y-%m-%d %H:%M")));
+        }
+        if date == next {
+            return self.set_resume(id, None);
+        }
+        self.pause_at_stop(idx, date)
     }
 
     /// Records time spent by a resource on a task.
@@ -1047,4 +1335,13 @@ fn split_digits(s: &str) -> (&str, &str) {
 
 fn trim_f(v: f64) -> String {
     if (v - v.round()).abs() < 1e-9 { format!("{}", v.round() as i64) } else { format!("{v:.2}") }
+}
+
+/// `part` of `whole` as a whole percentage, kept within 1-99% while the task is under way.
+fn percent_of(part: Minutes, whole: Minutes) -> u8 {
+    if part <= 0 {
+        return 0;
+    }
+    let pct = part.saturating_mul(100).saturating_add(whole / 2) / whole.max(1);
+    u8::try_from(pct.clamp(1, 99)).unwrap_or(99)
 }

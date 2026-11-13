@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use chrono::NaiveDate;
-use plancraft_core::calendar::TimeRange;
+use plancraft_core::calendar::{TimeRange, shift};
 use plancraft_core::duration::{DurationUnit, Lag, TimeSettings, best_unit, format_duration, parse_duration};
 use plancraft_core::io::{from_json_with_notes, to_json};
 use plancraft_core::limits::{self, MAX_MINUTES};
@@ -127,7 +127,11 @@ proptest! {
         Just(serde_json::json!({})),
         "\\PC{0,12}".prop_map(serde_json::Value::from),
     ]) {
-        let p = demo_project(start());
+        let mut p = demo_project(start());
+        // Fields the demo leaves empty, so the fuzzer mutates them too.
+        p.status_date = Some(start());
+        let t = p.tasks.iter_mut().find(|t| (1..100).contains(&t.percent_complete)).unwrap();
+        t.splits.push(Split { work: 60, resume: shift(start().and_hms_opt(8, 0, 0).unwrap(), 20 * 480) });
         let mut json: serde_json::Value = serde_json::from_str(&to_json(&p).unwrap()).unwrap();
         let mut leaves = Vec::new();
         collect_leaves(&mut json, &mut leaves);
@@ -219,6 +223,13 @@ enum Op {
     DeleteField(usize),
     Columns(String, Vec<String>),
     PageSetup(usize, bool, f32, u16, u8, u8, usize, String),
+    StatusDate(Option<i64>),
+    UpdateThrough(Option<usize>, i64, bool),
+    MarkOnTrack(usize),
+    Reschedule(Option<usize>, i64),
+    Resume(usize, Option<i64>),
+    ActualDuration(usize, i64),
+    RemainingDuration(usize, i64),
 }
 
 fn edit_op() -> impl Strategy<Value = Op> {
@@ -263,6 +274,13 @@ fn edit_op() -> impl Strategy<Value = Op> {
             cell_text()
         )
             .prop_map(|(a, b, c, d, e, f, g, h)| Op::PageSetup(a, b, c, d, e, f, g, h)),
+        prop::option::of(big()).prop_map(Op::StatusDate),
+        (prop::option::of(i()), big(), any::<bool>()).prop_map(|(a, m, z)| Op::UpdateThrough(a, m, z)),
+        i().prop_map(Op::MarkOnTrack),
+        (prop::option::of(i()), big()).prop_map(|(a, m)| Op::Reschedule(a, m)),
+        (i(), prop::option::of(big())).prop_map(|(a, m)| Op::Resume(a, m)),
+        (i(), big()).prop_map(|(a, m)| Op::ActualDuration(a, m)),
+        (i(), big()).prop_map(|(a, m)| Op::RemainingDuration(a, m)),
     ]
 }
 
@@ -356,6 +374,22 @@ fn apply(p: &mut Project, op: &Op) -> PlanResult<()> {
                 print_all_columns: portrait,
             });
         }
+        Op::StatusDate(m) => p.set_status_date(m.map(|m| shift(p.start, m).date())),
+        Op::UpdateThrough(i, m, zero) => {
+            let ids: Vec<TaskId> = i.map(|i| task_at(p, i)).into_iter().collect();
+            let how = if zero { ProgressUpdate::ZeroOrHundred } else { ProgressUpdate::Scheduled };
+            p.update_progress_through(&ids, shift(p.start, m), how)?;
+        }
+        Op::MarkOnTrack(i) => {
+            p.mark_on_track(&[task_at(p, i)])?;
+        }
+        Op::Reschedule(i, m) => {
+            let ids: Vec<TaskId> = i.map(|i| task_at(p, i)).into_iter().collect();
+            p.reschedule_uncompleted_work(&ids, shift(p.start, m))?;
+        }
+        Op::Resume(i, m) => p.set_resume(task_at(p, i), m.map(|m| shift(p.start, m)))?,
+        Op::ActualDuration(i, m) => p.set_actual_duration(task_at(p, i), m)?,
+        Op::RemainingDuration(i, m) => p.set_remaining_duration(task_at(p, i), m)?,
     }
     Ok(())
 }
@@ -487,4 +521,31 @@ fn page_setup_values_of_the_wrong_type_never_stop_a_plan_opening() {
     v["page_setup"] = serde_json::json!("landscape please");
     let (loaded, _) = plancraft_core::io::from_json_with_notes(&v.to_string(), std::path::Path::new("x.plancraft")).unwrap();
     assert!(loaded.page_setup.is_default());
+}
+
+/// Hostile pauses in a file are clamped when it is opened and never break scheduling: too many,
+/// out of order, negative or past the duration, and resume dates far away or before the start.
+#[test]
+fn hostile_splits_in_a_file_are_clamped_on_open() {
+    let mut p = demo_project(start());
+    let idx = p.tasks.iter().position(|t| (1..100).contains(&t.percent_complete)).unwrap();
+    let mut v = serde_json::to_value(&p).unwrap();
+    let mut splits: Vec<serde_json::Value> = (0..5_000)
+        .map(|i| serde_json::json!({ "work": (i * 7919) % 20_000 - 5_000, "resume": format!("{}-06-01T08:00:00", 1800 + i % 600) }))
+        .collect();
+    splits.push(serde_json::json!({ "work": i64::MAX, "resume": "2300-12-31T23:59:00" }));
+    v["tasks"][idx]["splits"] = serde_json::Value::Array(splits.clone());
+    let (mut loaded, notes) = plancraft_core::io::from_json_with_notes(&v.to_string(), std::path::Path::new("x.plancraft")).unwrap();
+    assert!(notes.iter().any(|n| n.contains("pauses")), "{notes:?}");
+    let t = &loaded.tasks[idx];
+    assert!(t.splits.len() <= plancraft_core::schedule::MAX_SPLITS);
+    assert!(t.splits.iter().all(|s| (0..=plancraft_core::limits::MAX_MINUTES).contains(&s.work)));
+    let report = recalculate(&mut loaded);
+    assert!(!report.warnings.iter().any(|w| w.contains("internal error")), "{:?}", report.warnings);
+    let s = &loaded.tasks[idx].sched;
+    assert!(s.parts.len() <= plancraft_core::schedule::MAX_SPLITS + 1);
+    assert!(s.parts.windows(2).all(|w| w[0].1 <= w[1].0), "parts are in order: {:?}", s.parts);
+    // The same pauses set through edits are refused past the limit.
+    p.tasks[idx].splits = (0..200).map(|i| Split { work: i, resume: shift(p.start, 10_000 + i) }).collect();
+    assert!(plancraft_core::limits::check_edit(&mut p).is_err());
 }

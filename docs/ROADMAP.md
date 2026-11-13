@@ -11,6 +11,8 @@
 - **Cross-file dependencies:** links to tasks in other documents, with cached snapshots and refresh
 - **Workload:** estimates (complexity points, three-point PERT and work), time-phased workload, overallocation detection and resource leveling
 - **Tracking:** time entries, the weekly timesheet, progress from tracked time, baselines, variance and earned value
+  - Status date, Update Project (progress through a date; reschedule uncompleted work after it) and Mark on Track.
+  - Stop and Resume dates: a task in progress can pause and resume later (a split bar); each reschedule adds a pause and keeps the earlier ones. Resource usage and leveling leave the pauses free. Actual and remaining duration entry.
 - **Desktop app:** two-row command bar, ten views, the major dialogs, undo/redo with history, multiple open documents, CSV export
 - **Custom fields and tables:**
   - Custom task fields: text with an optional pick-list, number, cost, date, duration and flag.
@@ -20,7 +22,7 @@
   - The Print window: a live preview of the exact printed pages, Page Setup saved with the plan, printing through the system print service (CUPS) or the PDF viewer on Windows.
   - PDF export written by PlanCraft itself (pure Rust, embedded font subset, searchable text).
   - Gantt Chart, Tracking Gantt, task table and Resource Sheet; pages across and down, repeated columns, legend, header and footer codes.
-- **MCP server:** 73 tools, resources and prompts over stdio and Streamable HTTP. A live mode works inside the running app (bearer token per session, `plancraft mcp --attach` bridge), and the app binary has a headless `plancraft mcp` mode.
+- **MCP server:** 76 tools, resources and prompts over stdio and Streamable HTTP. A live mode works inside the running app (bearer token per session, `plancraft mcp --attach` bridge), and the app binary has a headless `plancraft mcp` mode.
 - **Robustness:** no panics in shipped code (clippy-enforced), guarded edits with rollback, limits on hostile files and arguments, atomic saves, recovery copies, owner-only files.
 - **Quality gates:** `cargo xtask ci`, run locally on Linux, macOS and Windows (fmt, clippy, tests, cargo deny), a scheduler speed gate, hostile-input sweeps and parity tests against Microsoft's published scheduling examples.
 
@@ -30,9 +32,7 @@
 - **Network Diagram view:** PERT boxes laid out automatically, with critical highlighting.
 - **Reports:** a project overview dashboard, cost overview and a milestone report (printable). Printing of the usage, calendar and Network Diagram views.
 - **Saved filters and multi-level sort.** Also custom-field formulas and summary rollups.
-- **Recurring tasks, task splitting and the remaining-work model:**
-  - Reschedule incomplete work after the status date.
-  - Implement "Update Project".
+- **Recurring tasks and task splitting:** splitting tasks that have not started, dragging split parts on the Gantt, and the status-date calculation options (move completed parts back to the status date, remaining parts forward).
 - **Leveling options:** level within slack only, a priority-driven order, splitting, and a leveling preview (MS Project's "Leveling Gantt").
 - **Resource pool shared across projects:** one resources file that several projects link to.
 - **Overtime work and cost-rate tables:** effective-dated rates and cost accrual.

@@ -65,7 +65,8 @@ impl ProjectInfo {
         p.author = self.author.clone();
         p.notes = self.notes.clone();
         p.start = p.parse_datetime(&self.start, false).ok_or("Start date must look like YYYY-MM-DD")?;
-        p.status_date = if self.status_date.trim().is_empty() {
+        // "NA" (or nothing) means no status date: progress is reported as of today.
+        p.status_date = if self.status_date.trim().is_empty() || self.status_date.trim().eq_ignore_ascii_case("na") {
             None
         } else {
             Some(NaiveDate::parse_from_str(self.status_date.trim(), "%Y-%m-%d").map_err(|_| "Status date must look like YYYY-MM-DD")?)

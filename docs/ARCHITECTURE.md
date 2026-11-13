@@ -105,7 +105,7 @@ The MCP server is a hand-rolled JSON-RPC 2.0 server. It has no async runtime, wh
   - Tool errors come back as `isError` results.
   - Each request locks the shared workspace briefly.
   - The change callback runs after the lock is released.
-- **`tools/*`:** 73 tools grouped by domain.
+- **`tools/*`:** 76 tools grouped by domain.
   - All mutations go through `Document::try_edit(…, ChangeSource::Agent, …)`.
   - Unknown arguments are rejected so agents find their typos.
 - **Transports:**

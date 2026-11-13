@@ -437,6 +437,11 @@ impl Fixer {
         self.opt_datetime(&mut t.actual_finish);
         self.opt_datetime(&mut t.manual_start);
         self.opt_datetime(&mut t.manual_finish);
+        self.list(&mut t.splits, crate::schedule::MAX_SPLITS, "a task has more than 100 pauses");
+        for sp in &mut t.splits {
+            self.minutes(&mut sp.work, "a task's pause is out of range");
+            self.datetime(&mut sp.resume);
+        }
         if t.calendar.is_some_and(|c| !calendars.contains(&c)) {
             t.calendar = None;
             self.note("a task used a calendar that does not exist");

@@ -420,6 +420,15 @@ pub fn apply_chart_actions(doc: &mut Document, st: &mut UiState, rows: &[Row], a
                     let start = p.task(task).and_then(|t| t.sched.start).ok_or("task has no start")?;
                     let cal = task_calendar(p, idx);
                     let mut mins = cal.between(start, finish).max(0);
+                    // A split task does no work during its pauses.
+                    if let Some(t) = p.task(task) {
+                        for w in t.sched.parts.windows(2) {
+                            if let [(_, stop), (resume, _)] = w {
+                                mins = mins.saturating_sub(cal.between(*stop, (*resume).min(finish)).max(0));
+                            }
+                        }
+                        mins = mins.max(0);
+                    }
                     let day = p.settings.time.minutes_per_day.max(1);
                     if mins >= day / 2 {
                         mins = ((mins + day / 2) / day * day).max(day);
