@@ -72,6 +72,22 @@ pub fn task_table(
     let over_res: HashSet<ResourceId> = plancraft_core::workload::overallocations(&doc.project).into_iter().map(|(r, _)| r).collect();
     let over_tasks = super::overallocated_tasks(&doc.project, &over_res);
     let blank = blank_rows(st);
+    // The cursor and an open editor follow their task when the rows re-sort or regroup (after
+    // an edit, or an agent's change), so typing never lands on another task.
+    if let Some((was, id)) = st.cursor_task
+        && let Some((row, col)) = st.task_grid.cursor
+        && row == was
+        && super::task_at(&doc.project, rows, row).is_none_or(|t| t.id != id)
+        && let Some(now) = doc.project.task_index(id).and_then(|i| super::row_of_task(rows, i))
+    {
+        st.task_grid.cursor = Some((now, col));
+        if let Some(e) = st.task_grid.editing.as_mut()
+            && e.row == was
+        {
+            e.row = now;
+        }
+        st.task_grid.scroll_to = Some(now);
+    }
     let output = {
         let p = &doc.project;
         // Rows show the task's row number (what predecessors refer to), also when sorted or grouped.
@@ -127,7 +143,17 @@ pub fn task_table(
     for ev in output.events.clone() {
         match ev {
             GridEvent::Select { row, shift, ctrl } => super::select_row(&mut st.sel, &doc.project, rows, row, shift, ctrl),
-            GridEvent::CursorRow { row, shift } => super::select_row(&mut st.sel, &doc.project, rows, row, shift, false),
+            GridEvent::CursorRow { row, shift } => {
+                // Arrowing onto a group header selects nothing (a click selects the group), so a
+                // key pressed next can't act on the whole group by surprise.
+                if matches!(rows.get(row), Some(Row::Group(_))) {
+                    if !shift {
+                        st.sel.tasks.clear();
+                    }
+                } else {
+                    super::select_row(&mut st.sel, &doc.project, rows, row, shift, false);
+                }
+            }
             GridEvent::Activate { row, .. } => {
                 if super::task_at(&doc.project, rows, row).is_some() {
                     super::select_row(&mut st.sel, &doc.project, rows, row, false, false);
@@ -193,6 +219,7 @@ pub fn task_table(
             }
         }
     }
+    st.cursor_task = st.task_grid.cursor.and_then(|(r, _)| super::task_at(&doc.project, rows, r).map(|t| (r, t.id)));
     output
 }
 
@@ -360,6 +387,7 @@ pub fn apply_chart_actions(doc: &mut Document, st: &mut UiState, rows: &[Row], a
                 if let Some(r) = doc.project.task_index(task).and_then(|i| super::row_of_task(rows, i)) {
                     super::select_row(&mut st.sel, &doc.project, rows, r, shift, ctrl);
                     st.task_grid.cursor = Some((r, st.task_grid.cursor.map(|c| c.1).unwrap_or(2)));
+                    st.cursor_task = Some((r, task));
                 } else {
                     st.sel.select_task(task);
                 }

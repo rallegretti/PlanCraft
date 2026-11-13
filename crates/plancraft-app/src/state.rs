@@ -256,6 +256,14 @@ impl Selection {
     }
 }
 
+/// How a document's task views are sorted and grouped (kept per document).
+#[derive(Clone, Debug, Default)]
+pub struct ViewOrder {
+    pub sort: Option<(String, bool)>,
+    pub group: Option<String>,
+    pub collapsed_groups: HashSet<String>,
+}
+
 pub struct UiState {
     pub view: ViewKind,
     pub menu_tab: MenuTab,
@@ -276,6 +284,12 @@ pub struct UiState {
     pub group: Option<String>,
     /// Collapsed group headers (by label).
     pub collapsed_groups: HashSet<String>,
+    /// Sort, grouping and collapsed groups of the documents not active now (by handle): field
+    /// keys like `custom:3` mean different fields in different plans.
+    pub view_orders: std::collections::HashMap<u64, ViewOrder>,
+    /// The task grid's cursor row at the end of the last frame and the task on it, so the cursor
+    /// (and an open editor) follow that task when the rows re-sort or regroup.
+    pub cursor_task: Option<(usize, TaskId)>,
     /// Column widths of task tables, by table and field key (survive column changes).
     pub column_widths: std::collections::HashMap<(TaskTable, String), f32>,
     pub table: TaskTable,
@@ -312,6 +326,8 @@ impl Default for UiState {
             sort: None,
             group: None,
             collapsed_groups: HashSet::new(),
+            view_orders: Default::default(),
+            cursor_task: None,
             column_widths: std::collections::HashMap::new(),
             table: TaskTable::Entry,
             gantt: GanttState::default(),

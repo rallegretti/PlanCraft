@@ -283,14 +283,14 @@ pub fn shift(dt: NaiveDateTime, mins: Minutes) -> NaiveDateTime {
     dt.checked_add_signed(delta).unwrap_or(if mins < 0 { NaiveDateTime::MIN } else { NaiveDateTime::MAX })
 }
 
-/// Last day date arithmetic walks to: computed dates beyond it are clamped (hostile durations
-/// can't make the scheduler walk to the year 200,000).
 /// The last day of `d`'s month.
 fn month_last_day(d: NaiveDate) -> Option<NaiveDate> {
     let (y, m) = if d.month() == 12 { (d.year().checked_add(1)?, 1) } else { (d.year(), d.month() + 1) };
     NaiveDate::from_ymd_opt(y, m, 1).and_then(|first| first.pred_opt())
 }
 
+/// Last day date arithmetic walks to: computed dates beyond it are clamped (hostile durations
+/// can't make the scheduler walk to the year 200,000).
 pub fn horizon_end() -> NaiveDate {
     NaiveDate::from_ymd_opt(2500, 12, 31).unwrap_or(NaiveDate::MAX)
 }

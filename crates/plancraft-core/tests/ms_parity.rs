@@ -835,3 +835,27 @@ fn actual_duration_past_the_plan_completes_the_task() {
     assert_eq!((task.duration, task.percent_complete, task.remaining_duration()), (3 * DAY, 100, 0));
     assert_eq!(task.actual_finish, Some(dt(2026, 10, 21, 17)));
 }
+
+// Source: https://support.microsoft.com/en-us/office/create-or-update-a-baseline-or-an-interim-plan-in-project-desktop-7e775482-ac84-4f4a-bbd0-592f9ac91953 — "Update a baseline or an interim plan"
+// Saving a baseline for selected tasks only does not roll it up into their summary task unless
+// the roll-up options are chosen, so the summary (and the project total built from it) keeps
+// its older baseline figures. (PlanCraft has no roll-up options yet.)
+#[test]
+fn baselining_selected_tasks_does_not_update_their_summary_baseline() {
+    let mut p = project();
+    let s = p.add_task("Phase", None);
+    let a = task(&mut p, "A", 2 * DAY);
+    p.indent(a).unwrap();
+    p.task_mut(a).unwrap().fixed_cost = 100.0;
+    recalculate(&mut p);
+    p.set_baseline(&[]);
+    let d = p.add_task("D", None);
+    p.set_duration(d, DAY, false).unwrap();
+    p.indent(d).unwrap();
+    p.task_mut(d).unwrap().fixed_cost = 50.0;
+    recalculate(&mut p);
+    p.set_baseline(&[d]);
+    assert_eq!(p.task(d).unwrap().baseline.unwrap().cost, 50.0);
+    assert_eq!(p.task(s).unwrap().baseline.unwrap().cost, 100.0, "the summary keeps its baseline");
+    assert_eq!(plancraft_core::report::project_stats(&p).baseline_cost, 100.0);
+}

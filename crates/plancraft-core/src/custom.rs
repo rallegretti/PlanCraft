@@ -119,6 +119,12 @@ pub struct TableLayout {
     pub columns: Vec<String>,
 }
 
+/// Whether two custom field names are the same, ignoring case (the same rule a file is checked
+/// with when it is opened, so a field accepted here is never refused on load).
+fn same_name(a: &str, b: &str) -> bool {
+    a.to_lowercase() == b.to_lowercase()
+}
+
 /// The column key that shows custom field `id`.
 pub fn custom_column_key(id: CustomFieldId) -> String {
     format!("{CUSTOM_COLUMN_PREFIX}{}", id.0)
@@ -174,7 +180,7 @@ impl Project {
         let key = key.trim();
         self.custom_fields
             .iter()
-            .find(|f| f.name.eq_ignore_ascii_case(key))
+            .find(|f| same_name(&f.name, key))
             .or_else(|| key.parse::<u32>().ok().and_then(|n| self.custom_field(CustomFieldId(n))))
     }
 
@@ -183,7 +189,7 @@ impl Project {
     }
 
     fn check_unique_field_name(&self, name: &str, except: Option<CustomFieldId>) -> PlanResult<()> {
-        if self.custom_fields.iter().any(|f| Some(f.id) != except && f.name.eq_ignore_ascii_case(name)) {
+        if self.custom_fields.iter().any(|f| Some(f.id) != except && same_name(&f.name, name)) {
             return invalid(format!("a custom field named '{name}' already exists"));
         }
         Ok(())

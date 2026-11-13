@@ -236,8 +236,10 @@ fn inherited_from_summaries(p: &Project, parent: &[Option<usize>]) -> Vec<Inheri
     for i in 0..p.tasks.len() {
         let Some(pi) = parent.get(i).copied().flatten() else { continue };
         let (Some(par), Some(up)) = (p.tasks.get(pi), out.get(pi).copied()) else { continue };
-        let own_snet = par.constraint.date.filter(|_| par.constraint.kind == ConstraintKind::Snet);
-        let v = Inherited { snet: up.snet.max(own_snet), deadline: min_opt(up.deadline, par.deadline) };
+        // An inactive summary passes on what its own summaries set, not its own date or deadline.
+        let own_snet = par.constraint.date.filter(|_| par.active && par.constraint.kind == ConstraintKind::Snet);
+        let own_deadline = par.deadline.filter(|_| par.active);
+        let v = Inherited { snet: up.snet.max(own_snet), deadline: min_opt(up.deadline, own_deadline) };
         if let Some(slot) = out.get_mut(i) {
             *slot = v;
         }
@@ -379,11 +381,12 @@ impl<'a> Engine<'a> {
         self.outgoing.get(i).map(Vec::as_slice).unwrap_or_default()
     }
 
+    /// The leaf itself, or a summary's active leaf subtasks (inactive ones drive nothing).
     fn leaf_descendants(&self, idx: usize) -> Vec<usize> {
         if self.leaf(idx) {
             return vec![idx];
         }
-        self.p.descendants_range(idx).filter(|&i| self.leaf(i)).collect()
+        self.p.descendants_range(idx).filter(|&i| self.leaf(i) && self.task(i).is_some_and(|t| t.active)).collect()
     }
 
     fn resolve_pred(&mut self, r: &TaskRef, kind: LinkType, succ_name: &str) -> Vec<PredSource> {
@@ -978,7 +981,7 @@ struct Rollup {
 /// Weight of a subtask in % complete rollups: its duration (a milestone counts as one minute),
 /// so a summary's % complete is the duration-weighted progress of all subtasks below it.
 fn percent_weight(t: &Task) -> f64 {
-    t.duration.max(1) as f64
+    if t.is_milestone() { 1.0 } else { t.duration.max(1) as f64 }
 }
 
 /// Work, actual work and cost a summary carries itself (fixed cost and its own assignments).
