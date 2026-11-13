@@ -27,8 +27,9 @@ enum Kind {
 pub struct RecurringTask {
     /// The recurring task being changed (`None`: a new one).
     editing: Option<TaskId>,
-    /// Where a new one goes: above this row (appended when `None`).
-    at: Option<usize>,
+    /// Where a new one goes: above this task (appended when `None`), found when OK is pressed,
+    /// so rows inserted or deleted meanwhile don't move it.
+    above: Option<TaskId>,
     name: String,
     duration: String,
     kind: Kind,
@@ -51,12 +52,12 @@ pub struct RecurringTask {
 }
 
 impl RecurringTask {
-    /// A new recurring task, inserted above row `at`.
-    pub fn new(p: &Project, at: Option<usize>) -> Self {
+    /// A new recurring task, inserted above task `above`.
+    pub fn new(p: &Project, above: Option<TaskId>) -> Self {
         let start = p.start.date();
         Self {
             editing: None,
-            at,
+            above,
             name: String::new(),
             duration: p.format_duration(p.settings.time.minutes_per_day, false),
             kind: Kind::Weekly,
@@ -137,10 +138,13 @@ impl RecurringTask {
         let duration = parse_duration(&self.duration, p.settings.duration_unit, &p.settings.time)
             .map(|(m, _)| m)
             .ok_or("The duration isn't one PlanCraft understands, e.g. 1h or 2d")?;
-        let on = if self.by_weekday {
-            MonthDay::Weekday { nth: self.nth, weekday: self.weekday }
-        } else {
-            MonthDay::Day(u8::try_from(int(&self.day, "The day")?).map_err(|_| "The day must be from 1 to 31")?)
+        // Only monthly and yearly patterns read the day fields.
+        let on = || -> Result<MonthDay, String> {
+            Ok(if self.by_weekday {
+                MonthDay::Weekday { nth: self.nth, weekday: self.weekday }
+            } else {
+                MonthDay::Day(u8::try_from(int(&self.day, "The day")?).map_err(|_| "The day must be from 1 to 31")?)
+            })
         };
         let pattern = match self.kind {
             Kind::Daily => Pattern::Daily { interval: int(&self.every, "Every")?, workdays: self.workdays },
@@ -148,8 +152,8 @@ impl RecurringTask {
                 interval: int(&self.every, "Every")?,
                 days: self.days.iter().enumerate().filter(|(_, on)| **on).fold(0u8, |b, (k, _)| b | (1 << k)),
             },
-            Kind::Monthly => Pattern::Monthly { interval: int(&self.every, "Every")?, on },
-            Kind::Yearly => Pattern::Yearly { month: self.month, on },
+            Kind::Monthly => Pattern::Monthly { interval: int(&self.every, "Every")?, on: on()? },
+            Kind::Yearly => Pattern::Yearly { month: self.month, on: on()? },
         };
         let end =
             if self.end_by { RecurEnd::By(date(&self.end, "End by")?) } else { RecurEnd::After(int(&self.occurrences, "End after")?) };
@@ -184,7 +188,7 @@ impl RecurringTask {
                 Ok(format!("'{name}' changed"))
             }
             None => {
-                let at = self.at;
+                let at = self.above.and_then(|id| doc.project.task_index(id));
                 doc.edit_msg("Recurring Task", |p| p.add_recurring_task(&name, rec, at).map_err(|e| e.to_string()))?;
                 Ok(format!("Recurring task '{name}' added"))
             }
@@ -344,5 +348,27 @@ impl RecurringTask {
                 });
             });
         open && !close
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: the Day field (used only by monthly and yearly patterns) blocked OK when it
+    /// was cleared and the pattern switched to weekly or daily.
+    #[test]
+    fn hidden_fields_never_block_ok() {
+        let p = plancraft_core::sample::demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let mut d = RecurringTask::new(&p, None);
+        d.name = "Sync".into();
+        d.kind = Kind::Monthly;
+        d.day = String::new();
+        assert!(d.recurrence(&p).is_err());
+        for k in [Kind::Weekly, Kind::Daily] {
+            d.kind = k;
+            assert!(d.recurrence(&p).is_ok(), "{k:?}");
+        }
+        assert!(d.preview(&p).unwrap().starts_with("10 occurrences"));
     }
 }

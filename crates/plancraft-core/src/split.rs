@@ -22,6 +22,11 @@ fn invalid<T>(msg: impl Into<String>) -> PlanResult<T> {
     Err(PlanError::Invalid(msg.into()))
 }
 
+/// Working minutes of a task already done (0 when it has not started).
+fn work_done(t: &crate::model::Task) -> Minutes {
+    if t.actual_start.is_some() { t.duration.saturating_mul(Minutes::from(t.percent_complete)) / 100 } else { 0 }
+}
+
 /// The pauses in one task add up to at most five years.
 fn check_total(gaps: &[Gap]) -> PlanResult<()> {
     if gaps.iter().fold(0 as Minutes, |s, g| s.saturating_add(g.length)) > MAX_MINUTES {
@@ -66,6 +71,9 @@ impl Project {
     /// Splitting inside an existing pause lengthens that pause. Work already done can't be split.
     pub fn split_task(&mut self, id: TaskId, at: NaiveDateTime, resume: NaiveDateTime) -> PlanResult<()> {
         let idx = self.splittable(id)?;
+        if crate::limits::clamp_datetime(at) != at || crate::limits::clamp_datetime(resume) != resume {
+            return invalid("a split's dates must be between 1900 and 2300");
+        }
         if resume <= at {
             return invalid("work must resume after the split starts");
         }
@@ -77,8 +85,7 @@ impl Project {
         if before <= 0 || before >= dur {
             return invalid(format!("the split must fall inside the work of '{}'", t.name));
         }
-        let done = dur.saturating_mul(Minutes::from(t.percent_complete)) / 100;
-        if t.actual_start.is_some() && before < done {
+        if before < work_done(t) {
             return invalid(format!("work on '{}' already done can't be split", t.name));
         }
         // The moment that much work ends, and the working time from there to `resume`.
@@ -124,10 +131,14 @@ impl Project {
     pub fn set_split_length(&mut self, id: TaskId, k: usize, length: Minutes) -> PlanResult<()> {
         let idx = self.splittable(id)?;
         let t = self.tasks.get(idx).ok_or(PlanError::TaskNotFound(id))?;
+        let done = work_done(t);
         let mut gaps = planned_gaps(&t.gaps, t.duration);
         let Some(g) = gaps.get_mut(k) else {
             return invalid(format!("'{}' has {} split(s); there is no split {}", t.name, gaps.len(), k + 1));
         };
+        if g.work < done {
+            return invalid(format!("work on '{}' after that split is already under way; it can't move", t.name));
+        }
         if !(0..=MAX_MINUTES).contains(&length) {
             return invalid("a split can be at most 5 years long");
         }
@@ -153,6 +164,9 @@ impl Project {
         };
         if minutes <= 0 {
             return invalid("a part needs some work; rejoin the parts to remove one");
+        }
+        if from < work_done(t) {
+            return invalid(format!("work on '{}' in that part is already under way", t.name));
         }
         let delta = minutes.saturating_sub(to.saturating_sub(from));
         let new_dur = dur.saturating_add(delta);
@@ -213,6 +227,71 @@ mod tests {
         p.task_mut(a).unwrap().constraint = Constraint { kind: ConstraintKind::Snet, date: Some(dt(10, 21, 8)) };
         recalculate(&mut p);
         assert_eq!(p.task(a).unwrap().sched.parts, [(dt(10, 21, 8), dt(10, 22, 17)), (dt(10, 28, 8), dt(10, 29, 17))]);
+    }
+
+    /// Regression: a pause in work under way and a planned split at the same point cancelled
+    /// out (the earlier resume won), so Reschedule did nothing and Split Task shortened a pause.
+    #[test]
+    fn a_pause_and_a_split_at_the_same_point_resume_at_the_later() {
+        let (mut p, a, b) = plan();
+        p.split_task(a, dt(10, 20, 17), dt(10, 26, 8)).unwrap();
+        recalculate(&mut p);
+        p.set_percent_complete(a, 50).unwrap();
+        recalculate(&mut p);
+        let r = p.reschedule_uncompleted_work(&[a], dt(11, 6, 17)).unwrap();
+        assert_eq!(r.split, [a]);
+        recalculate(&mut p);
+        assert_eq!(p.task(a).unwrap().sched.parts.last().map(|x| x.0), Some(dt(11, 9, 8)));
+        assert_eq!(p.task(b).unwrap().sched.start, Some(dt(11, 11, 8)));
+        // Splitting inside that pause lengthens it, never shortens it.
+        p.split_task(a, dt(10, 21, 8), dt(10, 22, 8)).unwrap_or_default();
+        recalculate(&mut p);
+        assert_eq!(p.task(a).unwrap().sched.parts.last().map(|x| x.0), Some(dt(11, 9, 8)));
+    }
+
+    /// Regression: parts holding work already done could be dragged, moving that work.
+    #[test]
+    fn work_already_done_stays_put() {
+        let (mut p, a, _) = plan();
+        p.split_task(a, dt(10, 19, 17), dt(10, 21, 8)).unwrap();
+        recalculate(&mut p);
+        p.set_percent_complete(a, 50).unwrap();
+        recalculate(&mut p);
+        assert!(p.set_split_length(a, 0, 5 * 480).is_err(), "part 2 is under way");
+        assert!(p.set_part_duration(a, 1, 480).is_err());
+        assert!(p.split_task(a, dt(10, 21, 12), dt(10, 26, 8)).is_err(), "inside work done");
+        assert!(p.split_task(a, dt(10, 22, 17), dt(10, 26, 8)).is_ok(), "work not done yet can still be split");
+    }
+
+    /// Regression: a split far past 2300 was accepted and silently shortened.
+    #[test]
+    fn split_dates_stay_in_range() {
+        let (mut p, a, _) = plan();
+        let far = NaiveDate::from_ymd_opt(9999, 1, 1).unwrap().and_hms_opt(8, 0, 0).unwrap();
+        assert!(p.split_task(a, dt(10, 20, 17), far).is_err());
+    }
+
+    /// Regression: leveling moved a delayed task as one block, ignoring its planned split, and
+    /// left an overallocation it then didn't report.
+    #[test]
+    fn leveling_moves_planned_splits_with_the_task() {
+        let mut p = Project::new("L", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let r = p.add_resource("R");
+        let x = p.add_task("X", None);
+        p.task_mut(x).unwrap().priority = 900;
+        let y = p.add_task("Y", None);
+        p.set_duration(y, 2 * 480, false).unwrap();
+        p.task_mut(y).unwrap().priority = 100;
+        let z = p.add_task("Z", None);
+        p.task_mut(z).unwrap().constraint = Constraint { kind: ConstraintKind::Mso, date: Some(dt(10, 27, 8)) };
+        for t in [x, y, z] {
+            p.assign(t, r, Some(1.0), None).unwrap();
+        }
+        recalculate(&mut p);
+        p.split_task(y, dt(10, 19, 17), dt(10, 26, 8)).unwrap();
+        let report = crate::leveling::level_resources(&mut p, &Default::default());
+        let over = crate::workload::overallocations(&p);
+        assert!(over.is_empty() || !report.unresolved.is_empty(), "no silent overallocation: {over:?}");
     }
 
     #[test]

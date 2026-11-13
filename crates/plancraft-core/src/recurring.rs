@@ -165,8 +165,10 @@ impl Recurrence {
         Ok(())
     }
 
-    /// The days the pattern falls on, in order, before moving off non-working days.
-    fn pattern_dates(&self, cal: &WorkCal) -> Vec<NaiveDate> {
+    /// The occurrence dates, in order: the days the pattern falls on, each moved off non-working
+    /// days of `cal` to the next working day; one that lands on the same day as the previous one
+    /// doesn't count.
+    fn pattern_dates(&self, cal: &WorkCal) -> PlanResult<Vec<NaiveDate>> {
         let limit = match self.end {
             RecurEnd::After(n) => usize::from(n.min(MAX_OCCURRENCES)),
             RecurEnd::By(_) => usize::from(MAX_OCCURRENCES),
@@ -175,14 +177,37 @@ impl Recurrence {
             RecurEnd::By(d) => clamp_date(d),
             RecurEnd::After(_) => clamp_date(NaiveDate::MAX),
         };
-        let mut out = Vec::new();
+        let mut out: Vec<NaiveDate> = Vec::new();
+        let mut problem: Option<String> = None;
         let mut push = |d: NaiveDate| -> bool {
-            if d > last_day || out.len() >= limit {
+            if d > last_day {
                 return false;
             }
-            if d >= self.start {
-                out.push(d);
+            if d < self.start {
+                return true;
             }
+            let mut w = d;
+            for _ in 0..366 {
+                if cal.is_working_day(w) {
+                    break;
+                }
+                let Some(next) = w.succ_opt() else { break };
+                w = next;
+            }
+            if !cal.is_working_day(w) {
+                problem = Some("the calendar has no working days for the occurrences".into());
+                return false;
+            }
+            if out.last().is_some_and(|&prev| w <= prev) {
+                return true;
+            }
+            if out.len() >= limit {
+                if matches!(self.end, RecurEnd::By(_)) {
+                    problem = Some(format!("that range has more than {MAX_OCCURRENCES} occurrences; choose an earlier end date"));
+                }
+                return false;
+            }
+            out.push(w);
             true
         };
         let start = self.start;
@@ -210,7 +235,7 @@ impl Recurrence {
             }
             Pattern::Weekly { interval, days } => {
                 let back = u64::from(start.weekday().num_days_from_monday());
-                let Some(mut monday) = start.checked_sub_days(Days::new(back)) else { return out };
+                let Some(mut monday) = start.checked_sub_days(Days::new(back)) else { return Ok(out) };
                 'weeks: loop {
                     for k in 0..7u8 {
                         if days & (1 << k) != 0 {
@@ -225,7 +250,7 @@ impl Recurrence {
                 }
             }
             Pattern::Monthly { interval, on } => {
-                let Some(mut first) = start.with_day(1) else { return out };
+                let Some(mut first) = start.with_day(1) else { return Ok(out) };
                 while first <= last_day {
                     if let Some(d) = in_month(first, on)
                         && !push(d)
@@ -237,7 +262,7 @@ impl Recurrence {
                 }
             }
             Pattern::Yearly { month, on } => {
-                let Some(mut first) = NaiveDate::from_ymd_opt(start.year(), u32::from(month), 1) else { return out };
+                let Some(mut first) = NaiveDate::from_ymd_opt(start.year(), u32::from(month), 1) else { return Ok(out) };
                 while first <= last_day {
                     if let Some(d) = in_month(first, on)
                         && !push(d)
@@ -249,30 +274,23 @@ impl Recurrence {
                 }
             }
         }
-        out
+        if let Some(p) = problem {
+            return invalid(p);
+        }
+        if let RecurEnd::After(n) = self.end
+            && out.len() < usize::from(n)
+        {
+            return invalid("the occurrences would run past the year 2300");
+        }
+        Ok(out)
     }
 
     /// The occurrence dates. An occurrence that falls on a non-working day of `cal` moves to the
-    /// next working day, and one that would land on the same day as the previous is dropped.
+    /// next working day; when that is the day of the previous occurrence it doesn't count, so the
+    /// series still has the number of occurrences asked for.
     pub fn dates(&self, cal: &WorkCal) -> PlanResult<Vec<NaiveDate>> {
         self.validate()?;
-        let mut out: Vec<NaiveDate> = Vec::new();
-        for d in self.pattern_dates(cal) {
-            let mut w = d;
-            for _ in 0..366 {
-                if cal.is_working_day(w) {
-                    break;
-                }
-                let Some(next) = w.succ_opt() else { break };
-                w = next;
-            }
-            if !cal.is_working_day(w) {
-                return invalid("the calendar has no working days for the occurrences");
-            }
-            if out.last().is_none_or(|&prev| w > prev) {
-                out.push(w);
-            }
-        }
+        let out = self.pattern_dates(cal)?;
         if out.is_empty() {
             return invalid("the pattern has no occurrences in that range");
         }
@@ -287,26 +305,41 @@ impl Project {
         self.tasks.get(parent)?.recurrence.is_some().then_some(parent)
     }
 
-    /// For every row, whether it is an occurrence of a recurring task (one pass over the outline).
-    pub fn occurrence_rows(&self) -> Vec<bool> {
-        // (outline level, that row is a recurring task)
-        let mut stack: Vec<(u16, bool)> = Vec::new();
-        self.tasks
-            .iter()
-            .map(|t| {
-                while stack.last().is_some_and(|&(lvl, _)| lvl >= t.outline_level) {
-                    stack.pop();
-                }
-                let occurrence = stack.last().is_some_and(|&(_, r)| r);
-                stack.push((t.outline_level, t.recurrence.is_some()));
-                occurrence
-            })
+    /// Whether the task at `idx` is a recurring task or one of its occurrences (the Recurring field).
+    pub fn is_recurring(&self, idx: usize) -> bool {
+        self.tasks.get(idx).is_some_and(|t| t.recurrence.is_some() || t.occurrence)
+    }
+
+    /// The occurrences of the recurring task at `row`: its direct subtasks it made (not tasks
+    /// added under it by hand), in order.
+    fn occurrences_of(&self, row: usize) -> Vec<TaskId> {
+        let level = self.tasks.get(row).map_or(1, |t| t.outline_level).saturating_add(1);
+        self.descendants_range(row)
+            .filter(|&i| !self.has_children(i))
+            .filter_map(|i| self.tasks.get(i))
+            .filter(|t| t.outline_level == level && t.occurrence && t.recurrence.is_none())
+            .map(|t| t.id)
             .collect()
     }
 
-    /// Whether the task at `idx` is a recurring task or one of its occurrences (the Recurring field).
-    pub fn is_recurring(&self, idx: usize) -> bool {
-        self.tasks.get(idx).is_some_and(|t| t.recurrence.is_some()) || self.recurring_parent(idx).is_some()
+    /// The row a new recurring task goes above when asked for `at`: never inside another
+    /// recurring task (above that recurring task instead).
+    fn outside_recurring(&self, at: usize) -> usize {
+        let mut at = at;
+        for _ in 0..crate::limits::MAX_OUTLINE_LEVEL {
+            match self.tasks.get(at) {
+                Some(t) if t.occurrence => {}
+                _ => match self.recurring_parent(at) {
+                    Some(_) => {}
+                    None => return at,
+                },
+            }
+            match self.parent_index(at) {
+                Some(p) => at = p,
+                None => return at,
+            }
+        }
+        at
     }
 
     fn occurrence_dates(&self, rec: &Recurrence) -> PlanResult<Vec<NaiveDate>> {
@@ -330,6 +363,7 @@ impl Project {
         t.calendar = rec.calendar;
         t.ignore_resource_calendars = rec.ignore_resource_calendars;
         t.constraint = Constraint { kind: ConstraintKind::Snet, date: Some(WorkCal::single(cal).day_start(date)) };
+        t.occurrence = true;
     }
 
     /// Inserts a recurring task above row `index`, at that row's outline level (appended at the
@@ -341,7 +375,7 @@ impl Project {
         if name.is_empty() {
             return invalid("a recurring task needs a name");
         }
-        let at = index.unwrap_or(self.tasks.len()).min(self.tasks.len());
+        let at = self.outside_recurring(index.unwrap_or(self.tasks.len()).min(self.tasks.len()));
         let level = self.tasks.get(at).map_or(1, |t| t.outline_level);
         let mut summary = Task::new(self.ids.next_task(), name, self.settings.time.minutes_per_day);
         summary.outline_level = level;
@@ -365,8 +399,10 @@ impl Project {
 
     /// Changes a recurring task: its name (when given) and definition. Existing occurrences are
     /// moved to the new dates in order, extra ones are deleted, and new ones get the resources of
-    /// the first occurrence.
-    pub fn set_recurrence(&mut self, id: TaskId, name: Option<&str>, rec: Recurrence) -> PlanResult<()> {
+    /// the first occurrence. An occurrence with progress (or logged time) is never deleted and
+    /// keeps its dates; the change is refused when it would have to go. Tasks added under the
+    /// recurring task by hand are left alone. Returns the number of occurrences deleted.
+    pub fn set_recurrence(&mut self, id: TaskId, name: Option<&str>, rec: Recurrence) -> PlanResult<usize> {
         let row = self.task_index(id).ok_or(PlanError::TaskNotFound(id))?;
         if self.tasks.get(row).is_none_or(|t| t.recurrence.is_none()) {
             return invalid("this is not a recurring task");
@@ -378,14 +414,19 @@ impl Project {
             None => self.tasks.get(row).map(|t| t.name.clone()).unwrap_or_default(),
         };
         let level = self.tasks.get(row).map_or(1, |t| t.outline_level);
-        let kids: Vec<TaskId> = self
-            .tasks
-            .get(self.descendants_range(row))
-            .unwrap_or_default()
-            .iter()
-            .filter(|t| t.outline_level == level.saturating_add(1))
-            .map(|t| t.id)
-            .collect();
+        let kids = self.occurrences_of(row);
+        let started = |p: &Project, id: TaskId| {
+            p.task(id).is_some_and(|t| t.percent_complete > 0 || t.actual_start.is_some() || t.actual_finish.is_some())
+                || p.time_entries.iter().any(|e| e.task == id)
+        };
+        let doomed: Vec<TaskId> = kids.get(dates.len()..).unwrap_or_default().to_vec();
+        if let Some(t) = doomed.iter().find(|&&k| started(self, k)).and_then(|&k| self.task(k)) {
+            return invalid(format!(
+                "'{}' has progress or logged time, so it can't be removed; keep at least {} occurrences",
+                t.name,
+                kids.len()
+            ));
+        }
         let template: Vec<(crate::ids::ResourceId, f64)> =
             kids.first().map(|&k| self.assignments_for_task(k).map(|a| (a.resource, a.units)).collect()).unwrap_or_default();
         if let Some(t) = self.tasks.get_mut(row) {
@@ -394,13 +435,19 @@ impl Project {
             t.calendar = rec.calendar;
             t.ignore_resource_calendars = rec.ignore_resource_calendars;
         }
-        if kids.len() > dates.len() {
-            self.delete_tasks(kids.get(dates.len()..).unwrap_or_default())?;
+        if !doomed.is_empty() {
+            self.delete_tasks(&doomed)?;
         }
         for (k, date) in dates.into_iter().enumerate() {
             if let Some(&kid) = kids.get(k) {
+                let keep = started(self, kid);
                 let mut t = self.task(kid).cloned().ok_or(PlanError::TaskNotFound(kid))?;
-                self.shape_occurrence(&mut t, &name, k + 1, date, &rec);
+                if keep {
+                    // Work already done stays where it happened; only the name follows.
+                    t.name = format!("{name} {}", k + 1);
+                } else {
+                    self.shape_occurrence(&mut t, &name, k + 1, date, &rec);
+                }
                 if let Some(slot) = self.task_mut(kid) {
                     *slot = t;
                 }
@@ -419,7 +466,12 @@ impl Project {
                 }
             }
         }
-        Ok(())
+        Ok(doomed.len())
+    }
+
+    /// The occurrences a resource assigned to the recurring task at `row` works on.
+    pub fn occurrences_for_assignment(&self, row: usize) -> Vec<TaskId> {
+        self.occurrences_of(row).into_iter().filter(|&k| self.task(k).is_some_and(|t| !t.is_milestone())).collect()
     }
 }
 
@@ -455,9 +507,10 @@ mod tests {
 
     #[test]
     fn daily_skips_to_working_days() {
-        // Every day from a Friday: Saturday and Sunday move to Monday, which already has one.
+        // Every day from a Friday: Saturday and Sunday move to Monday, which counts once; the
+        // series still has four occurrences.
         let r = rec(Pattern::Daily { interval: 1, workdays: false }, d(2026, 10, 23), RecurEnd::After(4));
-        assert_eq!(dates(r), [d(2026, 10, 23), d(2026, 10, 26)]);
+        assert_eq!(dates(r), [d(2026, 10, 23), d(2026, 10, 26), d(2026, 10, 27), d(2026, 10, 28)]);
         let r = rec(Pattern::Daily { interval: 2, workdays: true }, d(2026, 10, 23), RecurEnd::After(3));
         assert_eq!(dates(r), [d(2026, 10, 23), d(2026, 10, 27), d(2026, 10, 29)]);
     }
@@ -492,14 +545,83 @@ mod tests {
         ] {
             assert!(r.dates(&wc).is_err(), "{r:?}");
         }
+        // Regression: a long range was cut at 999 pattern days without a word.
+        let r = rec(Pattern::Daily { interval: 1, workdays: false }, start, RecurEnd::By(d(2035, 1, 1)));
+        assert!(r.dates(&wc).unwrap_err().to_string().contains("999"));
+        let r = rec(Pattern::Yearly { month: 1, on: MonthDay::Day(5) }, d(2299, 1, 1), RecurEnd::After(5));
+        assert!(r.dates(&wc).unwrap_err().to_string().contains("2300"));
         // A range with no matching day.
         let r = rec(Pattern::Weekly { interval: 1, days: 1 }, d(2026, 10, 20), RecurEnd::By(d(2026, 10, 25)));
         assert!(r.dates(&wc).is_err());
     }
 
+    fn weekly_plan() -> (Project, TaskId) {
+        let mut p = Project::new("R", d(2026, 10, 19));
+        let r = rec(Pattern::Weekly { interval: 1, days: 1 }, d(2026, 10, 19), RecurEnd::After(3));
+        let id = p.add_recurring_task("Sync", r, None).unwrap();
+        crate::schedule::recalculate(&mut p);
+        (p, id)
+    }
+
+    /// Regression: a recurring task inserted at an occurrence landed inside the other recurring
+    /// task, whose next change then renamed and reshaped it; a task added under a recurring
+    /// task by hand was treated as an occurrence too.
+    #[test]
+    fn only_real_occurrences_change_with_their_recurring_task() {
+        let (mut p, outer) = weekly_plan();
+        let second = p.tasks[2].id;
+        let r = rec(Pattern::Daily { interval: 1, workdays: false }, d(2026, 10, 19), RecurEnd::After(2));
+        let inner = p.add_recurring_task("Inner", r, p.task_index(second)).unwrap();
+        assert_eq!(p.task_index(inner), Some(0), "above the other recurring task, not inside it");
+        assert_eq!(p.tasks[0].outline_level, 1);
+        // A task added by hand under the recurring task.
+        let prep = p.add_task("Prep", Some(p.task_index(outer).unwrap() + 1));
+        assert_eq!(p.parent_index(p.task_index(prep).unwrap()), p.task_index(outer));
+        let ana = p.add_resource("Ana");
+        p.assign(outer, ana, Some(1.0), None).unwrap();
+        assert_eq!(p.assignments_for_task(prep).count(), 0, "only occurrences get the resource");
+        let r = rec(Pattern::Weekly { interval: 1, days: 1 }, d(2026, 10, 19), RecurEnd::After(2));
+        assert_eq!(p.set_recurrence(outer, None, r).unwrap(), 1);
+        let t = p.task(prep).unwrap();
+        assert_eq!((t.name.as_str(), t.constraint.kind), ("Prep", ConstraintKind::Asap), "left alone");
+        assert!(p.task(inner).unwrap().recurrence.is_some());
+        let row = p.task_index(outer).unwrap();
+        assert_eq!(p.occurrences_of(row).len(), 2);
+        assert!(p.is_recurring(row + 2) && !p.is_recurring(p.task_index(prep).unwrap()));
+    }
+
+    /// Regression: changing a recurring task deleted occurrences that had progress.
+    #[test]
+    fn occurrences_with_progress_are_kept() {
+        let (mut p, id) = weekly_plan();
+        let third = p.tasks[3].id;
+        p.set_percent_complete(third, 100).unwrap();
+        crate::schedule::recalculate(&mut p);
+        let fewer = rec(Pattern::Weekly { interval: 1, days: 1 }, d(2026, 10, 19), RecurEnd::After(2));
+        assert!(p.set_recurrence(id, None, fewer).is_err());
+        assert!(p.task(third).is_some());
+        // Moving the series keeps the done occurrence where it was.
+        let before = p.task(third).unwrap().constraint;
+        let later = rec(Pattern::Weekly { interval: 1, days: 1 }, d(2026, 11, 2), RecurEnd::After(3));
+        p.set_recurrence(id, None, later).unwrap();
+        assert_eq!(p.task(third).unwrap().constraint, before);
+    }
+
+    /// Regression: a calendar a recurring task used could not be deleted (the edit rolled back).
+    #[test]
+    fn deleting_a_recurring_task_calendar_works() {
+        let mut p = Project::new("R", d(2026, 10, 19));
+        let cal = p.add_calendar("Shift", None).unwrap();
+        let r = Recurrence { calendar: Some(cal), ..rec(Pattern::Weekly { interval: 1, days: 1 }, d(2026, 10, 19), RecurEnd::After(2)) };
+        let id = p.add_recurring_task("Check", r, None).unwrap();
+        p.delete_calendar(cal).unwrap();
+        assert!(crate::limits::sanitize(&mut p).is_empty());
+        assert_eq!(p.task(id).unwrap().recurrence.unwrap().calendar, None);
+    }
+
     #[test]
     fn far_dates_stop_at_the_date_limit() {
-        let r = rec(Pattern::Yearly { month: 2, on: MonthDay::Day(29) }, d(2290, 1, 1), RecurEnd::After(999));
+        let r = rec(Pattern::Yearly { month: 2, on: MonthDay::Day(29) }, d(2290, 1, 1), RecurEnd::By(d(2400, 1, 1)));
         let v = dates(r);
         assert!(v.len() <= 11 && v.iter().all(|x| x.year() <= 2300), "{v:?}");
     }

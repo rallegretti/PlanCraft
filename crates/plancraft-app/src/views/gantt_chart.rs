@@ -557,30 +557,50 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
         {
             let hit =
                 if t.is_milestone() { Rect::from_center_size(pos2(x0, yc), vec2(14.0, 14.0)) } else { bar_rect.expand2(vec2(2.0, 3.0)) };
-            // The parts of a task split as planned (not paused in work under way) move on their own.
-            let planned = !summary && t.splits.is_empty() && t.sched.parts.len() > 1;
-            let part_at =
-                |x: f32| t.sched.parts.iter().position(|&(a, b)| x >= g.x_of(chart_left, a) - 2.0 && x <= g.x_of(chart_left, b) + 2.0);
+            // The parts of a task split as planned move on their own, unless work is under way
+            // (work done stays where it happened) or it also has pauses in work under way.
+            let planned = !summary && t.splits.is_empty() && t.actual_start.is_none() && t.sched.parts.len() > 1;
+            let part_at = |x: f32| {
+                // The part nearest the pointer, so tiny gaps at low zoom resolve sensibly.
+                t.sched
+                    .parts
+                    .iter()
+                    .map(|&(a, b)| (g.x_of(chart_left, a), g.x_of(chart_left, b)))
+                    .enumerate()
+                    .min_by(|(_, p), (_, q)| {
+                        let d = |(a, b): (f32, f32)| {
+                            if x < a {
+                                a - x
+                            } else if x > b {
+                                x - b
+                            } else {
+                                0.0
+                            }
+                        };
+                        d(*p).total_cmp(&d(*q))
+                    })
+                    .map(|(k, _)| k)
+            };
             if hit.contains(pp) && g.split_mode {
                 if !summary && !t.is_milestone() {
                     hovered = Some((t.id, "split"));
                 }
             } else if hit.contains(pp)
                 && planned
-                && let Some(k) = part_at(pp.x).filter(|&k| k + 1 < t.sched.parts.len() || k > 0)
+                && let Some(k) = part_at(pp.x)
             {
-                let end = t.sched.parts.get(k).map_or(x1, |&(_, b)| g.x_of(chart_left, b));
+                let (a, b) = t.sched.parts.get(k).map_or((x0, x1), |&(a, b)| (g.x_of(chart_left, a), g.x_of(chart_left, b)));
+                let last = k + 1 == t.sched.parts.len();
+                // Only a part wide enough has a separate end to drag.
+                let at_end = b - a > 12.0 && pp.x >= b - 5.0;
                 hovered_part = Some(k);
                 hovered = Some((
                     t.id,
-                    if k + 1 < t.sched.parts.len() && pp.x >= end - 5.0 {
-                        "part_end"
-                    } else if k == 0 {
-                        "bar"
-                    } else if k + 1 == t.sched.parts.len() && pp.x >= end - 5.0 {
-                        "end"
-                    } else {
-                        "part"
+                    match (at_end, last, k) {
+                        (true, true, _) => "end",
+                        (true, false, _) => "part_end",
+                        (false, _, 0) => "bar",
+                        (false, _, _) => "part",
                     },
                 ));
             } else if hit.contains(pp) {

@@ -720,6 +720,34 @@ fn agents_split_tasks_and_create_recurring_tasks() {
     c.call_err("create_recurring_task", json!({ "name": "X", "pattern": "monthly", "day": 32 }));
     c.call_err("create_recurring_task", json!({ "name": "X", "pattern": "daily", "occurrences": 2, "end": "2027-01-01" }));
     c.call_err("update_recurring_task", json!({ "task": id, "pattern": "daily" }));
+    // Review fixes: arguments that don't fit the pattern are refused; switching kinds keeps the
+    // interval or the day; a recurring task asked to go inside another lands above it; occurrences
+    // with progress are never deleted.
+    c.call_err("update_recurring_task", json!({ "task": rid, "days": ["monday"] }));
+    c.call_err("create_recurring_task", json!({ "name": "X", "pattern": "yearly", "every": 2 }));
+    let u = c.call("update_recurring_task", json!({ "task": rid, "pattern": "monthly", "day": 15, "every": 3 }));
+    let y = c.call("update_recurring_task", json!({ "task": rid, "pattern": "yearly" }));
+    assert_eq!(y["recurrence"]["day"], 15, "{y}");
+    let m = c.call("update_recurring_task", json!({ "task": rid, "pattern": "monthly", "nth": "first" }));
+    assert_eq!(m["recurrence"]["nth"], "first", "{m}");
+    assert!(u["occurrences"].as_array().unwrap().len() == 6);
+    let inner = c.call(
+        "create_recurring_task",
+        json!({ "name": "Inner", "pattern": "daily", "occurrences": 2, "before": u["occurrences"][1]["id"] }),
+    );
+    let outer_row = c.call("get_task", json!({ "task": rid }))["row"].as_u64().unwrap();
+    assert_eq!(inner["row"].as_u64().unwrap() + 3, outer_row, "Inner (and its 2 occurrences) sit above: {inner}");
+    let occ = c.call("get_task", json!({ "task": rid }))["children"].clone();
+    c.call("update_task", json!({ "task": occ[5]["id"], "percent_complete": 100 }));
+    let e = c.call_err("update_recurring_task", json!({ "task": rid, "occurrences": 2 }));
+    assert!(e.contains("progress"), "{e}");
+    let ok = c.call("update_recurring_task", json!({ "task": rid, "occurrences": 6, "name": "Sync" }));
+    assert_eq!(ok["occurrences_deleted"], 0);
+    let listed = c.call("list_tasks", json!({ "search": "Sync 1" }));
+    assert_eq!(listed["tasks"][0]["recurring"], true, "{listed}");
+    // A split whose resume is far past 2300 is refused.
+    c.call_err("split_task", json!({ "task": id, "start": "2026-10-20", "resume": "9999-01-01" }));
+
     // A recurring milestone, inserted above Build.
     let m = c.call(
         "create_recurring_task",

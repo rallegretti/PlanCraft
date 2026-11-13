@@ -696,14 +696,7 @@ impl Project {
         let ti = self.require_task(task)?;
         if self.row(ti)?.recurrence.is_some() {
             // A recurring task's resources work on every occurrence.
-            let level = self.row(ti)?.outline_level.saturating_add(1);
-            let kids: Vec<TaskId> = self
-                .descendants_range(ti)
-                .filter(|&i| !self.has_children(i))
-                .filter_map(|i| self.tasks.get(i))
-                .filter(|t| t.outline_level == level && !t.is_milestone())
-                .map(|t| t.id)
-                .collect();
+            let kids = self.occurrences_for_assignment(ti);
             let mut first = None;
             for kid in kids {
                 let aid = self.assign(kid, resource, units, work)?;
@@ -1301,6 +1294,9 @@ impl Project {
         self.calendar(id).ok_or(PlanError::CalendarNotFound(id))?;
         self.calendars.retain(|c| c.id != id);
         for t in &mut self.tasks {
+            if let Some(r) = t.recurrence.as_mut().filter(|r| r.calendar == Some(id)) {
+                r.calendar = None;
+            }
             if t.calendar == Some(id) {
                 t.calendar = None;
             }

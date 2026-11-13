@@ -687,8 +687,8 @@ impl PlanCraftApp {
                 self.dialogs.recurring = Some(Bound::new(doc, d));
             }
             Command::RecurringTask => {
-                let at = sel.first().and_then(|id| doc.project.task_index(*id));
-                self.dialogs.recurring = Some(Bound::new(doc, dialogs::recurring::RecurringTask::new(&doc.project, at)));
+                let above = sel.first().copied();
+                self.dialogs.recurring = Some(Bound::new(doc, dialogs::recurring::RecurringTask::new(&doc.project, above)));
             }
             Command::SplitTask => {
                 st.gantt.split_mode = !st.gantt.split_mode;
@@ -777,6 +777,7 @@ impl PlanCraftApp {
                         let target_level = p.tasks.get(at).map_or(1, |t| t.outline_level);
                         let at = at.min(p.tasks.len());
                         let mut ids = Vec::new();
+                        let recurring_in_clip = clip.iter().any(|t| t.recurrence.is_some());
                         for (k, t) in clip.iter().enumerate() {
                             let mut nt = t.clone();
                             nt.id = p.ids.next_task();
@@ -785,6 +786,8 @@ impl PlanCraftApp {
                             nt.baseline = None;
                             nt.baselines.clear();
                             nt.interim.clear();
+                            // A pasted occurrence is an ordinary task unless its recurring task comes too.
+                            nt.occurrence &= recurring_in_clip;
                             nt.outline_level = target_level.saturating_add(t.outline_level.saturating_sub(base));
                             ids.push(nt.id);
                             p.tasks.insert(at + k, nt);
@@ -1658,6 +1661,12 @@ impl PlanCraftApp {
         for m in agent_msgs {
             self.set_status(m);
         }
+        // Split Task waits for one click on a bar: Escape or leaving the Gantt views cancels it.
+        if self.st.gantt.split_mode
+            && (ctx.input(|i| i.key_pressed(egui::Key::Escape)) || !matches!(self.st.view, ViewKind::Gantt | ViewKind::TrackingGantt))
+        {
+            self.st.gantt.split_mode = false;
+        }
         // A document opened or activated elsewhere (e.g. by an agent) becomes the view.
         let active = ws.active_doc().map(|d| d.handle);
         if active != self.last_active {
@@ -1666,6 +1675,7 @@ impl PlanCraftApp {
             }
             self.st.sel = Default::default();
             self.st.gantt.initialized_for = None;
+            self.st.gantt.split_mode = false;
             self.st.cursor_task = None;
             // The Print window prints its plan as the view shows it; the view now shows another
             // plan, so it saves its Page Setup and closes.
@@ -2293,6 +2303,18 @@ mod ui_tests {
             plancraft_core::recurring::Pattern::Monthly { .. }
         ));
 
+        // Split Task waits for one click; Escape or another view cancels it (regression: it
+        // stayed on and split the next bar clicked, even in another plan or view).
+        h.state_mut().exec(&ctx, Command::SplitTask);
+        assert!(h.state().st.gantt.split_mode);
+        h.key_press(egui::Key::Escape);
+        h.run_steps(1);
+        assert!(!h.state().st.gantt.split_mode, "Escape cancels it");
+        h.state_mut().exec(&ctx, Command::SplitTask);
+        h.state_mut().exec(&ctx, Command::SetView(ViewKind::ResourceSheet));
+        h.run_steps(1);
+        assert!(!h.state().st.gantt.split_mode, "another view cancels it");
+        h.state_mut().exec(&ctx, Command::SetView(ViewKind::Gantt));
         // Split Task on the chart: a click splits the bar; dragging the later part back rejoins it.
         h.state_mut().exec(&ctx, Command::SplitTask);
         assert!(h.state().st.gantt.split_mode);

@@ -20,7 +20,7 @@ fn recurrence_props() -> Value {
     json!({
         "duration": duration("Duration of each occurrence (0 makes them milestones; default 1 day when creating)."),
         "pattern": string_enum("How often it repeats.", &PATTERNS),
-        "every": integer("Repeat every N days, weeks or months (default 1; ignored for yearly)."),
+        "every": integer("Repeat every N days, weeks or months (default 1; not for yearly)."),
         "workdays": boolean("Daily: count working days only (every N working days)."),
         "days": { "type": "array", "items": { "type": "string" }, "description": "Weekly: the weekdays, e.g. [\"tuesday\", \"thursday\"] (default the start date's weekday)." },
         "day": integer("Monthly/yearly: day of the month 1-31 (past a shorter month's end: its last day)."),
@@ -96,10 +96,11 @@ pub fn tools() -> Vec<Tool> {
         Tool::new(
             "update_recurring_task",
             "Change a recurring task",
-            "Change a recurring task's name, pattern, range, duration or calendar; omitted settings keep their values. Occurrences move to the new dates in order, extra ones are deleted and new ones get the resources of the first occurrence.",
+            "Change a recurring task's name, pattern, range, duration or calendar; omitted settings keep their values (switching between daily, weekly and monthly keeps 'every'; between monthly and yearly, the day). Occurrences move to the new dates in order, extra ones are deleted (refused when one has progress or logged time) and new ones get the resources of the first occurrence. Occurrences with progress keep their dates. Tasks added under the recurring task by hand are left alone.",
             schema(Value::Object(update), &["task"]),
             update_recurring_task,
-        ),
+        )
+        .destructive(),
     ]
 }
 
@@ -215,12 +216,23 @@ fn parse_recurrence(p: &Project, a: &Args, base: Option<Recurrence>) -> ToolResu
         match (small(a, "day", 1, 31)?, a.get("nth").filter(|v| !v.is_null()), a.get("weekday").filter(|v| !v.is_null())) {
             (Some(_), Some(_), _) => err("give 'day', or 'nth' with 'weekday', not both"),
             (Some(d), None, _) => Ok(MonthDay::Day(d as u8)),
-            (None, Some(n), Some(w)) => {
-                let nth = Nth::ALL.get(named(n, "nth", &NTHS)?).copied().unwrap_or(Nth::First);
-                Ok(MonthDay::Weekday { nth, weekday: named(w, "weekday", &WEEKDAYS)? as u8 })
+            (None, n, w) if n.is_some() || w.is_some() => {
+                // One of the two keeps the value it had (the first … / the start's weekday).
+                let (old_nth, old_wd) = match old {
+                    Some(MonthDay::Weekday { nth, weekday }) => (Some(nth), Some(weekday)),
+                    _ => (None, None),
+                };
+                let nth = match n {
+                    Some(n) => Nth::ALL.get(named(n, "nth", &NTHS)?).copied().unwrap_or(Nth::First),
+                    None => old_nth.unwrap_or(Nth::First),
+                };
+                let weekday = match w {
+                    Some(w) => named(w, "weekday", &WEEKDAYS)? as u8,
+                    None => old_wd.unwrap_or(start.weekday().num_days_from_monday() as u8),
+                };
+                Ok(MonthDay::Weekday { nth, weekday })
             }
-            (None, Some(_), None) | (None, None, Some(_)) => err("give 'nth' and 'weekday' together"),
-            (None, None, None) => Ok(old.unwrap_or(MonthDay::Day(start.day() as u8))),
+            _ => Ok(old.unwrap_or(MonthDay::Day(start.day() as u8))),
         }
     };
     let kind = match a.str("pattern")? {
@@ -233,19 +245,39 @@ fn parse_recurrence(p: &Project, a: &Args, base: Option<Recurrence>) -> ToolResu
             None => return err("'pattern' is required"),
         },
     };
+    // Arguments that don't belong to the pattern are refused, not ignored.
+    let allowed: &[&str] = match kind {
+        0 => &["every", "workdays"],
+        1 => &["every", "days"],
+        2 => &["every", "day", "nth", "weekday"],
+        _ => &["day", "nth", "weekday", "month"],
+    };
+    for key in ["every", "workdays", "days", "day", "nth", "weekday", "month"] {
+        if !allowed.contains(&key) && a.get(key).is_some_and(|v| !v.is_null()) {
+            let name = PATTERNS.get(kind).copied().unwrap_or_default();
+            return err(format!("'{key}' doesn't apply to a {name} pattern"));
+        }
+    }
     let old = base.map(|b| b.pattern);
+    // What carries over when the pattern changes kind: the interval (daily, weekly, monthly)
+    // and the day of the month (monthly, yearly).
+    let old_interval = match old {
+        Some(Pattern::Daily { interval, .. } | Pattern::Weekly { interval, .. } | Pattern::Monthly { interval, .. }) => interval,
+        _ => 1,
+    };
+    let old_on = match old {
+        Some(Pattern::Monthly { on, .. } | Pattern::Yearly { on, .. }) => Some(on),
+        _ => None,
+    };
     let pattern = match kind {
         0 => {
-            let (i, w) = match old {
-                Some(Pattern::Daily { interval, workdays }) => (interval, workdays),
-                _ => (1, false),
-            };
-            Pattern::Daily { interval: every.unwrap_or(i), workdays: a.bool("workdays")?.unwrap_or(w) }
+            let w = matches!(old, Some(Pattern::Daily { workdays: true, .. }));
+            Pattern::Daily { interval: every.unwrap_or(old_interval), workdays: a.bool("workdays")?.unwrap_or(w) }
         }
         1 => {
             let (i, d) = match old {
                 Some(Pattern::Weekly { interval, days }) => (interval, days),
-                _ => (1, 1u8 << start.weekday().num_days_from_monday()),
+                _ => (old_interval, 1u8 << start.weekday().num_days_from_monday()),
             };
             let days = match a.array("days")? {
                 Some(list) => {
@@ -259,17 +291,11 @@ fn parse_recurrence(p: &Project, a: &Args, base: Option<Recurrence>) -> ToolResu
             };
             Pattern::Weekly { interval: every.unwrap_or(i), days }
         }
-        2 => {
-            let (i, on) = match old {
-                Some(Pattern::Monthly { interval, on }) => (interval, Some(on)),
-                _ => (1, None),
-            };
-            Pattern::Monthly { interval: every.unwrap_or(i), on: month_day(on)? }
-        }
+        2 => Pattern::Monthly { interval: every.unwrap_or(old_interval), on: month_day(old_on)? },
         _ => {
             let (m, on) = match old {
                 Some(Pattern::Yearly { month, on }) => (month, Some(on)),
-                _ => (start.month() as u8, None),
+                _ => (start.month() as u8, old_on),
             };
             let month = match a.get("month").filter(|v| !v.is_null()) {
                 Some(Value::String(s)) if s.trim().parse::<u8>().is_err() => named(&json!(s), "month", &MONTHS)? as u8 + 1,
@@ -398,9 +424,13 @@ fn update_recurring_task(ctx: &Ctx, a: &Args) -> ToolResult {
             }
             let rec = parse_recurrence(p, a, base)?;
             let name = a.text("name")?;
-            p.set_recurrence(id, name.as_deref(), rec)?;
-            Ok(id)
+            let deleted = p.set_recurrence(id, name.as_deref(), rec)?;
+            Ok((id, deleted))
         },
-        |doc, id| Ok(recurring_result(&doc.project, id)),
+        |doc, (id, deleted)| {
+            let mut v = recurring_result(&doc.project, id);
+            set(&mut v, "occurrences_deleted", json!(deleted));
+            Ok(v)
+        },
     )
 }

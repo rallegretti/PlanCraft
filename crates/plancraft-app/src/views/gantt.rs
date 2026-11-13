@@ -450,9 +450,18 @@ pub fn apply_chart_actions(doc: &mut Document, st: &mut UiState, rows: &[Row], a
                     let idx = p.task_index(task).ok_or("task not found")?;
                     let cal = task_calendar(p, idx);
                     // Zoomed out, split at the end of the day clicked; zoomed in, at the hour.
-                    let at = if st.gantt.px_per_day >= 72.0 { at } else { cal.day_finish(at.date()) };
-                    let day = p.settings.time.minutes_per_day.max(1);
-                    let resume = cal.snap_forward(cal.add(cal.snap_forward(at), day));
+                    let at = if st.gantt.px_per_day >= 72.0 {
+                        let midnight = at.date().and_time(chrono::NaiveTime::MIN);
+                        plancraft_core::calendar::shift(midnight, ((at - midnight).num_minutes() + 30) / 60 * 60)
+                    } else {
+                        cal.day_finish(at.date())
+                    };
+                    // A pause of one working day of the task's calendar.
+                    let resume_from = cal.snap_forward(at);
+                    let day = Some(cal.working_minutes_on(resume_from.date()))
+                        .filter(|m| *m > 0)
+                        .unwrap_or(p.settings.time.minutes_per_day.max(1));
+                    let resume = cal.snap_forward(cal.add(resume_from, day));
                     p.split_task(task, at, resume).map_err(|e| e.to_string())
                 });
                 match r {
@@ -478,7 +487,11 @@ pub fn apply_chart_actions(doc: &mut Document, st: &mut UiState, rows: &[Row], a
                     let idx = p.task_index(task).ok_or("task not found")?;
                     let cal = task_calendar(p, idx);
                     let start = p.task(task).and_then(|t| t.sched.parts.get(k).map(|x| x.0)).ok_or("no such part")?;
-                    let mins = round_dragged(p, cal.between(start, finish).max(0)).max(1);
+                    // Dragged onto or before its own start: no change (rejoin parts by moving them).
+                    let mins = round_dragged(p, cal.between(start, finish).max(0));
+                    if mins <= 0 {
+                        return Ok(());
+                    }
                     p.set_part_duration(task, k, mins).map_err(|e| e.to_string())
                 });
                 if let Err(e) = r {

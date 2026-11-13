@@ -396,6 +396,9 @@ pub struct Task {
     /// A recurring task: this summary's subtasks are its occurrences (see [`crate::recurring`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub recurrence: Option<crate::recurring::Recurrence>,
+    /// An occurrence of a recurring task (made by it, and changed with it).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub occurrence: bool,
     /// Delay added by resource leveling (working minutes).
     #[serde(default, skip_serializing_if = "is_zero_i64")]
     pub leveling_delay: Minutes,
@@ -466,6 +469,7 @@ impl Task {
             splits: Vec::new(),
             gaps: Vec::new(),
             recurrence: None,
+            occurrence: false,
             leveling_delay: 0,
             fixed_cost: 0.0,
             notes: String::new(),

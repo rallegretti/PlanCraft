@@ -150,10 +150,10 @@ pub fn task_row(p: &Project, idx: usize) -> Value {
     if t.is_milestone() {
         m.insert("is_milestone".into(), json!(true));
     }
-    if t.recurrence.is_some() {
+    if t.recurrence.is_some() || t.occurrence {
         m.insert("recurring".into(), json!(true));
     }
-    if !t.gaps.is_empty() {
+    if !plancraft_core::schedule::planned_gaps(&t.gaps, t.duration).is_empty() {
         m.insert("split".into(), json!(true));
     }
     if t.mode == ScheduleMode::Manual {

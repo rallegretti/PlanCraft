@@ -1150,7 +1150,7 @@ fn recurring_tasks_follow_their_pattern() {
     assert!(p.task(tt).unwrap().sched.is_summary);
 }
 
-// Source: https://support.microsoft.com/en-us/project/create-recurring-tasks — "Create a recurring task" (recurring reminders)
+// Source: https://support.microsoft.com/en-us/project/create-recurring-tasks — "Recurring reminders"
 // A recurring task with a duration of zero is a recurring milestone.
 #[test]
 fn a_zero_duration_recurring_task_is_a_milestone() {
@@ -1161,7 +1161,7 @@ fn a_zero_duration_recurring_task_is_a_milestone() {
     assert!(occurrences(&p, r).iter().all(|t| t.is_milestone()));
 }
 
-// Source: https://support.microsoft.com/en-us/project/create-recurring-tasks — "Create a recurring task" (assigning resources)
+// Source: https://support.microsoft.com/en-us/project/create-recurring-tasks — "Assign resources to recurring tasks"
 // Resources assigned to the recurring (summary) task are assigned to every occurrence.
 #[test]
 fn resources_on_a_recurring_task_work_every_occurrence() {
@@ -1175,7 +1175,7 @@ fn resources_on_a_recurring_task_work_every_occurrence() {
     assert_eq!(p.assignments_for_task(r).count(), 0, "not on the summary row itself");
 }
 
-// Source: https://support.microsoft.com/en-us/project/create-recurring-tasks — "Create a recurring task" (leveling)
+// Source: https://support.microsoft.com/en-us/project/create-recurring-tasks — "Level recurring tasks"
 // Recurring tasks get the highest leveling priority, so leveling never delays or splits them.
 #[test]
 fn leveling_never_delays_recurring_tasks() {

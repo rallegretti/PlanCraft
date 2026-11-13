@@ -112,11 +112,15 @@ pub fn segments_of(
     }
     let mut breaks: Vec<(Minutes, Until)> = planned_gaps(gaps, dur).into_iter().map(|g| (g.work, Until::For(g.length))).collect();
     breaks.extend(splits.iter().take(MAX_SPLITS).map(|s| (s.work, Until::Date(s.resume))));
-    // Planned splits first at the same work point; the sort is stable.
     breaks.sort_by_key(|b| b.0);
     let mut out = Vec::new();
     let (mut at, mut used) = (start, 0);
-    for (work, until) in breaks {
+    let mut k = 0;
+    while let Some(&(work, _)) = breaks.get(k) {
+        // Every pause at this work point: work goes on at the latest of them.
+        let same = breaks.iter().skip(k).take_while(|b| b.0 == work).count();
+        let group = breaks.get(k..k + same).unwrap_or_default();
+        k += same.max(1);
         if work <= used {
             continue;
         }
@@ -124,10 +128,14 @@ pub fn segments_of(
             break;
         }
         let end = cal.add(at, work - used);
-        let resume = match until {
-            Until::Date(d) => cal.snap_forward(d),
-            Until::For(len) => cal.snap_forward(cal.add(cal.snap_forward(end), len)),
-        };
+        let resume = group
+            .iter()
+            .map(|(_, until)| match until {
+                Until::Date(d) => cal.snap_forward(*d),
+                Until::For(len) => cal.snap_forward(cal.add(cal.snap_forward(end), *len)),
+            })
+            .max()
+            .unwrap_or(end);
         if resume <= cal.snap_forward(end) {
             // No gap: the part simply goes on.
             continue;
