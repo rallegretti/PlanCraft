@@ -587,3 +587,102 @@ fn must_finish_on_fixes_finish() {
     assert_eq!(finish(&p, t), dt(2026, 10, 28, 17));
     assert_eq!(start(&p, t), dt(2026, 10, 27, 8));
 }
+
+// ===========================================================================
+// Inactive tasks, summary constraints and deadlines, earned value
+// ===========================================================================
+
+// Source: https://support.microsoft.com/en-us/project/inactivate-a-task — "Inactivate a task"
+// An inactive task does not affect the schedule or how other tasks are scheduled, so it must not
+// shorten its predecessors' slack.
+#[test]
+fn inactive_successor_does_not_drive_predecessor_slack() {
+    let mut p = project();
+    let _long = task(&mut p, "R", 10 * DAY);
+    let pred = task(&mut p, "P", 2 * DAY);
+    let inactive = task(&mut p, "Q", 20 * DAY);
+    p.link(pred.into(), inactive, LinkType::FS, Lag::None).unwrap();
+    p.task_mut(inactive).unwrap().active = false;
+    recalculate(&mut p);
+    assert_eq!(finish(&p, pred), dt(2026, 10, 20, 17));
+    assert_eq!(p.task(pred).unwrap().sched.total_slack, 8 * DAY);
+    assert!(!p.task(pred).unwrap().sched.critical);
+}
+
+// Source: https://support.microsoft.com/en-us/office/view-and-track-scheduling-factors-647becca-89da-4f58-a790-ba0ee8765683 — "Summary Task"
+// A Start No Earlier Than constraint on a summary task drives its subtasks' start dates.
+#[test]
+fn summary_start_no_earlier_than_drives_subtasks() {
+    let mut p = project();
+    let s = p.add_task("Phase", None);
+    let a = task(&mut p, "A", 2 * DAY);
+    let b = task(&mut p, "B", DAY);
+    p.indent(a).unwrap();
+    p.indent(b).unwrap();
+    constrain(&mut p, s, ConstraintKind::Snet, dt(2026, 11, 2, 8));
+    recalculate(&mut p);
+    assert_eq!(start(&p, a), dt(2026, 11, 2, 8));
+    assert_eq!(start(&p, b), dt(2026, 11, 2, 8));
+    assert_eq!(start(&p, s), dt(2026, 11, 2, 8));
+}
+
+// Source: https://support.microsoft.com/en-us/project/how-project-schedules-tasks-behind-the-scenes — "How do deadline dates affect the schedule?"
+// Deadlines can be set on summary tasks; they affect total slack (not the dates), and a summary
+// whose subtasks finish after its deadline shows a missed deadline.
+#[test]
+fn summary_deadline_reduces_subtask_slack_and_is_flagged() {
+    let mut p = project();
+    let s = p.add_task("Phase", None);
+    let a = task(&mut p, "A", 5 * DAY);
+    p.indent(a).unwrap();
+    p.task_mut(s).unwrap().deadline = Some(dt(2026, 10, 21, 17));
+    recalculate(&mut p);
+    assert_eq!(start(&p, a), dt(2026, 10, 19, 8), "a deadline does not move the task");
+    assert_eq!(p.task(a).unwrap().sched.total_slack, -2 * DAY);
+    assert!(p.task(a).unwrap().sched.critical);
+    assert!(p.task(s).unwrap().sched.warnings.iter().any(|w| w.contains("deadline")), "{:?}", p.task(s).unwrap().sched.warnings);
+}
+
+// Source: https://support.microsoft.com/en-us/office/acwp-fields-710a1c21-b9f1-4516-9c78-986e87345277 — "How Calculated"
+// ACWP is the cost of the work done so far; progress entered as % complete (not only actual work)
+// makes Project calculate it. A 10-day task at $100/h that is 50% complete has cost $4,000 so far.
+#[test]
+fn acwp_counts_progress_entered_as_percent_complete() {
+    let mut p = project();
+    let t = task(&mut p, "Build", 10 * DAY);
+    let r = p.add_resource("Ana");
+    p.resource_mut(r).unwrap().standard_rate = 100.0;
+    p.assign(t, r, Some(1.0), None).unwrap();
+    recalculate(&mut p);
+    p.set_baseline(&[]);
+    p.set_percent_complete(t, 50).unwrap();
+    recalculate(&mut p);
+    let ev = plancraft_core::report::earned_value(&p, dt(2026, 10, 23, 17)).unwrap();
+    assert!((ev.acwp - 4000.0).abs() < 1e-6, "ACWP {}", ev.acwp);
+    assert!((ev.bcwp - 4000.0).abs() < 1e-6, "BCWP {}", ev.bcwp);
+    assert!((ev.cpi - 1.0).abs() < 1e-9);
+}
+
+// Source: https://support.microsoft.com/en-us/office/create-or-update-a-baseline-or-an-interim-plan-in-project-desktop-7e775482-ac84-4f4a-bbd0-592f9ac91953 — "Update a baseline or an interim plan"
+// Saving a baseline for selected tasks only does not roll it up into their summary task unless
+// the roll-up options are chosen, so the summary (and the project total built from it) keeps
+// its older baseline figures. (PlanCraft has no roll-up options yet.)
+#[test]
+fn baselining_selected_tasks_does_not_update_their_summary_baseline() {
+    let mut p = project();
+    let s = p.add_task("Phase", None);
+    let a = task(&mut p, "A", 2 * DAY);
+    p.indent(a).unwrap();
+    p.task_mut(a).unwrap().fixed_cost = 100.0;
+    recalculate(&mut p);
+    p.set_baseline(&[]);
+    let d = p.add_task("D", None);
+    p.set_duration(d, DAY, false).unwrap();
+    p.indent(d).unwrap();
+    p.task_mut(d).unwrap().fixed_cost = 50.0;
+    recalculate(&mut p);
+    p.set_baseline(&[d]);
+    assert_eq!(p.task(d).unwrap().baseline.unwrap().cost, 50.0);
+    assert_eq!(p.task(s).unwrap().baseline.unwrap().cost, 100.0, "the summary keeps its baseline");
+    assert_eq!(plancraft_core::report::project_stats(&p).baseline_cost, 100.0);
+}

@@ -365,6 +365,9 @@ pub struct Task {
     pub show_on_timeline: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bar_color: Option<[u8; 3]>,
+    /// Values of the project's custom fields (see [`crate::custom`]).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub custom: std::collections::BTreeMap<CustomFieldId, crate::custom::CustomValue>,
     #[serde(default)]
     pub sched: TaskSchedule,
 }
@@ -412,6 +415,7 @@ impl Task {
             baseline: None,
             show_on_timeline: false,
             bar_color: None,
+            custom: std::collections::BTreeMap::new(),
             sched: TaskSchedule::default(),
         }
     }
@@ -781,6 +785,12 @@ pub struct Project {
     pub time_entries: Vec<TimeEntry>,
     #[serde(default)]
     pub external_projects: Vec<ExternalProject>,
+    /// User-defined task fields.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_fields: Vec<crate::custom::CustomFieldDef>,
+    /// Columns chosen for task tables, by table name.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tables: Vec<crate::custom::TableLayout>,
     #[serde(default)]
     pub ids: IdCounters,
     #[serde(default)]
@@ -815,6 +825,8 @@ impl Project {
             assignments: Vec::new(),
             time_entries: Vec::new(),
             external_projects: Vec::new(),
+            custom_fields: Vec::new(),
+            tables: Vec::new(),
             ids,
             sched: ProjectSchedule::default(),
         }

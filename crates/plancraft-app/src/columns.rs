@@ -59,7 +59,7 @@ pub enum TaskCol {
     UniqueId,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum TaskTable {
     Entry,
     Schedule,
@@ -526,7 +526,15 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
             t.estimate = Some(Estimate::ThreePoint { optimistic: o, most_likely: m, pessimistic: pe });
         }
         Deliverable => task_mut(p, id)?.deliverable = text.to_string(),
-        Notes => task_mut(p, id)?.notes = text.to_string(),
+        Notes => {
+            // The cell shows and edits only the first line; keep the rest of a longer note.
+            let t = task_mut(p, id)?;
+            t.notes = match t.notes.split_once('\n') {
+                Some((_, rest)) if text.is_empty() => rest.to_string(),
+                Some((_, rest)) => format!("{text}\n{rest}"),
+                None => text.to_string(),
+            };
+        }
         _ => return Err("this field is calculated and cannot be edited".into()),
     }
     Ok(())
@@ -535,4 +543,26 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
 /// Late-task check used by filters and indicators.
 pub fn is_late(p: &Project, t: &Task) -> bool {
     report::is_late(t, report::status_moment(p), p)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::NaiveDate;
+
+    /// Regression: the Notes cell shows only the first line, and committing it used to replace
+    /// the whole note with that line.
+    #[test]
+    fn editing_the_notes_cell_keeps_the_other_lines() {
+        let mut p = Project::new("Notes", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let id = p.add_task("Task", None);
+        p.task_mut(id).unwrap().notes = "first\nsecond\nthird".into();
+        commit(TaskCol::Notes, &mut p, id, "changed").unwrap();
+        assert_eq!(p.task(id).unwrap().notes, "changed\nsecond\nthird");
+        commit(TaskCol::Notes, &mut p, id, "").unwrap();
+        assert_eq!(p.task(id).unwrap().notes, "second\nthird");
+        p.task_mut(id).unwrap().notes = "one line".into();
+        commit(TaskCol::Notes, &mut p, id, "replaced").unwrap();
+        assert_eq!(p.task(id).unwrap().notes, "replaced");
+    }
 }

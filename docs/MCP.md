@@ -191,8 +191,8 @@ entity; read-only tools are annotated with `readOnlyHint`.
 | `list_documents` *(read-only)* | – | List the project documents currently open in this PlanCraft session, with their handle numbers, file paths, unsaved-change flag and which one is active. Use the handle as the 'document' argument of other tools. |
 | `new_project` | author, company, manager, **name**, notes, overwrite, path, start | Create a new empty project document and make it the active document. Optionally give a file path to save it immediately (required before it can be linked from other documents). |
 | `open_project` | **path** | Open a .plancraft project file (or activate it if it is already open) and make it the active document. |
-| `save_project` | path | Save the document to its file. With 'path', save as a new file (relative links to external projects are rewritten so they keep working). |
-| `close_project` | discard_changes | Close a document. Fails when it has unsaved changes unless discard_changes is true. |
+| `save_project` | path, overwrite | Save the document to its file. With 'path', save as a new file (relative links to external projects are rewritten so they keep working). Fails when another program changed the file since it was opened or last saved, unless overwrite is true. |
+| `close_project` | discard_changes | Close a document. Fails when it has unsaved changes unless discard_changes is true. Unsaved changes the user made in the app are never discarded. |
 | `set_active_document` | – | Make another open document the active one (the default target of all tools and the document shown in the app). |
 | `get_project` *(read-only)* | – | Get project information (name, dates, manager, file), settings (hours per day, currency, points, scheduling options), calendars and key statistics (task counts, late/critical tasks, work, cost, % complete, warnings). |
 | `update_project` | author, calendar, company, critical_slack, currency, days_per_month, default_finish_time, default_start_time, duration_unit, hours_per_day, hours_per_point, hours_per_week, manager, minutes_per_point, name, new_tasks_auto, notes, progress_from_time, start, status_date, use_resource_calendars | Update project properties and settings. Only the given fields change. |
@@ -203,9 +203,9 @@ entity; read-only tools are annotated with `readOnlyHint`.
 |---|---|---|
 | `list_tasks` *(read-only)* | filter, include_schedule, limit, max_level, offset, parent, search | List tasks in outline order with id, row, WBS, level, kind, duration, start/finish, % complete, critical flag, slack, work, predecessors and resources. Filter by category, search text or subtree. |
 | `get_task` *(read-only)* | **task** | Get every detail of one task: schedule (early/late dates, slack), constraint, deadline, progress and actuals, estimate, cost, predecessors and successors, assignments, milestone membership, parent/children, baseline and variance, notes and warnings. |
-| `create_task` | active, actual_finish, actual_start, after, bar_color, before, calendar, constraint_date, constraint_type, deadline, deliverable, duration, effort_driven, estimate, estimated, finish, fixed_cost, ignore_resource_calendars, index, is_milestone, manual_finish, manual_start, mode, **name**, notes, parent, percent_complete, predecessors, priority, resources, show_on_timeline, start, task_type | Create one task. Position it with parent/after/before/index (default: appended at the top level). New tasks default to an estimated 1-day duration; set 'duration', 'estimate', 'predecessors', 'resources' etc. in the same call. For many tasks use create_tasks. |
+| `create_task` | active, actual_finish, actual_start, after, bar_color, before, calendar, constraint_date, constraint_type, custom, deadline, deliverable, duration, effort_driven, estimate, estimated, finish, fixed_cost, ignore_resource_calendars, index, is_milestone, manual_finish, manual_start, mode, **name**, notes, parent, percent_complete, predecessors, priority, resources, show_on_timeline, start, task_type | Create one task. Position it with parent/after/before/index (default: appended at the top level). New tasks default to an estimated 1-day duration; set 'duration', 'estimate', 'predecessors', 'resources' etc. in the same call. For many tasks use create_tasks. |
 | `create_tasks` | after, before, index, parent, **tasks** | Create a whole work breakdown structure in one call (one undo step). Items nest via 'children' (or flat items with 'level'); each item accepts every create_task field. Use 'key' on items and reference them in other items' 'predecessors' (e.g. [{"task": "design", "type": "FS"}]) or milestone 'members'. Returns the created ids. |
-| `update_task` | active, actual_finish, actual_start, bar_color, calendar, constraint_date, constraint_type, deadline, deliverable, duration, effort_driven, estimate, estimated, finish, fixed_cost, ignore_resource_calendars, is_milestone, manual_finish, manual_start, mode, name, notes, percent_complete, predecessors, priority, resources, show_on_timeline, start, **task**, task_type | Change any editable field of a task; only the given fields change. 'start'/'finish' create SNET/FNET constraints for auto-scheduled tasks. Returns the updated task. |
+| `update_task` | active, actual_finish, actual_start, bar_color, calendar, constraint_date, constraint_type, custom, deadline, deliverable, duration, effort_driven, estimate, estimated, finish, fixed_cost, ignore_resource_calendars, is_milestone, manual_finish, manual_start, mode, name, notes, percent_complete, predecessors, priority, resources, show_on_timeline, start, **task**, task_type | Change any editable field of a task; only the given fields change. 'start'/'finish' create SNET/FNET constraints for auto-scheduled tasks. Returns the updated task. |
 | `update_tasks` | **updates** | Apply updates to several tasks in one call (one undo step). Each item is {"task": id, ...any update_task fields}. |
 | `delete_tasks` | **tasks** | Delete tasks together with their subtasks, links, assignments and time entries. |
 | `move_task` | after, before, index, parent, **task** | Move a task (with its subtasks) in the outline: before/after another task (taking that task's level), as the last child of a parent, or to a row index. |
@@ -268,6 +268,17 @@ entity; read-only tools are annotated with `readOnlyHint`.
 | `add_calendar_exception` | calendar, end, name, **start**, working_times, yearly | Add an exception to a calendar: non-working days (holiday, shutdown) when working_times is omitted, or special working hours for those days. Set yearly for recurring holidays. |
 | `remove_calendar_exception` | calendar, index, name | Remove a calendar exception by index (from get_calendar) or by name. |
 | `delete_calendar` | **calendar** | Delete a calendar. Tasks and resources using it fall back to the project calendar. The project calendar cannot be deleted. |
+
+### Custom fields
+
+| Tool | Arguments (required in **bold**) | Description |
+|---|---|---|
+| `list_custom_fields` *(read-only)* | – | List the project's custom fields (id, name, type, pick-list choices and how many tasks have a value). Set values with update_task's 'custom' argument. |
+| `create_custom_field` | choices, **name**, type | Define a custom task field: text (optionally limited to a pick-list), number, cost, date, duration or flag (yes/no). Names are unique, ignoring case. |
+| `update_custom_field` | choices, **field**, name | Rename a custom field or replace a text field's pick-list. Values already set are kept. |
+| `delete_custom_field` *(destructive)* | **field** | Delete a custom field, its value on every task and its columns in saved tables. |
+
+Set or clear values with the `custom` argument of `create_task`/`update_task`, e.g. `{"custom": {"Status": "In progress", "Budget": 1200, "Approved": true}}`. A `null` value clears a field. Tasks show their values under `custom`.
 
 ### Time tracking
 

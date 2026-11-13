@@ -59,15 +59,21 @@ pub fn tools() -> Vec<Tool> {
         Tool::new(
             "save_project",
             "Save a project",
-            "Save the document to its file. With 'path', save as a new file (relative links to external projects are rewritten so they keep working).",
-            schema(json!({ "path": string("Optional new file path (Save As).") }), &[]),
+            "Save the document to its file. With 'path', save as a new file (relative links to external projects are rewritten so they keep working). Fails when another program changed the file since it was opened or last saved, or when 'path' names another existing file, unless overwrite is true.",
+            schema(
+                json!({
+                    "path": string("Optional new file path (Save As)."),
+                    "overwrite": boolean("Replace the file even if another program changed it since it was opened or last saved, or replace the existing file at 'path' (default false). Check with the user first."),
+                }),
+                &[],
+            ),
             save_project,
         ),
         Tool::new(
             "close_project",
             "Close a project",
-            "Close a document. Fails when it has unsaved changes unless discard_changes is true.",
-            schema(json!({ "discard_changes": boolean("Close even if there are unsaved changes (default false).") }), &[]),
+            "Close a document. Fails when it has unsaved changes unless discard_changes is true. Unsaved changes the user made in the app are never discarded: ask the user to save or close the document.",
+            schema(json!({ "discard_changes": boolean("Close even if there are unsaved changes made by agents (default false). Never discards the user's own unsaved changes.") }), &[]),
             close_project,
         )
         .destructive(),
@@ -209,6 +215,7 @@ fn open_project(ctx: &Ctx, a: &Args) -> ToolResult {
 }
 
 fn save_project(ctx: &Ctx, a: &Args) -> ToolResult {
+    let overwrite = a.bool("overwrite")?.unwrap_or(false);
     let new_path = match a.str("path")? {
         Some(p) if !p.trim().is_empty() => Some(with_extension(p.trim())),
         _ => None,
@@ -218,16 +225,26 @@ fn save_project(ctx: &Ctx, a: &Args) -> ToolResult {
             Some(p) => {
                 let same =
                     doc.path.as_ref().is_some_and(|cur| std::fs::canonicalize(cur).ok() == std::fs::canonicalize(p).ok() && p.exists());
-                if !same {
+                if same {
+                    // Saving to its own file is a plain Save, with the same check for changes
+                    // made by another program.
+                    if overwrite { doc.save_overwriting()? } else { doc.save()? }
+                } else {
                     ctx.require_file_access("Saving to a new path")?;
+                    if p.exists() && !overwrite {
+                        return err(format!(
+                            "{} already exists; pass overwrite: true to replace it (check with the user first)",
+                            p.display()
+                        ));
+                    }
+                    doc.save_as(p)?
                 }
-                doc.save_as(p)?
             }
             None => {
                 if doc.path.is_none() {
                     return err("the document has never been saved; pass 'path' to choose a file");
                 }
-                doc.save()?
+                if overwrite { doc.save_overwriting()? } else { doc.save()? }
             }
         }
         Ok(json!({
@@ -245,6 +262,13 @@ fn close_project(ctx: &Ctx, a: &Args) -> ToolResult {
     let out = ctx.with_workspace(|ws| {
         let i = Ctx::doc_index(ws, a)?;
         let doc = doc_at(ws, i)?;
+        if doc.user_changes {
+            // The user's unsaved work is theirs to keep or throw away, not an agent's.
+            return err(format!(
+                "'{}' has unsaved changes made by the user in PlanCraft; ask the user to save or close it (save_project saves it)",
+                doc.title()
+            ));
+        }
         if doc.dirty && !discard {
             return err(format!("'{}' has unsaved changes; call save_project first or pass discard_changes: true", doc.title()));
         }

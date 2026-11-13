@@ -87,11 +87,14 @@ pub fn check_counts(p: &Project) -> PlanResult<()> {
     too_many("time entries", p.time_entries.len(), MAX_TIME_ENTRIES)?;
     too_many("calendars", p.calendars.len(), MAX_CALENDARS)?;
     too_many("linked projects", p.external_projects.len(), MAX_EXTERNAL_PROJECTS)?;
+    too_many("custom fields", p.custom_fields.len(), crate::custom::MAX_CUSTOM_FIELDS)?;
+    too_many("saved tables", p.tables.len(), crate::custom::MAX_TABLES)?;
     unique("task", p.tasks.iter().map(|t| t.id.0))?;
     unique("resource", p.resources.iter().map(|r| r.id.0))?;
     unique("assignment", p.assignments.iter().map(|a| a.id.0))?;
     unique("time entry", p.time_entries.iter().map(|e| e.id.0))?;
     unique("calendar", p.calendars.iter().map(|c| c.id.0))?;
+    unique("custom field", p.custom_fields.iter().map(|f| f.id.0))?;
     Ok(())
 }
 
@@ -147,6 +150,7 @@ pub fn sanitize(p: &mut Project) -> Vec<String> {
     for t in &mut p.tasks {
         s.task(t, &calendars);
     }
+    s.custom_fields(p);
     for r in &mut p.resources {
         s.resource(r, &calendars);
     }
@@ -192,7 +196,7 @@ pub fn sanitize(p: &mut Project) -> Vec<String> {
     }
 
     let ids = &mut p.ids;
-    for counter in [&mut ids.task, &mut ids.resource, &mut ids.calendar, &mut ids.assignment, &mut ids.time_entry] {
+    for counter in [&mut ids.task, &mut ids.resource, &mut ids.calendar, &mut ids.assignment, &mut ids.time_entry, &mut ids.custom_field] {
         if *counter > MAX_ID {
             *counter = MAX_ID;
             s.note("an id counter is out of range");
@@ -209,6 +213,68 @@ struct Fixer {
 }
 
 impl Fixer {
+    /// Custom field definitions, task values (dropped when their field is gone or of another
+    /// kind) and saved table layouts.
+    fn custom_fields(&mut self, p: &mut Project) {
+        use crate::custom::{self, CustomFieldKind, CustomValue};
+        let mut names = HashSet::new();
+        for f in &mut p.custom_fields {
+            self.name(&mut f.name);
+            if f.name.trim().is_empty() || !names.insert(f.name.to_lowercase()) {
+                // A fresh name that no earlier field uses (a later field named the same is
+                // renamed in turn when its own turn comes).
+                let mut n = 1u32;
+                let mut name = format!("Field {}", f.id.0);
+                while !names.insert(name.to_lowercase()) {
+                    n = n.saturating_add(1);
+                    name = format!("Field {} ({n})", f.id.0);
+                }
+                f.name = name;
+                self.note("a custom field name was empty or repeated");
+            }
+            self.list(&mut f.choices, custom::MAX_CHOICES, "a pick-list has too many entries");
+            for c in &mut f.choices {
+                self.name(c);
+            }
+            if !f.choices.is_empty() && f.kind != CustomFieldKind::Text {
+                f.choices.clear();
+                self.note("a pick-list was set on a field that is not text");
+            }
+        }
+        let kinds: std::collections::HashMap<_, _> = p.custom_fields.iter().map(|f| (f.id, f.kind)).collect();
+        for t in &mut p.tasks {
+            let before = t.custom.len();
+            t.custom.retain(|id, v| kinds.get(id).is_some_and(|k| v.fits(*k)));
+            if t.custom.len() != before {
+                self.note("a custom value belonged to a missing field or had the wrong type");
+            }
+            for v in t.custom.values_mut() {
+                match v {
+                    CustomValue::Text(s) => self.name(s),
+                    CustomValue::Number(n) => {
+                        self.f64(n, -custom::MAX_CUSTOM_NUMBER, custom::MAX_CUSTOM_NUMBER, "a custom number is out of range")
+                    }
+                    CustomValue::Date(d) => self.datetime(d),
+                    CustomValue::Duration(m) => self.minutes(m, "a custom duration is out of range"),
+                    CustomValue::Flag(_) => {}
+                }
+            }
+        }
+        for table in &mut p.tables {
+            self.name(&mut table.name);
+            self.list(&mut table.columns, custom::MAX_TABLE_COLUMNS, "a table has too many columns");
+            let before = table.columns.len();
+            table.columns.retain(|c| {
+                !c.is_empty()
+                    && c.chars().count() <= custom::MAX_COLUMN_KEY_CHARS
+                    && custom::custom_column_field(c).is_none_or(|id| kinds.contains_key(&id))
+            });
+            if table.columns.len() != before {
+                self.note("a table column was invalid or showed a missing custom field");
+            }
+        }
+    }
+
     fn note(&mut self, what: &'static str) {
         *self.notes.entry(what).or_default() += 1;
     }

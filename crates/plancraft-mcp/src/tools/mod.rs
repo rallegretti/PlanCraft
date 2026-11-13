@@ -11,6 +11,7 @@ use crate::server::Ctx;
 pub mod analysis;
 pub mod assignments;
 pub mod calendars;
+pub mod custom_fields;
 pub mod dependencies;
 pub mod documents;
 pub mod history;
@@ -112,6 +113,7 @@ pub fn all_tools() -> Vec<Tool> {
     v.extend(resources::tools());
     v.extend(assignments::tools());
     v.extend(calendars::tools());
+    v.extend(custom_fields::tools());
     v.extend(time::tools());
     v.extend(analysis::tools());
     v.extend(history::tools());
@@ -275,7 +277,8 @@ pub fn task_field_props() -> Map<String, Value> {
         "is_milestone": boolean("Convert to a milestone (true) or a normal task (false)."),
         "predecessors": predecessors("Predecessor links."),
         "resources": string("Resource assignments in 'Resource Names' syntax, e.g. \"Ana[50%], Bob\". Unknown names create new work resources. Replaces existing assignments; \"\" removes all."),
-        "bar_color": { "type": ["string", "null"], "description": "Gantt bar color as \"#RRGGBB\"; null resets." }
+        "bar_color": { "type": ["string", "null"], "description": "Gantt bar color as \"#RRGGBB\"; null resets." },
+        "custom": custom_fields::custom_values_prop()
     });
     match v {
         Value::Object(m) => m,

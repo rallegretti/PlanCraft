@@ -1,8 +1,8 @@
 //! The PlanCraft desktop application: layout, command execution and document management.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::{MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration as StdDuration, Instant};
 
 use chrono::{Duration, NaiveDate};
@@ -12,13 +12,14 @@ use plancraft_core::prelude::*;
 use plancraft_core::workspace::{ChangeSource, Document, SharedWorkspace, Workspace};
 
 use crate::commands::Command;
-use crate::dialogs::{self, Dialogs};
+use crate::dialogs::{self, Bound, Dialogs};
+use crate::edit::EditExt;
 use crate::mcp_host::McpHost;
 use crate::menubar::{self, MenuInfo};
-use crate::recovery::{Recovery, RecoveryStore};
+use crate::recovery::{self, Recovery, RecoveryStore, SharedRecovery};
 use crate::settings::AppSettings;
 use crate::start_page;
-use crate::state::{ToastKind, UiState, ViewKind};
+use crate::state::{ToastKind, UiState, ViewKind, ViewOrder};
 use crate::theme;
 use crate::views;
 
@@ -38,13 +39,18 @@ pub struct PlanCraftApp {
     /// Handle of the active document last frame (agents may open or switch documents).
     last_active: Option<u64>,
     /// Recovery copies of unsaved work.
-    recovery: Recovery,
+    recovery: SharedRecovery,
     /// The last recovery-copy error shown (shown once until it changes).
     recovery_error: Option<String>,
     /// Message of the last internal error caught by the frame guard, until dismissed.
     crash: Option<String>,
     /// Developer/test hook: panic inside the next frame (`PLANCRAFT_CMD=Panic`).
     inject_panic: bool,
+    /// A Save stopped because another program changed the file: asks to overwrite (by handle).
+    confirm_overwrite: Option<u64>,
+    /// The close (of a document or the app) to carry on with once the overwrite question is
+    /// answered and the save went through.
+    close_after_save: Option<CloseRequest>,
 }
 
 /// Locks the shared workspace. A panic caught while it was held must not lock the user out of
@@ -92,17 +98,20 @@ impl PlanCraftApp {
             seen: HashMap::new(),
             status: None,
             confirm_close: None,
+            confirm_overwrite: None,
+            close_after_save: None,
             allow_exit: false,
             last_title: String::new(),
             shot: std::env::var_os("PLANCRAFT_SCREENSHOT").map(|p| (PathBuf::from(p), 0)),
             last_active: None,
             // Tests never touch the user's recovery folder; they inject their own store.
-            recovery: Recovery::new(if cfg!(test) { None } else { RecoveryStore::user() }),
+            recovery: Arc::new(Mutex::new(Recovery::new(if cfg!(test) { None } else { RecoveryStore::user() }))),
             recovery_error: None,
             crash: None,
             inject_panic: false,
         };
-        if !app.recovery.found.is_empty() && !app.st.start_page {
+        recovery::spawn_background_writer(&app.recovery, &app.ws, cc.egui_ctx.clone());
+        if !app.rec().found.is_empty() && !app.st.start_page {
             app.st.toast(
                 ToastKind::Info,
                 "PlanCraft found unsaved work from an earlier session. Open the Start Page (File menu) to restore it.",
@@ -123,6 +132,11 @@ impl PlanCraftApp {
             app.mcp.start(app.ws.clone(), cc.egui_ctx.clone(), app.settings.mcp_port);
         }
         app
+    }
+
+    /// The recovery state (shared with the background writer). Lock order: workspace first.
+    fn rec(&self) -> MutexGuard<'_, Recovery> {
+        recovery::lock(&self.recovery)
     }
 
     fn set_status(&mut self, s: impl Into<String>) {
@@ -163,6 +177,23 @@ impl PlanCraftApp {
             if (global || !typing) && ctx.input_mut(|i| i.consume_shortcut(&sc)) {
                 out.push(c);
             }
+        }
+        // The desktop backend turns Ctrl+C/X/V into clipboard events rather than key presses, so
+        // outside a text field they are task clipboard commands. (Paste only arrives when the
+        // system clipboard holds text; Copy and Cut put the task names there for that reason.)
+        if !typing {
+            ctx.input_mut(|i| {
+                i.events.retain(|e| {
+                    let c = match e {
+                        egui::Event::Copy => Command::Copy,
+                        egui::Event::Cut => Command::Cut,
+                        egui::Event::Paste(_) => Command::Paste,
+                        _ => return true,
+                    };
+                    out.push(c);
+                    false
+                });
+            });
         }
     }
 
@@ -207,11 +238,17 @@ impl PlanCraftApp {
         } else {
             None
         };
+        let handle = doc.handle;
         let r = match path {
             Some(p) => doc.save_as(&p).map(|_| p),
             None => doc.save().map(|_| doc.path.clone().unwrap_or_default()),
         };
         drop(ws);
+        if let Err(plancraft_core::io::FileError::ChangedOnDisk { .. }) = &r {
+            // Never silently overwrite another program's changes: ask first.
+            self.confirm_overwrite = Some(handle);
+            return false;
+        }
         match r {
             Ok(p) => {
                 self.settings.add_recent(p.clone());
@@ -228,11 +265,22 @@ impl PlanCraftApp {
     fn export_csv(&mut self) {
         let Some((name, csv)) = self.with_doc(|doc, _| {
             let p = &doc.project;
-            let mut s = String::from("ID,Unique ID,WBS,Outline Level,Name,Milestone,Duration,Start,Finish,% Complete,Work (h),Cost,Predecessors,Resources,Critical\n");
-            let q = |v: &str| format!("\"{}\"", v.replace('"', "\"\""));
+            // UTF-8 byte order mark: Excel then reads names with accents correctly.
+            let mut s = String::from("\u{feff}ID,Unique ID,WBS,Outline Level,Name,Milestone,Duration,Start,Finish,% Complete,Work (h),Cost,Predecessors,Resources,Critical");
+            // A cell starting with = + - @ (or a tab/CR/LF, also after leading spaces) would run as
+            // a formula in a spreadsheet: prefix it with an apostrophe so it stays text.
+            let q = |v: &str| {
+                let risky = v.starts_with(['\t', '\r', '\n']) || v.trim_start().starts_with(['=', '+', '-', '@', '＝', '＋', '－', '＠']);
+                let guarded = if risky { format!("'{v}") } else { v.to_string() };
+                format!("\"{}\"", guarded.replace('"', "\"\""))
+            };
+            for f in &p.custom_fields {
+                s += &format!(",{}", q(&f.name));
+            }
+            s.push('\n');
             for (i, t) in p.tasks.iter().enumerate() {
                 s += &format!(
-                    "{},{},{},{},{},{},{},{},{},{:.0},{:.2},{:.2},{},{},{}\n",
+                    "{},{},{},{},{},{},{},{},{},{:.0},{:.2},{:.2},{},{},{}",
                     i + 1,
                     t.id.0,
                     q(&p.wbs(i)),
@@ -249,6 +297,11 @@ impl PlanCraftApp {
                     q(&p.format_resource_names(t.id)),
                     t.sched.critical
                 );
+                for f in &p.custom_fields {
+                    let v = t.custom.get(&f.id).map(|v| p.custom_value_text(f.id, v)).unwrap_or_default();
+                    s += &format!(",{}", q(&v));
+                }
+                s.push('\n');
             }
             (p.name.clone(), s)
         }) else {
@@ -310,7 +363,7 @@ impl PlanCraftApp {
             }
             Command::RestoreRecovered(stem) => self.restore_recovered(&stem),
             Command::DiscardRecovered(stem) => {
-                self.recovery.discard(&stem);
+                self.rec().discard(&stem);
                 self.set_status("Recovery copy discarded");
             }
             Command::ExportCsv => self.export_csv(),
@@ -325,6 +378,11 @@ impl PlanCraftApp {
             }
             Command::Filter(f) => self.st.filter = f,
             Command::Table(t) => self.st.table = t,
+            Command::SortBy(s) => self.st.sort = s,
+            Command::GroupBy(g) => {
+                self.st.group = g;
+                self.st.collapsed_groups.clear();
+            }
             Command::History => self.dialogs.history = !self.dialogs.history,
             Command::SetTheme(t) => {
                 self.settings.theme = t;
@@ -344,24 +402,26 @@ impl PlanCraftApp {
 
     /// Opens a recovery copy as an unsaved document, bound to its original file when it had one.
     fn restore_recovered(&mut self, stem: &str) {
-        let Some(item) = self.recovery.find(stem).cloned() else { return };
-        let Some(store) = self.recovery.store().cloned() else { return };
+        let Some(item) = self.rec().find(stem).cloned() else { return };
+        let Some(store) = self.rec().store().cloned() else { return };
         match store.load(&item) {
             Ok((project, notes)) => {
                 let mut ws = lock(&self.ws);
                 ws.add(project, item.original_path.clone());
                 if let Some(doc) = ws.active_doc_mut() {
+                    // Restored work is the user's: an agent must not be able to discard it.
                     doc.dirty = true;
+                    doc.user_changes = true;
                     doc.load_notes = notes;
                 }
                 // Copy the restored document under its new handle before the old copy goes.
-                let copied = self.recovery.write_dirty(&ws);
+                let copied = self.rec().write_dirty(&ws);
                 drop(ws);
                 match copied {
-                    Ok(_) => self.recovery.discard(stem),
+                    Ok(_) => self.rec().discard(stem),
                     // Keep the old copy and drop it from the list only (it stays on disk).
                     Err(e) => {
-                        self.recovery.found.retain(|i| i.stem != stem);
+                        self.rec().found.retain(|i| i.stem != stem);
                         self.st.toast(ToastKind::Warning, e);
                     }
                 }
@@ -384,7 +444,7 @@ impl PlanCraftApp {
         ws.close(handle);
         let empty = ws.docs.is_empty();
         // The user chose to save or discard: the recovery copy is no longer needed.
-        self.recovery.prune(&ws);
+        self.rec().prune(&ws);
         drop(ws);
         self.st.sel = Default::default();
         self.st.gantt.initialized_for = None;
@@ -425,10 +485,15 @@ impl PlanCraftApp {
                 st.sel.select_task(id);
                 if let Some(r) = doc.project.task_index(id) {
                     let rows = views::visible_rows(&doc.project, st);
-                    if let Some(row) = rows.iter().position(|&i| i == r) {
-                        let name_col = st.table.columns().iter().position(|c| *c == crate::columns::TaskCol::Name).unwrap_or(0);
+                    if let Some(row) = views::row_of_task(&rows, r) {
+                        // The plan's own columns: Name may have been moved, or columns inserted.
+                        let name_col = crate::fields::table_fields(&doc.project, st.table)
+                            .iter()
+                            .position(|f| *f == crate::fields::Field::Builtin(crate::columns::TaskCol::Name))
+                            .unwrap_or(0);
                         st.task_grid.begin_edit(row, name_col, String::new());
                         st.task_grid.scroll_to = Some(row);
+                        st.cursor_task = Some((row, id));
                     }
                 }
             }
@@ -566,7 +631,8 @@ impl PlanCraftApp {
             }
             Command::TaskInfo | Command::TaskNotes => {
                 if let Some(id) = st.sel.single_task().or(sel.first().copied()) {
-                    self.dialogs.task_info = dialogs::task_info::TaskInfo::new(&doc.project, id, cmd == Command::TaskNotes);
+                    self.dialogs.task_info =
+                        dialogs::task_info::TaskInfo::new(&doc.project, id, cmd == Command::TaskNotes).map(|d| Bound::new(doc, d));
                 }
             }
             Command::ToggleTimeline => {
@@ -591,7 +657,7 @@ impl PlanCraftApp {
                     st.gantt.scroll_to(s);
                     let rows = views::visible_rows(&doc.project, st);
                     if let Some(idx) = doc.project.task_index(*id)
-                        && let Some(r) = rows.iter().position(|&i| i == idx)
+                        && let Some(r) = views::row_of_task(&rows, idx)
                     {
                         st.task_grid.scroll_to = Some(r);
                     }
@@ -606,6 +672,9 @@ impl PlanCraftApp {
                             copied.push(t.clone());
                         }
                     }
+                    // Task names on the system clipboard, so they paste into other programs and
+                    // so the backend reports the next Ctrl+V as a paste.
+                    ctx.copy_text(copied.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join("\n"));
                     st.clipboard = copied;
                     if cmd == Command::Cut {
                         let r = doc.try_edit("Cut Tasks", ChangeSource::User, |p| p.delete_tasks(&sel).map(|_| ()));
@@ -670,10 +739,10 @@ impl PlanCraftApp {
             }
             Command::ResourceInfo => {
                 if let Some(id) = st.sel.single_resource() {
-                    self.dialogs.resource_info = dialogs::resource_info::ResourceInfo::new(&doc.project, id);
+                    self.dialogs.resource_info = dialogs::resource_info::ResourceInfo::new(&doc.project, id).map(|d| Bound::new(doc, d));
                 }
             }
-            Command::AssignResources => self.dialogs.assign = Some(Default::default()),
+            Command::AssignResources => self.dialogs.assign = Some(Bound::new(doc, Default::default())),
             Command::LevelAll => {
                 let r = match doc.edit("Level Resources", |p| level_resources(p, &LevelingOptions::default())) {
                     Ok(r) => r,
@@ -695,8 +764,12 @@ impl PlanCraftApp {
                 }
             }
             Command::ClearLeveling => report(st, doc.edit("Clear Leveling", clear_leveling)),
-            Command::ProjectInfo => self.dialogs.project_info = Some(dialogs::project_info::ProjectInfo::new(&doc.project)),
-            Command::ChangeWorkingTime => self.dialogs.working_time = Some(dialogs::working_time::WorkingTime::new(&doc.project)),
+            Command::ProjectInfo => {
+                self.dialogs.project_info = Some(Bound::new(doc, dialogs::project_info::ProjectInfo::new(&doc.project)))
+            }
+            Command::ChangeWorkingTime => {
+                self.dialogs.working_time = Some(Bound::new(doc, dialogs::working_time::WorkingTime::new(&doc.project)));
+            }
             Command::SetBaseline => match doc.edit("Set Baseline", |p| p.set_baseline(&[])) {
                 Ok(()) => st.toast(ToastKind::Success, "Baseline saved for all tasks"),
                 Err(e) => st.toast(ToastKind::Warning, e.to_string()),
@@ -706,7 +779,7 @@ impl PlanCraftApp {
                 Ok(_) => st.toast(ToastKind::Success, "Progress updated from tracked time"),
                 Err(e) => st.toast(ToastKind::Warning, e.to_string()),
             },
-            Command::ExternalLinks => self.dialogs.external = Some(Default::default()),
+            Command::ExternalLinks => self.dialogs.external = Some(Bound::new(doc, Default::default())),
             Command::RefreshExternal => {
                 let w = doc.refresh_external();
                 if w.is_empty() {
@@ -743,6 +816,48 @@ impl PlanCraftApp {
                 }
             }
             Command::ExpandAll => st.collapsed.clear(),
+            Command::InsertColumn { .. } | Command::HideColumn(_) | Command::MoveColumn { .. } | Command::ResetColumns => {
+                let table = st.table;
+                let before = crate::fields::table_fields(&doc.project, table);
+                let mut cols = before.clone();
+                match &cmd {
+                    Command::InsertColumn { at, key } => {
+                        let Some(field) = crate::fields::Field::from_key(&doc.project, key) else {
+                            return st.toast(ToastKind::Warning, "that field no longer exists");
+                        };
+                        cols.retain(|f| *f != field);
+                        cols.insert((*at).min(cols.len()), field);
+                    }
+                    Command::HideColumn(at) if cols.len() > 1 && *at < cols.len() => {
+                        cols.remove(*at);
+                    }
+                    Command::MoveColumn { at, right } => {
+                        let to = if *right { at.saturating_add(1) } else { at.saturating_sub(1) };
+                        if *at < cols.len() && to < cols.len() {
+                            cols.swap(*at, to);
+                        }
+                    }
+                    _ => {}
+                }
+                let reset = cmd == Command::ResetColumns;
+                // Nothing to change: no undo step, and the plan stays unmodified.
+                if (reset && doc.project.table_layout(table.label()).is_none()) || (!reset && cols == before) {
+                    return;
+                }
+                let r = doc.edit_msg("Change Columns", |p| {
+                    if reset {
+                        p.set_table_columns(table.label(), &[]).map_err(|e| e.to_string())
+                    } else {
+                        crate::fields::save_columns(p, table, &cols)
+                    }
+                });
+                if let Err(e) = r {
+                    st.toast(ToastKind::Warning, e);
+                }
+            }
+            Command::CustomFields => {
+                self.dialogs.custom_fields = Some(Bound::new(doc, dialogs::custom_fields::CustomFields::default()));
+            }
             _ => {}
         }
     }
@@ -753,6 +868,22 @@ impl PlanCraftApp {
 
     fn menu_info(&self, ws: &Workspace) -> MenuInfo {
         let doc = ws.active_doc();
+        // Sort/group choices: the table's columns, then custom fields not shown.
+        let fields = doc
+            .map(|d| {
+                let p = &d.project;
+                let mut list = crate::fields::table_fields(p, self.st.table);
+                for f in p.custom_fields.iter().map(|f| crate::fields::Field::Custom(f.id)) {
+                    if !list.contains(&f) {
+                        list.push(f);
+                    }
+                }
+                list.into_iter()
+                    .filter(|f| *f != crate::fields::Field::Builtin(crate::columns::TaskCol::Indicators))
+                    .map(|f| (f.key(), f.title(p)))
+                    .collect()
+            })
+            .unwrap_or_default();
         MenuInfo {
             has_doc: doc.is_some(),
             title: doc.map(|d| d.title()).unwrap_or_default(),
@@ -763,6 +894,7 @@ impl PlanCraftApp {
             resource_selected: !self.st.sel.resources.is_empty(),
             mcp_running: self.mcp.running(),
             mcp_url: self.mcp.url(),
+            fields,
         }
     }
 
@@ -957,6 +1089,8 @@ impl PlanCraftApp {
                 }
                 if self.save(false) {
                     self.close_doc(h);
+                } else if self.confirm_overwrite.is_some() {
+                    self.close_after_save = Some(CloseRequest::Document(h));
                 }
                 self.confirm_close = None;
             }
@@ -969,7 +1103,15 @@ impl PlanCraftApp {
                 let mut all = true;
                 for i in dirty {
                     lock(&self.ws).active = Some(i);
-                    all &= self.save(false);
+                    if !self.save(false) {
+                        // Stop at the first file that needs an answer (or failed); exiting carries
+                        // on once the overwrite question is answered.
+                        all = false;
+                        if self.confirm_overwrite.is_some() {
+                            self.close_after_save = Some(CloseRequest::App);
+                        }
+                        break;
+                    }
                 }
                 self.confirm_close = None;
                 if all {
@@ -983,6 +1125,80 @@ impl PlanCraftApp {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             }
             (Some(_), _) => self.confirm_close = None,
+            _ => {}
+        }
+    }
+
+    /// Asks before replacing a file another program changed since it was opened or saved.
+    fn overwrite_dialog(&mut self, ctx: &egui::Context) {
+        let Some(handle) = self.confirm_overwrite else {
+            return;
+        };
+        let name = {
+            let ws = lock(&self.ws);
+            match ws.index_of(handle).and_then(|i| ws.docs.get(i)) {
+                Some(d) => {
+                    d.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or(d.project.name.clone())
+                }
+                None => {
+                    self.confirm_overwrite = None;
+                    return;
+                }
+            }
+        };
+        let mut choice = None;
+        egui::Modal::new(egui::Id::new("confirm_overwrite")).show(ctx, |ui| {
+            ui.set_width(420.0);
+            ui.heading("File changed on disk");
+            ui.label(format!(
+                "{name} was changed by another program since you opened or last saved it. Overwrite it with your version, or save yours under another name?"
+            ));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if ui.add(egui::Button::new(RichText::new("Save As…").color(Color32::WHITE)).fill(theme::pal().ACCENT)).clicked() {
+                    choice = Some(0);
+                }
+                if ui.button("Overwrite").clicked() {
+                    choice = Some(1);
+                }
+                if ui.button("Cancel").clicked() {
+                    choice = Some(2);
+                }
+            });
+        });
+        let Some(choice) = choice else { return };
+        self.confirm_overwrite = None;
+        {
+            let mut ws = lock(&self.ws);
+            ws.active = ws.index_of(handle);
+        }
+        let saved = match choice {
+            0 => self.save(true),
+            1 => {
+                let r = {
+                    let mut ws = lock(&self.ws);
+                    ws.active_doc_mut().map(|d| d.save_overwriting().map(|_| d.path.clone().unwrap_or_default()))
+                };
+                match r {
+                    Some(Ok(p)) => {
+                        self.settings.add_recent(p.clone());
+                        self.set_status(format!("Saved {}", p.display()));
+                        true
+                    }
+                    Some(Err(e)) => {
+                        self.st.toast(ToastKind::Error, e.to_string());
+                        false
+                    }
+                    None => false,
+                }
+            }
+            _ => false,
+        };
+        // Carry on with the close that stopped to ask (Cancel or a failed save stops it).
+        match self.close_after_save.take() {
+            Some(CloseRequest::Document(h)) if saved => self.close_doc(h),
+            // Asks again about any other unsaved plans, then exits.
+            Some(CloseRequest::App) if saved => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
             _ => {}
         }
     }
@@ -1036,7 +1252,25 @@ impl PlanCraftApp {
                         self.inject_panic = true;
                         continue;
                     }
-                    _ => continue,
+                    "CustomFields" => Command::CustomFields,
+                    // `GroupBy=<field>` and `SortBy=<field>[ desc]`, by column key or custom field name.
+                    other => {
+                        let field_key = |name: &str| {
+                            let ws = lock(&self.ws);
+                            let p = &ws.active_doc()?.project;
+                            p.find_custom_field(name)
+                                .map(|f| plancraft_core::custom::custom_column_key(f.id))
+                                .or_else(|| crate::fields::Field::from_key(p, name).map(|f| f.key()))
+                        };
+                        if let Some(name) = other.strip_prefix("GroupBy=") {
+                            Command::GroupBy(field_key(name))
+                        } else if let Some(spec) = other.strip_prefix("SortBy=") {
+                            let (name, desc) = spec.strip_suffix(" desc").map_or((spec, false), |n| (n, true));
+                            Command::SortBy(field_key(name).map(|k| (k, desc)))
+                        } else {
+                            continue;
+                        }
+                    }
                 };
                 self.exec(ctx, cmd);
             }
@@ -1089,14 +1323,14 @@ impl PlanCraftApp {
             self.settings.save();
         }
         self.mcp.stop();
-        self.recovery.forget_all();
+        self.rec().forget_all();
     }
 
     /// Called after the frame guard caught a panic: secure the user's work first, then tell them.
     fn after_panic(&mut self, ctx: &egui::Context, message: &str) {
         let (any_dirty, saved) = {
             let ws = lock(&self.ws);
-            (ws.docs.iter().any(|d| d.dirty), self.recovery.write_dirty(&ws))
+            (ws.docs.iter().any(|d| d.dirty), self.rec().write_dirty(&ws))
         };
         let message: String = match message.char_indices().nth(MAX_CRASH_CHARS) {
             Some((cut, _)) => format!("{}…", message.get(..cut).unwrap_or(message)),
@@ -1190,9 +1424,15 @@ impl PlanCraftApp {
         let mut ws = lock(&ws_arc);
 
         // Keep recovery copies of unsaved work up to date.
-        match self.recovery.tick(&ws) {
-            Ok(()) => self.recovery_error = None,
-            Err(e) => {
+        // (The background writer also ticks, so copies are made while no frames are drawn.)
+        let error = {
+            let mut r = self.rec();
+            let _ = r.tick(&ws);
+            r.last_error.clone()
+        };
+        match error {
+            None => self.recovery_error = None,
+            Some(e) => {
                 if self.recovery_error.as_ref() != Some(&e) {
                     self.st.toast(ToastKind::Error, e.clone());
                 }
@@ -1222,6 +1462,21 @@ impl PlanCraftApp {
             }
             self.st.sel = Default::default();
             self.st.gantt.initialized_for = None;
+            self.st.cursor_task = None;
+            // Each document keeps its own sort and grouping.
+            let st = &mut self.st;
+            let leaving =
+                ViewOrder { sort: st.sort.take(), group: st.group.take(), collapsed_groups: std::mem::take(&mut st.collapsed_groups) };
+            if let Some(old) = self.last_active {
+                st.view_orders.insert(old, leaving);
+            }
+            let open: HashSet<u64> = ws.docs.iter().map(|d| d.handle).collect();
+            st.view_orders.retain(|h, _| open.contains(h));
+            if let Some(order) = active.and_then(|h| st.view_orders.remove(&h)) {
+                st.sort = order.sort;
+                st.group = order.group;
+                st.collapsed_groups = order.collapsed_groups;
+            }
             self.last_active = active;
         }
         // Drop selections that no longer exist (e.g. deleted by an agent).
@@ -1243,13 +1498,14 @@ impl PlanCraftApp {
 
         if start_open {
             let stats = ws.active_doc().map(|d| plancraft_core::report::project_stats(&d.project));
+            let recovered = self.rec().found.clone();
             let sinfo = start_page::StartInfo {
                 has_doc: info.has_doc,
                 doc_title: ws.active_doc().map(|d| d.project.name.clone()).unwrap_or_default(),
                 doc_path: ws.active_doc().and_then(|d| d.path.as_ref().map(|p| p.display().to_string())),
                 stats,
                 settings: &self.settings,
-                recovered: &self.recovery.found,
+                recovered: &recovered,
             };
             egui::Panel::top("title").frame(egui::Frame::new().fill(theme::pal().BG)).show(ui, |ui| {
                 menubar::title_bar(ui, &info, &mut out);
@@ -1302,44 +1558,39 @@ impl PlanCraftApp {
                 }
             });
             views::gantt::context_menu_popup(&ctx, &mut out);
+            if let Some(doc) = ws.active_doc() {
+                views::gantt::column_menu_popup(&ctx, &doc.project, &self.st, &mut out);
+            }
         }
 
-        // Dialogs.
+        // Dialogs. Editing dialogs stay bound to the document they were opened for.
+        dialogs::show_bound(&mut self.dialogs.task_info, &mut ws, |d, doc| d.show(&ctx, doc));
+        dialogs::show_bound(&mut self.dialogs.resource_info, &mut ws, |d, doc| d.show(&ctx, doc));
+        dialogs::show_bound(&mut self.dialogs.project_info, &mut ws, |d, doc| d.show(&ctx, doc));
+        dialogs::show_bound(&mut self.dialogs.working_time, &mut ws, |d, doc| d.show(&ctx, doc));
+        dialogs::show_bound(&mut self.dialogs.custom_fields, &mut ws, |d, doc| d.show(&ctx, doc));
+        {
+            let st = &mut self.st;
+            dialogs::show_bound(&mut self.dialogs.external, &mut ws, |d, doc| d.show(&ctx, doc, st));
+        }
+        // Assign Resources works on the active document's selection: start afresh when the
+        // active document changes, so typed units never carry over to another plan.
+        let active = ws.active_doc().map(|d| d.handle);
+        if let Some(b) = &mut self.dialogs.assign
+            && let Some(h) = active
+            && b.doc != h
+        {
+            *b = Bound { doc: h, dialog: Default::default() };
+        }
+        {
+            let mut toasts = Vec::new();
+            let sel = &self.st.sel;
+            dialogs::show_bound(&mut self.dialogs.assign, &mut ws, |d, doc| d.show(&ctx, doc, sel, &mut toasts));
+            for (k, t) in toasts {
+                self.st.toast(k, t);
+            }
+        }
         if let Some(doc) = ws.active_doc_mut() {
-            if let Some(d) = &mut self.dialogs.task_info
-                && !d.show(&ctx, doc)
-            {
-                self.dialogs.task_info = None;
-            }
-            if let Some(d) = &mut self.dialogs.resource_info
-                && !d.show(&ctx, doc)
-            {
-                self.dialogs.resource_info = None;
-            }
-            if let Some(d) = &mut self.dialogs.project_info
-                && !d.show(&ctx, doc)
-            {
-                self.dialogs.project_info = None;
-            }
-            if let Some(d) = &mut self.dialogs.working_time
-                && !d.show(&ctx, doc)
-            {
-                self.dialogs.working_time = None;
-            }
-            if let Some(d) = &mut self.dialogs.assign {
-                let mut toasts = Vec::new();
-                if !d.show(&ctx, doc, &self.st.sel, &mut toasts) {
-                    self.dialogs.assign = None;
-                }
-                for (k, t) in toasts {
-                    self.st.toast(k, t);
-                }
-            }
-            if let Some(d) = &mut self.dialogs.external
-                && !d.show(&ctx, doc, &mut self.st)
-            {
-                self.dialogs.external = None;
-            }
             if self.dialogs.stats {
                 dialogs::misc::statistics(&ctx, doc, &mut self.dialogs.stats);
             }
@@ -1356,6 +1607,7 @@ impl PlanCraftApp {
             dialogs::mcp_panel::show(&ctx, &mut self.dialogs.mcp, &mut self.mcp, &mut self.settings, &ws);
         }
         self.confirm_dialog(&ctx);
+        self.overwrite_dialog(&ctx);
         self.toasts(&ctx);
 
         for c in out {
@@ -1452,6 +1704,120 @@ mod ui_tests {
         assert_eq!(names[2], "Inserted step", "{names:?}");
     }
 
+    /// Regression: the name editor of a new task used the default column positions, so with the
+    /// Name column moved it opened on another column.
+    #[test]
+    fn insert_edits_the_name_column_wherever_it_is() {
+        let mut h = harness();
+        let ctx = h.ctx.clone();
+        let name_at = |h: &Harness<'static, PlanCraftApp>| {
+            let ws = h.state().ws.lock().unwrap();
+            crate::fields::table_fields(&ws.active_doc().unwrap().project, crate::columns::TaskTable::Entry)
+                .iter()
+                .position(|f| *f == crate::fields::Field::Builtin(crate::columns::TaskCol::Name))
+                .unwrap()
+        };
+        let at = name_at(&h);
+        h.state_mut().exec(&ctx, Command::MoveColumn { at, right: false });
+        assert_eq!(name_at(&h), at - 1);
+        let target = { h.state().ws.lock().unwrap().active_doc().unwrap().project.tasks[2].id };
+        h.state_mut().st.sel.select_task(target);
+        h.state_mut().exec(&ctx, Command::InsertTask);
+        h.run_steps(2);
+        assert_eq!(h.state().st.task_grid.editing.as_ref().map(|e| e.col), Some(at - 1));
+    }
+
+    /// Regression: in a sorted view the grid cursor stayed on its row number when an edit
+    /// re-sorted the rows, so the next keystroke edited a different task from the selected one.
+    #[test]
+    fn the_cursor_follows_its_task_when_an_edit_re_sorts_the_rows() {
+        let mut h = harness();
+        let ctx = h.ctx.clone();
+        h.state_mut().exec(&ctx, Command::SortBy(Some(("duration".into(), false))));
+        h.run_steps(2);
+        let rows_now = |h: &Harness<'static, PlanCraftApp>| {
+            let ws = h.state().ws.lock().unwrap();
+            views::visible_rows(&ws.active_doc().unwrap().project, &h.state().st)
+        };
+        let rows = rows_now(&h);
+        let (row, id) = {
+            let ws = h.state().ws.lock().unwrap();
+            let p = &ws.active_doc().unwrap().project;
+            let row =
+                rows.iter().position(|r| r.task().is_some_and(|i| !p.tasks[i].sched.is_summary && !p.tasks[i].is_milestone())).unwrap();
+            (row, p.tasks[rows[row].task().unwrap()].id)
+        };
+        h.state_mut().st.sel.select_task(id);
+        h.state_mut().st.task_grid.cursor = Some((row, 3));
+        h.run_steps(2);
+        // The edit makes it the longest task, so it sorts to another row.
+        {
+            let mut ws = h.state().ws.lock().unwrap();
+            ws.active_doc_mut().unwrap().edit("Longer", |p| p.set_duration(id, 400 * 480, false)).unwrap().unwrap();
+        }
+        h.run_steps(3);
+        let rows = rows_now(&h);
+        let (now, _) = h.state().st.task_grid.cursor.unwrap();
+        let ws = h.state().ws.lock().unwrap();
+        let p = &ws.active_doc().unwrap().project;
+        let pos = rows.iter().position(|r| r.task().is_some_and(|i| p.tasks[i].id == id));
+        assert_ne!(now, row, "the task moved: was {row}, now at {pos:?}; rows {:?}", rows.iter().map(|r| r.task()).collect::<Vec<_>>());
+        assert_eq!(rows[now].task().map(|i| p.tasks[i].id), Some(id), "the cursor is on the edited task");
+    }
+
+    /// Regression: sort and grouping were shared by every open plan, and a custom-field key names
+    /// a different field in another plan.
+    #[test]
+    fn each_open_plan_keeps_its_own_sort_and_grouping() {
+        let mut ws = Workspace::default();
+        let a = ws.add(plancraft_core::sample::demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+        let b = ws.add(Project::new("Other plan", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+        ws.active = ws.index_of(a);
+        let shared = ws.shared();
+        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).build_eframe(move |cc| PlanCraftApp::new(cc, shared));
+        h.run_steps(3);
+        let ctx = h.ctx.clone();
+        h.state_mut().exec(&ctx, Command::SortBy(Some(("start".into(), true))));
+        h.state_mut().exec(&ctx, Command::GroupBy(Some("custom:1".into())));
+        let activate = |h: &mut Harness<'static, PlanCraftApp>, handle: u64| {
+            {
+                let mut ws = h.state().ws.lock().unwrap();
+                ws.active = ws.index_of(handle);
+            }
+            h.run_steps(2);
+        };
+        activate(&mut h, b);
+        assert_eq!((h.state().st.sort.clone(), h.state().st.group.clone()), (None, None), "the other plan starts unsorted");
+        activate(&mut h, a);
+        assert_eq!(h.state().st.sort, Some(("start".into(), true)));
+        assert_eq!(h.state().st.group.as_deref(), Some("custom:1"));
+    }
+
+    /// Regression: arrowing onto a group header selected every task in the group, so a Delete
+    /// pressed next removed them all.
+    #[test]
+    fn arrowing_onto_a_group_header_selects_nothing() {
+        let mut h = harness();
+        let ctx = h.ctx.clone();
+        let status = { h.state().ws.lock().unwrap().active_doc().unwrap().project.find_custom_field("Status").unwrap().id };
+        h.state_mut().exec(&ctx, Command::GroupBy(Some(plancraft_core::custom::custom_column_key(status))));
+        h.run_steps(2);
+        let first = {
+            let ws = h.state().ws.lock().unwrap();
+            let p = &ws.active_doc().unwrap().project;
+            let rows = views::visible_rows(p, &h.state().st);
+            assert!(matches!(rows[0], views::Row::Group(_)));
+            p.tasks[rows[1].task().unwrap()].id
+        };
+        h.state_mut().st.sel.select_task(first);
+        h.state_mut().st.task_grid.cursor = Some((1, 3));
+        focus_task_grid(&mut h);
+        h.key_press(egui::Key::ArrowUp);
+        h.run_steps(2);
+        assert_eq!(h.state().st.task_grid.cursor.map(|c| c.0), Some(0));
+        assert!(h.state().st.sel.tasks.is_empty(), "{:?}", h.state().st.sel.tasks);
+    }
+
     #[test]
     fn outline_and_link_shortcuts_work_while_grid_has_focus() {
         let mut h = harness();
@@ -1481,10 +1847,192 @@ mod ui_tests {
     }
 
     #[test]
+    fn columns_can_be_inserted_hidden_and_moved_with_undo() {
+        use crate::fields::{Field, table_fields};
+        let mut h = harness();
+        let ctx = h.ctx.clone();
+        let (status, before) = {
+            let ws = h.state().ws.lock().unwrap();
+            let p = &ws.active_doc().unwrap().project;
+            (p.find_custom_field("Status").unwrap().id, table_fields(p, crate::columns::TaskTable::Entry))
+        };
+        let key = Field::Custom(status).key();
+        h.state_mut().exec(&ctx, Command::InsertColumn { at: 3, key });
+        h.run_steps(2);
+        let after = { table_fields(&h.state().ws.lock().unwrap().active_doc().unwrap().project, crate::columns::TaskTable::Entry) };
+        assert_eq!(after.len(), before.len() + 1);
+        assert_eq!(after[3], Field::Custom(status));
+        h.state_mut().exec(&ctx, Command::MoveColumn { at: 3, right: false });
+        h.state_mut().exec(&ctx, Command::HideColumn(0));
+        h.run_steps(2);
+        {
+            let ws = h.state().ws.lock().unwrap();
+            let doc = ws.active_doc().unwrap();
+            let cols = table_fields(&doc.project, crate::columns::TaskTable::Entry);
+            assert_eq!(cols[1], Field::Custom(status), "moved left, then the first column was hidden");
+            assert!(doc.dirty, "column choices are saved with the plan");
+        }
+        for _ in 0..3 {
+            h.state_mut().exec(&ctx, Command::Undo);
+        }
+        h.run_steps(2);
+        let ws = h.state().ws.lock().unwrap();
+        assert_eq!(table_fields(&ws.active_doc().unwrap().project, crate::columns::TaskTable::Entry), before);
+    }
+
+    #[test]
+    fn grouped_and_sorted_views_render() {
+        let mut h = harness();
+        let ctx = h.ctx.clone();
+        let status = { h.state().ws.lock().unwrap().active_doc().unwrap().project.find_custom_field("Status").unwrap().id };
+        h.state_mut().exec(&ctx, Command::GroupBy(Some(plancraft_core::custom::custom_column_key(status))));
+        h.state_mut().exec(&ctx, Command::SortBy(Some(("start".into(), true))));
+        for v in [ViewKind::Gantt, ViewKind::TrackingGantt, ViewKind::TaskUsage] {
+            h.state_mut().st.view = v;
+            h.run_steps(2);
+        }
+        h.state_mut().exec(&ctx, Command::CustomFields);
+        h.run_steps(2);
+        assert!(h.state().dialogs.custom_fields.is_some());
+    }
+
+    /// Regression: dialogs applied to whichever document was active, and task ids repeat across
+    /// documents, so OK after a tab switch wrote one plan's task into another.
+    #[test]
+    fn dialogs_stay_with_the_document_they_were_opened_for() {
+        use egui_kittest::kittest::Queryable;
+        let mut ws = Workspace::default();
+        let a = ws.add(plancraft_core::sample::demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+        let mut other = Project::new("Other plan", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        for k in 0..30 {
+            other.add_task(format!("Other {k}"), None);
+        }
+        let b = ws.add(other, None);
+        ws.active = ws.index_of(a);
+        let shared = ws.shared();
+        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).build_eframe(move |cc| PlanCraftApp::new(cc, shared));
+        h.run_steps(3);
+
+        let id = { h.state().ws.lock().unwrap().active_doc().unwrap().project.tasks[3].id };
+        let before_b = {
+            let ws = h.state().ws.lock().unwrap();
+            ws.docs[ws.index_of(b).unwrap()].project.clone()
+        };
+        h.state_mut().st.sel.select_task(id);
+        let ctx = h.ctx.clone();
+        h.state_mut().exec(&ctx, Command::TaskInfo);
+        h.run_steps(2);
+        assert!(h.state().dialogs.task_info.is_some());
+
+        // Switch to the other plan, then press OK on the open dialog.
+        {
+            let state = h.state_mut();
+            let mut ws = state.ws.lock().unwrap();
+            ws.active = ws.index_of(b);
+        }
+        h.run_steps(2);
+        h.get_by_label_contains("OK").click();
+        h.run_steps(3);
+        let ws = h.state().ws.lock().unwrap();
+        assert_eq!(ws.docs[ws.index_of(b).unwrap()].project.tasks, before_b.tasks, "the other plan is untouched");
+        assert!(ws.docs[ws.index_of(b).unwrap()].history().is_empty());
+        assert!(h.state().dialogs.task_info.is_none(), "OK applied to its own plan and closed");
+        let own = ws.docs[ws.index_of(a).unwrap()].history();
+        assert!(own.iter().any(|(l, _)| l.starts_with("Task Information")), "{own:?}");
+    }
+
+    /// Regression: Save silently replaced a file another program had changed since it was opened.
+    #[test]
+    fn save_asks_before_overwriting_a_file_changed_on_disk() {
+        use egui_kittest::kittest::Queryable;
+        let tmp = crate::recovery::tests::TempDir::new("overwrite");
+        let path = tmp.0.join("plan.plancraft");
+        plancraft_core::io::save(&Project::new("Plan", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), &path).unwrap();
+        let mut ws = Workspace::default();
+        ws.open(&path).unwrap();
+        let shared = ws.shared();
+        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).build_eframe(move |cc| PlanCraftApp::new(cc, shared));
+        h.run_steps(3);
+
+        let mut other = plancraft_core::io::load(&path).unwrap();
+        other.add_task("Written elsewhere", None);
+        plancraft_core::io::save(&other, &path).unwrap();
+        h.state().ws.lock().unwrap().active_doc_mut().unwrap().edit("Add", |p| p.add_task("Mine", None)).unwrap();
+
+        let ctx = h.ctx.clone();
+        h.state_mut().exec(&ctx, Command::Save);
+        h.run_steps(2);
+        assert!(h.state().confirm_overwrite.is_some(), "the user is asked");
+        assert!(plancraft_core::io::load(&path).unwrap().tasks.iter().any(|t| t.name == "Written elsewhere"));
+
+        h.get_by_label("Overwrite").click();
+        h.run_steps(3);
+        assert!(h.state().confirm_overwrite.is_none());
+        let saved = plancraft_core::io::load(&path).unwrap();
+        assert!(saved.tasks.iter().any(|t| t.name == "Mine"), "overwritten on request");
+        assert!(!h.state().ws.lock().unwrap().active_doc().unwrap().dirty);
+    }
+
+    /// Regression: opening a cell editor and leaving with Enter used to commit the displayed text,
+    /// which added a Start No Earlier Than constraint (dates show without their time) and drifted
+    /// durations by display rounding, each with its own undo step.
+    #[test]
+    fn leaving_a_cell_unchanged_changes_nothing() {
+        let mut h = harness();
+        let before = { h.state().ws.lock().unwrap().active_doc().unwrap().project.tasks.clone() };
+        let history = { h.state().ws.lock().unwrap().active_doc().unwrap().history().len() };
+        // Entry table: 3 = Duration, 4 = Start, 5 = Finish.
+        for col in [3, 4, 5] {
+            h.state_mut().st.task_grid.cursor = Some((3, col));
+            focus_task_grid(&mut h);
+            h.key_press(egui::Key::F2);
+            h.run_steps(2);
+            assert!(h.state().st.task_grid.editing.is_some(), "F2 opens the editor in column {col}");
+            h.key_press(egui::Key::Enter);
+            h.run_steps(3);
+        }
+        let ws = h.state().ws.lock().unwrap();
+        let doc = ws.active_doc().unwrap();
+        assert_eq!(doc.history().len(), history, "no undo steps: {:?}", doc.history());
+        for (a, b) in before.iter().zip(&doc.project.tasks) {
+            assert_eq!((a.duration, a.constraint, a.manual_start), (b.duration, b.constraint, b.manual_start), "{}", a.name);
+        }
+    }
+
+    /// Regression: the desktop backend delivers Ctrl+C/X/V as `Event::Copy/Cut/Paste` (no key
+    /// event), so key-based shortcuts never fired and the clipboard keys did nothing.
+    #[test]
+    fn clipboard_events_copy_cut_and_paste_tasks() {
+        let mut h = harness();
+        let (id, name) = {
+            let ws = h.state().ws.lock().unwrap();
+            let t = &ws.active_doc().unwrap().project.tasks[3];
+            (t.id, t.name.clone())
+        };
+        let n = tasks(&h).len();
+        h.state_mut().st.sel.select_task(id);
+        focus_task_grid(&mut h);
+        h.event(egui::Event::Copy);
+        h.run_steps(2);
+        assert_eq!(h.state().st.clipboard.len(), 1);
+        assert_eq!(h.state().st.clipboard[0].name, name);
+        h.event(egui::Event::Paste(name.clone()));
+        h.run_steps(3);
+        assert_eq!(tasks(&h).len(), n + 1);
+        assert_eq!(tasks(&h).iter().filter(|t| **t == name).count(), 2);
+
+        let pasted = h.state().st.sel.tasks.iter().copied().next().unwrap();
+        h.state_mut().st.sel.tasks = [pasted].into_iter().collect();
+        h.event(egui::Event::Cut);
+        h.run_steps(3);
+        assert_eq!(tasks(&h).len(), n);
+    }
+
+    #[test]
     fn frame_guard_turns_a_panic_into_a_message_and_saves_unsaved_work() {
         let tmp = crate::recovery::tests::TempDir::new("frame-guard");
         let mut h = harness();
-        h.state_mut().recovery = Recovery::new(Some(RecoveryStore::new(&tmp.0)));
+        *h.state().rec() = Recovery::new(Some(RecoveryStore::new(&tmp.0)));
         h.state().ws.lock().unwrap().active_doc_mut().unwrap().edit("Add", |p| p.add_task("Unsaved work", None)).unwrap();
 
         h.state_mut().inject_panic = true;
@@ -1523,12 +2071,12 @@ mod ui_tests {
             Recovery::new(Some(store.clone())).write_dirty(&ws).unwrap();
         }
         let mut h = harness();
-        h.state_mut().recovery = Recovery::new(Some(store.clone()));
-        assert_eq!(h.state().recovery.found.len(), 2);
+        *h.state().rec() = Recovery::new(Some(store.clone()));
+        assert_eq!(h.state().rec().found.len(), 2);
         h.state_mut().st.start_page = true;
         h.run_steps(2);
 
-        let crashed = h.state().recovery.found.iter().find(|i| i.name == "Crashed Plan").unwrap().stem.clone();
+        let crashed = h.state().rec().found.iter().find(|i| i.name == "Crashed Plan").unwrap().stem.clone();
         let ctx = h.ctx.clone();
         h.state_mut().exec(&ctx, Command::RestoreRecovered(crashed.clone()));
         h.run_steps(2);
@@ -1544,10 +2092,10 @@ mod ui_tests {
         assert_eq!(left.len(), 2, "the restored document has its own copy now: {left:?}");
         assert!(store.list().iter().all(|i| i.stem != crashed), "the old copy is gone");
 
-        let scratch = h.state().recovery.found.iter().find(|i| i.name == "Scratch").unwrap().stem.clone();
+        let scratch = h.state().rec().found.iter().find(|i| i.name == "Scratch").unwrap().stem.clone();
         let ctx = h.ctx.clone();
         h.state_mut().exec(&ctx, Command::DiscardRecovered(scratch.clone()));
-        assert!(h.state().recovery.found.is_empty());
+        assert!(h.state().rec().found.is_empty());
         assert!(store.list().iter().all(|i| i.stem != scratch));
     }
 

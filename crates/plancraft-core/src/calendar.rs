@@ -8,6 +8,8 @@
 
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Weekday};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::fmt;
 
 use crate::duration::Minutes;
@@ -264,6 +266,10 @@ fn intersect(a: &[TimeRange], b: &[TimeRange]) -> Vec<TimeRange> {
 #[derive(Clone, Debug)]
 pub struct WorkCal<'a> {
     layers: Vec<CalLayer<'a>>,
+    /// Working minutes of whole months (`(year, month)`) and whole years (`(year, 0)`), filled
+    /// on demand so [`WorkCal::between`] over a long span costs a few dozen lookups, not one
+    /// calendar evaluation per day (one date centuries out used to stall every recalculation).
+    span_cache: RefCell<HashMap<(i32, u32), Minutes>>,
 }
 
 /// `minute` minutes after midnight on `d` (1440 is the next midnight; clamped at the end of time).
@@ -275,6 +281,12 @@ fn at(d: NaiveDate, minute: u32) -> NaiveDateTime {
 pub fn shift(dt: NaiveDateTime, mins: Minutes) -> NaiveDateTime {
     let delta = Duration::try_minutes(mins).unwrap_or(if mins < 0 { Duration::MIN } else { Duration::MAX });
     dt.checked_add_signed(delta).unwrap_or(if mins < 0 { NaiveDateTime::MIN } else { NaiveDateTime::MAX })
+}
+
+/// The last day of `d`'s month.
+fn month_last_day(d: NaiveDate) -> Option<NaiveDate> {
+    let (y, m) = if d.month() == 12 { (d.year().checked_add(1)?, 1) } else { (d.year(), d.month() + 1) };
+    NaiveDate::from_ymd_opt(y, m, 1).and_then(|first| first.pred_opt())
 }
 
 /// Last day date arithmetic walks to: computed dates beyond it are clamped (hostile durations
@@ -304,12 +316,12 @@ fn minute_of_day(dt: NaiveDateTime) -> u32 {
 
 impl<'a> WorkCal<'a> {
     pub fn single(calendar: &'a Calendar) -> Self {
-        Self { layers: vec![CalLayer::new(calendar, &[])] }
+        Self::from_layers(vec![CalLayer::new(calendar, &[])])
     }
 
     /// Combines layers; with no layers there is no working time at all.
     pub fn from_layers(layers: Vec<CalLayer<'a>>) -> Self {
-        Self { layers }
+        Self { layers, span_cache: RefCell::new(HashMap::new()) }
     }
 
     pub fn layers(&self) -> &[CalLayer<'a>] {
@@ -494,29 +506,85 @@ impl<'a> WorkCal<'a> {
     /// Working minutes in `[a, b)`; negative if `b < a`.
     pub fn between(&self, a: NaiveDateTime, b: NaiveDateTime) -> Minutes {
         if b < a {
-            return -self.between(b, a);
+            return self.between(b, a).saturating_neg();
         }
-        let mut total: Minutes = 0;
-        let mut d = a.date().max(horizon_start());
+        let first = a.date().max(horizon_start());
         let last = b.date().min(horizon_end());
-        while d <= last {
-            let lo = if d == a.date() { minute_of_day(a) } else { 0 };
-            let hi = if d == last { minute_of_day(b) } else { 1440 };
-            if hi > lo {
-                for r in self.ranges(d) {
-                    let s = r.start.max(lo);
-                    let e = r.end.min(hi);
-                    if e > s {
-                        total = total.saturating_add(Minutes::from(e - s));
-                    }
-                }
-            }
-            match d.succ_opt() {
-                Some(n) => d = n,
-                None => break,
+        if first > last {
+            return 0;
+        }
+        let lo = if first == a.date() { minute_of_day(a) } else { 0 };
+        let hi = if last == b.date() { minute_of_day(b) } else { 1440 };
+        if first == last {
+            return self.minutes_in_day(first, lo, hi);
+        }
+        // Partial first day, the whole days in between, partial last day.
+        let mut total = self.minutes_in_day(first, lo, 1440);
+        if let (Some(from), Some(to)) = (next_day(first), prev_day(last))
+            && from <= to
+        {
+            total = total.saturating_add(self.whole_days(from, to));
+        }
+        total.saturating_add(self.minutes_in_day(last, 0, hi))
+    }
+
+    /// Working minutes on `d` between minute `lo` and minute `hi` of the day.
+    fn minutes_in_day(&self, d: NaiveDate, lo: u32, hi: u32) -> Minutes {
+        if hi <= lo {
+            return 0;
+        }
+        self.ranges(d)
+            .iter()
+            .map(|r| {
+                let (s, e) = (r.start.max(lo), r.end.min(hi));
+                if e > s { Minutes::from(e - s) } else { 0 }
+            })
+            .sum()
+    }
+
+    /// Working minutes of the whole days `from..=to`, stepping by cached years and months where
+    /// they fit and by days only up to the next month boundary.
+    fn whole_days(&self, from: NaiveDate, to: NaiveDate) -> Minutes {
+        let mut total: Minutes = 0;
+        let mut d = from;
+        while d <= to {
+            let year_end = NaiveDate::from_ymd_opt(d.year(), 12, 31);
+            let month_end = month_last_day(d);
+            let (minutes, next) = if d.ordinal() == 1 && year_end.is_some_and(|e| e <= to) {
+                (self.cached_span(d.year(), 0), year_end.and_then(next_day))
+            } else if d.day() == 1 && month_end.is_some_and(|e| e <= to) {
+                (self.cached_span(d.year(), d.month()), month_end.and_then(next_day))
+            } else {
+                (self.working_minutes_on(d), next_day(d))
+            };
+            total = total.saturating_add(minutes);
+            match next {
+                Some(n) if n > d => d = n,
+                _ => break,
             }
         }
         total
+    }
+
+    /// Working minutes of a whole month (`month` 1–12) or year (`month` 0), cached.
+    fn cached_span(&self, year: i32, month: u32) -> Minutes {
+        if let Some(m) = self.span_cache.borrow().get(&(year, month)).copied() {
+            return m;
+        }
+        let minutes = if month == 0 {
+            (1..=12).map(|m| self.cached_span(year, m)).fold(0, Minutes::saturating_add)
+        } else {
+            match NaiveDate::from_ymd_opt(year, month, 1) {
+                Some(first) => first
+                    .iter_days()
+                    .take_while(|d| d.month() == month)
+                    .map(|d| self.working_minutes_on(d))
+                    .fold(0, Minutes::saturating_add),
+                None => 0,
+            }
+        };
+        self.span_cache.borrow_mut().insert((year, month), minutes);
+        minutes
     }
 
     /// Working minutes on day `d` that fall inside `[a, b)`.
@@ -544,6 +612,63 @@ mod tests {
         let back: TimeRange = serde_json::from_str("\"13:30-17:00\"").unwrap();
         assert_eq!(back, TimeRange::new(13 * 60 + 30, 17 * 60));
         assert!(TimeRange::parse("12:00-08:00").is_none());
+    }
+
+    /// The cached month/year stepping in `between` must agree with counting every day, across
+    /// month and year boundaries, leap years, holidays (yearly and one-off) and partial days.
+    #[test]
+    fn between_matches_a_day_by_day_count() {
+        let mut cal = Calendar::standard(CalendarId(1));
+        let mut xmas = CalendarException::non_working(
+            "Christmas",
+            NaiveDate::from_ymd_opt(2026, 12, 24).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 12, 26).unwrap(),
+        );
+        xmas.yearly = true;
+        cal.exceptions.push(xmas);
+        cal.exceptions.push(CalendarException::non_working(
+            "Shutdown",
+            NaiveDate::from_ymd_opt(2027, 7, 1).unwrap(),
+            NaiveDate::from_ymd_opt(2027, 7, 31).unwrap(),
+        ));
+        let leave = [CalendarException::non_working(
+            "Leave",
+            NaiveDate::from_ymd_opt(2026, 11, 2).unwrap(),
+            NaiveDate::from_ymd_opt(2027, 2, 15).unwrap(),
+        )];
+        let other = Calendar::standard(CalendarId(2));
+        let wcs = [WorkCal::single(&cal), WorkCal::from_layers(vec![CalLayer::new(&cal, &[]), CalLayer::new(&other, &leave)])];
+        let naive = |wc: &WorkCal, a: NaiveDateTime, b: NaiveDateTime| -> Minutes {
+            let mut total = 0;
+            let mut d = a.date();
+            while d <= b.date() {
+                let lo = if d == a.date() { minute_of_day(a) } else { 0 };
+                let hi = if d == b.date() { minute_of_day(b) } else { 1440 };
+                total += wc.minutes_in_day(d, lo, hi);
+                d = d.succ_opt().unwrap();
+            }
+            total
+        };
+        let points = [
+            dt(2026, 10, 19, 8, 0),
+            dt(2026, 10, 21, 13, 30),
+            dt(2026, 11, 30, 17, 0),
+            dt(2026, 12, 1, 0, 0),
+            dt(2026, 12, 31, 23, 59),
+            dt(2027, 1, 1, 0, 0),
+            dt(2027, 3, 15, 10, 0),
+            dt(2028, 2, 29, 9, 0),
+            dt(2030, 6, 30, 16, 0),
+            dt(2031, 1, 1, 12, 0),
+        ];
+        for wc in &wcs {
+            for &a in &points {
+                for &b in &points {
+                    let expected = if b < a { -naive(wc, b, a) } else { naive(wc, a, b) };
+                    assert_eq!(wc.between(a, b), expected, "{a} .. {b}");
+                }
+            }
+        }
     }
 
     #[test]

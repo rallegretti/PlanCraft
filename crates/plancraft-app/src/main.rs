@@ -14,6 +14,7 @@ mod columns;
 mod commands;
 mod dialogs;
 mod edit;
+mod fields;
 mod format;
 mod logo;
 mod mcp_host;

@@ -1,6 +1,7 @@
 //! Task Information dialog.
 
 use egui::{Context, RichText, Ui};
+use plancraft_core::custom::CustomFieldKind;
 use plancraft_core::prelude::*;
 use plancraft_core::workspace::Document;
 
@@ -16,7 +17,16 @@ enum Tab {
     Advanced,
     Estimate,
     Milestone,
+    Custom,
     Notes,
+}
+
+/// One custom field in the dialog: the text it opened with and the text being edited.
+#[derive(Clone)]
+struct CustomRow {
+    field: CustomFieldId,
+    original: String,
+    text: String,
 }
 
 #[derive(Clone)]
@@ -76,8 +86,19 @@ pub struct TaskInfo {
     deliverable: String,
     members: Vec<TaskRef>,
     notes: String,
+    custom: Vec<CustomRow>,
     error: Option<String>,
     summary: bool,
+}
+
+/// A custom value as text the dialog can edit and parse back (ISO dates, plain numbers).
+fn custom_edit_text(p: &Project, field: CustomFieldId, v: Option<&CustomValue>) -> String {
+    match v {
+        None => String::new(),
+        Some(CustomValue::Date(d)) => format::iso_date(Some(*d)),
+        Some(CustomValue::Number(n)) => format!("{n}"),
+        Some(other) => p.custom_value_text(field, other),
+    }
 }
 
 impl TaskInfo {
@@ -142,6 +163,14 @@ impl TaskInfo {
             deliverable: t.deliverable.clone(),
             members: t.members.clone(),
             notes: t.notes.clone(),
+            custom: p
+                .custom_fields
+                .iter()
+                .map(|f| {
+                    let text = custom_edit_text(p, f.id, t.custom.get(&f.id));
+                    CustomRow { field: f.id, original: text.clone(), text }
+                })
+                .collect(),
             error: None,
             summary: t.sched.is_summary,
         })
@@ -268,6 +297,13 @@ impl TaskInfo {
                 }
             }
         }
+        // Custom fields: only the ones edited here, so values changed meanwhile are kept.
+        for row in self.custom.iter().filter(|r| r.text.trim() != r.original.trim()) {
+            let listed = p.custom_field(row.field).is_some_and(|f| f.choices.iter().any(|c| c == crate::fields::NO_VALUE));
+            let text = if row.text == crate::fields::NO_VALUE && !listed { "" } else { row.text.as_str() };
+            let value = p.parse_custom_value(row.field, text).map_err(err)?;
+            p.set_custom_value(id, row.field, value).map_err(err)?;
+        }
         // Progress last so actual dates use the new schedule.
         plancraft_core::schedule::recalculate(p);
         let pct: u8 =
@@ -326,6 +362,9 @@ impl TaskInfo {
                     if self.milestone {
                         tabs.push((Tab::Milestone, "Milestone"));
                     }
+                    if !self.custom.is_empty() {
+                        tabs.push((Tab::Custom, "Custom Fields"));
+                    }
                     tabs.push((Tab::Notes, "Notes"));
                     for (t, l) in tabs {
                         ui.selectable_value(&mut self.tab, t, l);
@@ -339,6 +378,7 @@ impl TaskInfo {
                     Tab::Advanced => self.advanced(ui, &doc.project),
                     Tab::Estimate => self.estimate(ui, &doc.project),
                     Tab::Milestone => self.milestone_tab(ui, &doc.project),
+                    Tab::Custom => self.custom_tab(ui, &doc.project),
                     Tab::Notes => {
                         ui.add(egui::TextEdit::multiline(&mut self.notes).desired_rows(14).desired_width(f32::INFINITY));
                     }
@@ -639,6 +679,41 @@ impl TaskInfo {
             EstKind::Work => {
                 ui.label("Work:");
                 ui.add(egui::TextEdit::singleline(&mut self.est_work).desired_width(80.0).hint_text("e.g. 24h"));
+                ui.end_row();
+            }
+        });
+    }
+
+    fn custom_tab(&mut self, ui: &mut Ui, p: &Project) {
+        egui::Grid::new("ti_custom").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+            for row in &mut self.custom {
+                let Some(f) = p.custom_field(row.field) else { continue };
+                ui.label(&f.name);
+                let options: Vec<String> = match f.kind {
+                    CustomFieldKind::Flag => vec!["Yes".into(), "No".into(), crate::fields::NO_VALUE.into()],
+                    CustomFieldKind::Text if !f.choices.is_empty() => {
+                        f.choices.iter().cloned().chain(std::iter::once(crate::fields::NO_VALUE.to_string())).collect()
+                    }
+                    _ => Vec::new(),
+                };
+                if options.is_empty() {
+                    let hint = match f.kind {
+                        CustomFieldKind::Date => "YYYY-MM-DD",
+                        CustomFieldKind::Duration => "e.g. 3d",
+                        CustomFieldKind::Number | CustomFieldKind::Cost => "number",
+                        _ => "",
+                    };
+                    ui.add(egui::TextEdit::singleline(&mut row.text).hint_text(hint).desired_width(220.0));
+                } else {
+                    let shown = if row.text.is_empty() { crate::fields::NO_VALUE.to_string() } else { row.text.clone() };
+                    egui::ComboBox::from_id_salt(("ti_custom", row.field.0)).width(220.0).selected_text(shown).show_ui(ui, |ui| {
+                        for o in options {
+                            if ui.selectable_label(row.text == o, &o).clicked() {
+                                row.text = if o == crate::fields::NO_VALUE { String::new() } else { o };
+                            }
+                        }
+                    });
+                }
                 ui.end_row();
             }
         });

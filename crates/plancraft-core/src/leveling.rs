@@ -8,9 +8,10 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use chrono::NaiveDate;
+use chrono::{NaiveDate, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 
+use crate::calendar::WorkCal;
 use crate::duration::Minutes;
 use crate::ids::*;
 use crate::model::*;
@@ -54,30 +55,50 @@ pub fn clear_leveling(p: &mut Project) {
 
 type Load = HashMap<ResourceId, BTreeMap<NaiveDate, f64>>;
 
-fn task_loads(p: &Project, idx: usize, delay: Minutes, filter: &HashSet<ResourceId>) -> Load {
-    let mut out: Load = HashMap::new();
-    let Some(t) = p.tasks.get(idx) else {
-        return out;
-    };
-    let (Some(s), Some(_)) = (t.sched.start, t.sched.finish) else {
-        return out;
-    };
-    let cal = task_calendar(p, idx);
-    let start = if delay > 0 { cal.snap_forward(cal.add(s, delay)) } else { s };
-    let finish = cal.add(start, t.duration);
-    for a in p.assignments_for_task(t.id) {
-        if !filter.is_empty() && !filter.contains(&a.resource) {
-            continue;
-        }
-        if p.resource(a.resource).is_none_or(|r| r.kind != ResourceType::Work) {
-            continue;
-        }
-        let e = out.entry(a.resource).or_default();
-        for (d, w) in distribute(&cal, start, finish, a.work as f64, a.contour) {
-            *e.entry(d).or_default() += w;
-        }
+/// What a task's load depends on during leveling, looked up once per task.
+struct TaskPlan<'a> {
+    cal: WorkCal<'a>,
+    start: Option<NaiveDateTime>,
+    duration: Minutes,
+    /// (resource, work, contour) of its work assignments within the leveling filter.
+    assignments: Vec<(ResourceId, f64, WorkContour)>,
+}
+
+impl<'a> TaskPlan<'a> {
+    fn new(p: &'a Project, idx: usize, filter: &HashSet<ResourceId>) -> Option<Self> {
+        let t = p.tasks.get(idx)?;
+        let has_dates = t.sched.start.is_some() && t.sched.finish.is_some();
+        let assignments = p
+            .assignments_for_task(t.id)
+            .filter(|a| filter.is_empty() || filter.contains(&a.resource))
+            .filter(|a| p.resource(a.resource).is_some_and(|r| r.kind == ResourceType::Work))
+            .map(|a| (a.resource, a.work as f64, a.contour))
+            .collect();
+        Some(Self { cal: task_calendar(p, idx), start: if has_dates { t.sched.start } else { None }, duration: t.duration, assignments })
     }
-    out
+
+    /// The task's load per resource and day when delayed by `delay`, and the start it then has.
+    fn load(&self, delay: Minutes) -> (Load, Option<NaiveDateTime>) {
+        let mut out: Load = HashMap::new();
+        let Some(s) = self.start else {
+            return (out, None);
+        };
+        let start = if delay > 0 { self.cal.snap_forward(self.cal.add(s, delay)) } else { s };
+        let finish = self.cal.add(start, self.duration);
+        for (rid, work, contour) in &self.assignments {
+            let e = out.entry(*rid).or_default();
+            for (d, w) in distribute(&self.cal, start, finish, *work, *contour) {
+                *e.entry(d).or_default() += w;
+            }
+        }
+        (out, Some(start))
+    }
+
+    fn finish_after(&self, delay: Minutes) -> Option<NaiveDateTime> {
+        let s = self.start?;
+        let start = if delay > 0 { self.cal.snap_forward(self.cal.add(s, delay)) } else { s };
+        Some(self.cal.add(start, self.duration))
+    }
 }
 
 fn fits(p: &Project, committed: &Load, candidate: &Load, caps: &mut HashMap<(ResourceId, NaiveDate), f64>) -> bool {
@@ -95,16 +116,44 @@ fn fits(p: &Project, committed: &Load, candidate: &Load, caps: &mut HashMap<(Res
     true
 }
 
-fn commit(committed: &mut Load, add: Load) {
+fn add_load(committed: &mut Load, add: &Load, sign: f64) {
     for (rid, days) in add {
-        let e = committed.entry(rid).or_default();
+        let e = committed.entry(*rid).or_default();
         for (d, w) in days {
-            *e.entry(d).or_default() += w;
+            *e.entry(*d).or_default() += sign * w;
         }
     }
 }
 
+/// Tasks whose dates can move other tasks: a predecessor (or milestone member) of anything,
+/// directly or through a summary above it.
+fn has_dependents(p: &Project) -> Vec<bool> {
+    let mut referenced: HashSet<TaskId> = HashSet::new();
+    for t in &p.tasks {
+        referenced.extend(t.predecessors.iter().map(|d| d.predecessor).chain(t.members.iter().copied()).filter_map(|r| r.local()));
+    }
+    // (outline level, this row or one above it is referenced)
+    let mut stack: Vec<(u16, bool)> = Vec::new();
+    p.tasks
+        .iter()
+        .map(|t| {
+            while stack.last().is_some_and(|&(lvl, _)| lvl >= t.outline_level) {
+                stack.pop();
+            }
+            let v = stack.last().is_some_and(|&(_, r)| r) || referenced.contains(&t.id);
+            stack.push((t.outline_level, v));
+            v
+        })
+        .collect()
+}
+
 /// Levels resources by delaying tasks. Recalculates the schedule.
+///
+/// Tasks are taken one at a time by (start, priority high first, total slack low first, id). Each
+/// keeps its place when its resources have room on every day; otherwise it is delayed a working
+/// day at a time until it fits. The load of placed tasks is kept up to date incrementally, and the
+/// schedule is recalculated only when a delay can move other tasks (the task has dependents, or
+/// its new finish moves the project finish), so leveling stays fast on large plans.
 pub fn level_resources(p: &mut Project, opts: &LevelingOptions) -> LevelingReport {
     if opts.clear_existing {
         for t in &mut p.tasks {
@@ -115,6 +164,7 @@ pub fn level_resources(p: &mut Project, opts: &LevelingOptions) -> LevelingRepor
     let mut report = LevelingReport { finish_before: p.sched.finish, ..Default::default() };
     let filter: HashSet<ResourceId> = opts.resources.iter().copied().collect();
     let day = p.settings.time.minutes_per_day.max(1);
+    let dependents = has_dependents(p);
 
     let movable = |t: &Task| -> bool {
         t.active
@@ -124,73 +174,113 @@ pub fn level_resources(p: &mut Project, opts: &LevelingOptions) -> LevelingRepor
             && !matches!(t.constraint.kind, ConstraintKind::Mso | ConstraintKind::Mfo)
     };
 
-    // Fixed tasks (started, manual, hard constraints) are committed first.
+    // Load currently committed, and each committed task's share with the start it was taken at.
     let mut committed: Load = HashMap::new();
-    let mut fixed: Vec<TaskId> = Vec::new();
+    let mut shares: HashMap<usize, (Load, Option<NaiveDateTime>)> = HashMap::new();
+    // Fixed tasks (started, manual, hard constraints) are committed first.
     for (i, t) in p.tasks.iter().enumerate() {
-        if !t.sched.is_summary && t.active && !movable(t) {
-            commit(&mut committed, task_loads(p, i, 0, &filter));
-            fixed.push(t.id);
+        if !t.sched.is_summary
+            && t.active
+            && !movable(t)
+            && let Some(plan) = TaskPlan::new(p, i, &filter)
+        {
+            let share = plan.load(0);
+            add_load(&mut committed, &share.0, 1.0);
+            shares.insert(i, share);
         }
     }
 
-    let mut order: Vec<TaskId> =
-        p.tasks.iter().filter(|t| movable(t) && p.assignments_for_task(t.id).next().is_some()).map(|t| t.id).collect();
-    let mut placed: Vec<TaskId> = Vec::new();
+    let mut order: Vec<usize> =
+        p.tasks.iter().enumerate().filter(|(_, t)| movable(t) && p.assignments_for_task(t.id).next().is_some()).map(|(i, _)| i).collect();
     let mut caps = HashMap::new();
     let mut delays: HashMap<TaskId, Minutes> = HashMap::new();
+    // Set when committed shares may be out of date with the schedule (after a recalculation).
+    let mut recalculated = false;
+    let mut pending_recalc = false;
 
     while !order.is_empty() {
-        // Re-sort each round: earlier delays may have moved successors.
-        order.sort_by_key(|id| {
-            let t = p.task(*id);
-            (t.and_then(|t| t.sched.start), std::cmp::Reverse(t.map_or(0, |t| t.priority)), t.map_or(0, |t| t.sched.total_slack), *id)
-        });
-        let id = order.remove(0);
-        let Some(idx) = p.task_index(id) else { continue };
-        let name = p.tasks.get(idx).map(|t| t.name.clone()).unwrap_or_default();
-
-        // Rebuild committed load from fixed + already placed tasks at their current dates.
-        let mut current = HashMap::new();
-        for tid in fixed.iter().chain(placed.iter()) {
-            if let Some(i) = p.task_index(*tid) {
-                commit(&mut current, task_loads(p, i, 0, &filter));
+        if recalculated {
+            // Earlier delays moved tasks: refresh the shares of committed tasks that moved.
+            let moved: Vec<usize> =
+                shares.iter().filter(|(i, (_, at))| p.tasks.get(**i).map(|t| t.sched.start) != Some(*at)).map(|(i, _)| *i).collect();
+            for i in moved {
+                if let (Some(plan), Some((old, _))) = (TaskPlan::new(p, i, &filter), shares.remove(&i)) {
+                    add_load(&mut committed, &old, -1.0);
+                    let share = plan.load(0);
+                    add_load(&mut committed, &share.0, 1.0);
+                    shares.insert(i, share);
+                }
             }
+            recalculated = false;
         }
-        committed = current;
+        // Next task: earliest start, then highest priority, then least slack, then id.
+        let key = |i: usize| {
+            let t = p.tasks.get(i);
+            (
+                t.and_then(|t| t.sched.start),
+                std::cmp::Reverse(t.map_or(0, |t| t.priority)),
+                t.map_or(0, |t| t.sched.total_slack),
+                t.map(|t| t.id),
+            )
+        };
+        let Some(pos) = order.iter().enumerate().min_by_key(|(_, i)| key(**i)).map(|(pos, _)| pos) else { break };
+        let idx = order.swap_remove(pos);
+        let Some((id, name)) = p.tasks.get(idx).map(|t| (t.id, t.name.clone())) else { continue };
+        let Some(plan) = TaskPlan::new(p, idx, &filter) else { continue };
 
-        let alone = task_loads(p, idx, 0, &filter);
+        let (alone, _) = plan.load(0);
         if !fits(p, &HashMap::new(), &alone, &mut caps) {
             report.unresolved.push(format!("'{}' needs more units than its resources can provide", name));
-            placed.push(id);
+            let share = plan.load(0);
+            add_load(&mut committed, &share.0, 1.0);
+            shares.insert(idx, share);
             continue;
         }
         let mut delay = 0;
-        let mut found = false;
+        let mut placed = None;
         for _ in 0..=opts.max_delay_days {
-            let cand = task_loads(p, idx, delay, &filter);
-            if fits(p, &committed, &cand, &mut caps) {
-                found = true;
+            let cand = plan.load(delay);
+            if fits(p, &committed, &cand.0, &mut caps) {
+                placed = Some(cand);
                 break;
             }
             delay += day;
         }
-        if !found {
-            report.unresolved.push(format!("'{}' could not be leveled within {} days", name, opts.max_delay_days));
-            delay = 0;
-        }
+        let share = match placed {
+            Some(share) => share,
+            None => {
+                report.unresolved.push(format!("'{}' could not be leveled within {} days", name, opts.max_delay_days));
+                delay = 0;
+                plan.load(0)
+            }
+        };
+        let moves_others = delay > 0
+            && (dependents.get(idx).copied().unwrap_or(true) || plan.finish_after(delay).zip(p.sched.finish).is_none_or(|(f, pf)| f > pf));
+        drop(plan);
+        add_load(&mut committed, &share.0, 1.0);
+        shares.insert(idx, share);
         if delay > 0 {
             if let Some(t) = p.tasks.get_mut(idx) {
                 t.leveling_delay = crate::limits::clamp_minutes(t.leveling_delay.saturating_add(delay));
             }
             *delays.entry(id).or_default() += delay;
-            recalculate(p);
+            if moves_others {
+                recalculate(p);
+                recalculated = true;
+                pending_recalc = false;
+            } else {
+                // Only this task moved (and its summaries); its share already has its new dates.
+                pending_recalc = true;
+            }
         }
-        placed.push(id);
+    }
+    if pending_recalc {
+        recalculate(p);
     }
 
+    let position: HashMap<TaskId, usize> = p.tasks.iter().enumerate().map(|(i, t)| (t.id, i)).collect();
     report.delayed = delays.into_iter().collect();
-    report.delayed.sort_by_key(|(id, _)| p.task_index(*id));
+    report.delayed.sort_by_key(|(id, _)| position.get(id).copied());
     report.finish_after = p.sched.finish;
     report
 }

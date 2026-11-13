@@ -152,6 +152,25 @@ pub fn milestone_status(p: &Project, at: NaiveDateTime) -> Vec<MilestoneStatus> 
         .collect()
 }
 
+/// Total baseline cost: each baseline counted once at the highest level that has one (a summary's
+/// baseline already includes its subtasks and its own fixed cost).
+fn baseline_cost(p: &Project) -> f64 {
+    // (outline level, a task on the path to here has a baseline)
+    let mut stack: Vec<(u16, bool)> = Vec::new();
+    let mut total = 0.0;
+    for t in &p.tasks {
+        while stack.last().is_some_and(|&(lvl, _)| lvl >= t.outline_level) {
+            stack.pop();
+        }
+        let covered = stack.last().is_some_and(|&(_, c)| c);
+        if !covered && let Some(b) = t.baseline {
+            total += b.cost;
+        }
+        stack.push((t.outline_level, covered || t.baseline.is_some()));
+    }
+    total
+}
+
 pub fn earned_value(p: &Project, at: NaiveDateTime) -> Option<EarnedValue> {
     let leaves = p.tasks.iter().filter(|t| !t.sched.is_summary && t.active);
     let mut ev = EarnedValue::default();
@@ -161,10 +180,14 @@ pub fn earned_value(p: &Project, at: NaiveDateTime) -> Option<EarnedValue> {
         any_baseline = true;
         ev.bcws += b.cost * planned_fraction(b.start, b.finish, at, p);
         ev.bcwp += b.cost * t.sched.percent_complete as f64 / 100.0;
-        // Actual cost: work-based actual cost proportionally to actual work, plus fixed cost when started.
-        let planned_work = t.sched.work.max(1) as f64;
-        let actual_ratio =
-            if t.sched.work > 0 { t.sched.actual_work as f64 / planned_work } else { t.sched.percent_complete as f64 / 100.0 };
+        // Actual cost (ACWP): the cost of the work done so far. Progress entered as actual work
+        // (tracked time) counts as that work; progress entered as % complete counts as that share
+        // of the work, as it does for tasks with no resources.
+        let actual_ratio = if t.sched.work > 0 && t.sched.actual_work > 0 {
+            t.sched.actual_work as f64 / t.sched.work as f64
+        } else {
+            t.sched.percent_complete as f64 / 100.0
+        };
         ev.acwp += t.sched.cost * actual_ratio;
     }
     if !any_baseline {
@@ -183,7 +206,7 @@ pub fn project_stats(p: &Project) -> ProjectStats {
     let wc = project_calendar(p);
     let leaves: Vec<&Task> = p.tasks.iter().filter(|t| !t.sched.is_summary).collect();
     let baseline_finish = p.tasks.iter().filter_map(|t| t.baseline.map(|b| b.finish)).max();
-    let baseline_cost = p.tasks.iter().filter(|t| !t.sched.is_summary).filter_map(|t| t.baseline.map(|b| b.cost)).sum();
+    let baseline_cost = baseline_cost(p);
     let over = crate::workload::overallocations(p).len();
     ProjectStats {
         name: p.name.clone(),

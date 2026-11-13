@@ -354,3 +354,155 @@ fn demo_project_is_consistent() {
     let back = plancraft_core::io::from_json(&json, std::path::Path::new("demo")).unwrap();
     assert_eq!(back.tasks.len(), p.tasks.len());
 }
+
+/// Summary S{A→B} with S –SS→ C. Returns (project, A, B, C).
+fn summary_ss_link() -> (Project, TaskId, TaskId, TaskId) {
+    let mut p = project();
+    let s = p.add_task("S", None);
+    let a = task(&mut p, "A", 5);
+    let b = task(&mut p, "B", 5);
+    p.indent(a).unwrap();
+    p.indent(b).unwrap();
+    p.link(a.into(), b, LinkType::FS, Lag::None).unwrap();
+    let c = task(&mut p, "C", 20);
+    while p.task(c).unwrap().outline_level > 1 {
+        p.outdent(c).unwrap();
+    }
+    p.link(s.into(), c, LinkType::SS, Lag::None).unwrap();
+    recalculate(&mut p);
+    (p, a, b, c)
+}
+
+/// Regression: a link from a summary's start constrained every subtask, so later subtasks got
+/// negative slack and were flagged critical although nothing could be late.
+#[test]
+fn a_start_link_from_a_summary_only_binds_the_subtask_that_starts_it() {
+    let (p, a, b, c) = summary_ss_link();
+    for id in [a, b, c] {
+        assert!(p.task(id).unwrap().sched.total_slack >= 0, "{}: {}", p.task(id).unwrap().name, p.task(id).unwrap().sched.total_slack);
+    }
+    // C (20d) drives the finish and cannot start before A does, so A's start is critical (no
+    // slack). B only follows A and has 10 days of slack (it used to get -5 days).
+    assert_eq!(p.task(a).unwrap().sched.total_slack, 0);
+    assert_eq!(p.task(b).unwrap().sched.total_slack, 10 * DAY);
+    assert!(!p.task(b).unwrap().sched.critical);
+    assert!(p.task(c).unwrap().sched.critical);
+}
+
+/// Regression: when a resource had no working day in the first 28 days after the project start,
+/// its calendar was dropped and its task was scheduled in the middle of its leave.
+#[test]
+fn a_long_leave_at_the_project_start_delays_the_task() {
+    let mut p = project();
+    let t = task(&mut p, "Work", 5);
+    let r = p.add_resource("Ana");
+    p.resource_mut(r).unwrap().exceptions.push(CalendarException::non_working("Leave", d(2026, 10, 19), d(2026, 11, 20)));
+    p.assign(t, r, Some(1.0), None).unwrap();
+    recalculate(&mut p);
+    assert_eq!(start(&p, t), dt(2026, 11, 23, 8));
+}
+
+/// Regression: the project's cost and baseline cost left out fixed costs on summary rows, so
+/// the project total disagreed with its own top-level summary.
+#[test]
+fn summary_fixed_costs_count_in_project_and_baseline_totals() {
+    let mut p = project();
+    let s = p.add_task("Phase", None);
+    let a = task(&mut p, "A", 2);
+    p.indent(a).unwrap();
+    p.task_mut(s).unwrap().fixed_cost = 1000.0;
+    p.task_mut(a).unwrap().fixed_cost = 50.0;
+    recalculate(&mut p);
+    assert_eq!(p.task(s).unwrap().sched.cost, 1050.0);
+    assert_eq!(p.sched.cost, 1050.0);
+    p.set_baseline(&[]);
+    assert_eq!(plancraft_core::report::project_stats(&p).baseline_cost, 1050.0);
+}
+
+/// Regression: indenting a task under one with resource assignments made it a summary and its
+/// work and cost vanished from every total (the assignment was still there).
+#[test]
+fn indenting_under_an_assigned_task_keeps_its_work_and_cost() {
+    let mut p = project();
+    let parent = task(&mut p, "Design", 5);
+    let r = p.add_resource("Ana");
+    p.resource_mut(r).unwrap().standard_rate = 100.0;
+    p.assign(parent, r, Some(1.0), None).unwrap();
+    let child = task(&mut p, "Sketch", 1);
+    recalculate(&mut p);
+    let (work, cost) = (p.sched.work, p.sched.cost);
+    assert_eq!(work, 5 * DAY);
+    p.indent(child).unwrap();
+    recalculate(&mut p);
+    assert!(p.task(parent).unwrap().sched.is_summary);
+    assert_eq!(p.sched.work, work, "project work");
+    assert_eq!(p.sched.cost, cost, "project cost");
+    assert_eq!(p.task(parent).unwrap().sched.work, work, "the summary carries its own assignment");
+}
+
+/// Regression: a summary weighted a nested summary by its span instead of by the durations of
+/// the subtasks inside it, so the top summary disagreed with the project's own % complete.
+#[test]
+fn nested_summaries_weigh_progress_by_subtask_duration() {
+    let mut p = project();
+    let top = p.add_task("Top", None);
+    let inner = p.add_task("Inner", None);
+    let x = task(&mut p, "X", 10);
+    let y = task(&mut p, "Y", 10);
+    let z = task(&mut p, "Z", 10);
+    p.indent(inner).unwrap();
+    for id in [x, y] {
+        p.indent(id).unwrap();
+        p.indent(id).unwrap();
+    }
+    p.indent(z).unwrap();
+    recalculate(&mut p);
+    p.set_percent_complete(x, 100).unwrap();
+    p.set_percent_complete(y, 100).unwrap();
+    recalculate(&mut p);
+    let top_pct = p.task(top).unwrap().sched.percent_complete;
+    assert!((top_pct - 200.0 / 3.0).abs() < 0.01, "{top_pct}");
+    assert!((p.sched.percent_complete - top_pct).abs() < 0.01);
+}
+
+/// Regression: an inactive summary still passed its Start No Earlier Than date and deadline down
+/// to its active subtasks.
+#[test]
+fn an_inactive_summary_passes_no_constraint_or_deadline_down() {
+    let mut p = project();
+    let s = p.add_task("S", None);
+    let a = task(&mut p, "A", 5);
+    p.indent(a).unwrap();
+    {
+        let st = p.task_mut(s).unwrap();
+        st.constraint = Constraint { kind: ConstraintKind::Snet, date: Some(dt(2026, 12, 1, 8)) };
+        st.deadline = Some(dt(2026, 10, 20, 17));
+        st.active = false;
+    }
+    recalculate(&mut p);
+    assert_eq!(start(&p, a), dt(2026, 10, 19, 8));
+    assert!(p.task(a).unwrap().sched.total_slack >= 0, "no slack lost to the inactive summary's deadline");
+}
+
+/// Regression: inactive subtasks still counted when a link from a summary's start was resolved,
+/// so an inactive subtask that started earliest took the link and its active sibling was left
+/// with slack it did not have.
+#[test]
+fn inactive_subtasks_do_not_take_a_link_from_their_summarys_start() {
+    let mut p = project();
+    let s = p.add_task("S", None);
+    let a = task(&mut p, "A", 5);
+    let b = task(&mut p, "B", 5);
+    p.indent(a).unwrap();
+    p.indent(b).unwrap();
+    p.task_mut(b).unwrap().constraint = Constraint { kind: ConstraintKind::Snet, date: Some(dt(2026, 10, 21, 8)) };
+    p.task_mut(a).unwrap().active = false;
+    let c = task(&mut p, "C", 20);
+    while p.task(c).unwrap().outline_level > 1 {
+        p.outdent(c).unwrap();
+    }
+    p.link(s.into(), c, LinkType::SS, Lag::None).unwrap();
+    recalculate(&mut p);
+    assert_eq!(start(&p, c), dt(2026, 10, 21, 8), "C follows the active subtask's start");
+    assert_eq!(p.task(b).unwrap().sched.total_slack, 0, "B's start drives C, which drives the finish");
+}
