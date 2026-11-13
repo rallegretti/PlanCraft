@@ -116,7 +116,7 @@ impl PrintDialog {
             h.finish(),
             g.px_per_day,
             (g.show_critical, g.show_baseline, g.show_progress, g.show_links, g.show_slack, g.show_resource_names),
-        );
+        ) + &format!("|{}|{}", g.baseline_slot, g.multi_baselines);
         if let Some((k, d)) = &self.cache {
             if *k == key {
                 return d.clone();

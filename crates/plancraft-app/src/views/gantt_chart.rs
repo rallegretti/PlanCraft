@@ -25,11 +25,21 @@ pub enum ChartAction {
     Command(Command),
 }
 
+/// Which Gantt view the chart draws.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChartKind {
+    Gantt,
+    /// Critical tasks in red, with the baseline under each bar.
+    Tracking,
+    /// Only the bars of the chosen baselines, stacked in each row ([`GanttState::multi_baselines`]).
+    Baselines,
+}
+
 pub struct ChartInput<'a> {
     pub project: &'a Project,
     pub rows: &'a [super::Row],
     pub selected: &'a dyn Fn(TaskId) -> bool,
-    pub tracking: bool,
+    pub kind: ChartKind,
     pub row_height: f32,
     pub header_height: f32,
     pub blank_rows: usize,
@@ -43,6 +53,68 @@ struct BarGeom {
 }
 
 const BAR_H: f32 = 10.0;
+
+/// The baselines in a bit set (bit n = Baseline n), lowest first.
+pub fn baseline_slots(mask: u16) -> impl Iterator<Item = u8> {
+    (0..=plancraft_core::baseline::MAX_BASELINE).filter(move |n| mask & (1 << n) != 0)
+}
+
+/// The bars of `slots` stacked in the row centred on `y` (Multiple Baselines Gantt). Returns the
+/// span drawn, for hit testing.
+fn baseline_stack(bp: &Painter, g: &GanttState, chart_left: f32, t: &Task, y: f32, rh: f32, slots: &[u8]) -> Option<Rect> {
+    // Fit the stack inside the row: gaps shrink first, then the bars.
+    let n = slots.len().max(1) as f32;
+    let band = (rh - 4.0).max(4.0);
+    let gap = if n > 5.0 { 0.5 } else { 1.0 };
+    let h = ((band - (n - 1.0) * gap) / n).clamp(0.8, 5.0);
+    let top = y - (h * n + (n - 1.0) * gap) / 2.0;
+    let mut span: Option<Rect> = None;
+    for (k, &slot) in slots.iter().enumerate() {
+        let Some(b) = t.baseline_in(slot) else { continue };
+        let color = theme::pal().BASELINE_SERIES.get(usize::from(slot)).copied().unwrap_or(theme::pal().BAR_BASELINE);
+        let y0 = top + k as f32 * (h + gap);
+        let (x0, x1) = (g.x_of(chart_left, b.start), g.x_of(chart_left, b.finish));
+        let r = if t.is_milestone() {
+            let r = (h / 2.0 + 1.0).max(2.5);
+            diamond(bp, pos2(x0, y0 + h / 2.0), r, color, Stroke::NONE);
+            Rect::from_center_size(pos2(x0, y0 + h / 2.0), vec2(2.0 * r, 2.0 * r))
+        } else {
+            let r = Rect::from_min_max(pos2(x0, y0), pos2(x1.max(x0 + 1.0), y0 + h));
+            bp.rect_filled(r, if t.sched.is_summary { 0.0 } else { 1.0 }, color);
+            r
+        };
+        span = Some(span.map_or(r, |s| s.union(r)));
+    }
+    span
+}
+
+/// The colour key of the Multiple Baselines Gantt, in the chart's bottom-right corner.
+fn baseline_legend(bp: &Painter, body: Rect, slots: &[u8]) {
+    let font = FontId::proportional(11.0);
+    let y = body.bottom() - 12.0;
+    // Right to left: (swatch x, label x, label, colour).
+    let mut items = Vec::new();
+    let mut x = body.right() - 10.0;
+    for &slot in slots.iter().rev() {
+        let name = plancraft_core::baseline::PlanSlot::Baseline(slot).name();
+        x -= bp.layout_no_wrap(name.clone(), font.clone(), theme::pal().TEXT).size().x;
+        let label_x = x;
+        x -= 14.0;
+        let color = theme::pal().BASELINE_SERIES.get(usize::from(slot)).copied().unwrap_or(theme::pal().BAR_BASELINE);
+        items.push((x, label_x, name, color));
+        x -= 12.0;
+    }
+    if items.is_empty() {
+        return;
+    }
+    let bg = Rect::from_min_max(pos2(x + 4.0, y - 9.0), pos2(body.right() - 4.0, y + 9.0));
+    bp.rect_filled(bg, 3.0, theme::pal().BG);
+    bp.rect_stroke(bg, 3.0, Stroke::new(1.0, theme::pal().GRID_LINE_STRONG), StrokeKind::Inside);
+    for (sx, lx, name, color) in items {
+        bp.rect_filled(Rect::from_min_size(pos2(sx, y - 3.0), vec2(10.0, 6.0)), 1.0, color);
+        bp.text(pos2(lx, y), Align2::LEFT_CENTER, name, font.clone(), theme::pal().TEXT);
+    }
+}
 
 fn diamond(painter: &Painter, c: Pos2, r: f32, fill: Color32, stroke: Stroke) {
     painter.add(Shape::convex_polygon(vec![c + vec2(0.0, -r), c + vec2(r, 0.0), c + vec2(0.0, r), c + vec2(-r, 0.0)], fill, stroke));
@@ -64,6 +136,9 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
     let mut actions = Vec::new();
     let p = input.project;
     let rh = input.row_height;
+    let tracking = input.kind == ChartKind::Tracking;
+    let multi = input.kind == ChartKind::Baselines;
+    let multi_slots: Vec<u8> = baseline_slots(g.multi_baselines).collect();
     let header = Rect::from_min_size(rect.min, vec2(rect.width() - 12.0, input.header_height));
     let body = Rect::from_min_max(pos2(rect.left(), header.bottom()), pos2(rect.right() - 12.0, rect.bottom() - 12.0));
     let chart_left = body.left();
@@ -164,7 +239,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
     }
 
     // ---- Links ----
-    if g.show_links {
+    if g.show_links && !multi {
         let link_stroke = Stroke::new(1.0, theme::pal().LINK);
         for idx in input.rows.iter().filter_map(super::Row::task) {
             let Some(t) = p.tasks.get(idx) else { continue };
@@ -242,7 +317,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
     }
 
     // Milestone membership: dashed connectors from member tasks to their milestone.
-    if g.show_links {
+    if g.show_links && !multi {
         let stroke = Stroke::new(1.0, theme::pal().MEMBER_LINK);
         for idx in input.rows.iter().filter_map(super::Row::task) {
             let Some(t) = p.tasks.get(idx) else { continue };
@@ -291,14 +366,25 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
         };
         let y = bg.y;
         let (x0, x1) = (bg.x0, bg.x1.max(bg.x0));
-        let critical = (g.show_critical || input.tracking) && t.sched.critical;
+        let critical = (g.show_critical || tracking) && t.sched.critical;
         let summary = t.sched.is_summary;
         let bar_rect = Rect::from_min_max(pos2(x0, y - BAR_H / 2.0), pos2(x1.max(x0 + 1.0), y + BAR_H / 2.0));
 
+        if multi {
+            // Only the baselines: no current bar to drag, but a click still selects the task.
+            if let Some(span) = baseline_stack(&bp, g, chart_left, t, y, rh, &multi_slots)
+                && let Some(pp) = pointer
+                && body.contains(pp)
+                && span.expand2(vec2(2.0, 3.0)).contains(pp)
+            {
+                hovered = Some((t.id, "select"));
+            }
+            continue;
+        }
+
         // Baseline (below the bar).
-        if (g.show_baseline || input.tracking)
-            && let Some(b) = t.baseline
-        {
+        let baseline = t.baseline_in(g.baseline_slot).filter(|_| g.show_baseline || tracking);
+        if let Some(b) = baseline {
             let bx0 = g.x_of(chart_left, b.start);
             let bx1 = g.x_of(chart_left, b.finish);
             if t.is_milestone() {
@@ -307,7 +393,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
                 bp.rect_filled(Rect::from_min_max(pos2(bx0, y + 3.0), pos2(bx1.max(bx0 + 1.0), y + 8.0)), 1.0, theme::pal().BAR_BASELINE);
             }
         }
-        let y_shift = if (g.show_baseline || input.tracking) && t.baseline.is_some() { -3.0 } else { 0.0 };
+        let y_shift = if baseline.is_some() { -3.0 } else { 0.0 };
         let bar_rect = bar_rect.translate(vec2(0.0, y_shift));
         let yc = y + y_shift;
 
@@ -460,14 +546,20 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
         bp.rect_filled(Rect::from_min_max(pos2(x0, body.top() + 2.0), pos2(x1, body.top() + 5.0)), 0.0, theme::pal().ACCENT_DARK);
     }
 
+    if multi {
+        baseline_legend(&bp, body, &multi_slots);
+    }
+
     // ---- Interaction ----
     match hovered {
+        Some((_, "select")) => ui.ctx().set_cursor_icon(CursorIcon::PointingHand),
         Some((_, "end")) => ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal),
         Some((_, "progress")) => ui.ctx().set_cursor_icon(CursorIcon::ResizeEast),
         Some(_) => ui.ctx().set_cursor_icon(CursorIcon::Grab),
         None => {}
     }
     if resp.drag_started()
+        && !multi
         && let Some((tid, zone)) = hovered
         && let Some(t) = p.task(tid)
     {
@@ -584,7 +676,23 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
         }
     } else if let Some((tid, _)) = hovered {
         // Tooltip with task details.
-        if let Some(t) = p.task(tid)
+        if multi
+            && let Some(t) = p.task(tid)
+            && let Some(pp) = pointer
+        {
+            // The bars here are baselines: list the ones shown, not the current schedule.
+            let mut text = t.name.clone();
+            for &n in &multi_slots {
+                let name = plancraft_core::baseline::PlanSlot::Baseline(n).name();
+                match t.baseline_in(n) {
+                    Some(b) => {
+                        text += &format!("\n{name}: {} – {}", format::date(Some(b.start)), format::date(Some(b.finish)));
+                    }
+                    None => text += &format!("\n{name}: NA"),
+                }
+            }
+            tooltip_at(ui, pp + vec2(12.0, 12.0), &text);
+        } else if let Some(t) = p.task(tid)
             && let Some(pp) = pointer
         {
             let mut text = format!(

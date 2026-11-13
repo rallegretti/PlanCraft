@@ -75,7 +75,7 @@ Durations of summary tasks are computed from their subtasks. Setting `start` on 
 prefer dependencies over fixed dates.
 
 Analysis: get_schedule (Gantt table), critical_path, get_workload / get_overallocations, level_resources, project_statistics, milestone_status, \
-set_baseline + get_variance. Cross-project links: add_external_project, list_external_tasks, link_external_task, refresh_external_links. \
+set_baseline (Baseline or Baseline1-10) + get_variance; list_baselines, set_interim_plan, clear_baseline. Cross-project links: add_external_project, list_external_tasks, link_external_task, refresh_external_links. \
 Custom fields: list_custom_fields / create_custom_field (text with optional pick-list, number, cost, date, duration, flag); set values with \
 update_task's `custom` object, e.g. {\"Status\": \"Done\"}. \
 Printing: export_pdf writes the Gantt chart or task table as a paginated PDF; set_page_setup changes paper, orientation, scale, \

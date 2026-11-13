@@ -26,10 +26,10 @@ pub enum TaskCol {
     RemainingWork,
     Cost,
     FixedCost,
-    BaselineStart,
-    BaselineFinish,
-    BaselineWork,
-    BaselineCost,
+    /// A value of Baseline (0) or Baseline1–10.
+    Baseline(u8, BlField),
+    /// Interim plan 1–10: its start (`false`) or finish (`true`), the Start*n* and Finish*n* fields.
+    Interim(u8, bool),
     StartVariance,
     FinishVariance,
     WorkVariance,
@@ -61,6 +61,41 @@ pub enum TaskCol {
     Milestones,
     Notes,
     UniqueId,
+}
+
+/// The values a baseline holds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum BlField {
+    Start,
+    Finish,
+    Duration,
+    Work,
+    Cost,
+}
+
+impl BlField {
+    pub const ALL: [BlField; 5] = [BlField::Start, BlField::Finish, BlField::Duration, BlField::Work, BlField::Cost];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            BlField::Start => "Start",
+            BlField::Finish => "Finish",
+            BlField::Duration => "Duration",
+            BlField::Work => "Work",
+            BlField::Cost => "Cost",
+        }
+    }
+
+    /// The key suffix in table layouts ("start", "finish", ...).
+    pub fn key(self) -> &'static str {
+        match self {
+            BlField::Start => "start",
+            BlField::Finish => "finish",
+            BlField::Duration => "duration",
+            BlField::Work => "work",
+            BlField::Cost => "cost",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -134,12 +169,23 @@ impl TaskTable {
                     Cost,
                 ]
             }
-            TaskTable::Work => vec![Indicators, Name, Work, BaselineWork, WorkVariance, ActualWork, RemainingWork, PercentComplete],
-            TaskTable::Cost => vec![Indicators, Name, FixedCost, Cost, BaselineCost, CostVariance],
+            TaskTable::Work => {
+                vec![Indicators, Name, Work, Baseline(0, BlField::Work), WorkVariance, ActualWork, RemainingWork, PercentComplete]
+            }
+            TaskTable::Cost => vec![Indicators, Name, FixedCost, Cost, Baseline(0, BlField::Cost), CostVariance],
             TaskTable::Estimates => {
                 vec![Indicators, Name, EstimateMethod, Points, Optimistic, MostLikely, Pessimistic, ExpectedWork, Work, Duration, Resources]
             }
-            TaskTable::Variance => vec![Indicators, Name, Start, Finish, BaselineStart, BaselineFinish, StartVariance, FinishVariance],
+            TaskTable::Variance => vec![
+                Indicators,
+                Name,
+                Start,
+                Finish,
+                Baseline(0, BlField::Start),
+                Baseline(0, BlField::Finish),
+                StartVariance,
+                FinishVariance,
+            ],
             TaskTable::Summary => vec![Indicators, Wbs, Name, Duration, Start, Finish, PercentComplete, Cost, Work, Milestones],
             TaskTable::Details => {
                 vec![Indicators, UniqueId, Name, TaskType, Priority, EarlyStart, EarlyFinish, Predecessors, Successors, Deliverable, Notes]
@@ -169,10 +215,14 @@ impl TaskCol {
             RemainingWork => ColumnDef::new("Rem. Work", 72.0).right().read_only(),
             Cost => ColumnDef::new("Total Cost", 90.0).right().read_only(),
             FixedCost => ColumnDef::new("Fixed Cost", 86.0).right(),
-            BaselineStart => ColumnDef::new("Baseline Start", 100.0).read_only(),
-            BaselineFinish => ColumnDef::new("Baseline Finish", 100.0).read_only(),
-            BaselineWork => ColumnDef::new("Baseline Work", 86.0).right().read_only(),
-            BaselineCost => ColumnDef::new("Baseline Cost", 90.0).right().read_only(),
+            Baseline(n, f) => {
+                let title = format!("{} {}", PlanSlot::Baseline(n).name(), f.label());
+                match f {
+                    BlField::Start | BlField::Finish => ColumnDef::new(title, 106.0).read_only(),
+                    _ => ColumnDef::new(title, 96.0).right().read_only(),
+                }
+            }
+            Interim(n, finish) => ColumnDef::new(format!("{}{n}", if finish { "Finish" } else { "Start" }), 96.0).read_only(),
             StartVariance => ColumnDef::new("Start Var.", 76.0).right().read_only(),
             FinishVariance => ColumnDef::new("Finish Var.", 76.0).right().read_only(),
             WorkVariance => ColumnDef::new("Work Var.", 72.0).right().read_only(),
@@ -293,10 +343,18 @@ pub fn cell(col: TaskCol, p: &Project, idx: usize, ctx: &CellCtx) -> Cell {
         RemainingWork => Cell::text(format_work((s.work - s.actual_work).max(0))),
         Cost => Cell::text(format::money(p, s.cost)),
         FixedCost => Cell::text(format::money(p, t.fixed_cost)),
-        BaselineStart => Cell::text(t.baseline.map(|b| format::date(Some(b.start))).unwrap_or_else(|| "NA".into())),
-        BaselineFinish => Cell::text(t.baseline.map(|b| format::date(Some(b.finish))).unwrap_or_else(|| "NA".into())),
-        BaselineWork => Cell::text(t.baseline.map(|b| format_work(b.work)).unwrap_or_default()),
-        BaselineCost => Cell::text(t.baseline.map(|b| format::money(p, b.cost)).unwrap_or_default()),
+        Baseline(n, f) => Cell::text(match (t.baseline_in(n), f) {
+            (Some(b), BlField::Start) => format::date(Some(b.start)),
+            (Some(b), BlField::Finish) => format::date(Some(b.finish)),
+            (Some(b), BlField::Duration) => p.format_duration(b.duration, false),
+            (Some(b), BlField::Work) => format_work(b.work),
+            (Some(b), BlField::Cost) => format::money(p, b.cost),
+            (None, BlField::Start | BlField::Finish) => "NA".into(),
+            (None, _) => String::new(),
+        }),
+        Interim(n, finish) => {
+            Cell::text(t.interim_in(n).map_or_else(|| "NA".into(), |i| format::date(Some(if finish { i.finish } else { i.start }))))
+        }
         StartVariance | FinishVariance => {
             let wc = plancraft_core::schedule::project_calendar(p);
             let v = match (t.baseline, s.start, s.finish) {

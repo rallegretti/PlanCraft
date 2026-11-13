@@ -101,11 +101,39 @@ pub struct ChartOptions {
     pub resource_names: bool,
     /// The view's zoom, for [`TimescaleFit::AsShown`].
     pub per_day: f32,
+    /// The baseline (0–10) drawn under each bar when `baseline` is on.
+    pub baseline_slot: u8,
+    /// The Multiple Baselines Gantt: only the bars of these baselines (bit n = Baseline n), stacked
+    /// in each row. 0 for the other views.
+    pub baselines: u16,
 }
 
 impl Default for ChartOptions {
     fn default() -> Self {
-        Self { critical: false, baseline: false, progress: true, links: true, slack: false, resource_names: true, per_day: 20.0 }
+        Self {
+            critical: false,
+            baseline: false,
+            progress: true,
+            links: true,
+            slack: false,
+            resource_names: true,
+            per_day: 20.0,
+            baseline_slot: 0,
+            baselines: 0,
+        }
+    }
+}
+
+impl ChartOptions {
+    /// The baselines drawn, lowest first.
+    pub fn baseline_slots(&self) -> Vec<u8> {
+        if self.baselines != 0 {
+            (0..=crate::baseline::MAX_BASELINE).filter(|n| self.baselines & (1 << n) != 0).collect()
+        } else if self.baseline {
+            vec![self.baseline_slot]
+        } else {
+            Vec::new()
+        }
     }
 }
 
@@ -131,6 +159,8 @@ pub struct Palette {
     pub bar_summary: Rgb,
     pub bar_manual: Rgb,
     pub bar_baseline: Rgb,
+    /// Baseline, Baseline1 … Baseline10 in the Multiple Baselines Gantt.
+    pub baseline_series: [Rgb; 11],
     pub bar_slack: Rgb,
     pub bar_inactive: Rgb,
     pub milestone: Rgb,
@@ -164,6 +194,19 @@ impl Default for Palette {
             bar_summary: Rgb(0x33, 0x38, 0x45),
             bar_manual: Rgb(0x9B, 0xBC, 0xEB),
             bar_baseline: Rgb(0xA9, 0xAE, 0xB8),
+            baseline_series: [
+                Rgb(0x8A, 0x90, 0x9C),
+                Rgb(0x1F, 0x8A, 0x8A),
+                Rgb(0xC8, 0x8A, 0x12),
+                Rgb(0x7B, 0x4F, 0xB8),
+                Rgb(0x3C, 0x8D, 0x3A),
+                Rgb(0xC0, 0x4A, 0x7A),
+                Rgb(0x2F, 0x6F, 0xC8),
+                Rgb(0xA0, 0x5A, 0x2C),
+                Rgb(0x5C, 0x7A, 0x1E),
+                Rgb(0x8E, 0x3B, 0x3B),
+                Rgb(0x4A, 0x55, 0x6A),
+            ],
             bar_slack: Rgb(0x2C, 0x9C, 0x8F),
             bar_inactive: Rgb(0xE6, 0xE8, 0xEC),
             milestone: Rgb(0x1B, 0x3A, 0x8C),
@@ -244,11 +287,10 @@ fn date_range(job: &PrintJob) -> (NaiveDateTime, NaiveDateTime) {
     let p = job.project;
     let mut start = p.sched.start.unwrap_or(p.start);
     let mut finish = p.sched.finish.unwrap_or(start);
-    for t in &p.tasks {
-        if let Some(b) = t.baseline {
-            start = start.min(b.start);
-            finish = finish.max(b.finish);
-        }
+    let slots = job.chart.map(|c| c.baseline_slots()).unwrap_or_default();
+    for b in p.tasks.iter().flat_map(|t| slots.iter().filter_map(|&n| t.baseline_in(n))) {
+        start = start.min(b.start);
+        finish = finish.max(b.finish);
     }
     let from = job.from.map(|d| d.and_time(NaiveTime::MIN));
     let to = job.to.map(|d| shift(d.and_time(NaiveTime::MIN), 1440));
@@ -359,13 +401,17 @@ impl Chart<'_> {
     /// Whether anything is drawn for rows `rows` in the chart stretch `[off, off + w)`.
     fn has_bars(&self, rows: std::ops::Range<usize>, off: f32, w: f32) -> bool {
         let (a, b) = (self.time_at(off), self.time_at(off + w));
-        self.job.sheet.rows.get(rows).unwrap_or_default().iter().any(|r| {
-            let span = match &r.kind {
-                RowKind::Task(id) => self.task(*id).and_then(|t| Some((t.sched.start?, t.sched.finish?))),
-                RowKind::Group { start, finish } => start.zip(*finish),
-                RowKind::Other => None,
-            };
-            span.is_some_and(|(s, f)| s <= b && f >= a)
+        let slots = self.opts.baseline_slots();
+        let shows = |s: NaiveDateTime, f: NaiveDateTime| s <= b && f >= a;
+        self.job.sheet.rows.get(rows).unwrap_or_default().iter().any(|r| match &r.kind {
+            RowKind::Task(id) => self.task(*id).is_some_and(|t| {
+                // The Multiple Baselines Gantt draws only baseline bars; the others draw the
+                // scheduled bar and maybe one baseline under it.
+                let scheduled = self.opts.baselines == 0 && t.sched.start.zip(t.sched.finish).is_some_and(|(s, f)| shows(s, f));
+                scheduled || slots.iter().filter_map(|&n| t.baseline_in(n)).any(|bl| shows(bl.start, bl.finish))
+            }),
+            RowKind::Group { start, finish } => start.zip(*finish).is_some_and(|(s, f)| shows(s, f)),
+            RowKind::Other => false,
         })
     }
 
@@ -448,7 +494,7 @@ impl Chart<'_> {
         let xs = |t: NaiveDateTime| self.x(body.x, off, t);
 
         // Links that touch a row on this page (the other end may be off the page: clipped).
-        if o.links {
+        if o.links && o.baselines == 0 {
             for link in self.links_touching(rows.clone()) {
                 let (r, pr) = (link.succ_row, link.pred_row);
                 let (Some(t), Some(pt_)) = (p.tasks.get(link.succ), p.tasks.get(link.pred)) else { continue };
@@ -526,11 +572,34 @@ impl Chart<'_> {
             };
             let Some(&idx) = self.index_of.get(&id) else { continue };
             let Some(t) = p.tasks.get(idx) else { continue };
+            if o.baselines != 0 {
+                // Multiple Baselines Gantt: only the baselines, stacked.
+                let slots = o.baseline_slots();
+                // Fit the stack inside the row, gaps shrinking first when many baselines show.
+                let n = slots.len().max(1) as f32;
+                let band = ROW_H - 2.0;
+                let gap = if n > 5.0 { 0.3 } else { 0.6 };
+                let h = ((band - (n - 1.0) * gap) / n).clamp(0.5, 3.0);
+                let top = yc - (h * n + (n - 1.0) * gap) / 2.0;
+                for (k, &slot) in slots.iter().enumerate() {
+                    let Some(b) = t.baseline_in(slot) else { continue };
+                    let color = pal.baseline_series.get(usize::from(slot)).copied().unwrap_or(pal.bar_baseline);
+                    let y0 = top + k as f32 * (h + gap);
+                    let (bx0, bx1) = (xs(b.start), xs(b.finish));
+                    if t.is_milestone() {
+                        diamond(out, pt(bx0, y0 + h / 2.0), (h / 2.0 + 0.6).max(1.5), color);
+                    } else {
+                        out.push(Item::Rect { rect: Rect::new(bx0, y0, (bx1 - bx0).max(1.0), h), fill: Some(color), stroke: None });
+                    }
+                }
+                continue;
+            }
             let (Some(s), Some(f)) = (t.sched.start, t.sched.finish) else { continue };
             let (x0, x1) = (xs(s), xs(f).max(xs(s)));
             let critical = o.critical && t.sched.critical;
-            let with_baseline = o.baseline && t.baseline.is_some();
-            if let (true, Some(b)) = (o.baseline, t.baseline) {
+            let shown_baseline = if o.baseline { t.baseline_in(o.baseline_slot) } else { None };
+            let with_baseline = shown_baseline.is_some();
+            if let Some(b) = shown_baseline {
                 let (bx0, bx1) = (xs(b.start), xs(b.finish));
                 if t.is_milestone() {
                     diamond(out, pt(bx0, yc + 4.0), 3.0, pal.bar_baseline);
@@ -756,20 +825,35 @@ fn legend(out: &mut Vec<Item>, job: &PrintJob, opts: &ChartOptions, r: Rect) {
             o.push(Item::Rect { rect: Rect::new(c.x, c.y - 1.0, 22.0, 2.0), fill: Some(p.bar_progress), stroke: None })
         }));
     }
+    let baseline_name = crate::baseline::PlanSlot::Baseline(opts.baseline_slot).name();
     if opts.baseline {
-        entries.push(("Baseline", |o, c, p| {
+        entries.push((baseline_name.as_str(), |o, c, p| {
             o.push(Item::Rect { rect: Rect::new(c.x, c.y - 1.5, 22.0, 3.0), fill: Some(p.bar_baseline), stroke: None })
         }));
     }
     if opts.slack {
         entries.push(("Slack", |o, c, p| hline(o, c.x, c.x + 22.0, c.y, Stroke::new(1.0, p.bar_slack))));
     }
+    // The Multiple Baselines Gantt shows only baseline bars: its key is one colour per baseline.
+    let series: Vec<(String, Rgb)> = if opts.baselines != 0 {
+        entries.clear();
+        let colour = |n: u8| pal.baseline_series.get(usize::from(n)).copied().unwrap_or(pal.bar_baseline);
+        opts.baseline_slots().into_iter().map(|n| (crate::baseline::PlanSlot::Baseline(n).name(), colour(n))).collect()
+    } else {
+        Vec::new()
+    };
     let per_col = 2;
-    let cols = entries.len().div_ceil(per_col).max(1);
+    let cols = (entries.len() + series.len()).div_ceil(per_col).max(1);
     let col_w = ((r.w - left_w - 8.0) / cols as f32).max(1.0);
+    let at = |i: usize| (r.x + left_w + 8.0 + (i / per_col) as f32 * col_w, r.y + 13.0 + (i % per_col) as f32 * 20.0);
     for (i, (label, draw)) in entries.iter().enumerate() {
-        let (cx, cy) = (r.x + left_w + 8.0 + (i / per_col) as f32 * col_w, r.y + 13.0 + (i % per_col) as f32 * 20.0);
+        let (cx, cy) = at(i);
         draw(out, pt(cx, cy), pal);
+        boxed_text(out, Rect::new(cx + 26.0, cy - 7.0, (col_w - 28.0).max(0.0), 14.0), label, SMALL, pal.text, false, Align::Left);
+    }
+    for (k, (label, colour)) in series.iter().enumerate() {
+        let (cx, cy) = at(entries.len() + k);
+        out.push(Item::Rect { rect: Rect::new(cx, cy - 2.0, 22.0, 4.0), fill: Some(*colour), stroke: None });
         boxed_text(out, Rect::new(cx + 26.0, cy - 7.0, (col_w - 28.0).max(0.0), 14.0), label, SMALL, pal.text, false, Align::Left);
     }
 }
@@ -1280,6 +1364,39 @@ mod tests {
         assert!(some < all, "{some} < {all}");
     }
     const MAX_PAGES_WIDE_TEST: u8 = 12;
+
+    /// Regression: with blank pages skipped, the Multiple Baselines Gantt dropped the pages that
+    /// held only baseline bars, because a page counted as blank unless a scheduled bar crossed it.
+    #[test]
+    fn pages_with_only_baseline_bars_are_not_blank() {
+        fn fills(items: &[Item], colour: Rgb) -> usize {
+            items
+                .iter()
+                .map(|i| match i {
+                    Item::Rect { fill: Some(f), .. } if *f == colour => 1,
+                    Item::Clip { items, .. } => fills(items, colour),
+                    _ => 0,
+                })
+                .sum()
+        }
+        let mut p = sample::demo_project(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap());
+        // Baseline1: the whole plan as it stood two years earlier, far from every scheduled bar.
+        for t in &mut p.tasks {
+            if let Some(b) = t.baseline {
+                let back = |d: NaiveDateTime| crate::calendar::shift(d, -2 * 365 * 1440);
+                t.baselines.insert(1, crate::model::Baseline { start: back(b.start), finish: back(b.finish), ..b });
+            }
+        }
+        let sheet = task_sheet(&p, true);
+        let setup = PageSetup { timescale: TimescaleFit::PagesWide(MAX_PAGES_WIDE_TEST), print_blank_pages: false, ..Default::default() };
+        let chart = ChartOptions { baselines: 0b10, ..Default::default() };
+        let out = layout(&PrintJob { chart: Some(chart), ..job(&p, &setup, &sheet, true) });
+        let colour = Palette::default().baseline_series[1];
+        assert!(out.pages.iter().map(|pg| fills(&pg.items, colour)).sum::<usize>() > 0, "Baseline1 bars are printed");
+        // Pages with only scheduled bars are blank in this view: nothing is drawn on them.
+        let a_bar = out.pages.iter().all(|pg| fills(&pg.items, colour) > 0 || texts(pg).iter().any(|t| t.contains("Baseline1")));
+        assert!(a_bar, "every page kept shows Baseline1 bars (or the legend naming them)");
+    }
 
     #[test]
     fn hostile_input_never_panics_and_stays_bounded() {

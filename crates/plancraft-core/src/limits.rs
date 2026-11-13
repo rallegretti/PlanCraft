@@ -39,6 +39,10 @@ pub const MAX_NOTES_CHARS: usize = 100_000;
 pub const MAX_MINUTES: Minutes = 5 * 366 * 24 * 60;
 /// Largest percentage lag (either sign).
 pub const MAX_LAG_PERCENT: i32 = 10_000;
+/// Largest work or duration a summary or baseline can total: every task at the maximum.
+pub const MAX_TOTAL_MINUTES: Minutes = MAX_MINUTES * MAX_TASKS as Minutes;
+/// Largest cost a summary or baseline can total.
+pub const MAX_TOTAL_MONEY: f64 = MAX_MONEY * MAX_TASKS as f64;
 /// Largest units of a resource or assignment (100,000%).
 pub const MAX_UNITS: f64 = 1_000.0;
 /// Largest rate, cost per use or cost (either sign for costs).
@@ -344,6 +348,22 @@ impl Fixer {
         }
     }
 
+    fn total_minutes(&mut self, m: &mut Minutes, what: &'static str) {
+        let c = (*m).clamp(0, MAX_TOTAL_MINUTES);
+        if c != *m {
+            *m = c;
+            self.note(what);
+        }
+    }
+
+    /// Swaps a start that comes after its finish.
+    fn ordered(&mut self, start: &mut NaiveDateTime, finish: &mut NaiveDateTime) {
+        if start > finish {
+            std::mem::swap(start, finish);
+            self.note("a baseline or interim plan starts after it finishes");
+        }
+    }
+
     fn signed_minutes(&mut self, m: &mut Minutes, what: &'static str) {
         let c = (*m).clamp(-MAX_MINUTES, MAX_MINUTES);
         if c != *m {
@@ -419,6 +439,10 @@ impl Fixer {
         self.name(&mut s.currency);
         self.minutes(&mut s.minutes_per_point, "work per complexity point is out of range");
         self.signed_minutes(&mut s.critical_slack, "the critical slack threshold is out of range");
+        if s.earned_value_baseline > crate::baseline::MAX_BASELINE {
+            s.earned_value_baseline = 0;
+            self.note("the earned value baseline does not exist");
+        }
     }
 
     fn task(&mut self, t: &mut Task, calendars: &HashSet<crate::ids::CalendarId>) {
@@ -470,13 +494,26 @@ impl Fixer {
             }
         }
         self.f64(&mut t.fixed_cost, -MAX_MONEY, MAX_MONEY, "a cost is out of range");
-        if let Some(b) = &mut t.baseline {
+        let before = (t.baselines.len(), t.interim.len());
+        t.baselines.retain(|n, _| (1..=crate::baseline::MAX_BASELINE).contains(n));
+        t.interim.retain(|n, _| (1..=crate::baseline::MAX_INTERIM).contains(n));
+        if before != (t.baselines.len(), t.interim.len()) {
+            self.note("a baseline or interim plan number is out of range");
+        }
+        // A summary's baseline totals its subtasks, so it gets the summary-sized limits.
+        for b in t.baseline.iter_mut().chain(t.baselines.values_mut()) {
             self.datetime(&mut b.start);
             self.datetime(&mut b.finish);
             self.datetime(&mut b.saved);
-            self.minutes(&mut b.duration, "a baseline duration is out of range");
-            self.minutes(&mut b.work, "baseline work is out of range");
-            self.f64(&mut b.cost, -MAX_MONEY, MAX_MONEY, "a cost is out of range");
+            self.ordered(&mut b.start, &mut b.finish);
+            self.total_minutes(&mut b.duration, "a baseline duration is out of range");
+            self.total_minutes(&mut b.work, "baseline work is out of range");
+            self.f64(&mut b.cost, -MAX_TOTAL_MONEY, MAX_TOTAL_MONEY, "a baseline cost is out of range");
+        }
+        for i in t.interim.values_mut() {
+            self.datetime(&mut i.start);
+            self.datetime(&mut i.finish);
+            self.ordered(&mut i.start, &mut i.finish);
         }
     }
 

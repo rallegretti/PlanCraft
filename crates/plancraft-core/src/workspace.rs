@@ -39,6 +39,8 @@ fn approx_bytes(p: &Project) -> usize {
                 + t.predecessors.len() * size_of::<crate::model::Dependency>()
                 + t.members.len() * size_of::<crate::model::TaskRef>()
                 + t.splits.len() * size_of::<crate::model::Split>()
+                + t.baselines.len() * (size_of::<crate::model::Baseline>() + 32)
+                + t.interim.len() * (size_of::<crate::model::Interim>() + 32)
                 + t.sched.parts.len() * size_of::<(chrono::NaiveDateTime, chrono::NaiveDateTime)>()
                 + t.sched.warnings.iter().map(|w| size_of::<String>() + w.len()).sum::<usize>()
                 + t.custom.values().map(custom_value).sum::<usize>()

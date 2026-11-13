@@ -238,6 +238,42 @@ fn full_project_workflow() {
     let fe_var = var["tasks"].as_array().unwrap().iter().find(|t| t["id"] == fe).unwrap();
     assert_eq!(fe_var["finish_variance_minutes"], 480);
     assert_eq!(fe_var["finish_variance"], "1 day");
+    // Baseline1 keeps the new plan; variance still measures against Baseline.
+    let b1 = c.call("set_baseline", json!({ "baseline": "baseline1" }));
+    assert_eq!((b1["name"].as_str(), b1["tasks"].as_u64()), (Some("Baseline1"), Some(8)));
+    assert!(b1["saved"].is_string());
+    let var1 = c.call("get_variance", json!({ "baseline": 1, "tasks": [fe] }));
+    assert_eq!((var1["baseline"].as_str(), var1["tasks"][0]["finish_variance_minutes"].as_i64()), (Some("Baseline1"), Some(0)));
+    let var0 = c.call("get_variance", json!({ "tasks": [fe] }));
+    assert_eq!(var0["tasks"][0]["finish_variance_minutes"], 480);
+    let fe_task = c.call("get_task", json!({ "task": fe }));
+    assert!(fe_task["other_baselines"]["baseline1"]["finish"].is_string(), "{fe_task}");
+    assert_eq!(fe_task["baseline"]["finish_variance_minutes"], 480);
+    let interim = c.call("set_interim_plan", json!({ "copy": "baseline", "into": "interim2", "tasks": [fe] }));
+    assert_eq!((interim["tasks"].as_u64(), interim["tasks_written"].as_u64()), (Some(1), Some(1)));
+    assert_eq!(c.call("get_task", json!({ "task": fe }))["interim_plans"]["interim2"]["finish"], fe_var["baseline_finish"]);
+    c.call_err("set_interim_plan", json!({ "copy": "interim2", "into": "baseline3" }));
+    c.call_err("set_interim_plan", json!({ "copy": "baseline", "into": "scheduled" }));
+    c.call_err("set_baseline", json!({ "baseline": 11 }));
+    c.call_err("clear_baseline", json!({ "baseline": 1, "interim_plan": 2 }));
+    let listed = c.call("list_baselines", json!({}));
+    assert_eq!(listed["baselines"].as_array().unwrap().len(), 11);
+    assert_eq!(listed["baselines"][1]["tasks"], 8);
+    assert_eq!(listed["baselines"][2]["tasks"], 0);
+    assert_eq!(listed["interim_plans"].as_array().unwrap().len(), 1);
+    // Review fixes: an empty task list never means "everything"; copying an empty plan is
+    // refused rather than erasing the target; names and null work like everywhere else.
+    c.call_err("set_interim_plan", json!({ "copy": "scheduled", "into": "interim3", "tasks": [] }));
+    c.call_err("clear_baseline", json!({ "tasks": [] }));
+    c.call_err("set_interim_plan", json!({ "copy": "baseline7", "into": "baseline" }));
+    assert_eq!(c.call("list_baselines", json!({}))["baselines"][0]["tasks"], 8, "Baseline is untouched");
+    assert_eq!(c.call("clear_baseline", json!({ "baseline": null, "interim_plan": "interim2" }))["tasks_cleared"], 1);
+    let ev = c.call("update_project", json!({ "earned_value_baseline": "baseline1" }));
+    assert_eq!(ev["settings"]["earned_value_baseline"], "Baseline1", "{ev}");
+    assert_eq!(c.call("project_statistics", json!({}))["earned_value"]["baseline"], "Baseline1");
+    c.call_err("update_project", json!({ "earned_value_baseline": 11 }));
+    c.call("update_project", json!({ "earned_value_baseline": 0 }));
+    assert_eq!(c.call("clear_baseline", json!({ "baseline": "baseline1" }))["tasks_cleared"], 8);
     let stats = c.call("project_statistics", json!({}));
     assert_eq!(stats["milestones"], 1);
     assert_eq!(stats["summary_tasks"], 2);

@@ -278,6 +278,13 @@ pub struct Baseline {
     pub saved: NaiveDateTime,
 }
 
+/// Start and finish dates saved as an interim plan (the Start1–10 and Finish1–10 fields).
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Interim {
+    pub start: NaiveDateTime,
+    pub finish: NaiveDateTime,
+}
+
 /// Values computed by the scheduler. Never edit directly.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
@@ -381,8 +388,15 @@ pub struct Task {
     pub fixed_cost: f64,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
+    /// Baseline (number 0): the one variance is measured against.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub baseline: Option<Baseline>,
+    /// Baselines 1–10, by number (see [`crate::baseline`]).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty", deserialize_with = "crate::baseline::lenient_slots")]
+    pub baselines: std::collections::BTreeMap<u8, Baseline>,
+    /// Interim plans 1–10, by number.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty", deserialize_with = "crate::baseline::lenient_slots")]
+    pub interim: std::collections::BTreeMap<u8, Interim>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub show_on_timeline: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -398,6 +412,9 @@ fn one_u16() -> u16 {
     1
 }
 fn is_zero_i64(v: &i64) -> bool {
+    *v == 0
+}
+fn is_zero_u8(v: &u8) -> bool {
     *v == 0
 }
 fn is_zero_f64(v: &f64) -> bool {
@@ -436,6 +453,8 @@ impl Task {
             fixed_cost: 0.0,
             notes: String::new(),
             baseline: None,
+            baselines: std::collections::BTreeMap::new(),
+            interim: std::collections::BTreeMap::new(),
             show_on_timeline: false,
             bar_color: None,
             custom: std::collections::BTreeMap::new(),
@@ -775,6 +794,9 @@ pub struct ProjectSettings {
     pub use_resource_calendars: bool,
     /// Update task % complete automatically from tracked time.
     pub progress_from_time: bool,
+    /// The baseline (0–10) earned value is measured against.
+    #[serde(skip_serializing_if = "is_zero_u8")]
+    pub earned_value_baseline: u8,
 }
 
 impl Default for ProjectSettings {
@@ -788,6 +810,7 @@ impl Default for ProjectSettings {
             new_tasks_auto: true,
             use_resource_calendars: true,
             progress_from_time: false,
+            earned_value_baseline: 0,
         }
     }
 }

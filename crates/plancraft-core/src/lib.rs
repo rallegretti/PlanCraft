@@ -15,6 +15,7 @@
 //! assert!(p.task(b).unwrap().sched.start > p.task(a).unwrap().sched.start);
 //! ```
 
+pub mod baseline;
 pub mod calendar;
 pub mod custom;
 pub mod duration;
@@ -36,6 +37,7 @@ pub mod workload;
 pub mod workspace;
 
 pub mod prelude {
+    pub use crate::baseline::{PlanSlot, Scope};
     pub use crate::calendar::{Calendar, CalendarException, TimeRange, WorkCal, WorkWeek};
     pub use crate::custom::{CustomFieldDef, CustomFieldKind, CustomValue, TableLayout};
     pub use crate::duration::{DurationUnit, Lag, Minutes, TimeSettings, format_duration, format_work, parse_duration, parse_work};
