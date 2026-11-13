@@ -546,6 +546,8 @@ impl PlanCraftApp {
                 if st.view == ViewKind::NetworkDiagram {
                     // No table to type the name into: show the new box (double-click names it).
                     st.network.reveal_pending = true;
+                } else if st.view == ViewKind::Board {
+                    st.board.reveal_pending = true;
                 } else if let Some(r) = doc.project.task_index(id) {
                     let rows = views::visible_rows(&doc.project, st);
                     if let Some(row) = views::row_of_task(&rows, r) {
@@ -734,6 +736,9 @@ impl PlanCraftApp {
                 }
             }
             Command::ScrollToTask if st.view == ViewKind::NetworkDiagram => st.network.reveal_pending = true,
+            Command::ScrollToTask if st.view == ViewKind::Board => st.board.reveal_pending = true,
+            // The board has no timescale to zoom.
+            Command::ZoomIn | Command::ZoomOut | Command::ZoomEntire | Command::ZoomSelected if st.view == ViewKind::Board => {}
             Command::ScrollToTask => {
                 if let Some(id) = sel.first()
                     && let Some(t) = doc.project.task(*id)
@@ -788,6 +793,10 @@ impl PlanCraftApp {
                             nt.interim.clear();
                             // A pasted occurrence is an ordinary task unless its recurring task comes too.
                             nt.occurrence &= recurring_in_clip;
+                            // Board columns belong to their plan: a column this plan lacks means none.
+                            if nt.board_status.is_some_and(|s| p.board_column(s).is_none()) {
+                                nt.board_status = None;
+                            }
                             nt.outline_level = target_level.saturating_add(t.outline_level.saturating_sub(base));
                             ids.push(nt.id);
                             p.tasks.insert(at + k, nt);
@@ -1676,6 +1685,8 @@ impl PlanCraftApp {
             self.st.sel = Default::default();
             self.st.gantt.initialized_for = None;
             self.st.gantt.split_mode = false;
+            // The board's column window and drag belong to the plan they started in.
+            self.st.board = Default::default();
             self.st.cursor_task = None;
             // The Print window prints its plan as the view shows it; the view now shows another
             // plan, so it saves its Page Setup and closes.
@@ -2482,10 +2493,69 @@ mod ui_tests {
         h.get_by_label("  OK  ").click();
         h.run_steps(3);
         assert!(h.state().st.board.edit.is_none());
+        {
+            let ws = h.state().ws.lock().unwrap();
+            let p = &ws.active_doc().unwrap().project;
+            let c = &p.board_columns[1];
+            assert_eq!((c.name.as_str(), c.percent_complete), ("Ready", Some(10)));
+        }
+
+        // Regression: dragging a selected card moved the whole selection, summaries and hidden
+        // tasks included (refused, or silently completed). Only the cards shown move.
+        let (summary, hidden) = {
+            let mut ws = h.state().ws.lock().unwrap();
+            let doc = ws.active_doc_mut().unwrap();
+            let summary = doc.project.tasks.iter().find(|t| t.sched.is_summary).unwrap().id;
+            let hidden = doc.project.tasks.iter().find(|t| !t.sched.is_summary && t.id != card).unwrap().id;
+            doc.edit("Hide", |p| p.set_show_on_board(&[hidden], false)).unwrap().unwrap();
+            (summary, hidden)
+        };
+        h.state_mut().st.sel.tasks = [card, summary, hidden].into_iter().collect();
+        h.run_steps(30);
+        let to = views::board::card_centre(body, scroll, 2, 1);
+        pointer(&mut h, a, primary(true));
+        for k in 1..=10 {
+            pointer(&mut h, a + (to - a) * (k as f32 / 10.0), None);
+        }
+        pointer(&mut h, to, primary(false));
+        h.run_steps(2);
+        {
+            let ws = h.state().ws.lock().unwrap();
+            let p = &ws.active_doc().unwrap().project;
+            let col = p.board_columns[2].id;
+            assert_eq!(p.task(card).unwrap().board_status, Some(col), "the card moved");
+            assert_ne!(p.task(hidden).unwrap().board_status, Some(col), "the hidden task stayed");
+        }
+
+        // Regression: the column window outlived a switch to another plan and then renamed that
+        // plan's column with the same id.
+        h.state_mut().st.board.edit = Some(crate::state::ColumnEdit::new_column());
+        {
+            let mut ws = h.state().ws.lock().unwrap();
+            let other = ws.add(Project::new("Other plan", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+            ws.active = ws.index_of(other);
+        }
+        h.run_steps(2);
+        assert!(h.state().st.board.edit.is_none(), "the window closes with its plan");
+    }
+
+    /// Regression: pasting a task copied from another plan (or from a deleted column) was
+    /// refused, because its Board Status named a column this plan doesn't have.
+    #[test]
+    fn pasting_a_card_from_another_board_lands_in_the_first_column() {
+        let mut h = harness();
+        let ctx = h.ctx.clone();
+        let mut t = Task::new(TaskId(999), "From elsewhere", 480);
+        t.board_status = Some(plancraft_core::ids::BoardColumnId(77));
+        h.state_mut().st.clipboard = vec![t];
+        let before = h.state().ws.lock().unwrap().active_doc().unwrap().project.tasks.len();
+        h.state_mut().exec(&ctx, Command::Paste);
+        h.run_steps(2);
         let ws = h.state().ws.lock().unwrap();
         let p = &ws.active_doc().unwrap().project;
-        let c = &p.board_columns[1];
-        assert_eq!((c.name.as_str(), c.percent_complete), ("Ready", Some(10)));
+        assert_eq!(p.tasks.len(), before + 1, "pasted");
+        let pasted = p.tasks.iter().find(|t| t.name == "From elsewhere").unwrap();
+        assert_eq!(pasted.board_status, None);
     }
 
     /// The Network Diagram: a click selects a box, a double-click opens Task Information,

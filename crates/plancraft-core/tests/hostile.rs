@@ -706,6 +706,13 @@ fn hostile_boards_in_a_file_are_clamped_on_open() {
     v["tasks"][1]["board_status"] = serde_json::Value::Null;
     let (loaded, _) = plancraft_core::io::from_json_with_notes(&v.to_string(), std::path::Path::new("x.plancraft")).unwrap();
     assert_eq!(loaded.board_columns.len(), 4);
+    // Regression: a counter at the very top gave the default columns ids out of range, so the
+    // plan opened but every edit was then refused.
+    v["ids"]["board_column"] = serde_json::json!(u32::MAX);
+    let (loaded, _) = plancraft_core::io::from_json_with_notes(&v.to_string(), std::path::Path::new("x.plancraft")).unwrap();
+    let mut doc = Document::new(1, loaded, None);
+    doc.edit("Rename", |p| p.name = "Still editable".into()).unwrap();
+    assert!(limits::check_counts(&doc.project).is_ok());
 }
 
 #[test]

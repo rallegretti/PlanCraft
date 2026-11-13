@@ -359,11 +359,10 @@ pub fn apply_task_fields(p: &mut Project, id: TaskId, a: &Args) -> ToolResult<()
         if let Some(b) = a.bool("show_on_board")? {
             p.set_show_on_board(&[id], b)?;
         }
-        if a.is_clear("board_status") {
-            row_mut(p, i)?.board_status = None;
-        } else if let Some(v) = a.get("board_status") {
-            let col = super::board::column_arg(p, v, "board_status")?;
-            p.set_board_status(&[id], col)?;
+        // The column is checked here; the card moves with the progress fields (a column can
+        // set % complete, which needs an up-to-date schedule).
+        if let Some(v) = a.get("board_status").filter(|v| !v.is_null()) {
+            super::board::column_arg(p, v, "board_status")?;
         }
         if let Some(b) = a.bool("ignore_resource_calendars")? {
             row_mut(p, i)?.ignore_resource_calendars = b;
@@ -478,7 +477,7 @@ pub fn apply_task_links(p: &mut Project, id: TaskId, a: &Args, keys: Option<&Tas
 }
 
 /// Progress arguments, applied after everything else on an up-to-date schedule.
-const PROGRESS_KEYS: [&str; 4] = ["percent_complete", "actual_duration", "remaining_duration", "resume"];
+const PROGRESS_KEYS: [&str; 5] = ["board_status", "percent_complete", "actual_duration", "remaining_duration", "resume"];
 
 /// Whether `a` carries any progress argument.
 pub fn has_progress(a: &Args) -> bool {
@@ -488,6 +487,13 @@ pub fn has_progress(a: &Args) -> bool {
 /// Applies % complete, actual/remaining duration and the resume date (needs an up-to-date
 /// schedule for actual dates).
 pub fn apply_task_progress(p: &mut Project, id: TaskId, a: &Args) -> ToolResult<()> {
+    // The card first, so an explicit percent_complete wins over the column's Set % Complete.
+    if a.is_clear("board_status") {
+        row_mut(p, idx_of(p, id)?)?.board_status = None;
+    } else if let Some(v) = a.get("board_status") {
+        let col = super::board::column_arg(p, v, "board_status")?;
+        p.set_board_status(&[id], col)?;
+    }
     if let Some(pct) = a.f64("percent_complete")? {
         if !(0.0..=100.0).contains(&pct) {
             return err("'percent_complete' must be between 0 and 100");

@@ -237,10 +237,10 @@ impl Fixer {
         let mut names = HashSet::new();
         for c in &mut p.board_columns {
             self.name(&mut c.name);
-            if c.name.trim().is_empty() || !names.insert(c.name.trim().to_lowercase()) {
+            if c.name.trim().is_empty() || !names.insert(crate::board::name_key(&c.name)) {
                 let mut n = 1u32;
                 let mut name = format!("Column {}", c.id.0);
-                while !names.insert(name.to_lowercase()) {
+                while !names.insert(crate::board::name_key(&name)) {
                     n = n.saturating_add(1);
                     name = format!("Column {} ({n})", c.id.0);
                 }

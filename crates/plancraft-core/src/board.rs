@@ -10,6 +10,8 @@
 //! - A project has at most 100 columns.
 //!
 //! Choices where the pages say nothing:
+//! - A new plan's columns are Not Started, Next up, In progress and Done (the pages name Not
+//!   Started for new tasks and the other three for a sprint board), and Done sets 100%.
 //! - A task with no Board Status (or one naming a deleted column) sits in the first column.
 //! - Summary tasks don't show; their subtasks do.
 //! - Deleting a column moves its tasks to the first column.
@@ -17,7 +19,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{BoardColumnId, IdCounters, TaskId};
-use crate::limits::{MAX_NAME_CHARS, MAX_TASKS};
+use crate::limits::MAX_NAME_CHARS;
 use crate::model::Project;
 use crate::ops::{PlanError, PlanResult};
 
@@ -47,6 +49,21 @@ fn invalid<T>(msg: impl Into<String>) -> PlanResult<T> {
     Err(PlanError::Invalid(msg.into()))
 }
 
+/// What makes two column names the same: case and surrounding spaces don't count. Used by the
+/// ops and by the file checks alike, so they always agree.
+pub fn name_key(name: &str) -> String {
+    name.trim().to_lowercase()
+}
+
+/// A column id written as "B3" or "3" (digits only).
+fn parse_id(key: &str) -> Option<BoardColumnId> {
+    let digits = key.strip_prefix(['B', 'b']).unwrap_or(key);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok().map(BoardColumnId)
+}
+
 /// A trimmed column name, or why it can't be one.
 fn column_name(name: &str) -> PlanResult<String> {
     let name = name.trim();
@@ -64,14 +81,18 @@ impl Project {
         self.board_columns.iter().find(|c| c.id == id)
     }
 
-    /// A column by name (case ignored) or by id ("B3" or "3").
+    /// A column by name (case ignored) or by id ("B3" or "3"); a name wins.
     pub fn find_board_column(&self, key: &str) -> Option<BoardColumnId> {
-        let k = key.trim();
-        if let Some(c) = self.board_columns.iter().find(|c| c.name.eq_ignore_ascii_case(k)) {
+        let k = name_key(key);
+        if let Some(c) = self.board_columns.iter().find(|c| name_key(&c.name) == k) {
             return Some(c.id);
         }
-        let n: u32 = k.trim_start_matches(['B', 'b']).parse().ok()?;
-        self.board_column(BoardColumnId(n)).map(|c| c.id)
+        self.board_column_by_id(key.trim())
+    }
+
+    /// A column by id only ("B3" or "3").
+    pub fn board_column_by_id(&self, key: &str) -> Option<BoardColumnId> {
+        parse_id(key).and_then(|id| self.board_column(id)).map(|c| c.id)
     }
 
     /// The column a task's card sits in: its Board Status, or the first column.
@@ -88,17 +109,23 @@ impl Project {
     /// The board: each column with the rows of its cards, in outline order.
     pub fn board(&self) -> Vec<(&crate::board::BoardColumn, Vec<usize>)> {
         let mut cols: Vec<(&crate::board::BoardColumn, Vec<usize>)> = self.board_columns.iter().map(|c| (c, Vec::new())).collect();
-        let first = self.board_columns.first().map(|c| c.id);
+        let at: std::collections::HashMap<BoardColumnId, usize> = self.board_columns.iter().enumerate().map(|(k, c)| (c.id, k)).collect();
         for (i, t) in self.tasks.iter().enumerate() {
             if !self.on_board(i) {
                 continue;
             }
-            let col = t.board_status.filter(|s| self.board_column(*s).is_some()).or(first);
-            if let Some((_, rows)) = cols.iter_mut().find(|(c, _)| Some(c.id) == col) {
+            let k = t.board_status.and_then(|s| at.get(&s).copied()).unwrap_or(0);
+            if let Some((_, rows)) = cols.get_mut(k) {
                 rows.push(i);
             }
         }
         cols
+    }
+
+    /// Rows of `ids`, looked up in one pass (an unknown id is an error).
+    fn rows_of(&self, ids: &[TaskId]) -> PlanResult<Vec<usize>> {
+        let at: std::collections::HashMap<TaskId, usize> = self.tasks.iter().enumerate().map(|(i, t)| (t.id, i)).collect();
+        ids.iter().map(|id| at.get(id).copied().ok_or(PlanError::TaskNotFound(*id))).collect()
     }
 
     fn require_column(&self, id: BoardColumnId) -> PlanResult<usize> {
@@ -111,7 +138,7 @@ impl Project {
         if self.board_columns.len() >= MAX_BOARD_COLUMNS {
             return invalid(format!("a board can have at most {MAX_BOARD_COLUMNS} columns"));
         }
-        if self.board_columns.iter().any(|c| c.name.eq_ignore_ascii_case(&name)) {
+        if self.board_columns.iter().any(|c| name_key(&c.name) == name_key(&name)) {
             return invalid(format!("there is already a column named '{name}'"));
         }
         if percent_complete.is_some_and(|p| p > 100) {
@@ -126,7 +153,7 @@ impl Project {
     pub fn rename_board_column(&mut self, id: BoardColumnId, name: &str) -> PlanResult<()> {
         let k = self.require_column(id)?;
         let name = column_name(name)?;
-        if self.board_columns.iter().any(|c| c.id != id && c.name.eq_ignore_ascii_case(&name)) {
+        if self.board_columns.iter().any(|c| c.id != id && name_key(&c.name) == name_key(&name)) {
             return invalid(format!("there is already a column named '{name}'"));
         }
         if let Some(c) = self.board_columns.get_mut(k) {
@@ -157,18 +184,17 @@ impl Project {
     }
 
     /// Deletes a column; its tasks move to the first remaining column. The last column can't be
-    /// deleted. Returns the number of tasks moved.
+    /// deleted. Returns the number of cards moved.
     pub fn delete_board_column(&mut self, id: BoardColumnId) -> PlanResult<usize> {
         let k = self.require_column(id)?;
         if self.board_columns.len() <= 1 {
             return invalid("the board needs at least one column");
         }
+        let moved = self.board().get(k).map_or(0, |(_, rows)| rows.len());
         self.board_columns.remove(k);
-        let mut moved = 0;
         for t in &mut self.tasks {
             if t.board_status == Some(id) {
                 t.board_status = None;
-                moved += 1;
             }
         }
         Ok(moved)
@@ -179,22 +205,17 @@ impl Project {
     pub fn set_board_status(&mut self, ids: &[TaskId], column: BoardColumnId) -> PlanResult<()> {
         let k = self.require_column(column)?;
         let percent = self.board_columns.get(k).and_then(|c| c.percent_complete);
-        if ids.len() > MAX_TASKS {
-            return invalid("too many tasks");
+        let rows = self.rows_of(ids)?;
+        if let Some(&i) = rows.iter().find(|&&i| self.has_children(i)) {
+            let name = self.tasks.get(i).map(|t| t.name.clone()).unwrap_or_default();
+            return invalid(format!("'{name}' is a summary task; its subtasks have the cards"));
         }
-        for &id in ids {
-            let idx = self.task_index(id).ok_or(PlanError::TaskNotFound(id))?;
-            if self.has_children(idx) {
-                let name = self.tasks.get(idx).map(|t| t.name.clone()).unwrap_or_default();
-                return invalid(format!("'{name}' is a summary task; its subtasks have the cards"));
-            }
-        }
-        for &id in ids {
-            if let Some(t) = self.task_mut(id) {
+        for i in rows {
+            if let Some(t) = self.tasks.get_mut(i) {
                 t.board_status = Some(column);
             }
             if let Some(p) = percent {
-                self.set_percent_complete(id, p)?;
+                self.set_percent_complete_at(i, p)?;
             }
         }
         Ok(())
@@ -202,8 +223,10 @@ impl Project {
 
     /// Shows or hides tasks on the board (Show on Board).
     pub fn set_show_on_board(&mut self, ids: &[TaskId], show: bool) -> PlanResult<()> {
-        for &id in ids {
-            self.task_mut(id).ok_or(PlanError::TaskNotFound(id))?.show_on_board = show;
+        for i in self.rows_of(ids)? {
+            if let Some(t) = self.tasks.get_mut(i) {
+                t.show_on_board = show;
+            }
         }
         Ok(())
     }
@@ -249,6 +272,31 @@ mod tests {
             p.add_board_column(&format!("C{k}"), None, None).unwrap();
         }
         assert!(p.add_board_column("One too many", None, None).is_err());
+    }
+
+    /// Regressions: the ops compared names with ASCII-only case folding while the file check
+    /// lowercased fully, so some names passed one and were renamed by the other (the edit rolled
+    /// back); loose ids like "BB3" or "+3" resolved; deleting the first column under-counted the
+    /// cards that moved (tasks with no Board Status already sat there).
+    #[test]
+    fn names_ids_and_counts_are_consistent() {
+        let (mut p, a, b) = plan();
+        p.add_board_column("ÉTÉ", None, None).unwrap();
+        assert!(p.add_board_column("été", None, None).is_err());
+        assert!(crate::limits::sanitize(&mut p.clone()).is_empty());
+        let third = p.board_columns[2].id;
+        for loose in ["BB3", "+3", "B", "b+3", " 3x"] {
+            assert_eq!(p.find_board_column(loose), None, "{loose}");
+        }
+        assert_eq!(p.find_board_column("b3"), Some(third));
+        let named = p.add_board_column("3", None, None).unwrap();
+        assert_eq!(p.find_board_column("3"), Some(named), "a name wins over an id");
+        assert_eq!(p.board_column_by_id("3"), Some(third));
+        // A and B sit in the first column with no Board Status; one more was put there.
+        let first = p.board_columns[0].id;
+        p.set_board_status(&[b], first).unwrap();
+        assert_eq!(p.delete_board_column(first).unwrap(), 2);
+        assert!(p.task(a).unwrap().board_status.is_none() && p.task(b).unwrap().board_status.is_none());
     }
 
     #[test]

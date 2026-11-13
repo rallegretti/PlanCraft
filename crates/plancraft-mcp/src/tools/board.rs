@@ -21,8 +21,14 @@ pub fn tools() -> Vec<Tool> {
         Tool::new(
             "get_board",
             "Get the Task Board",
-            "The Task Board: its columns in order (name, id, Set % Complete) with the cards in each (task id, name, % complete, resources, finish). A task's card sits in its Board Status column (the first column when it has none); summary tasks and tasks with show_on_board false have no card. Move cards with update_task (board_status) or move_cards.",
-            schema(json!({ "column": column_ref("Only this column.") }), &[]),
+            "The Task Board: its columns in order (name, id, Set % Complete, card count) with the cards in each (task id, row, name, % complete, resources, finish, milestone), at most 'limit' per column. A task's card sits in its Board Status column (the first column when it has none); summary tasks and tasks with show_on_board false have no card. Move cards with update_task (board_status) or move_cards.",
+            schema(
+                json!({
+                    "column": column_ref("Only this column."),
+                    "limit": integer("Most cards listed per column (default 100; 'count' always gives the total)."),
+                }),
+                &[],
+            ),
             get_board,
         )
         .read_only(),
@@ -73,14 +79,15 @@ pub fn tools() -> Vec<Tool> {
     ]
 }
 
-/// A board column named by a value (name, "B3" or 3).
+/// A board column named by a value: a JSON number is an id; text is a name or "B3".
 pub fn column_arg(p: &Project, v: &Value, key: &str) -> ToolResult<BoardColumnId> {
-    let text = match v {
-        Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
+    let found = match v {
+        Value::String(s) => p.find_board_column(s),
+        Value::Number(n) => p.board_column_by_id(&n.to_string()),
         other => return err(format!("'{key}' must be a column name or id, got {other}")),
     };
-    p.find_board_column(&text).ok_or_else(|| {
+    found.ok_or_else(|| {
+        let text = v.as_str().map_or_else(|| v.to_string(), str::to_string);
         let names: Vec<&str> = p.board_columns.iter().map(|c| c.name.as_str()).collect();
         ToolError(format!("'{key}': no board column '{}' (columns: {})", text.trim(), names.join(", ")))
     })
@@ -106,13 +113,19 @@ fn position_arg(a: &Args) -> ToolResult<Option<usize>> {
 }
 
 fn board_json(p: &Project, only: Option<BoardColumnId>) -> Value {
+    board_json_limited(p, only, 100)
+}
+
+fn board_json_limited(p: &Project, only: Option<BoardColumnId>, limit: usize) -> Value {
     let columns: Vec<Value> = p
         .board()
         .into_iter()
         .filter(|(c, _)| only.is_none_or(|o| o == c.id))
         .map(|(c, rows)| {
+            let count = rows.len();
             let cards: Vec<Value> = rows
                 .iter()
+                .take(limit)
                 .filter_map(|&i| p.tasks.get(i).map(|t| (i, t)))
                 .map(|(i, t)| {
                     json!({
@@ -126,7 +139,7 @@ fn board_json(p: &Project, only: Option<BoardColumnId>) -> Value {
                     })
                 })
                 .collect();
-            json!({ "id": c.id.0, "name": c.name, "percent_complete": c.percent_complete, "count": cards.len(), "cards": cards })
+            json!({ "id": c.id.0, "name": c.name, "percent_complete": c.percent_complete, "count": count, "truncated": count > cards.len(), "cards": cards })
         })
         .collect();
     json!({ "columns": columns })
@@ -136,7 +149,8 @@ fn get_board(ctx: &Ctx, a: &Args) -> ToolResult {
     ctx.read(a, |doc| {
         let p = &doc.project;
         let only = a.get("column").filter(|v| !v.is_null()).map(|v| column_arg(p, v, "column")).transpose()?;
-        Ok(board_json(p, only))
+        let limit = a.u64("limit")?.map_or(100, |n| usize::try_from(n).unwrap_or(usize::MAX));
+        Ok(board_json_limited(p, only, limit))
     })
 }
 
@@ -176,6 +190,9 @@ fn update_board_column(ctx: &Ctx, a: &Args) -> ToolResult {
         "Change Board Column",
         |p, _| {
             let col = column_arg(p, a.get("column").ok_or_else(|| missing("column"))?, "column")?;
+            if !["name", "percent_complete", "position"].iter().any(|k| a.present(k)) {
+                return err("nothing to change: give 'name', 'position' or 'percent_complete'");
+            }
             if let Some(name) = a.str("name")? {
                 p.rename_board_column(col, name)?;
             }

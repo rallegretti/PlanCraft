@@ -104,6 +104,20 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     let max_y = (content_h - body.height()).max(0.0);
     st.board.scroll.x = st.board.scroll.x.clamp(0.0, max_x);
     st.board.scroll.y = st.board.scroll.y.clamp(0.0, max_y);
+    // Bring the selected card into view (after Insert Task or Scroll to Task).
+    if std::mem::take(&mut st.board.reveal_pending)
+        && let Some(i) = st.sel.single_task().and_then(|id| doc.project.task_index(id))
+        && let Some((k, n)) = cols.iter().enumerate().find_map(|(k, c)| c.rows.iter().position(|&r| r == i).map(|n| (k, n)))
+    {
+        let x = GAP + k as f32 * (COL_W + GAP);
+        let y = HEAD_H + PAD + n as f32 * (CARD_H + CARD_GAP);
+        if x < st.board.scroll.x || x + COL_W > st.board.scroll.x + body.width() {
+            st.board.scroll.x = (x - GAP).clamp(0.0, max_x);
+        }
+        if y < st.board.scroll.y || y + CARD_H + HEAD_H > st.board.scroll.y + body.height() {
+            st.board.scroll.y = (y - HEAD_H - PAD).clamp(0.0, max_y);
+        }
+    }
     let (sx, sy) = (st.board.scroll.x, st.board.scroll.y);
 
     let col_x = |k: usize| body.left() + GAP + k as f32 * (COL_W + GAP) - sx;
@@ -126,12 +140,17 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
             return Some(Hit::Header(k));
         }
         let rows = &cols.get(k)?.rows;
-        (0..rows.len()).find(|&n| card_rect(k, n).contains(pos)).and_then(|n| rows.get(n).copied()).map(Hit::Card).or(Some(Hit::Column(k)))
+        let top = body.top() + GAP / 2.0 + HEAD_H + PAD - sy;
+        let n = ((pos.y - top) / (CARD_H + CARD_GAP)).floor();
+        let card = (n >= 0.0).then_some(n as usize).filter(|&n| card_rect(k, n).contains(pos)).and_then(|n| rows.get(n).copied());
+        card.map(Hit::Card).or(Some(Hit::Column(k)))
     };
     let pointer = ui.input(|i| i.pointer.hover_pos());
+    // Where a drag ends (a touch release leaves no hover position).
+    let latest = ui.input(|i| i.pointer.latest_pos());
     let hovered = pointer.and_then(hit_at);
     let dragging = st.board.drag.clone();
-    let drop_col = match (&dragging, pointer.and_then(hit_at)) {
+    let drop_col = match (&dragging, latest.and_then(hit_at)) {
         (Some(_), Some(Hit::Card(i))) => cols.iter().position(|c| c.rows.contains(&i)),
         (Some(_), Some(Hit::Header(k) | Hit::Column(k))) => Some(k),
         _ => None,
@@ -203,8 +222,14 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
         && let Some(Hit::Card(i)) = press.and_then(hit_at)
         && let Some(t) = p.tasks.get(i)
     {
-        // Dragging a selected card moves the whole selection.
-        let tasks: Vec<TaskId> = if st.sel.tasks.contains(&t.id) { st.sel.tasks.iter().copied().collect() } else { vec![t.id] };
+        // Dragging a selected card moves the selected cards shown on the board; tasks selected
+        // elsewhere (summaries, filtered out, hidden from the board) stay where they are.
+        let tasks: Vec<TaskId> = if st.sel.tasks.contains(&t.id) {
+            let shown: std::collections::HashSet<usize> = cols.iter().flat_map(|c| c.rows.iter().copied()).collect();
+            st.sel.tasks.iter().copied().filter(|id| p.task_index(*id).is_some_and(|i| shown.contains(&i))).collect()
+        } else {
+            vec![t.id]
+        };
         st.board.drag = Some(BoardDrag { tasks });
     }
     if let (Some(drag), Some(pp)) = (&dragging, pointer) {
@@ -232,9 +257,8 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                 st.toast(ToastKind::Warning, e);
             }
         }
-        return;
     }
-    if !ui.input(|i| i.pointer.any_down()) {
+    if !ui.input(|i| i.pointer.any_down()) || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         st.board.drag = None;
     }
     let p = &doc.project;
@@ -270,11 +294,17 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
             Hit::Header(k) => cols.get(k).map(|c| c.id),
             _ => None,
         });
-        if let Some(Hit::Card(i)) = resp.interact_pointer_pos().and_then(hit_at)
-            && let Some(id) = p.tasks.get(i).map(|t| t.id)
-            && !st.sel.tasks.contains(&id)
-        {
-            st.sel.select_task(id);
+        match resp.interact_pointer_pos().and_then(hit_at) {
+            Some(Hit::Card(i)) => {
+                if let Some(id) = p.tasks.get(i).map(|t| t.id)
+                    && !st.sel.tasks.contains(&id)
+                {
+                    st.sel.select_task(id);
+                }
+            }
+            // An empty spot: the menu acts on nothing hidden.
+            Some(Hit::Column(_)) => st.sel.tasks.clear(),
+            _ => {}
         }
     }
     let menu = st.board.menu;
@@ -315,6 +345,24 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
             Err(e) => st.toast(ToastKind::Warning, e),
         },
         None => {}
+    }
+
+    // Keys, once the board has been clicked: Delete, Insert, and Enter for Task Information.
+    if resp.clicked() || resp.secondary_clicked() || resp.drag_started() {
+        resp.request_focus();
+    }
+    if resp.has_focus() && !ui.ctx().egui_wants_keyboard_input() {
+        let (del, ins, enter) =
+            ui.input(|i| (i.key_pressed(egui::Key::Delete), i.key_pressed(egui::Key::Insert), i.key_pressed(egui::Key::Enter)));
+        if del && !st.sel.tasks.is_empty() {
+            out.push(Command::DeleteSelection);
+        }
+        if ins {
+            out.push(Command::InsertTask);
+        }
+        if enter && st.sel.single_task().is_some() {
+            out.push(Command::TaskInfo);
+        }
     }
 
     // ---- Scrollbars ----

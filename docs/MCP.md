@@ -303,13 +303,13 @@ Set the status date with `update_project` (`status_date`, or `null` for today). 
 
 | Tool | Arguments (required in **bold**) | Description |
 |---|---|---|
-| `get_board` *(read-only)* | column | The Task Board: its columns in order (name, id, Set % Complete) with the cards in each (task id, name, % complete, resources, finish). A task's card sits in its Board Status column (the first column when it has none); summary tasks and tasks with show_on_board false have no card. Move cards with update_task (board_status) or move_cards. |
+| `get_board` *(read-only)* | column, limit | The Task Board: its columns in order (name, id, Set % Complete, card count) with the cards in each (task id, row, name, % complete, resources, finish, milestone), at most 'limit' per column. A task's card sits in its Board Status column (the first column when it has none); summary tasks and tasks with show_on_board false have no card. Move cards with update_task (board_status) or move_cards. |
 | `move_cards` | **column**, **tasks** | Move tasks' cards to a column (sets their Board Status). A column with a Set % Complete value also sets their % complete. Summary tasks have no card and are refused. |
 | `add_board_column` | **name**, percent_complete, position | Add a column to the Task Board (to the right of the last one by default). Names are unique; a board has at most 100 columns. |
 | `update_board_column` | **column**, name, percent_complete, position | Rename a Task Board column, move it to another position, or change its Set % Complete value. Omitted settings keep their values. |
 | `delete_board_column` *(destructive)* | **column** | Delete a Task Board column; its cards move to the first remaining column (their tasks are kept). The last column can't be deleted. |
 
-Tasks take `board_status` (a column name or id; `null` puts the card back in the first column) and `show_on_board` in `update_task`, and task details show both. A plan starts with Not Started, Next up, In progress and Done (Done sets 100%).
+Tasks take `board_status` (a column name or id; `null` puts the card back in the first column) and `show_on_board` in `create_task`/`update_task`, and task details show both. The card moves after the call's other changes are scheduled, and an explicit `percent_complete` in the same call wins over the column's. Columns are given as a name or "B3" text, or as a number (always an id). A plan starts with Not Started, Next up, In progress and Done (Done sets 100%).
 
 ### Split tasks and recurring tasks
 

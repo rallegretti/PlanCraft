@@ -259,6 +259,11 @@ impl Field {
             FreeSlack => mins(s.free_slack),
             TotalSlack => mins(s.total_slack),
             Priority => num(f64::from(t.priority)),
+            // In board order, not by name.
+            BoardStatus if !s.is_summary => p
+                .board_column_of(idx)
+                .and_then(|c| p.board_columns.iter().position(|b| b.id == c))
+                .map_or(SortKey::Missing, |k| num(k as f64)),
             ExpectedWork => t.estimate.map_or(SortKey::Missing, |e| mins(e.expected_work(&p.settings))),
             _ => {
                 let none = |_: TaskId| false;

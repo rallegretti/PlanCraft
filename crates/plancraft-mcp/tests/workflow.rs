@@ -794,6 +794,27 @@ fn agents_work_the_task_board() {
     c.call_err("add_board_column", json!({ "name": "done" }));
     c.call_err("add_board_column", json!({ "name": "X", "percent_complete": 101 }));
     c.call_err("update_board_column", json!({ "column": "Done", "position": 0 }));
+    // Review fixes. A card moved with other changes waits for the new schedule: actual dates
+    // come from it (regression: they came from the old one).
+    let t = c.call("create_task", json!({ "name": "Ship", "duration": "3d", "board_status": "Done" }));
+    let t = c.call("get_task", json!({ "task": t["id"] }));
+    assert_eq!((t["actual_start"].as_str(), t["actual_finish"].as_str()), (Some("2026-10-19 08:00"), Some("2026-10-21 17:00")), "{t}");
+    let u = c.call("create_task", json!({ "name": "Polish", "duration": "1d" }))["id"].clone();
+    let u2 = c.call("update_task", json!({ "task": u, "duration": "5d", "board_status": "Done" }));
+    assert_eq!(u2["finish"], "2026-10-23 17:00", "{u2}");
+    // An explicit percent_complete wins over the column's.
+    let w = c.call("update_task", json!({ "task": u, "board_status": "Done", "percent_complete": 30 }));
+    assert_eq!(w["percent_complete_entered"], 30, "{w}");
+    // A number is an id, text a name: a column named "3" doesn't hide column 3.
+    c.call("add_board_column", json!({ "name": "3" }));
+    let by_id = c.call("get_board", json!({ "column": 3 }));
+    assert_eq!(by_id["columns"][0]["name"], "In progress", "{by_id}");
+    assert_eq!(c.call("get_board", json!({ "column": "3" }))["columns"][0]["name"], "3");
+    c.call_err("get_board", json!({ "column": "BB3" }));
+    c.call_err("update_board_column", json!({ "column": "3" }));
+    let limited = c.call("get_board", json!({ "column": "Done", "limit": 1 }));
+    assert_eq!((limited["columns"][0]["count"].as_u64(), limited["columns"][0]["truncated"].as_bool()), (Some(3), Some(true)), "{limited}");
+    c.call("delete_board_column", json!({ "column": "3" }));
     for col in ["Not Started", "Next up", "In progress"] {
         c.call("delete_board_column", json!({ "column": col }));
     }

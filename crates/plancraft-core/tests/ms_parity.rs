@@ -1241,8 +1241,9 @@ fn column_of(p: &Project, id: TaskId) -> String {
 }
 
 // Source: https://support.microsoft.com/en-us/project/use-task-boards-in-microsoft-project-online-desktop-client — "Add tasks to your projects"
-// Every new task starts in the Not Started column; the board also has Next up, In progress and
-// Done ("Move tasks across the board").
+// Every new task starts in the Not Started column. (PlanCraft's board also starts with Next up,
+// In progress and Done, the columns the page's "Move tasks across the board" gives a sprint
+// board.)
 #[test]
 fn new_tasks_start_in_not_started() {
     let mut p = project();

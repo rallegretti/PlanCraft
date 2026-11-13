@@ -533,6 +533,11 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
             if summary {
                 return Err("summary tasks have no card on the board; their subtasks do".into());
             }
+            if text.trim().is_empty() {
+                // Cleared: the card goes back to the first column.
+                task_mut(p, id)?.board_status = None;
+                return Ok(());
+            }
             let col = p.find_board_column(text).ok_or_else(|| format!("there is no board column named '{}'", text.trim()))?;
             p.set_board_status(&[id], col).map_err(err)?;
         }

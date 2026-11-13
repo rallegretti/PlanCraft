@@ -911,6 +911,12 @@ impl Project {
             }
             return Ok(());
         }
+        self.set_percent_complete_at(idx, pct)
+    }
+
+    /// [`Project::set_percent_complete`] for the leaf task at row `idx`.
+    pub(crate) fn set_percent_complete_at(&mut self, idx: usize, pct: u8) -> PlanResult<()> {
+        let pct = pct.min(100);
         let t = self.row_mut(idx)?;
         t.percent_complete = pct;
         if pct == 0 || pct == 100 {

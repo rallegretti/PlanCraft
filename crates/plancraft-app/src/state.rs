@@ -187,11 +187,13 @@ pub struct BoardState {
     pub menu: Option<Option<plancraft_core::ids::BoardColumnId>>,
     /// Where the cards were drawn on the last frame (columns start at its left edge).
     pub body: egui::Rect,
+    /// Scroll the selected card into view on the next frame.
+    pub reveal_pending: bool,
 }
 
 impl Default for BoardState {
     fn default() -> Self {
-        Self { scroll: egui::Vec2::ZERO, drag: None, edit: None, menu: None, body: egui::Rect::NOTHING }
+        Self { scroll: egui::Vec2::ZERO, drag: None, edit: None, menu: None, body: egui::Rect::NOTHING, reveal_pending: false }
     }
 }
 
