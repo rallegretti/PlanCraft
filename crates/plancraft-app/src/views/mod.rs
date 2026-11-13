@@ -4,6 +4,7 @@ pub mod calendar;
 pub mod gantt;
 pub mod gantt_chart;
 pub mod milestones;
+pub mod network;
 pub mod resource_sheet;
 pub mod resource_usage;
 pub mod task_usage;
@@ -66,6 +67,12 @@ fn matches_filter(p: &Project, t: &Task, f: TaskFilter) -> bool {
         TaskFilter::Summary => t.sched.is_summary,
         TaskFilter::Unassigned => !t.sched.is_summary && !t.is_milestone() && p.assignments_for_task(t.id).next().is_none(),
     }
+}
+
+/// Whether a task passes the view's filter and search text.
+pub fn task_matches(p: &Project, st: &UiState, t: &Task) -> bool {
+    let search = st.search.trim().to_lowercase();
+    matches_filter(p, t, st.filter) && (search.is_empty() || t.name.to_lowercase().contains(&search))
 }
 
 /// Orders task indices by the sort field (ties keep outline order; empty values stay last in

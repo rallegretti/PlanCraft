@@ -170,3 +170,40 @@ fn printing_10000_linked_tasks_is_fast() {
     eprintln!("laying out 10,000 tasks on {} pages: {took:?} (limit {limit:?})", doc.pages.len());
     assert!(took < limit, "laying out 10,000 tasks took {took:?}; the limit is {limit:?}");
 }
+
+/// The Network Diagram lays out on every edit, so a 10,000-task plan (phases, chains and cross
+/// links) must lay out quickly.
+#[test]
+fn laying_out_a_10000_task_network_diagram_is_fast() {
+    use plancraft_core::network::{NetworkOptions, boxes_for, layout};
+    let mut p = Project::new("Big network", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+    let mut leaves = Vec::new();
+    for i in 0..10_000 {
+        let id = p.add_task(format!("Task {i}"), None);
+        if i % 25 == 0 {
+            continue; // a phase
+        }
+        p.task_mut(id).unwrap().outline_level = 2;
+        p.set_duration(id, 480, false).unwrap();
+        leaves.push(id);
+    }
+    for (k, w) in leaves.windows(2).enumerate() {
+        if k % 7 != 0 {
+            p.link(w[0].into(), w[1], LinkType::FS, Lag::None).unwrap();
+        }
+        if k >= 30 && k % 11 == 0 {
+            p.link(leaves[k - 30].into(), w[1], LinkType::SS, Lag::None).unwrap();
+        }
+    }
+    recalculate(&mut p);
+    let shown = vec![true; p.tasks.len()];
+    let best = best_of(3, || {
+        for opts in [NetworkOptions::default(), NetworkOptions { critical_first: true, ..Default::default() }] {
+            let d = layout(&p, &boxes_for(&p, &shown, &Default::default()), opts);
+            assert_eq!(d.nodes.len(), 10_000);
+        }
+    });
+    let limit = if cfg!(debug_assertions) { Duration::from_secs(10) } else { Duration::from_millis(500) };
+    eprintln!("laying out 10,000 tasks twice: {best:?} (limit {limit:?})");
+    assert!(best < limit, "took {best:?}; the limit is {limit:?}");
+}

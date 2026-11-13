@@ -549,3 +549,62 @@ fn hostile_splits_in_a_file_are_clamped_on_open() {
     p.tasks[idx].splits = (0..200).map(|i| Split { work: i, resume: shift(p.start, 10_000 + i) }).collect();
     assert!(plancraft_core::limits::check_edit(&mut p).is_err());
 }
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: cases(256), ..ProptestConfig::default() })]
+
+    /// The Network Diagram lays out any outline and any links, cycles from a damaged file
+    /// included: one box per shown task, no two in one place, every task right of its
+    /// predecessors when there is no cycle, and a line for every link.
+    #[test]
+    fn network_diagrams_lay_out_any_plan(
+        levels in prop::collection::vec(1u16..6, 0..40),
+        links in prop::collection::vec((0usize..40, 0usize..40, 0usize..5), 0..80),
+        shown in prop::collection::vec(any::<bool>(), 40),
+        collapse in prop::collection::vec(any::<bool>(), 40),
+        critical_first in any::<bool>(),
+        ids_only in any::<bool>(),
+    ) {
+        use plancraft_core::network::{NetLinkKind, NetworkOptions, boxes_for, layout};
+        let mut p = Project::new("Net", start());
+        let ids: Vec<TaskId> = levels.iter().enumerate().map(|(i, _)| p.add_task(format!("T{i}"), None)).collect();
+        for (t, &lvl) in p.tasks.iter_mut().zip(&levels) {
+            t.outline_level = lvl;
+        }
+        let n = ids.len();
+        let mut cyclic = false;
+        for &(a, b, how) in &links {
+            if n == 0 {
+                break;
+            }
+            let (a, b) = (ids[a % n], ids[b % n]);
+            if how == 4 {
+                // Written straight into the plan, as a damaged file could hold it.
+                p.task_mut(b).unwrap().predecessors.push(Dependency::fs(a));
+                cyclic = true;
+            } else {
+                let _ = p.link(a.into(), b, LinkType::ALL[how], Lag::None);
+            }
+        }
+        recalculate(&mut p);
+        let shown: Vec<bool> = shown.into_iter().take(n).collect();
+        let collapsed: std::collections::HashSet<TaskId> = ids.iter().zip(&collapse).filter(|(_, c)| **c).map(|(id, _)| *id).collect();
+        let d = layout(&p, &boxes_for(&p, &shown, &collapsed), NetworkOptions { critical_first, ids_only });
+        prop_assert!(d.nodes.len() <= shown.iter().filter(|s| **s).count());
+        let mut cells = std::collections::HashSet::new();
+        for (k, node) in d.nodes.iter().enumerate() {
+            prop_assert!(cells.insert((node.col, node.row)), "two boxes at {:?}", (node.col, node.row));
+            prop_assert!(node.col < d.cols && node.row < d.rows);
+            let r = d.rect(k).unwrap();
+            prop_assert_eq!(d.node_at(r.x + 1.0, r.y + 1.0), Some(k));
+        }
+        for l in &d.links {
+            prop_assert!(d.route(l).len() >= 2);
+            // Collapsing can loop too: a task linked between two subtasks of one summary links
+            // into its box and back out.
+            if !cyclic && collapse.iter().all(|c| !c) && matches!(l.kind, NetLinkKind::Dependency { .. }) {
+                prop_assert!(d.nodes[l.to].col > d.nodes[l.from].col, "{:?}", l);
+            }
+        }
+    }
+}

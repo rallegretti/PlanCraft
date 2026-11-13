@@ -863,3 +863,78 @@ fn baselining_selected_tasks_does_not_update_their_summary_baseline() {
     assert_eq!(p.task(s).unwrap().baseline.unwrap().cost, 100.0, "the summary keeps its baseline");
     assert_eq!(plancraft_core::report::project_stats(&p).baseline_cost, 100.0);
 }
+
+// ---------------------------------------------------------------------------
+// Network Diagram layout
+// ---------------------------------------------------------------------------
+
+fn network(p: &Project, critical_first: bool) -> plancraft_core::network::Diagram {
+    use plancraft_core::network::{NetworkOptions, boxes_for, layout};
+    let shown = vec![true; p.tasks.len()];
+    layout(p, &boxes_for(p, &shown, &Default::default()), NetworkOptions { critical_first, ids_only: false })
+}
+
+fn cell(d: &plancraft_core::network::Diagram, p: &Project, id: TaskId) -> (u32, u32) {
+    let n = &d.nodes[d.node_of(p.task_index(id).unwrap()).unwrap()];
+    (n.col, n.row)
+}
+
+// Source: https://support.microsoft.com/en-us/office/layout-dialog-box-aab7e026-13f6-428e-a20a-0825865537cc — "Box Layout" (Top Down From Left)
+// The default arrangement starts the first path at the upper left and runs it across; each further
+// path starts on a new row below.
+#[test]
+fn network_diagram_runs_each_path_along_its_own_row() {
+    let mut p = project();
+    let a = task(&mut p, "A", DAY);
+    let b = task(&mut p, "B", DAY);
+    let c = task(&mut p, "C", DAY);
+    let other = task(&mut p, "Other start", DAY);
+    let d2 = task(&mut p, "D", DAY);
+    p.link_chain(&[a, b, c]).unwrap();
+    p.link_chain(&[other, d2]).unwrap();
+    recalculate(&mut p);
+    let d = network(&p, false);
+    assert_eq!([cell(&d, &p, a), cell(&d, &p, b), cell(&d, &p, c)], [(0, 0), (1, 0), (2, 0)]);
+    assert_eq!([cell(&d, &p, other), cell(&d, &p, d2)], [(0, 1), (1, 1)]);
+}
+
+// Source: https://support.microsoft.com/en-us/office/layout-dialog-box-aab7e026-13f6-428e-a20a-0825865537cc — "Box Layout" (Top Down - Critical First)
+// With "Critical First" the critical path is laid out first, from the upper left; other paths go
+// on the rows below it.
+#[test]
+fn network_diagram_critical_first_puts_the_critical_path_on_top() {
+    let mut p = project();
+    let side = task(&mut p, "Side", DAY);
+    let main = task(&mut p, "Main", 5 * DAY);
+    let end = task(&mut p, "End", DAY);
+    p.link(side.into(), end, LinkType::FS, Lag::None).unwrap();
+    p.link(main.into(), end, LinkType::FS, Lag::None).unwrap();
+    recalculate(&mut p);
+    let d = network(&p, true);
+    assert_eq!([cell(&d, &p, main), cell(&d, &p, end)], [(0, 0), (1, 0)]);
+    assert_eq!(cell(&d, &p, side), (0, 1));
+}
+
+// Source: https://support.microsoft.com/en-us/office/layout-dialog-box-aab7e026-13f6-428e-a20a-0825865537cc — "Link style" (Rectilinear)
+// Right-angled link lines leave a predecessor's box on its right side and go into the successor's
+// box on its left side.
+#[test]
+fn network_diagram_links_leave_on_the_right_and_enter_on_the_left() {
+    let mut p = project();
+    let a = task(&mut p, "A", DAY);
+    let b = task(&mut p, "B", DAY);
+    let c = task(&mut p, "C", DAY);
+    p.link(a.into(), b, LinkType::FS, Lag::None).unwrap();
+    p.link(a.into(), c, LinkType::SS, Lag::None).unwrap();
+    recalculate(&mut p);
+    let d = network(&p, false);
+    for l in &d.links {
+        let (from, to) = (d.rect(l.from).unwrap(), d.rect(l.to).unwrap());
+        let pts = d.route(l);
+        let (first, last) = (pts[0], pts[pts.len() - 1]);
+        assert_eq!(first, (from.right(), from.mid_y()));
+        assert_eq!(last, (to.x, to.mid_y()));
+        // Right angles only.
+        assert!(pts.windows(2).all(|w| w[0].0 == w[1].0 || w[0].1 == w[1].1), "{pts:?}");
+    }
+}

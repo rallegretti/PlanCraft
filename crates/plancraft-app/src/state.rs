@@ -14,6 +14,7 @@ use crate::widgets::grid::GridState;
 pub enum ViewKind {
     Gantt,
     TrackingGantt,
+    NetworkDiagram,
     TaskUsage,
     Milestones,
     ResourceSheet,
@@ -29,6 +30,7 @@ impl ViewKind {
         match self {
             ViewKind::Gantt => "Gantt Chart",
             ViewKind::TrackingGantt => "Tracking Gantt",
+            ViewKind::NetworkDiagram => "Network Diagram",
             ViewKind::TaskUsage => "Task Usage",
             ViewKind::Milestones => "Milestones",
             ViewKind::ResourceSheet => "Resource Sheet",
@@ -44,6 +46,7 @@ impl ViewKind {
         match self {
             ViewKind::Gantt => "📊",
             ViewKind::TrackingGantt => "📈",
+            ViewKind::NetworkDiagram => "🔀",
             ViewKind::TaskUsage => "📝",
             ViewKind::Milestones => "♦",
             ViewKind::ResourceSheet => "👥",
@@ -55,9 +58,10 @@ impl ViewKind {
         }
     }
 
-    pub const ALL: [ViewKind; 10] = [
+    pub const ALL: [ViewKind; 11] = [
         ViewKind::Gantt,
         ViewKind::TrackingGantt,
+        ViewKind::NetworkDiagram,
         ViewKind::TaskUsage,
         ViewKind::Milestones,
         ViewKind::Calendar,
@@ -93,7 +97,7 @@ impl MenuTab {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Default)]
 pub enum TaskFilter {
     #[default]
     All,
@@ -127,6 +131,56 @@ impl TaskFilter {
             TaskFilter::Late => "Late Tasks",
             TaskFilter::Unassigned => "Unassigned Tasks",
             TaskFilter::Summary => "Summary Tasks",
+        }
+    }
+}
+
+/// Network Diagram drag in progress.
+#[derive(Clone, Debug)]
+pub enum NetDrag {
+    /// Moving the view (diagram point under the pointer when the drag started).
+    Pan { grab: egui::Pos2 },
+    /// Drawing a link from a box.
+    Link { from: TaskId },
+}
+
+/// Network Diagram view: where it is scrolled to, zoom, options and the cached layout.
+pub struct NetworkState {
+    /// Diagram point at the top-left corner of the view.
+    pub offset: egui::Pos2,
+    pub zoom: f32,
+    pub opts: plancraft_core::network::NetworkOptions,
+    pub show_summaries: bool,
+    pub link_labels: bool,
+    pub progress_marks: bool,
+    pub drag: Option<NetDrag>,
+    /// Zoom out to show the whole diagram on the next frame.
+    pub fit_pending: bool,
+    /// Scroll the selected task into view on the next frame.
+    pub reveal_pending: bool,
+    /// Layout of the last frame, with the key it was made for.
+    pub cache: Option<(u64, std::sync::Arc<plancraft_core::network::Diagram>)>,
+    /// Document the view was last shown for (another one starts at the top left).
+    pub shown_for: Option<u64>,
+    /// Where the view was drawn on the last frame (for zooming about its centre).
+    pub view_rect: egui::Rect,
+}
+
+impl Default for NetworkState {
+    fn default() -> Self {
+        Self {
+            offset: egui::Pos2::ZERO,
+            zoom: 1.0,
+            opts: Default::default(),
+            show_summaries: true,
+            link_labels: false,
+            progress_marks: true,
+            drag: None,
+            fit_pending: false,
+            reveal_pending: true,
+            cache: None,
+            shown_for: None,
+            view_rect: egui::Rect::NOTHING,
         }
     }
 }
@@ -294,6 +348,7 @@ pub struct UiState {
     pub column_widths: std::collections::HashMap<(TaskTable, String), f32>,
     pub table: TaskTable,
     pub gantt: GanttState,
+    pub network: NetworkState,
     pub table_width: f32,
     pub timeline_visible: bool,
     pub granularity: Granularity,
@@ -331,6 +386,7 @@ impl Default for UiState {
             column_widths: std::collections::HashMap::new(),
             table: TaskTable::Entry,
             gantt: GanttState::default(),
+            network: NetworkState::default(),
             table_width: 720.0,
             timeline_visible: true,
             granularity: Granularity::Day,
