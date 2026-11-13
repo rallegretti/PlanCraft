@@ -13,6 +13,7 @@
 //! The view selector spans both rows. Tabs are plain tabs, and the toolbar is
 //! one row of compact inline buttons separated by thin dividers.
 
+use plancraft_core::baseline::PlanSlot;
 use std::cell::RefCell;
 
 use egui::{Align, Align2, Color32, CornerRadius, FontId, Layout, Rect, Sense, Shape, Stroke, StrokeKind, Ui, pos2, vec2};
@@ -406,8 +407,15 @@ fn toolbar(ui: &mut Ui, st: &mut UiState, info: &MenuInfo, settings: &AppSetting
                 Command::UpdateProject,
             );
             sep(ui);
-            b(ui, "📏", Some("Set Baseline"), "Save the current schedule as the baseline", doc, Command::SetBaseline);
-            b(ui, "✖", None, "Clear the baseline", doc, Command::ClearBaseline);
+            b(
+                ui,
+                "📏",
+                Some("Set Baseline"),
+                "Save the schedule as Baseline or Baseline1–10, or set an interim plan",
+                doc,
+                Command::SetBaseline,
+            );
+            b(ui, "✖", None, "Clear a baseline or an interim plan", doc, Command::ClearBaseline);
             sep(ui);
             if button(ui, "⚡", Some("AI Agents"), "Built-in MCP server for AI agents", true, info.mcp_running).clicked() {
                 push(Command::McpPanel);
@@ -418,6 +426,14 @@ fn toolbar(ui: &mut Ui, st: &mut UiState, info: &MenuInfo, settings: &AppSetting
             b(ui, "♦", Some("Milestones"), "Milestone status report", doc, Command::SetView(ViewKind::Milestones));
             b(ui, "📶", Some("Workload"), "Resource utilization and resource graph", doc, Command::SetView(ViewKind::Workload));
             b(ui, "📈", Some("Tracking Gantt"), "Current schedule against the baseline", doc, Command::SetView(ViewKind::TrackingGantt));
+            b(
+                ui,
+                "📚",
+                Some("Baselines"),
+                "Compare Baseline, Baseline1 and Baseline2 bars",
+                doc,
+                Command::SetView(ViewKind::MultipleBaselines),
+            );
             sep(ui);
             b(ui, "🖶", Some("Print"), "Print preview, page setup and printing (Ctrl+P)", doc, Command::Print);
             b(ui, "📄", Some("Export PDF"), "Save the current view as a PDF", doc, Command::ExportPdf);
@@ -527,9 +543,41 @@ fn toolbar(ui: &mut Ui, st: &mut UiState, info: &MenuInfo, settings: &AppSetting
                 return;
             }
             let g = &mut st.gantt;
+            if st.view == ViewKind::MultipleBaselines {
+                combo_label(ui, "Bars of");
+                let shown: Vec<String> =
+                    crate::views::gantt_chart::baseline_slots(g.multi_baselines).map(|n| PlanSlot::Baseline(n).name()).collect();
+                let title = if shown.is_empty() { "no baseline".to_string() } else { shown.join(", ") };
+                ui.add_enabled_ui(doc, |ui| {
+                    ui.menu_button(title, |ui| {
+                        for n in 0..=plancraft_core::baseline::MAX_BASELINE {
+                            let bit = 1u16 << n;
+                            let mut on = g.multi_baselines & bit != 0;
+                            if ui.checkbox(&mut on, PlanSlot::Baseline(n).name()).changed() {
+                                g.multi_baselines ^= bit;
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text("Which baselines to compare, one bar each")
+                });
+                sep(ui);
+                toggle(ui, "☰", "Project Summary", "Show the project summary bar", &mut g.show_project_summary);
+                return;
+            }
             toggle(ui, "⚠", "Critical Path", "Highlight critical tasks", &mut g.show_critical);
             toggle(ui, "⌛", "Slack", "Show total slack after each task", &mut g.show_slack);
-            toggle(ui, "📏", "Baseline", "Show baseline bars", &mut g.show_baseline);
+            toggle(ui, "📏", "Baseline", "Show baseline bars (the Tracking Gantt always does)", &mut g.show_baseline);
+            egui::ComboBox::from_id_salt("tb_baseline_slot")
+                .width(88.0)
+                .selected_text(PlanSlot::Baseline(g.baseline_slot).name())
+                .show_ui(ui, |ui| {
+                    for n in 0..=plancraft_core::baseline::MAX_BASELINE {
+                        ui.selectable_value(&mut g.baseline_slot, n, PlanSlot::Baseline(n).name());
+                    }
+                })
+                .response
+                .on_hover_text("Which baseline the baseline bars show");
             sep(ui);
             toggle(ui, "▣", "Progress", "Show progress inside bars", &mut g.show_progress);
             toggle(ui, "🔗", "Links", "Show dependency arrows", &mut g.show_links);

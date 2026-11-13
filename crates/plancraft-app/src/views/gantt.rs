@@ -13,7 +13,7 @@ use crate::edit::EditExt;
 use crate::fields::{self, Field};
 use crate::state::{ToastKind, UiState};
 use crate::theme;
-use crate::views::gantt_chart::{self, ChartAction, ChartInput};
+use crate::views::gantt_chart::{self, ChartAction, ChartInput, ChartKind};
 use crate::views::{GroupRow, Row};
 use crate::widgets::grid::{self, GridConfig, GridEvent};
 
@@ -306,12 +306,37 @@ pub fn column_menu_popup(ctx: &egui::Context, p: &Project, st: &UiState, out: &m
         }
         ui.separator();
         ui.menu_button("Insert Column", |ui| {
-            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
-                for f in fields::all_fields(p).into_iter().filter(|f| !shown.contains(f)) {
-                    if ui.button(f.title(p)).clicked() {
-                        cmd = Some(Command::InsertColumn { at: col, key: f.key() });
-                    }
+            use crate::columns::TaskCol;
+            let hidden: Vec<Field> = fields::all_fields(p).into_iter().filter(|f| !shown.contains(f)).collect();
+            let mut pick = |ui: &mut egui::Ui, f: &Field| {
+                if ui.button(f.title(p)).clicked() {
+                    cmd = Some(Command::InsertColumn { at: col, key: f.key() });
                 }
+            };
+            // Baseline1–10 and the interim plans go in submenus so the list stays short.
+            let numbered = |f: &Field, n: u8| matches!(f, Field::Builtin(TaskCol::Baseline(m, _)) if *m == n);
+            let interim = |f: &Field| matches!(f, Field::Builtin(TaskCol::Interim(..)));
+            egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                for f in hidden.iter().filter(|f| !interim(f) && !(1..=10).any(|n| numbered(f, n))) {
+                    pick(ui, f);
+                }
+                ui.separator();
+                ui.menu_button("Baseline1–10", |ui| {
+                    for n in 1..=plancraft_core::baseline::MAX_BASELINE {
+                        ui.menu_button(PlanSlot::Baseline(n).name(), |ui| {
+                            for f in hidden.iter().filter(|f| numbered(f, n)) {
+                                pick(ui, f);
+                            }
+                        });
+                    }
+                });
+                ui.menu_button("Interim Plans", |ui| {
+                    egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                        for f in hidden.iter().filter(|f| interim(f)) {
+                            pick(ui, f);
+                        }
+                    });
+                });
             });
         });
         if ui.add_enabled(shown.len() > 1, egui::Button::new("Hide Column")).clicked() {
@@ -353,7 +378,7 @@ pub fn splitter(ui: &mut Ui, x: f32, rect: Rect, width: &mut f32) {
     ui.painter().vline(x + 2.0, rect.y_range(), Stroke::new(1.0, theme::pal().GRID_LINE_STRONG));
 }
 
-pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, tracking: bool, out: &mut Vec<Command>) {
+pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, kind: ChartKind, out: &mut Vec<Command>) {
     let rows = super::visible_rows(&doc.project, st);
     let table_w = st.table_width.min(rect.width() - 160.0).max(120.0);
     let table_rect = Rect::from_min_size(rect.min, vec2(table_w, rect.height()));
@@ -370,7 +395,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, track
             project: &doc.project,
             rows: &rows,
             selected: &is_sel,
-            tracking,
+            kind,
             row_height: theme::ROW_HEIGHT,
             header_height: theme::HEADER_HEIGHT,
             blank_rows: blank,

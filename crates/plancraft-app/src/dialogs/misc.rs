@@ -173,7 +173,8 @@ pub fn statistics(ctx: &Context, doc: &Document, open: &mut bool) {
             });
             if let Some(ev) = &s.earned_value {
                 ui.separator();
-                ui.label(RichText::new("Earned value (vs. baseline)").strong());
+                let against = plancraft_core::baseline::PlanSlot::Baseline(ev.baseline).name();
+                ui.label(RichText::new(format!("Earned value (against {against})")).strong());
                 egui::Grid::new("stats_ev").num_columns(4).spacing([24.0, 4.0]).show(ui, |ui| {
                     ui.label("Planned value (BCWS)");
                     ui.label(format::money(p, ev.bcws));
@@ -200,8 +201,9 @@ pub fn statistics(ctx: &Context, doc: &Document, open: &mut bool) {
                     ui.end_row();
                 });
             } else {
+                let against = plancraft_core::baseline::PlanSlot::Baseline(p.settings.earned_value_baseline).name();
                 ui.label(
-                    RichText::new("Set a baseline (Project > Set Baseline) to track variance and earned value.")
+                    RichText::new(format!("Save {against} (Project > Set Baseline) to track earned value; variance uses Baseline."))
                         .small()
                         .color(theme::pal().TEXT_WEAK),
                 );

@@ -7,9 +7,10 @@ use chrono::NaiveDateTime;
 use plancraft_core::custom::{self, CustomFieldKind, CustomValue};
 use plancraft_core::prelude::*;
 
-use crate::columns::{self, CellCtx, TaskCol, TaskTable};
+use crate::columns::{self, BlField, CellCtx, TaskCol, TaskTable};
 use crate::format;
 use crate::widgets::grid::{Cell, ColumnDef};
+use plancraft_core::baseline::{MAX_BASELINE, MAX_INTERIM};
 
 /// The pick-list entry that clears a custom value.
 pub const NO_VALUE: &str = "(none)";
@@ -22,7 +23,7 @@ pub enum Field {
 }
 
 /// Built-in columns and their keys (as saved in table layouts). Keys never change.
-const BUILTIN: [(TaskCol, &str); 51] = [
+const BUILTIN: [(TaskCol, &str); 52] = [
     (TaskCol::Indicators, "indicators"),
     (TaskCol::Mode, "mode"),
     (TaskCol::Wbs, "wbs"),
@@ -39,10 +40,11 @@ const BUILTIN: [(TaskCol, &str); 51] = [
     (TaskCol::RemainingWork, "remaining_work"),
     (TaskCol::Cost, "cost"),
     (TaskCol::FixedCost, "fixed_cost"),
-    (TaskCol::BaselineStart, "baseline_start"),
-    (TaskCol::BaselineFinish, "baseline_finish"),
-    (TaskCol::BaselineWork, "baseline_work"),
-    (TaskCol::BaselineCost, "baseline_cost"),
+    (TaskCol::Baseline(0, BlField::Start), "baseline_start"),
+    (TaskCol::Baseline(0, BlField::Finish), "baseline_finish"),
+    (TaskCol::Baseline(0, BlField::Duration), "baseline_duration"),
+    (TaskCol::Baseline(0, BlField::Work), "baseline_work"),
+    (TaskCol::Baseline(0, BlField::Cost), "baseline_cost"),
     (TaskCol::StartVariance, "start_variance"),
     (TaskCol::FinishVariance, "finish_variance"),
     (TaskCol::WorkVariance, "work_variance"),
@@ -109,7 +111,15 @@ impl SortKey {
 impl Field {
     pub fn key(&self) -> String {
         match self {
-            Field::Builtin(c) => BUILTIN.iter().find(|(b, _)| b == c).map_or("", |(_, k)| k).to_string(),
+            Field::Builtin(c) => match BUILTIN.iter().find(|(b, _)| b == c) {
+                Some((_, k)) => k.to_string(),
+                None => match c {
+                    TaskCol::Baseline(n, f) => format!("baseline{n}_{}", f.key()),
+                    TaskCol::Interim(n, false) => format!("start{n}"),
+                    TaskCol::Interim(n, true) => format!("finish{n}"),
+                    _ => String::new(),
+                },
+            },
             Field::Custom(id) => custom::custom_column_key(*id),
         }
     }
@@ -119,7 +129,10 @@ impl Field {
         if let Some(id) = custom::custom_column_field(key) {
             return p.custom_field(id).map(|_| Field::Custom(id));
         }
-        BUILTIN.iter().find(|(_, k)| *k == key).map(|(c, _)| Field::Builtin(*c))
+        if let Some((c, _)) = BUILTIN.iter().find(|(_, k)| *k == key) {
+            return Some(Field::Builtin(*c));
+        }
+        generated().find(|c| Field::Builtin(*c).key() == key).map(Field::Builtin)
     }
 
     pub fn title(&self, p: &Project) -> String {
@@ -224,8 +237,12 @@ impl Field {
             RemainingDuration => mins(t.duration_progress().1),
             Stop => time(s.stop),
             Resume => time(s.resume),
-            BaselineStart => time(t.baseline.map(|b| b.start)),
-            BaselineFinish => time(t.baseline.map(|b| b.finish)),
+            Baseline(n, BlField::Start) => time(t.baseline_in(*n).map(|b| b.start)),
+            Baseline(n, BlField::Finish) => time(t.baseline_in(*n).map(|b| b.finish)),
+            Baseline(n, BlField::Duration) => t.baseline_in(*n).map_or(SortKey::Missing, |b| mins(b.duration)),
+            Baseline(n, BlField::Work) => t.baseline_in(*n).map_or(SortKey::Missing, |b| mins(b.work)),
+            Baseline(n, BlField::Cost) => t.baseline_in(*n).map_or(SortKey::Missing, |b| num(b.cost)),
+            Interim(n, finish) => time(t.interim_in(*n).map(|i| if *finish { i.finish } else { i.start })),
             ConstraintDate => time(t.constraint.date),
             Deadline => time(t.deadline),
             PercentComplete => num(f64::from(s.percent_complete)),
@@ -234,8 +251,6 @@ impl Field {
             RemainingWork => mins((s.work - s.actual_work).max(0)),
             Cost => num(s.cost),
             FixedCost => num(t.fixed_cost),
-            BaselineWork => t.baseline.map_or(SortKey::Missing, |b| mins(b.work)),
-            BaselineCost => t.baseline.map_or(SortKey::Missing, |b| num(b.cost)),
             WorkVariance => t.baseline.map_or(SortKey::Missing, |b| mins(s.work - b.work)),
             CostVariance => t.baseline.map_or(SortKey::Missing, |b| num(s.cost - b.cost)),
             FreeSlack => mins(s.free_slack),
@@ -281,9 +296,23 @@ pub fn table_fields(p: &Project, table: TaskTable) -> Vec<Field> {
     }
 }
 
-/// Every field a column can show: the built-in columns, then the custom fields.
+/// Baseline1–10 values and the interim plans (Start1–10, Finish1–10), in that order.
+fn generated() -> impl Iterator<Item = TaskCol> {
+    let baselines = (1..=MAX_BASELINE).flat_map(|n| BlField::ALL.into_iter().map(move |f| TaskCol::Baseline(n, f)));
+    let interim = (1..=MAX_INTERIM).flat_map(|n| [TaskCol::Interim(n, false), TaskCol::Interim(n, true)]);
+    baselines.chain(interim)
+}
+
+/// Every field a column can show: the built-in columns, the numbered baselines and interim plans,
+/// then the custom fields.
 pub fn all_fields(p: &Project) -> Vec<Field> {
-    BUILTIN.iter().map(|(c, _)| Field::Builtin(*c)).chain(p.custom_fields.iter().map(|f| Field::Custom(f.id))).collect()
+    BUILTIN
+        .iter()
+        .map(|(c, _)| *c)
+        .chain(generated())
+        .map(Field::Builtin)
+        .chain(p.custom_fields.iter().map(|f| Field::Custom(f.id)))
+        .collect()
 }
 
 /// Saves a changed column list for `table` (keys of `fields`).

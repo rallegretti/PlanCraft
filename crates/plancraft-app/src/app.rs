@@ -746,6 +746,8 @@ impl PlanCraftApp {
                             nt.predecessors.clear();
                             nt.members.clear();
                             nt.baseline = None;
+                            nt.baselines.clear();
+                            nt.interim.clear();
                             nt.outline_level = target_level.saturating_add(t.outline_level.saturating_sub(base));
                             ids.push(nt.id);
                             p.tasks.insert(at + k, nt);
@@ -818,11 +820,12 @@ impl PlanCraftApp {
             Command::ChangeWorkingTime => {
                 self.dialogs.working_time = Some(Bound::new(doc, dialogs::working_time::WorkingTime::new(&doc.project)));
             }
-            Command::SetBaseline => match doc.edit("Set Baseline", |p| p.set_baseline(&[])) {
-                Ok(()) => st.toast(ToastKind::Success, "Baseline saved for all tasks"),
-                Err(e) => st.toast(ToastKind::Warning, e.to_string()),
-            },
-            Command::ClearBaseline => report(st, doc.edit("Clear Baseline", |p| p.clear_baseline(&[]))),
+            Command::SetBaseline => {
+                self.dialogs.set_baseline = Some(Bound::new(doc, dialogs::baseline::SetBaseline::new(sel.clone())));
+            }
+            Command::ClearBaseline => {
+                self.dialogs.clear_baseline = Some(Bound::new(doc, dialogs::baseline::ClearBaseline::new(sel.clone())));
+            }
             Command::UpdateProgressFromTime => match doc.edit("Update Progress from Time", |p| p.update_progress_from_time()) {
                 Ok(_) => st.toast(ToastKind::Success, "Progress updated from tracked time"),
                 Err(e) => st.toast(ToastKind::Warning, e.to_string()),
@@ -1334,6 +1337,8 @@ impl PlanCraftApp {
                     "CustomFields" => Command::CustomFields,
                     "Print" => Command::Print,
                     "UpdateProject" => Command::UpdateProject,
+                    "SetBaseline" => Command::SetBaseline,
+                    "ClearBaseline" => Command::ClearBaseline,
                     "Track" => {
                         // Progress through day 10, then a week's pause: split bars to look at.
                         if let Some(doc) = lock(&self.ws).active_doc_mut() {
@@ -1347,6 +1352,31 @@ impl PlanCraftApp {
                                     plancraft_core::ops::ProgressUpdate::Scheduled,
                                 )?;
                                 p.reschedule_uncompleted_work(&[], p.end_of_working_day(after))
+                            });
+                        }
+                        continue;
+                    }
+                    "Rebaseline" => {
+                        // Two later snapshots to compare: Baseline1 after a slip, Baseline2 after another.
+                        if let Some(doc) = lock(&self.ws).active_doc_mut() {
+                            let _ = doc.try_edit("Rebaseline", ChangeSource::User, |p| {
+                                use plancraft_core::baseline::Scope;
+                                for n in 1..=2u8 {
+                                    let ids: Vec<TaskId> = p
+                                        .tasks
+                                        .iter()
+                                        .filter(|t| !t.sched.is_summary && !t.is_milestone())
+                                        .map(|t| t.id)
+                                        .step_by(3)
+                                        .collect();
+                                    for id in ids {
+                                        let d = p.task(id).map_or(0, |t| t.duration);
+                                        p.set_duration(id, d.saturating_add(d / 2), false)?;
+                                    }
+                                    plancraft_core::schedule::recalculate(p);
+                                    p.set_baseline_in(n, &Scope::entire_project())?;
+                                }
+                                Ok::<(), PlanError>(())
                             });
                         }
                         continue;
@@ -1644,7 +1674,8 @@ impl PlanCraftApp {
                 self.view_bar(ui, bar);
                 let mut rect = Rect::from_min_max(pos2(full.left() + 22.0, full.top()), full.max);
                 let st = &mut self.st;
-                let show_timeline = st.timeline_visible && matches!(st.view, ViewKind::Gantt | ViewKind::TrackingGantt);
+                let show_timeline =
+                    st.timeline_visible && matches!(st.view, ViewKind::Gantt | ViewKind::TrackingGantt | ViewKind::MultipleBaselines);
                 if show_timeline {
                     let tl = Rect::from_min_size(rect.min, vec2(rect.width(), views::timeline::HEIGHT));
                     let chart_w = (rect.width() - st.table_width - 16.0).max(100.0);
@@ -1652,8 +1683,11 @@ impl PlanCraftApp {
                     rect = Rect::from_min_max(pos2(rect.left(), tl.bottom()), rect.max);
                 }
                 match st.view {
-                    ViewKind::Gantt => views::gantt::show(ui, rect, doc, st, false, &mut out),
-                    ViewKind::TrackingGantt => views::gantt::show(ui, rect, doc, st, true, &mut out),
+                    ViewKind::Gantt => views::gantt::show(ui, rect, doc, st, views::gantt_chart::ChartKind::Gantt, &mut out),
+                    ViewKind::TrackingGantt => views::gantt::show(ui, rect, doc, st, views::gantt_chart::ChartKind::Tracking, &mut out),
+                    ViewKind::MultipleBaselines => {
+                        views::gantt::show(ui, rect, doc, st, views::gantt_chart::ChartKind::Baselines, &mut out)
+                    }
                     ViewKind::NetworkDiagram => views::network::show(ui, rect, doc, st, &mut out),
                     ViewKind::TaskUsage => views::task_usage::show(ui, rect, doc, st, &mut out),
                     ViewKind::Milestones => views::milestones::show(ui, rect, doc, st, &mut out),
@@ -1681,6 +1715,8 @@ impl PlanCraftApp {
             let st = &mut self.st;
             dialogs::show_bound(&mut self.dialogs.external, &mut ws, |d, doc| d.show(&ctx, doc, st));
             dialogs::show_bound(&mut self.dialogs.update_project, &mut ws, |d, doc| d.show(&ctx, doc, st));
+            dialogs::show_bound(&mut self.dialogs.set_baseline, &mut ws, |d, doc| d.show(&ctx, doc, st));
+            dialogs::show_bound(&mut self.dialogs.clear_baseline, &mut ws, |d, doc| d.show(&ctx, doc, st));
             let st = &*st;
             dialogs::show_bound(&mut self.dialogs.print, &mut ws, |d, doc| d.show(&ctx, doc, st));
         }
@@ -2019,6 +2055,80 @@ mod ui_tests {
             h.state_mut().exec(&ctx, Command::Print);
             h.run_steps(2);
         }
+    }
+
+    #[test]
+    fn set_baseline_window_saves_numbered_baselines_interim_plans_and_clears_them() {
+        use egui_kittest::kittest::Queryable;
+        use plancraft_core::baseline::PlanSlot;
+        let mut h = harness();
+        let ctx = h.ctx.clone();
+        let count = |h: &Harness<'static, PlanCraftApp>, slot: PlanSlot| {
+            let ws = h.state().ws.lock().unwrap();
+            ws.active_doc().unwrap().project.plan_info(slot).tasks
+        };
+        let all = h.state().ws.lock().unwrap().active_doc().unwrap().project.tasks.len();
+        let label = |h: &Harness<'static, PlanCraftApp>, slot: PlanSlot| {
+            crate::dialogs::baseline::slot_label(&h.state().ws.lock().unwrap().active_doc().unwrap().project, slot)
+        };
+        assert_eq!(count(&h, PlanSlot::Baseline(0)), all, "the demo plan has a Baseline");
+        assert_eq!(count(&h, PlanSlot::Baseline(1)), 0);
+
+        // Set baseline: pick Baseline1 from the list, entire project.
+        h.state_mut().exec(&ctx, Command::SetBaseline);
+        h.run_steps(2);
+        h.get_by_value(&label(&h, PlanSlot::Baseline(0))).click();
+        h.run_steps(2);
+        h.get_by_label("Baseline1").click();
+        h.run_steps(2);
+        h.get_by_label("  OK  ").click();
+        h.run_steps(3);
+        assert!(h.state().dialogs.set_baseline.is_none(), "OK closes the window");
+        assert_eq!(count(&h, PlanSlot::Baseline(1)), all);
+
+        // Set interim plan: the current Start/Finish into Start1/Finish1 (the defaults).
+        h.state_mut().exec(&ctx, Command::SetBaseline);
+        h.run_steps(2);
+        h.get_by_label("Set interim plan").click();
+        h.run_steps(2);
+        h.get_by_label("  OK  ").click();
+        h.run_steps(3);
+        assert_eq!(count(&h, PlanSlot::Interim(1)), all);
+
+        // The new columns show the saved values.
+        {
+            let ws = h.state().ws.lock().unwrap();
+            let p = &ws.active_doc().unwrap().project;
+            let none = |_: TaskId| false;
+            let ctx_cells = crate::columns::CellCtx { overallocated: &none };
+            let col = crate::columns::TaskCol::Baseline(1, crate::columns::BlField::Finish);
+            assert_eq!(crate::columns::cell(col, p, 0, &ctx_cells).text, crate::format::date(p.tasks[0].sched.finish));
+            let interim = crate::columns::cell(crate::columns::TaskCol::Interim(1, false), p, 0, &ctx_cells).text;
+            assert_eq!(interim, crate::format::date(p.tasks[0].sched.start));
+        }
+
+        // The Multiple Baselines Gantt and its print preview render.
+        h.state_mut().exec(&ctx, Command::SetView(ViewKind::MultipleBaselines));
+        h.run_steps(3);
+        h.state_mut().exec(&ctx, Command::Print);
+        h.run_steps(2);
+        h.state_mut().dialogs.print = None;
+
+        // Clear Baseline: Baseline1 from the entire project.
+        h.state_mut().exec(&ctx, Command::ClearBaseline);
+        h.run_steps(2);
+        h.get_by_value(&label(&h, PlanSlot::Baseline(0))).click();
+        h.run_steps(2);
+        h.get_by_label(&label(&h, PlanSlot::Baseline(1))).click();
+        h.run_steps(2);
+        h.get_by_label("  OK  ").click();
+        h.run_steps(3);
+        assert!(h.state().dialogs.clear_baseline.is_none());
+        assert_eq!(count(&h, PlanSlot::Baseline(1)), 0);
+        assert_eq!(count(&h, PlanSlot::Baseline(0)), all, "Baseline is untouched");
+        assert_eq!(count(&h, PlanSlot::Interim(1)), all);
+        h.state_mut().exec(&ctx, Command::Undo);
+        assert_eq!(count(&h, PlanSlot::Baseline(1)), all, "clearing is one undoable edit");
     }
 
     /// Regressions in the Print window: Ctrl+P again threw away unsaved Page Setup changes,

@@ -840,12 +840,13 @@ fn actual_duration_past_the_plan_completes_the_task() {
     assert_eq!(task.actual_finish, Some(dt(2026, 10, 21, 17)));
 }
 
-// Source: https://support.microsoft.com/en-us/office/create-or-update-a-baseline-or-an-interim-plan-in-project-desktop-7e775482-ac84-4f4a-bbd0-592f9ac91953 — "Update a baseline or an interim plan"
-// Saving a baseline for selected tasks only does not roll it up into their summary task unless
-// the roll-up options are chosen, so the summary (and the project total built from it) keeps
-// its older baseline figures. (PlanCraft has no roll-up options yet.)
-#[test]
-fn baselining_selected_tasks_does_not_update_their_summary_baseline() {
+// ---------------------------------------------------------------------------
+// Baselines and interim plans
+// ---------------------------------------------------------------------------
+
+/// Phase (summary) over A (2 days, fixed cost 100), plus D (1 day, fixed cost 50) added under it
+/// after Baseline was saved for the whole plan.
+fn baselined_phase() -> (Project, TaskId, TaskId, TaskId) {
     let mut p = project();
     let s = p.add_task("Phase", None);
     let a = task(&mut p, "A", 2 * DAY);
@@ -855,13 +856,146 @@ fn baselining_selected_tasks_does_not_update_their_summary_baseline() {
     p.set_baseline(&[]);
     let d = p.add_task("D", None);
     p.set_duration(d, DAY, false).unwrap();
-    p.indent(d).unwrap();
     p.task_mut(d).unwrap().fixed_cost = 50.0;
+    p.link(a.into(), d, LinkType::FS, Lag::None).unwrap();
     recalculate(&mut p);
-    p.set_baseline(&[d]);
+    assert_eq!(p.parent_index(p.task_index(d).unwrap()), Some(0), "D is a subtask of Phase, like A");
+    (p, s, a, d)
+}
+
+// Source: https://support.microsoft.com/en-us/office/create-or-update-a-baseline-or-an-interim-plan-in-project-desktop-7e775482-ac84-4f4a-bbd0-592f9ac91953 — "Update a baseline or an interim plan"
+// Saving a baseline for selected tasks only does not roll it up into their summary task unless
+// the roll-up options are chosen, so the summary (and the project total built from it) keeps
+// its older baseline figures.
+#[test]
+fn baselining_selected_tasks_does_not_update_their_summary_baseline() {
+    let (mut p, s, _, d) = baselined_phase();
+    p.set_baseline_in(0, &Scope::selected(vec![d])).unwrap();
     assert_eq!(p.task(d).unwrap().baseline.unwrap().cost, 50.0);
     assert_eq!(p.task(s).unwrap().baseline.unwrap().cost, 100.0, "the summary keeps its baseline");
     assert_eq!(plancraft_core::report::project_stats(&p).baseline_cost, 100.0);
+}
+
+// Source: https://support.microsoft.com/en-us/office/create-or-update-a-baseline-or-an-interim-plan-in-project-desktop-7e775482-ac84-4f4a-bbd0-592f9ac91953 — "Set a baseline"
+// "To all summary tasks" rolls the selected tasks' new baseline values up into their summary
+// tasks, so the summary's baseline matches its subtasks again.
+#[test]
+fn rolling_a_selected_baseline_up_to_all_summary_tasks() {
+    let (mut p, s, a, d) = baselined_phase();
+    p.set_baseline_in(0, &Scope { tasks: vec![d], roll_up_to_summaries: true, ..Scope::default() }).unwrap();
+    let sb = p.task(s).unwrap().baseline.unwrap();
+    assert_eq!(sb.cost, 150.0, "A's 100 plus D's 50");
+    assert_eq!(sb.start, p.task(a).unwrap().baseline.unwrap().start);
+    assert_eq!(sb.finish, dt(2026, 10, 21, 17), "D's baseline finish (day 3)");
+    assert_eq!(sb.duration, 3 * DAY);
+    assert_eq!(plancraft_core::report::project_stats(&p).baseline_cost, 150.0);
+}
+
+// Source: https://support.microsoft.com/en-us/office/create-or-update-a-baseline-or-an-interim-plan-in-project-desktop-7e775482-ac84-4f4a-bbd0-592f9ac91953 — "Set a baseline"
+// "From subtasks into selected summary task(s)" updates a selected summary's baseline from its
+// subtasks' saved baselines, picking up a subtask that was added and baselined later.
+#[test]
+fn rolling_subtask_baselines_into_a_selected_summary() {
+    let (mut p, s, _, d) = baselined_phase();
+    p.set_baseline_in(0, &Scope::selected(vec![d])).unwrap();
+    assert_eq!(p.task(s).unwrap().baseline.unwrap().cost, 100.0);
+    p.set_baseline_in(0, &Scope { tasks: vec![s], roll_up_from_subtasks: true, ..Scope::default() }).unwrap();
+    assert_eq!(p.task(s).unwrap().baseline.unwrap().cost, 150.0);
+    assert_eq!(p.task(s).unwrap().baseline.unwrap().finish, dt(2026, 10, 21, 17));
+}
+
+// Source: https://support.microsoft.com/en-us/office/create-or-update-a-baseline-or-an-interim-plan-in-project-desktop-7e775482-ac84-4f4a-bbd0-592f9ac91953 — "Learn more about baselines and interim plans"
+// A plan keeps up to 11 baselines (Baseline and Baseline1–10); saving one leaves the others as
+// they were, so later snapshots can be compared with the original plan.
+#[test]
+fn eleven_independent_baselines() {
+    let mut p = project();
+    let a = task(&mut p, "A", 2 * DAY);
+    recalculate(&mut p);
+    p.set_baseline_in(0, &Scope::entire_project()).unwrap();
+    p.set_duration(a, 4 * DAY, false).unwrap();
+    recalculate(&mut p);
+    for n in 1..=10 {
+        p.set_baseline_in(n, &Scope::entire_project()).unwrap();
+    }
+    assert!(p.set_baseline_in(11, &Scope::entire_project()).is_err(), "there is no Baseline11");
+    let t = p.task(a).unwrap();
+    assert_eq!(t.baseline_in(0).unwrap().finish, dt(2026, 10, 20, 17));
+    assert!((1..=10).all(|n| t.baseline_in(n).unwrap().finish == dt(2026, 10, 22, 17)));
+}
+
+// Source: https://support.microsoft.com/en-us/office/create-or-update-a-baseline-or-an-interim-plan-in-project-desktop-7e775482-ac84-4f4a-bbd0-592f9ac91953 — "Analyze baseline and interim data"
+// Variance is calculated from Baseline only, not from Baseline1–10: with only Baseline1 saved,
+// a task has no baseline to vary from.
+#[test]
+fn variance_uses_baseline_not_the_numbered_ones() {
+    let mut p = project();
+    let a = task(&mut p, "A", 2 * DAY);
+    recalculate(&mut p);
+    p.set_baseline_in(1, &Scope::entire_project()).unwrap();
+    let stats = plancraft_core::report::project_stats(&p);
+    assert_eq!(stats.baseline_finish, None);
+    assert_eq!(stats.baseline_cost, 0.0);
+    assert!(p.task(a).unwrap().baseline.is_none());
+}
+
+// Source: https://support.microsoft.com/en-us/office/create-or-update-a-baseline-or-an-interim-plan-in-project-desktop-7e775482-ac84-4f4a-bbd0-592f9ac91953 — "Set an interim plan"
+// Copying into an interim plan keeps only start and finish dates; copying one baseline into
+// another copies all of its values.
+#[test]
+fn interim_plans_hold_dates_and_baseline_copies_hold_everything() {
+    let (mut p, _, a, _) = baselined_phase();
+    let all = Scope::entire_project();
+    assert_eq!(p.save_plan(PlanSlot::Scheduled, PlanSlot::Interim(1), &all).unwrap(), 3);
+    let t = p.task(a).unwrap();
+    assert_eq!(t.interim_in(1).map(|i| (i.start, i.finish)), t.sched.start.zip(t.sched.finish));
+    p.save_plan(PlanSlot::Baseline(0), PlanSlot::Baseline(4), &all).unwrap();
+    let (b0, b4) = (p.task(a).unwrap().baseline_in(0).copied().unwrap(), p.task(a).unwrap().baseline_in(4).copied().unwrap());
+    assert_eq!((b4.start, b4.finish, b4.duration, b4.work, b4.cost), (b0.start, b0.finish, b0.duration, b0.work, b0.cost));
+    p.save_plan(PlanSlot::Baseline(4), PlanSlot::Interim(2), &all).unwrap();
+    assert_eq!(p.task(a).unwrap().interim_in(2).map(|i| (i.start, i.finish)), Some((b0.start, b0.finish)));
+}
+
+// Source: https://learn.microsoft.com/en-us/office/vba/api/project.application.baselineclear — "Parameters"
+// Clearing works on all tasks or only the selected ones, for a baseline or for a Start/Finish
+// (interim) pair.
+#[test]
+fn clearing_a_numbered_baseline_or_interim_plan() {
+    let (mut p, s, a, d) = baselined_phase();
+    let all = Scope::entire_project();
+    p.set_baseline_in(2, &all).unwrap();
+    p.save_plan(PlanSlot::Scheduled, PlanSlot::Interim(5), &all).unwrap();
+    assert_eq!(p.clear_plan(PlanSlot::Baseline(2), &[a]).unwrap(), 1);
+    assert!(p.task(a).unwrap().baseline_in(2).is_none());
+    assert!(p.task(d).unwrap().baseline_in(2).is_some() && p.task(s).unwrap().baseline_in(2).is_some());
+    assert!(p.task(a).unwrap().baseline.is_some(), "Baseline is untouched");
+    assert_eq!(p.clear_plan(PlanSlot::Interim(5), &[]).unwrap(), 3);
+    assert!(p.tasks.iter().all(|t| t.interim.is_empty()));
+}
+
+// Source: https://support.microsoft.com/en-us/office/earned-value-method-task-field-4f2df39a-c696-4dd5-bd62-bb0ea26a4a33 — "Remarks"
+// Project Options let you pick which of the 11 baselines earned value is calculated from.
+#[test]
+fn earned_value_uses_the_chosen_baseline() {
+    let mut p = project();
+    let t = task(&mut p, "Build", 10 * DAY);
+    p.task_mut(t).unwrap().fixed_cost = 1000.0;
+    recalculate(&mut p);
+    p.set_baseline_in(0, &Scope::entire_project()).unwrap();
+    p.task_mut(t).unwrap().fixed_cost = 3000.0;
+    recalculate(&mut p);
+    p.set_baseline_in(3, &Scope::entire_project()).unwrap();
+    p.set_percent_complete(t, 50).unwrap();
+    recalculate(&mut p);
+    let at = dt(2026, 10, 30, 17);
+    let ev0 = plancraft_core::report::earned_value(&p, at).unwrap();
+    assert!((ev0.bcwp - 500.0).abs() < 1e-6, "BCWP against Baseline {}", ev0.bcwp);
+    p.set_earned_value_baseline(3).unwrap();
+    let ev3 = plancraft_core::report::earned_value(&p, at).unwrap();
+    assert_eq!(ev3.baseline, 3);
+    assert!((ev3.bcwp - 1500.0).abs() < 1e-6, "BCWP against Baseline3 {}", ev3.bcwp);
+    p.set_earned_value_baseline(5).unwrap();
+    assert!(plancraft_core::report::earned_value(&p, at).is_none(), "Baseline5 was never saved");
 }
 
 // ---------------------------------------------------------------------------

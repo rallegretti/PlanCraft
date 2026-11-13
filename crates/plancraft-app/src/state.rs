@@ -14,6 +14,7 @@ use crate::widgets::grid::GridState;
 pub enum ViewKind {
     Gantt,
     TrackingGantt,
+    MultipleBaselines,
     NetworkDiagram,
     TaskUsage,
     Milestones,
@@ -30,6 +31,7 @@ impl ViewKind {
         match self {
             ViewKind::Gantt => "Gantt Chart",
             ViewKind::TrackingGantt => "Tracking Gantt",
+            ViewKind::MultipleBaselines => "Multiple Baselines Gantt",
             ViewKind::NetworkDiagram => "Network Diagram",
             ViewKind::TaskUsage => "Task Usage",
             ViewKind::Milestones => "Milestones",
@@ -46,6 +48,7 @@ impl ViewKind {
         match self {
             ViewKind::Gantt => "📊",
             ViewKind::TrackingGantt => "📈",
+            ViewKind::MultipleBaselines => "📚",
             ViewKind::NetworkDiagram => "🔀",
             ViewKind::TaskUsage => "📝",
             ViewKind::Milestones => "♦",
@@ -58,9 +61,10 @@ impl ViewKind {
         }
     }
 
-    pub const ALL: [ViewKind; 11] = [
+    pub const ALL: [ViewKind; 12] = [
         ViewKind::Gantt,
         ViewKind::TrackingGantt,
+        ViewKind::MultipleBaselines,
         ViewKind::NetworkDiagram,
         ViewKind::TaskUsage,
         ViewKind::Milestones,
@@ -205,6 +209,10 @@ pub struct GanttState {
     pub drag: Option<BarDrag>,
     pub show_critical: bool,
     pub show_baseline: bool,
+    /// The baseline (0–10) the Gantt Chart and Tracking Gantt draw under each bar.
+    pub baseline_slot: u8,
+    /// Baselines shown in the Multiple Baselines Gantt (bit n = Baseline n).
+    pub multi_baselines: u16,
     pub show_slack: bool,
     pub show_links: bool,
     pub show_resource_names: bool,
@@ -221,6 +229,8 @@ impl Default for GanttState {
             drag: None,
             show_critical: false,
             show_baseline: false,
+            baseline_slot: 0,
+            multi_baselines: 0b111,
             show_slack: false,
             show_links: true,
             show_resource_names: true,

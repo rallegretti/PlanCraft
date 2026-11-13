@@ -36,6 +36,8 @@ pub struct EarnedValue {
     pub cv: f64,
     pub spi: f64,
     pub cpi: f64,
+    /// The baseline (0–10) the values are measured against.
+    pub baseline: u8,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
@@ -152,31 +154,13 @@ pub fn milestone_status(p: &Project, at: NaiveDateTime) -> Vec<MilestoneStatus> 
         .collect()
 }
 
-/// Total baseline cost: each baseline counted once at the highest level that has one (a summary's
-/// baseline already includes its subtasks and its own fixed cost).
-fn baseline_cost(p: &Project) -> f64 {
-    // (outline level, a task on the path to here has a baseline)
-    let mut stack: Vec<(u16, bool)> = Vec::new();
-    let mut total = 0.0;
-    for t in &p.tasks {
-        while stack.last().is_some_and(|&(lvl, _)| lvl >= t.outline_level) {
-            stack.pop();
-        }
-        let covered = stack.last().is_some_and(|&(_, c)| c);
-        if !covered && let Some(b) = t.baseline {
-            total += b.cost;
-        }
-        stack.push((t.outline_level, covered || t.baseline.is_some()));
-    }
-    total
-}
-
 pub fn earned_value(p: &Project, at: NaiveDateTime) -> Option<EarnedValue> {
     let leaves = p.tasks.iter().filter(|t| !t.sched.is_summary && t.active);
     let mut ev = EarnedValue::default();
     let mut any_baseline = false;
+    let slot = p.settings.earned_value_baseline;
     for t in leaves {
-        let Some(b) = t.baseline else { continue };
+        let Some(b) = t.baseline_in(slot) else { continue };
         any_baseline = true;
         ev.bcws += b.cost * planned_fraction(b.start, b.finish, at, p);
         ev.bcwp += b.cost * t.sched.percent_complete as f64 / 100.0;
@@ -193,6 +177,7 @@ pub fn earned_value(p: &Project, at: NaiveDateTime) -> Option<EarnedValue> {
     if !any_baseline {
         return None;
     }
+    ev.baseline = slot;
     ev.sv = ev.bcwp - ev.bcws;
     ev.cv = ev.bcwp - ev.acwp;
     ev.spi = if ev.bcws > 0.0 { ev.bcwp / ev.bcws } else { 1.0 };
@@ -206,7 +191,7 @@ pub fn project_stats(p: &Project) -> ProjectStats {
     let wc = project_calendar(p);
     let leaves: Vec<&Task> = p.tasks.iter().filter(|t| !t.sched.is_summary).collect();
     let baseline_finish = p.tasks.iter().filter_map(|t| t.baseline.map(|b| b.finish)).max();
-    let baseline_cost = baseline_cost(p);
+    let baseline_cost = crate::baseline::baseline_totals(p, 0).0;
     let over = crate::workload::overallocations(p).len();
     ProjectStats {
         name: p.name.clone(),

@@ -195,7 +195,7 @@ entity; read-only tools are annotated with `readOnlyHint`.
 | `close_project` | discard_changes | Close a document. Fails when it has unsaved changes unless discard_changes is true. Unsaved changes the user made in the app are never discarded. |
 | `set_active_document` | – | Make another open document the active one (the default target of all tools and the document shown in the app). |
 | `get_project` *(read-only)* | – | Get project information (name, dates, manager, file), settings (hours per day, currency, points, scheduling options), calendars and key statistics (task counts, late/critical tasks, work, cost, % complete, warnings). |
-| `update_project` | author, calendar, company, critical_slack, currency, days_per_month, default_finish_time, default_start_time, duration_unit, hours_per_day, hours_per_point, hours_per_week, manager, minutes_per_point, name, new_tasks_auto, notes, progress_from_time, start, status_date, use_resource_calendars | Update project properties and settings. Only the given fields change. |
+| `update_project` | author, calendar, company, critical_slack, currency, days_per_month, default_finish_time, default_start_time, duration_unit, earned_value_baseline, hours_per_day, hours_per_point, hours_per_week, manager, minutes_per_point, name, new_tasks_auto, notes, progress_from_time, start, status_date, use_resource_calendars | Update project properties and settings. Only the given fields change. |
 
 ### Tasks
 
@@ -285,7 +285,7 @@ Set or clear values with the `custom` argument of `create_task`/`update_task`, e
 | Tool | Arguments (required in **bold**) | Description |
 |---|---|---|
 | `set_page_setup` | footer, header, legend, margin_mm, orientation, pages_wide, paper, print_blank_pages, repeat_columns, scale_percent | Change the plan's Page Setup (saved with the plan, undoable). Omitted settings keep their values. Returns the whole setup. |
-| `export_pdf` | footer, from, header, legend, margin_mm, orientation, overwrite, pages_wide, paper, **path**, print_blank_pages, repeat_columns, scale_percent, to, view | Print the plan to a PDF: the Gantt chart (`view: "gantt"`, the default), the Tracking Gantt with baselines (`"tracking"`) or the task table alone (`"table"`), paginated with the plan's Page Setup. Page Setup arguments apply to this export only. Needs file access; never replaces an existing file unless `overwrite` is true, and only writes `.pdf` files. |
+| `export_pdf` | footer, from, header, legend, margin_mm, orientation, overwrite, pages_wide, paper, **path**, print_blank_pages, repeat_columns, scale_percent, to, view | Print the plan to a PDF: the Gantt chart (`view: "gantt"`, the default), the Tracking Gantt with Baseline (`"tracking"`), the Multiple Baselines Gantt with Baseline, Baseline1 and Baseline2 bars (`"baselines"`) or the task table alone (`"table"`), paginated with the plan's Page Setup. Page Setup arguments apply to this export only. Needs file access; never replaces an existing file unless `overwrite` is true, and only writes `.pdf` files. |
 
 Header and footer texts take codes: `[Project]`, `[Manager]`, `[Company]`, `[View]`, `[Date]`, `[Page]`, `[Pages]`, `[Start]` and `[Finish]`. `pages_wide: 0` prints the timescale at a fixed zoom instead of fitting it to pages.
 
@@ -319,9 +319,13 @@ Set the status date with `update_project` (`status_date`, or `null` for today). 
 | `level_resources` | clear_existing, max_delay_days, resources | Resolve overallocations by delaying tasks (leveling delay), visiting tasks by start, priority and slack. Started, manual and must-start/finish tasks are not moved. Undoable. |
 | `clear_leveling` | – | Remove all leveling delays. |
 | `project_statistics` *(read-only)* | – | Project statistics: dates, duration, work, cost, % complete, task counts (complete, in progress, late, critical), overallocated resources, baseline variance, milestone status and earned value (SPI/CPI, needs a baseline). |
-| `set_baseline` | tasks | Save the current start, finish, duration, work and cost as the baseline of all tasks (or the given tasks) for later variance tracking. |
-| `clear_baseline` | tasks | Remove the baseline from all tasks (or the given tasks). |
-| `get_variance` *(read-only)* | only_slipped, tasks | Compare current schedule with the baseline per task: start/finish variance (working time), duration, work and cost variance. |
+| `set_baseline` | baseline, roll_up_from_subtasks, roll_up_to_summaries, tasks | Save the current start, finish, duration, work and cost into a baseline (Baseline, or Baseline1-10) for all tasks or the given tasks. Variance is measured against Baseline; the numbered ones keep earlier snapshots (e.g. one per phase). Saving for selected tasks can roll the new values up into their summary tasks. Overwrites what the baseline held for those tasks. |
+| `set_interim_plan` | **copy**, **into**, tasks | Copy plan values between the current schedule, baselines and interim plans (Start1/Finish1 .. Start10/Finish10). Copying into an interim plan copies start and finish only; copying a baseline into another baseline copies all its values; tasks with no value in the source lose theirs in the target. An interim plan can't be copied into a baseline. |
+| `clear_baseline` | baseline, interim_plan, tasks | Remove a baseline (default Baseline) or an interim plan from all tasks (or the given tasks). |
+| `list_baselines` *(read-only)* | – | Which baselines and interim plans hold values: per slot the number of tasks, when it was last saved, its start and finish, and its total work and cost. Also says which baseline earned value uses. |
+| `get_variance` *(read-only)* | baseline, only_slipped, tasks | Compare current schedule with a baseline per task (default Baseline): start/finish variance (working time), duration, work and cost variance. |
+
+Baselines are named `baseline` (or `0`) and `baseline1` … `baseline10` (or `1` … `10`); interim plans `interim1` … `interim10`. `get_task` adds `other_baselines` and `interim_plans` when a task has values there. Choose the baseline earned value uses with `update_project` (`earned_value_baseline`, 0–10).
 
 ### History
 

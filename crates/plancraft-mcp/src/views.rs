@@ -359,6 +359,33 @@ pub fn task_detail(p: &Project, id: TaskId) -> Value {
         "baseline": variance_json(p, t),
         "warnings": t.sched.warnings,
     });
+    if !t.baselines.is_empty() {
+        let other: serde_json::Map<String, Value> = t
+            .baselines
+            .iter()
+            .map(|(n, b)| {
+                let v = json!({
+                    "start": fmt_dt(Some(b.start)), "finish": fmt_dt(Some(b.finish)), "duration": dur(p, b.duration),
+                    "work": format_work(b.work), "cost": round2(b.cost), "saved": fmt_dt(Some(b.saved)),
+                });
+                (plancraft_core::baseline::PlanSlot::Baseline(*n).key(), v)
+            })
+            .collect();
+        m.insert("other_baselines".into(), Value::Object(other));
+    }
+    if !t.interim.is_empty() {
+        let interim: serde_json::Map<String, Value> = t
+            .interim
+            .iter()
+            .map(|(n, i)| {
+                (
+                    plancraft_core::baseline::PlanSlot::Interim(*n).key(),
+                    json!({ "start": fmt_dt(Some(i.start)), "finish": fmt_dt(Some(i.finish)) }),
+                )
+            })
+            .collect();
+        m.insert("interim_plans".into(), Value::Object(interim));
+    }
     if let Value::Object(e) = extra {
         for (k, val) in e {
             m.insert(k, val);
@@ -559,6 +586,7 @@ pub fn earned_value_json(ev: &Option<report::EarnedValue>) -> Value {
             "cost_variance": round2(e.cv),
             "spi": round2(e.spi),
             "cpi": round2(e.cpi),
+            "baseline": plancraft_core::baseline::PlanSlot::Baseline(e.baseline).name(),
         }),
     }
 }

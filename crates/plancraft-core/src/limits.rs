@@ -419,6 +419,10 @@ impl Fixer {
         self.name(&mut s.currency);
         self.minutes(&mut s.minutes_per_point, "work per complexity point is out of range");
         self.signed_minutes(&mut s.critical_slack, "the critical slack threshold is out of range");
+        if s.earned_value_baseline > crate::baseline::MAX_BASELINE {
+            s.earned_value_baseline = 0;
+            self.note("the earned value baseline does not exist");
+        }
     }
 
     fn task(&mut self, t: &mut Task, calendars: &HashSet<crate::ids::CalendarId>) {
@@ -470,13 +474,23 @@ impl Fixer {
             }
         }
         self.f64(&mut t.fixed_cost, -MAX_MONEY, MAX_MONEY, "a cost is out of range");
-        if let Some(b) = &mut t.baseline {
+        let before = (t.baselines.len(), t.interim.len());
+        t.baselines.retain(|n, _| (1..=crate::baseline::MAX_BASELINE).contains(n));
+        t.interim.retain(|n, _| (1..=crate::baseline::MAX_INTERIM).contains(n));
+        if before != (t.baselines.len(), t.interim.len()) {
+            self.note("a baseline or interim plan number is out of range");
+        }
+        for b in t.baseline.iter_mut().chain(t.baselines.values_mut()) {
             self.datetime(&mut b.start);
             self.datetime(&mut b.finish);
             self.datetime(&mut b.saved);
             self.minutes(&mut b.duration, "a baseline duration is out of range");
             self.minutes(&mut b.work, "baseline work is out of range");
             self.f64(&mut b.cost, -MAX_MONEY, MAX_MONEY, "a cost is out of range");
+        }
+        for i in t.interim.values_mut() {
+            self.datetime(&mut i.start);
+            self.datetime(&mut i.finish);
         }
     }
 

@@ -1,5 +1,6 @@
 //! Modal-style windows.
 
+pub mod baseline;
 pub mod custom_fields;
 pub mod mcp_panel;
 pub mod misc;
@@ -48,6 +49,8 @@ pub struct Dialogs {
     pub custom_fields: Option<Bound<custom_fields::CustomFields>>,
     pub print: Option<Bound<print::PrintDialog>>,
     pub update_project: Option<Bound<update_project::UpdateProject>>,
+    pub set_baseline: Option<Bound<baseline::SetBaseline>>,
+    pub clear_baseline: Option<Bound<baseline::ClearBaseline>>,
     /// Follows the active document's selection; reset when the active document changes.
     pub assign: Option<Bound<misc::AssignResources>>,
     pub external: Option<Bound<misc::ExternalLinks>>,

@@ -12,7 +12,7 @@ use crate::args::*;
 const PAPERS: [&str; 5] = ["letter", "legal", "tabloid", "a4", "a3"];
 const ORIENTATIONS: [&str; 2] = ["landscape", "portrait"];
 const LEGENDS: [&str; 3] = ["every_page", "legend_page", "none"];
-const VIEWS: [&str; 3] = ["gantt", "tracking", "table"];
+const VIEWS: [&str; 4] = ["gantt", "tracking", "baselines", "table"];
 
 fn setup_props() -> serde_json::Map<String, Value> {
     let Value::Object(m) = json!({
@@ -39,7 +39,7 @@ pub fn tools() -> Vec<Tool> {
         (
             "view",
             string_enum(
-                "What to print (default gantt): the Gantt chart, the Tracking Gantt (with baselines), or the task table alone.",
+                "What to print (default gantt): the Gantt chart, the Tracking Gantt (with Baseline), the Multiple Baselines Gantt (Baseline, Baseline1 and Baseline2 bars), or the task table alone.",
                 &VIEWS,
             ),
         ),
@@ -201,11 +201,14 @@ fn export_pdf(ctx: &Ctx, a: &Args) -> ToolResult {
         let chart = match view.as_str() {
             "gantt" => Some(print::ChartOptions::default()),
             "tracking" => Some(print::ChartOptions { critical: true, baseline: true, ..Default::default() }),
+            "baselines" => Some(print::ChartOptions { baselines: 0b111, ..Default::default() }),
             _ => None,
         };
         let mut sheet = print::task_sheet(p, chart.is_some());
-        if view == "tracking" {
-            sheet.title = "Tracking Gantt".into();
+        match view.as_str() {
+            "tracking" => sheet.title = "Tracking Gantt".into(),
+            "baselines" => sheet.title = "Multiple Baselines Gantt".into(),
+            _ => {}
         }
         let out = print::layout(&print::PrintJob {
             project: p,

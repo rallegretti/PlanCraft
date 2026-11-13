@@ -4,6 +4,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use chrono::NaiveDate;
+use plancraft_core::baseline::{MAX_BASELINE, MAX_INTERIM, PlanSlot, Scope};
 use plancraft_core::duration::format_work;
 use plancraft_core::ids::{ResourceId, TaskId};
 use plancraft_core::leveling::{LevelingOptions, clear_leveling, level_resources};
@@ -93,24 +94,62 @@ pub fn tools() -> Vec<Tool> {
         Tool::new(
             "set_baseline",
             "Set baseline",
-            "Save the current start, finish, duration, work and cost as the baseline of all tasks (or the given tasks) for later variance tracking.",
-            schema(json!({ "tasks": task_refs("Only these tasks (default all).") }), &[]),
+            "Save the current start, finish, duration, work and cost into a baseline (Baseline, or Baseline1-10) for all tasks or the given tasks. Variance is measured against Baseline; the numbered ones keep earlier snapshots (e.g. one per phase). Saving for selected tasks can roll the new values up into their summary tasks. Overwrites what the baseline held for those tasks.",
+            schema(
+                json!({
+                    "baseline": baseline_ref("Which baseline: 0 or \"baseline\" (default), 1-10 or \"baseline1\"..\"baseline10\"."),
+                    "tasks": task_refs("Only these tasks (default all)."),
+                    "roll_up_to_summaries": boolean("With tasks: roll their new baseline values up into all their summary tasks (default false)."),
+                    "roll_up_from_subtasks": boolean("With tasks: recompute each given summary task's baseline from its subtasks' baselines (default false)."),
+                }),
+                &[],
+            ),
             set_baseline,
+        ),
+        Tool::new(
+            "set_interim_plan",
+            "Set interim plan",
+            "Copy plan values between the current schedule, baselines and interim plans (Start1/Finish1 .. Start10/Finish10). Copying into an interim plan copies start and finish only; copying a baseline into another baseline copies all its values; tasks with no value in the source lose theirs in the target. An interim plan can't be copied into a baseline.",
+            schema(
+                json!({
+                    "copy": string("Source: \"scheduled\" (current start/finish), \"baseline\", \"baseline1\"..\"baseline10\" or \"interim1\"..\"interim10\"."),
+                    "into": string("Target: \"interim1\"..\"interim10\", \"baseline\" or \"baseline1\"..\"baseline10\"."),
+                    "tasks": task_refs("Only these tasks (default all)."),
+                }),
+                &["copy", "into"],
+            ),
+            set_interim_plan,
         ),
         Tool::new(
             "clear_baseline",
             "Clear baseline",
-            "Remove the baseline from all tasks (or the given tasks).",
-            schema(json!({ "tasks": task_refs("Only these tasks (default all).") }), &[]),
+            "Remove a baseline (default Baseline) or an interim plan from all tasks (or the given tasks).",
+            schema(
+                json!({
+                    "baseline": baseline_ref("Which baseline to clear: 0-10 or \"baseline\"..\"baseline10\" (default Baseline)."),
+                    "interim_plan": integer("Clear this interim plan (1-10) instead of a baseline."),
+                    "tasks": task_refs("Only these tasks (default all)."),
+                }),
+                &[],
+            ),
             clear_baseline,
         )
         .destructive(),
         Tool::new(
+            "list_baselines",
+            "List baselines",
+            "Which baselines and interim plans hold values: per slot the number of tasks, when it was last saved, its start and finish, and its total work and cost. Also says which baseline earned value uses.",
+            schema(json!({}), &[]),
+            list_baselines,
+        )
+        .read_only(),
+        Tool::new(
             "get_variance",
             "Baseline variance",
-            "Compare current schedule with the baseline per task: start/finish variance (working time), duration, work and cost variance.",
+            "Compare current schedule with a baseline per task (default Baseline): start/finish variance (working time), duration, work and cost variance.",
             schema(
                 json!({
+                    "baseline": baseline_ref("Compare against this baseline (default Baseline, the one variance fields use)."),
                     "tasks": task_refs("Only these tasks."),
                     "only_slipped": boolean("Only tasks finishing later than baseline."),
                 }),
@@ -400,16 +439,94 @@ fn project_statistics(ctx: &Ctx, a: &Args) -> ToolResult {
     })
 }
 
+fn baseline_ref(desc: &str) -> Value {
+    json!({ "type": ["integer", "string"], "description": desc })
+}
+
+/// The baseline an argument names (`default` when absent).
+fn baseline_arg(a: &Args, key: &str, default: u8) -> ToolResult<u8> {
+    let slot = match a.get(key) {
+        None | Some(Value::Null) => return Ok(default),
+        Some(Value::Number(_)) => match a.u64(key)? {
+            Some(n) if n <= u64::from(MAX_BASELINE) => PlanSlot::Baseline(n as u8),
+            _ => return err(format!("'{key}' must be a baseline number from 0 to 10")),
+        },
+        Some(Value::String(s)) => match s.trim().parse::<u8>() {
+            Ok(n) if n <= MAX_BASELINE => PlanSlot::Baseline(n),
+            _ => PlanSlot::parse(s)
+                .ok_or_else(|| ToolError(format!("'{key}': unknown baseline '{s}' (use baseline, baseline1 .. baseline10)")))?,
+        },
+        Some(other) => return err(format!("'{key}' must be a baseline number or name, got {other}")),
+    };
+    match slot {
+        PlanSlot::Baseline(n) => Ok(n),
+        _ => err(format!("'{key}' must name a baseline (baseline, baseline1 .. baseline10)")),
+    }
+}
+
+fn slot_arg(a: &Args, key: &str) -> ToolResult<PlanSlot> {
+    let s = a.req_str(key)?;
+    PlanSlot::parse(s).ok_or_else(|| {
+        ToolError(format!("'{key}': unknown plan '{s}' (use scheduled, baseline, baseline1 .. baseline10, interim1 .. interim10)"))
+    })
+}
+
+fn plan_info_json(p: &Project, slot: PlanSlot) -> Value {
+    let info = p.plan_info(slot);
+    let mut v = json!({
+        "name": slot.name(),
+        "key": slot.key(),
+        "tasks": info.tasks,
+        "tasks_with_baseline": info.tasks,
+        "start": fmt_dt(info.start),
+        "finish": fmt_dt(info.finish),
+    });
+    if let PlanSlot::Baseline(_) = slot {
+        set(&mut v, "saved", fmt_dt(info.saved));
+        set(&mut v, "work", json!(format_work(info.work)));
+        set(&mut v, "cost", json!(round2(info.cost)));
+    }
+    v
+}
+
 fn set_baseline(ctx: &Ctx, a: &Args) -> ToolResult {
     ctx.edit(
         a,
         "Set baseline",
         |p, _| {
-            let ids = task_list_arg(p, a, "tasks")?;
-            p.set_baseline(&ids);
-            Ok(p.tasks.iter().filter(|t| t.baseline.is_some()).count())
+            let n = baseline_arg(a, "baseline", 0)?;
+            let scope = Scope {
+                tasks: task_list_arg(p, a, "tasks")?,
+                roll_up_to_summaries: a.bool("roll_up_to_summaries")?.unwrap_or(false),
+                roll_up_from_subtasks: a.bool("roll_up_from_subtasks")?.unwrap_or(false),
+            };
+            let written = p.set_baseline_in(n, &scope)?;
+            Ok((n, written))
         },
-        |doc, n| Ok(json!({ "tasks_with_baseline": n, "baseline_finish": fmt_dt(doc.project.tasks.iter().filter_map(|t| t.baseline.map(|b| b.finish)).max()) })),
+        |doc, (n, written)| {
+            let mut v = plan_info_json(&doc.project, PlanSlot::Baseline(n));
+            set(&mut v, "tasks_written", json!(written));
+            Ok(v)
+        },
+    )
+}
+
+fn set_interim_plan(ctx: &Ctx, a: &Args) -> ToolResult {
+    ctx.edit(
+        a,
+        "Set interim plan",
+        |p, _| {
+            let (copy, into) = (slot_arg(a, "copy")?, slot_arg(a, "into")?);
+            let scope = Scope::selected(task_list_arg(p, a, "tasks")?);
+            let written = p.save_plan(copy, into, &scope)?;
+            Ok((copy, into, written))
+        },
+        |doc, (copy, into, written)| {
+            let mut v = plan_info_json(&doc.project, into);
+            set(&mut v, "copied_from", json!(copy.name()));
+            set(&mut v, "tasks_written", json!(written));
+            Ok(v)
+        },
     )
 }
 
@@ -418,18 +535,44 @@ fn clear_baseline(ctx: &Ctx, a: &Args) -> ToolResult {
         a,
         "Clear baseline",
         |p, _| {
+            let slot = match a.u64("interim_plan")? {
+                Some(_) if a.present("baseline") => return err("give 'baseline' or 'interim_plan', not both"),
+                Some(n) if (1..=u64::from(MAX_INTERIM)).contains(&n) => PlanSlot::Interim(n as u8),
+                Some(_) => return err("'interim_plan' must be from 1 to 10"),
+                None => PlanSlot::Baseline(baseline_arg(a, "baseline", 0)?),
+            };
             let ids = task_list_arg(p, a, "tasks")?;
-            p.clear_baseline(&ids);
-            Ok(p.tasks.iter().filter(|t| t.baseline.is_some()).count())
+            let cleared = p.clear_plan(slot, &ids)?;
+            Ok((slot, cleared))
         },
-        |_, n| Ok(json!({ "tasks_with_baseline": n })),
+        |doc, (slot, cleared)| {
+            let mut v = plan_info_json(&doc.project, slot);
+            set(&mut v, "tasks_cleared", json!(cleared));
+            Ok(v)
+        },
     )
+}
+
+fn list_baselines(ctx: &Ctx, a: &Args) -> ToolResult {
+    ctx.read(a, |doc| {
+        let p = &doc.project;
+        let baselines: Vec<Value> = PlanSlot::baselines().map(|s| plan_info_json(p, s)).collect();
+        let interim: Vec<Value> =
+            PlanSlot::interim_plans().filter(|&s| p.tasks.iter().any(|t| t.dates_in(s).is_some())).map(|s| plan_info_json(p, s)).collect();
+        Ok(json!({
+            "baselines": baselines,
+            "interim_plans": interim,
+            "variance_baseline": PlanSlot::Baseline(0).name(),
+            "earned_value_baseline": PlanSlot::Baseline(p.settings.earned_value_baseline).name(),
+        }))
+    })
 }
 
 fn get_variance(ctx: &Ctx, a: &Args) -> ToolResult {
     ctx.read(a, |doc| {
         let p = &doc.project;
         let ids = task_list_arg(p, a, "tasks")?;
+        let n = baseline_arg(a, "baseline", 0)?;
         let only_slipped = a.bool("only_slipped")?.unwrap_or(false);
         let wc = project_calendar(p);
         let mut rows = Vec::new();
@@ -438,7 +581,7 @@ fn get_variance(ctx: &Ctx, a: &Args) -> ToolResult {
             if !ids.is_empty() && !ids.contains(&t.id) {
                 continue;
             }
-            let Some(b) = t.baseline else {
+            let Some(b) = t.baseline_in(n) else {
                 without += 1;
                 continue;
             };
@@ -460,9 +603,10 @@ fn get_variance(ctx: &Ctx, a: &Args) -> ToolResult {
             }));
         }
         Ok(json!({
+            "baseline": PlanSlot::Baseline(n).name(),
             "tasks": rows,
             "tasks_without_baseline": without,
-            "hint": if without > 0 && rows.is_empty() { "No baseline saved: call set_baseline first." } else { "" },
+            "hint": if without > 0 && rows.is_empty() { "No values in this baseline: call set_baseline first." } else { "" },
         }))
     })
 }

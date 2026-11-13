@@ -30,17 +30,20 @@ const PT_PER_PX: f32 = 0.75;
 pub enum PrintView {
     Gantt,
     Tracking,
+    Baselines,
     TaskTable,
     Resources,
 }
 
 impl PrintView {
-    pub const ALL: [PrintView; 4] = [PrintView::Gantt, PrintView::Tracking, PrintView::TaskTable, PrintView::Resources];
+    pub const ALL: [PrintView; 5] =
+        [PrintView::Gantt, PrintView::Tracking, PrintView::Baselines, PrintView::TaskTable, PrintView::Resources];
 
     pub fn label(self) -> &'static str {
         match self {
             PrintView::Gantt => "Gantt Chart",
             PrintView::Tracking => "Tracking Gantt",
+            PrintView::Baselines => "Multiple Baselines Gantt",
             PrintView::TaskTable => "Task Table",
             PrintView::Resources => "Resource Sheet",
         }
@@ -50,6 +53,7 @@ impl PrintView {
     pub fn for_view(v: ViewKind) -> Self {
         match v {
             ViewKind::TrackingGantt => PrintView::Tracking,
+            ViewKind::MultipleBaselines => PrintView::Baselines,
             ViewKind::ResourceSheet | ViewKind::ResourceUsage | ViewKind::Workload | ViewKind::TeamPlanner => PrintView::Resources,
             _ => PrintView::Gantt,
         }
@@ -146,6 +150,8 @@ pub fn sheet(p: &Project, st: &UiState, view: PrintView, all_columns: bool) -> (
         slack: g.show_slack,
         resource_names: g.show_resource_names,
         per_day: g.px_per_day * PT_PER_PX,
+        baseline_slot: g.baseline_slot,
+        baselines: 0,
     };
     match view {
         PrintView::Gantt => (task_sheet(p, st, view.label(), &pal, all_columns), Some(chart)),
@@ -153,6 +159,11 @@ pub fn sheet(p: &Project, st: &UiState, view: PrintView, all_columns: bool) -> (
             task_sheet(p, st, view.label(), &pal, all_columns),
             Some(ChartOptions { critical: true, baseline: true, progress: true, ..chart }),
         ),
+        PrintView::Baselines => {
+            // Nothing to draw with no baseline chosen: fall back to Baseline.
+            let baselines = if g.multi_baselines == 0 { 1 } else { g.multi_baselines };
+            (task_sheet(p, st, view.label(), &pal, all_columns), Some(ChartOptions { baselines, ..chart }))
+        }
         // Without a chart there is no divider: the whole table prints.
         PrintView::TaskTable => (task_sheet(p, st, view.label(), &pal, true), None),
         PrintView::Resources => (views::resource_sheet::print_sheet(p, &pal), None),

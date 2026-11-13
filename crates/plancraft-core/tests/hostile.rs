@@ -155,6 +155,8 @@ proptest! {
         ops in prop::collection::vec(edit_op(), 1..40),
         range in prop::option::of((-200_000i64..200_000, 0i64..200_000)),
         per_day in prop_oneof![Just(20.0f32), 0.0f32..3000.0, Just(f32::NAN)],
+        baseline_slot in prop_oneof![0u8..11, any::<u8>()],
+        baselines in any::<u16>(),
     ) {
         let mut doc = Document::new(1, demo_project(start()), None);
         for op in ops {
@@ -169,13 +171,14 @@ proptest! {
         let p = &doc.project;
         let day = |n: i64| plancraft_core::calendar::shift(start().and_hms_opt(0, 0, 0).unwrap(), n * 1440).date();
         let (from, to) = range.map_or((None, None), |(a, len)| (Some(day(a)), Some(day(a.saturating_add(len)))));
-        for chart in [true, false] {
-            let sheet = plancraft_core::print::task_sheet(p, chart);
+        let gantt = plancraft_core::print::ChartOptions { critical: true, baseline: true, slack: true, per_day, baseline_slot, ..Default::default() };
+        for chart in [Some(gantt), Some(plancraft_core::print::ChartOptions { baselines, ..gantt }), None] {
+            let sheet = plancraft_core::print::task_sheet(p, chart.is_some());
             let out = plancraft_core::print::layout(&plancraft_core::print::PrintJob {
                 project: p,
                 setup: &p.page_setup,
                 sheet: &sheet,
-                chart: chart.then(|| plancraft_core::print::ChartOptions { critical: true, baseline: true, slack: true, per_day, ..Default::default() }),
+                chart,
                 from,
                 to,
                 printed: start().and_hms_opt(9, 0, 0).unwrap(),
@@ -217,7 +220,10 @@ enum Op {
     Predecessors(usize, String),
     Summary(usize, usize),
     Level,
-    Baseline,
+    Baseline(u8, Option<usize>, bool, bool),
+    Plan(usize, usize, Option<usize>),
+    ClearPlan(usize, Option<usize>),
+    EvBaseline(u8),
     AddField(usize, String, Vec<String>),
     SetCustom(usize, usize, String),
     DeleteField(usize),
@@ -257,7 +263,11 @@ fn edit_op() -> impl Strategy<Value = Op> {
         (i(), cell_text()).prop_map(|(a, t)| Op::Predecessors(a, t)),
         (i(), i()).prop_map(|(a, b)| Op::Summary(a, b)),
         Just(Op::Level),
-        Just(Op::Baseline),
+        (prop_oneof![0u8..12, any::<u8>()], prop::option::of(i()), any::<bool>(), any::<bool>())
+            .prop_map(|(n, t, up, down)| Op::Baseline(n, t, up, down)),
+        (0usize..26, 0usize..26, prop::option::of(i())).prop_map(|(a, b, t)| Op::Plan(a, b, t)),
+        (0usize..26, prop::option::of(i())).prop_map(|(a, t)| Op::ClearPlan(a, t)),
+        prop_oneof![0u8..12, any::<u8>()].prop_map(Op::EvBaseline),
         (0usize..6, cell_text(), prop::collection::vec(cell_text(), 0..4)).prop_map(|(k, n, c)| Op::AddField(k, n, c)),
         (i(), i(), cell_text()).prop_map(|(a, f, t)| Op::SetCustom(a, f, t)),
         i().prop_map(Op::DeleteField),
@@ -282,6 +292,15 @@ fn edit_op() -> impl Strategy<Value = Op> {
         (i(), big()).prop_map(|(a, m)| Op::ActualDuration(a, m)),
         (i(), big()).prop_map(|(a, m)| Op::RemainingDuration(a, m)),
     ]
+}
+
+/// Any plan slot, out-of-range numbers included: Scheduled, Baseline 0–12, Interim 0–11.
+fn slot(k: usize) -> PlanSlot {
+    match k {
+        0 => PlanSlot::Scheduled,
+        1..=13 => PlanSlot::Baseline((k - 1) as u8),
+        _ => PlanSlot::Interim((k - 14) as u8),
+    }
 }
 
 fn field_at(p: &Project, i: usize) -> CustomFieldId {
@@ -346,7 +365,19 @@ fn apply(p: &mut Project, op: &Op) -> PlanResult<()> {
         Op::Level => {
             plancraft_core::leveling::level_resources(p, &plancraft_core::leveling::LevelingOptions::default());
         }
-        Op::Baseline => p.set_baseline(&[]),
+        Op::Baseline(n, t, up, down) => {
+            let tasks: Vec<TaskId> = t.map(|i| task_at(p, i)).into_iter().collect();
+            p.set_baseline_in(n, &Scope { tasks, roll_up_to_summaries: up, roll_up_from_subtasks: down })?;
+        }
+        Op::Plan(a, b, t) => {
+            let tasks: Vec<TaskId> = t.map(|i| task_at(p, i)).into_iter().collect();
+            p.save_plan(slot(a), slot(b), &Scope::selected(tasks))?;
+        }
+        Op::ClearPlan(a, t) => {
+            let tasks: Vec<TaskId> = t.map(|i| task_at(p, i)).into_iter().collect();
+            p.clear_plan(slot(a), &tasks)?;
+        }
+        Op::EvBaseline(n) => p.set_earned_value_baseline(n)?,
         Op::AddField(k, name, choices) => {
             let kind = CustomFieldKind::ALL[k % CustomFieldKind::ALL.len()];
             p.add_custom_field(&name, kind, &choices)?;
@@ -525,6 +556,40 @@ fn page_setup_values_of_the_wrong_type_never_stop_a_plan_opening() {
 
 /// Hostile pauses in a file are clamped when it is opened and never break scheduling: too many,
 /// out of order, negative or past the duration, and resume dates far away or before the start.
+#[test]
+fn hostile_baselines_in_a_file_are_clamped_on_open() {
+    let p = demo_project(start());
+    let mut v = serde_json::to_value(&p).unwrap();
+    let b = |start: &str, work: i64, cost: f64| serde_json::json!({ "start": start, "finish": "2400-01-01T17:00:00", "duration": -5, "work": work, "cost": cost, "saved": "1066-10-14T09:00:00" });
+    v["tasks"][1]["baselines"] = serde_json::json!({
+        "0": b("2026-10-19T08:00:00", 480, 1.0),
+        "3": b("1500-01-01T08:00:00", i64::MAX, 1e300),
+        "11": b("2026-10-19T08:00:00", 480, 1.0),
+        "255": b("2026-10-19T08:00:00", 480, 1.0),
+    });
+    v["tasks"][1]["interim"] = serde_json::json!({
+        "0": { "start": "2026-10-19T08:00:00", "finish": "2026-10-20T17:00:00" },
+        "10": { "start": "1200-01-01T08:00:00", "finish": "3000-01-01T08:00:00" },
+    });
+    v["settings"]["earned_value_baseline"] = serde_json::json!(200);
+    let (mut loaded, notes) = plancraft_core::io::from_json_with_notes(&v.to_string(), std::path::Path::new("x.plancraft")).unwrap();
+    assert!(notes.iter().any(|n| n.contains("baseline or interim plan number")), "{notes:?}");
+    assert!(notes.iter().any(|n| n.contains("earned value baseline")), "{notes:?}");
+    let t = &loaded.tasks[1];
+    assert_eq!(t.baselines.keys().copied().collect::<Vec<_>>(), [3], "only Baseline1–10 are kept");
+    assert_eq!(t.interim.keys().copied().collect::<Vec<_>>(), [10]);
+    let b3 = t.baseline_in(3).unwrap();
+    assert!(b3.start.date() >= chrono::NaiveDate::from_ymd_opt(1900, 1, 1).unwrap() && b3.work <= limits::MAX_MINUTES && b3.duration >= 0);
+    assert!(b3.cost.abs() <= limits::MAX_MONEY);
+    assert_eq!(loaded.settings.earned_value_baseline, 0);
+    assert!(limits::sanitize(&mut loaded).is_empty(), "loading left nothing out of range");
+    let report = recalculate(&mut loaded);
+    assert!(!report.warnings.iter().any(|w| w.contains("internal error")), "{:?}", report.warnings);
+    // A number too big for a baseline key refuses the file cleanly.
+    v["tasks"][1]["baselines"] = serde_json::json!({ "999": b("2026-10-19T08:00:00", 480, 1.0) });
+    assert!(plancraft_core::io::from_json_with_notes(&v.to_string(), std::path::Path::new("x.plancraft")).is_err());
+}
+
 #[test]
 fn hostile_splits_in_a_file_are_clamped_on_open() {
     let mut p = demo_project(start());
