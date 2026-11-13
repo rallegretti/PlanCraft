@@ -792,7 +792,7 @@ pub struct Project {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tables: Vec<crate::custom::TableLayout>,
     /// Page Setup for printing and PDF export.
-    #[serde(default, skip_serializing_if = "crate::print::PageSetup::is_default")]
+    #[serde(default, skip_serializing_if = "crate::print::PageSetup::is_default", deserialize_with = "crate::print::lenient_page_setup")]
     pub page_setup: crate::print::PageSetup,
     #[serde(default)]
     pub ids: IdCounters,

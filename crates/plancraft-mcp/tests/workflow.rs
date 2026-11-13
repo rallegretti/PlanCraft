@@ -559,6 +559,8 @@ fn agents_set_page_setup_and_export_pdfs() {
     assert!(e.contains("letter"), "{e}");
     // Page Setup is an undoable edit.
     c.call("undo", json!({}));
+    let back = c.call("set_page_setup", json!({}));
+    assert_eq!(back["page_setup"]["paper"], "Letter", "undo put the old setup back: {back}");
     assert!(c.call_err("set_page_setup", json!({ "scale_percent": 5 })).contains("at least"));
 
     let path = dir.path().join("plan");
@@ -575,4 +577,7 @@ fn agents_set_page_setup_and_export_pdfs() {
     assert!(e.contains(".pdf"), "{e}");
     let e = c.call_err("export_pdf", json!({ "path": pdf.to_str().unwrap(), "overwrite": true, "from": "2026-12-01", "to": "2026-11-01" }));
     assert!(e.contains("before"), "{e}");
+    // Dates outside 1900-2300 are refused, like everywhere else.
+    let e = c.call_err("export_pdf", json!({ "path": pdf.to_str().unwrap(), "overwrite": true, "from": "0001-01-01" }));
+    assert!(e.contains("between"), "{e}");
 }

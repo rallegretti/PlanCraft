@@ -22,7 +22,10 @@ pub struct PendingPdf {
 
 pub struct PrintDialog {
     view: PrintView,
+    /// The Page Setup being edited, and the plan's Page Setup it started from: when the plan's
+    /// changes (Undo, or an agent) the draft follows it rather than overwriting it on close.
     setup: PageSetup,
+    base: PageSetup,
     from: String,
     to: String,
     page: usize,
@@ -42,6 +45,7 @@ impl PrintDialog {
         Self {
             view: PrintView::for_view(st.view),
             setup: doc.project.page_setup.clone(),
+            base: doc.project.page_setup.clone(),
             from: String::new(),
             to: String::new(),
             page: 0,
@@ -79,12 +83,27 @@ impl PrintDialog {
         Ok((a, b))
     }
 
-    /// The printed pages, laid out again only when something they depend on changed.
-    fn pages(&mut self, doc: &Document, st: &UiState) -> Arc<print::Document> {
+    /// The printed pages, laid out again only when something they depend on changed (and not
+    /// while a slider is being dragged: the last pages stay until it is let go).
+    fn pages(&mut self, ctx: &Context, doc: &Document, st: &UiState) -> Arc<print::Document> {
+        use std::hash::{Hash, Hasher};
         let (from, to) = self.range().unwrap_or((None, None));
         let g = &st.gantt;
+        // What the view shows that a printout follows: collapsed rows and groups, column widths.
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let mut collapsed: Vec<u32> = st.collapsed.iter().map(|id| id.0).collect();
+        collapsed.sort_unstable();
+        collapsed.hash(&mut h);
+        let mut groups: Vec<&String> = st.collapsed_groups.iter().collect();
+        groups.sort_unstable();
+        groups.hash(&mut h);
+        let mut widths: Vec<(String, String, u32)> =
+            st.column_widths.iter().map(|((t, k), w)| (t.label().to_string(), k.clone(), w.to_bits())).collect();
+        widths.sort_unstable();
+        widths.hash(&mut h);
+        st.table_width.to_bits().hash(&mut h);
         let key = format!(
-            "{}|{}|{:?}|{:?}|{from:?}|{to:?}|{:?}|{:?}|{:?}|{}|{:?}|{}|{}|{}|{:?}",
+            "{}|{}|{:?}|{:?}|{from:?}|{to:?}|{:?}|{:?}|{:?}|{}|{:?}|{}|{}|{:?}",
             doc.handle,
             doc.revision,
             self.view,
@@ -94,15 +113,18 @@ impl PrintDialog {
             st.filter,
             st.search,
             st.table,
-            st.collapsed.len(),
-            st.collapsed_groups.len(),
+            h.finish(),
             g.px_per_day,
             (g.show_critical, g.show_baseline, g.show_progress, g.show_links, g.show_slack, g.show_resource_names),
         );
-        if let Some((k, d)) = &self.cache
-            && *k == key
-        {
-            return d.clone();
+        if let Some((k, d)) = &self.cache {
+            if *k == key {
+                return d.clone();
+            }
+            if ctx.input(|i| i.pointer.any_down()) {
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                return d.clone();
+            }
         }
         let d = Arc::new(printing::document(&doc.project, st, self.view, &self.setup, from, to));
         self.cache = Some((key, d.clone()));
@@ -110,18 +132,31 @@ impl PrintDialog {
     }
 
     /// Saves changed page setup with the plan (one undoable edit).
-    fn commit_setup(&mut self, doc: &mut Document) {
+    pub fn commit_setup(&mut self, doc: &mut Document) {
         let mut s = self.setup.clone();
         s.sanitize();
         if s != doc.project.page_setup {
-            let _ = doc.edit_msg("Page Setup", move |p| {
-                p.set_page_setup(s);
-                Ok(())
-            });
+            let saved = s.clone();
+            if doc
+                .edit_msg("Page Setup", move |p| {
+                    p.set_page_setup(s);
+                    Ok(())
+                })
+                .is_ok()
+            {
+                self.setup = saved;
+            }
         }
+        self.base = doc.project.page_setup.clone();
     }
 
     pub fn show(&mut self, ctx: &Context, doc: &mut Document, st: &UiState) -> bool {
+        // The plan's Page Setup changed under the window (Undo, or an agent): show that one.
+        if doc.project.page_setup != self.base {
+            self.setup = doc.project.page_setup.clone();
+            self.base = self.setup.clone();
+        }
+        let before = (self.view, self.setup.clone(), self.from.clone(), self.to.clone());
         // Background work: printer list and print jobs.
         if let Some(rx) = &self.printers_rx
             && let Ok(list) = rx.try_recv()
@@ -146,7 +181,7 @@ impl PrintDialog {
             }
         }
 
-        let pages = self.pages(doc, st);
+        let pages = self.pages(ctx, doc, st);
         let mut open = true;
         let mut close = false;
         let mut print_now = false;
@@ -174,6 +209,10 @@ impl PrintDialog {
                 });
             });
 
+        // A changed setting shows in the preview at once, not on the next mouse move.
+        if before != (self.view, self.setup.clone(), self.from.clone(), self.to.clone()) {
+            ctx.request_repaint();
+        }
         let range_ok = self.range().is_ok();
         if (print_now || save_pdf) && range_ok {
             self.commit_setup(doc);

@@ -17,6 +17,11 @@ use crate::timescale::{Unit, tiers};
 
 /// Most pages one print produces (hostile plans and settings can't make millions).
 pub const MAX_PAGES: usize = 2000;
+/// Pages looked at (printed or skipped as blank) before giving up.
+const MAX_PAGE_VISITS: usize = 20 * MAX_PAGES;
+/// Smallest printable area in virtual points: a row, the timescale and the bands fit.
+const MIN_AREA_W: f32 = 200.0;
+const MIN_AREA_H: f32 = 160.0;
 
 const TEXT: f32 = 8.0;
 const SMALL: f32 = 7.0;
@@ -260,15 +265,41 @@ fn date_range(job: &PrintJob) -> (NaiveDateTime, NaiveDateTime) {
 fn fill_codes(s: &str, job: &PrintJob, page: usize, pages: usize) -> String {
     let p = job.project;
     let day = |d: Option<NaiveDateTime>| d.map(|d| d.format("%a %m/%d/%y").to_string()).unwrap_or_default();
-    s.replace("[Project]", &p.name)
-        .replace("[Manager]", &p.manager)
-        .replace("[Company]", &p.company)
-        .replace("[View]", &job.sheet.title)
-        .replace("[Date]", &job.printed.format("%b %-d, %Y").to_string())
-        .replace("[Pages]", &pages.to_string())
-        .replace("[Page]", &page.to_string())
-        .replace("[Start]", &day(p.sched.start.or(Some(p.start))))
-        .replace("[Finish]", &day(p.sched.finish))
+    let value = |code: &str| -> Option<String> {
+        Some(match code {
+            "Project" => p.name.clone(),
+            "Manager" => p.manager.clone(),
+            "Company" => p.company.clone(),
+            "View" => job.sheet.title.clone(),
+            "Date" => job.printed.format("%b %-d, %Y").to_string(),
+            "Pages" => pages.to_string(),
+            "Page" => page.to_string(),
+            "Start" => day(p.sched.start.or(Some(p.start))),
+            "Finish" => day(p.sched.finish),
+            _ => return None,
+        })
+    };
+    // One pass over the template only: a value that looks like a code (a project named
+    // "[Manager]") is printed as is, never expanded again.
+    let mut out = String::new();
+    let mut rest = s;
+    while let Some(open) = rest.find('[') {
+        let (before, from) = rest.split_at(open);
+        out.push_str(before);
+        let filled = from.find(']').and_then(|close| Some((value(from.get(1..close)?)?, close)));
+        match filled {
+            Some((v, close)) => {
+                out.push_str(&v);
+                rest = from.get(close + 1..).unwrap_or_default();
+            }
+            None => {
+                out.push('[');
+                rest = from.get(1..).unwrap_or_default();
+            }
+        }
+    }
+    out.push_str(rest);
+    out
 }
 
 struct Chart<'a> {
@@ -276,11 +307,45 @@ struct Chart<'a> {
     opts: ChartOptions,
     start: NaiveDateTime,
     per_day: f32,
-    /// Row index of each task in the sheet.
-    rows_of: HashMap<TaskId, usize>,
+    /// Index in the project of each task (lookups by id are linear otherwise).
+    index_of: HashMap<TaskId, usize>,
+    /// Links between printed rows, sorted by successor row and by predecessor row, so each page
+    /// finds its links without scanning the whole plan.
+    by_succ: Vec<LinkRef>,
+    by_pred: Vec<LinkRef>,
+}
+
+/// A link between two printed rows.
+#[derive(Clone, Copy)]
+struct LinkRef {
+    succ_row: usize,
+    pred_row: usize,
+    /// Indexes in the project of the successor and the predecessor, and of the link in the
+    /// successor's predecessor list.
+    succ: usize,
+    pred: usize,
+    dep: usize,
 }
 
 impl Chart<'_> {
+    fn task(&self, id: TaskId) -> Option<&crate::model::Task> {
+        self.index_of.get(&id).and_then(|&i| self.job.project.tasks.get(i))
+    }
+
+    /// Links with either end on `rows`, each once.
+    fn links_touching(&self, rows: std::ops::Range<usize>) -> impl Iterator<Item = LinkRef> + '_ {
+        let span = |v: &'_ [LinkRef], key: fn(&LinkRef) -> usize, rows: &std::ops::Range<usize>| {
+            let a = v.partition_point(|l| key(l) < rows.start);
+            let b = v.partition_point(|l| key(l) < rows.end);
+            (a, b)
+        };
+        let (a, b) = span(&self.by_succ, |l| l.succ_row, &rows);
+        let (c, d) = span(&self.by_pred, |l| l.pred_row, &rows);
+        let by_succ = self.by_succ.get(a..b).unwrap_or_default();
+        let by_pred = self.by_pred.get(c..d).unwrap_or_default();
+        by_succ.iter().copied().chain(by_pred.iter().copied().filter(move |l| !rows.contains(&l.succ_row)))
+    }
+
     fn x(&self, x0: f32, offset: f32, t: NaiveDateTime) -> f32 {
         let mins = (t - self.start).num_minutes() as f32;
         x0 - offset + mins / 1440.0 * self.per_day
@@ -293,11 +358,10 @@ impl Chart<'_> {
 
     /// Whether anything is drawn for rows `rows` in the chart stretch `[off, off + w)`.
     fn has_bars(&self, rows: std::ops::Range<usize>, off: f32, w: f32) -> bool {
-        let p = self.job.project;
         let (a, b) = (self.time_at(off), self.time_at(off + w));
         self.job.sheet.rows.get(rows).unwrap_or_default().iter().any(|r| {
             let span = match &r.kind {
-                RowKind::Task(id) => p.task(*id).and_then(|t| Some((t.sched.start?, t.sched.finish?))),
+                RowKind::Task(id) => self.task(*id).and_then(|t| Some((t.sched.start?, t.sched.finish?))),
                 RowKind::Group { start, finish } => start.zip(*finish),
                 RowKind::Other => None,
             };
@@ -385,17 +449,12 @@ impl Chart<'_> {
 
         // Links that touch a row on this page (the other end may be off the page: clipped).
         if o.links {
-            for (r, row) in self.job.sheet.rows.iter().enumerate() {
-                let RowKind::Task(id) = row.kind else { continue };
-                let Some(t) = p.task(id) else { continue };
+            for link in self.links_touching(rows.clone()) {
+                let (r, pr) = (link.succ_row, link.pred_row);
+                let (Some(t), Some(pt_)) = (p.tasks.get(link.succ), p.tasks.get(link.pred)) else { continue };
+                let Some(d) = t.predecessors.get(link.dep) else { continue };
                 let (Some(ss), Some(sf)) = (t.sched.start, t.sched.finish) else { continue };
-                for d in &t.predecessors {
-                    let Some(pid) = d.predecessor.local() else { continue };
-                    let Some(&pr) = self.rows_of.get(&pid) else { continue };
-                    if !rows.contains(&r) && !rows.contains(&pr) {
-                        continue;
-                    }
-                    let Some(pt_) = p.task(pid) else { continue };
+                {
                     let (Some(ps), Some(pf)) = (pt_.sched.start, pt_.sched.finish) else { continue };
                     let critical = o.critical && t.sched.critical && pt_.sched.critical;
                     let color = if critical { pal.bar_critical_edge } else { pal.link };
@@ -465,7 +524,7 @@ impl Chart<'_> {
                 }
                 _ => continue,
             };
-            let Some(idx) = p.task_index(id) else { continue };
+            let Some(&idx) = self.index_of.get(&id) else { continue };
             let Some(t) = p.tasks.get(idx) else { continue };
             let (Some(s), Some(f)) = (t.sched.start, t.sched.finish) else { continue };
             let (x0, x1) = (xs(s), xs(f).max(xs(s)));
@@ -677,7 +736,7 @@ fn legend(out: &mut Vec<Item>, job: &PrintJob, opts: &ChartOptions, r: Rect) {
     for (i, (label, draw)) in entries.iter().enumerate() {
         let (cx, cy) = (r.x + left_w + 8.0 + (i / per_col) as f32 * col_w, r.y + 13.0 + (i % per_col) as f32 * 20.0);
         draw(out, pt(cx, cy), pal);
-        boxed_text(out, Rect::new(cx + 26.0, cy - 7.0, col_w - 28.0, 14.0), label, SMALL, pal.text, false, Align::Left);
+        boxed_text(out, Rect::new(cx + 26.0, cy - 7.0, (col_w - 28.0).max(0.0), 14.0), label, SMALL, pal.text, false, Align::Left);
     }
 }
 
@@ -724,10 +783,11 @@ pub fn layout(job: &PrintJob) -> Document {
     let setup = job.setup;
     let (pw, ph) = setup.page_size();
     let margin = setup.margin_pt().min(pw / 4.0).min(ph / 4.0);
-    let s = setup.scale();
-    // Printable area in virtual points (never too small to hold a row).
-    let w = ((pw - 2.0 * margin) / s).max(100.0);
-    let h = ((ph - 2.0 * margin) / s).max(120.0);
+    // Printable area in virtual points. A scale too large for the paper and margins is reduced
+    // so a row, the timescale and the bands still fit, rather than printing off the page.
+    let (aw, ah) = ((pw - 2.0 * margin).max(1.0), (ph - 2.0 * margin).max(1.0));
+    let s = setup.scale().min(aw / MIN_AREA_W).min(ah / MIN_AREA_H).max(0.001);
+    let (w, h) = (aw / s, ah / s);
     let has_header = setup.header.iter().any(|t| !t.trim().is_empty());
     let has_footer = setup.footer.iter().any(|t| !t.trim().is_empty());
     let chart_opts = job.chart;
@@ -747,6 +807,9 @@ pub fn layout(job: &PrintJob) -> Document {
     } else {
         repeat
     };
+    // Every other column fits beside the repeated ones on a page of its own.
+    let widths: Vec<f32> =
+        widths.iter().enumerate().map(|(c, &cw)| if repeat.contains(&c) { cw } else { cw.min((w - repeat_w).max(12.0)) }).collect();
 
     // Strips across: table columns first, then the timescale.
     let mut strips: Vec<Strip> = Vec::new();
@@ -763,6 +826,7 @@ pub fn layout(job: &PrintJob) -> Document {
         }
     }
     let mut chart: Option<Chart> = None;
+    let mut strips_cut = false;
     if let Some(opts) = chart_opts {
         let (start, end) = date_range(job);
         let days = ((end - start).num_minutes() as f32 / 1440.0).max(1.0);
@@ -786,14 +850,32 @@ pub fn layout(job: &PrintJob) -> Document {
             strips.push(Strip { cols: repeat.clone(), chart: Some((repeat_w, later_w, done)) });
             done += later_w;
         }
-        let rows_of = job
+        let p = job.project;
+        let index_of: HashMap<TaskId, usize> = p.tasks.iter().enumerate().map(|(i, t)| (t.id, i)).collect();
+        let rows_of: HashMap<TaskId, usize> = job
             .sheet
             .rows
             .iter()
             .enumerate()
             .filter_map(|(i, r)| if let RowKind::Task(id) = r.kind { Some((id, i)) } else { None })
             .collect();
-        chart = Some(Chart { job, opts, start, per_day, rows_of });
+        let mut by_succ = Vec::new();
+        for (&id, &succ_row) in &rows_of {
+            let Some(&succ) = index_of.get(&id) else { continue };
+            let Some(t) = p.tasks.get(succ) else { continue };
+            for (dep, d) in t.predecessors.iter().enumerate() {
+                let Some(pid) = d.predecessor.local() else { continue };
+                if let (Some(&pred_row), Some(&pred)) = (rows_of.get(&pid), index_of.get(&pid)) {
+                    by_succ.push(LinkRef { succ_row, pred_row, succ, pred, dep });
+                }
+            }
+        }
+        by_succ.sort_by_key(|l| (l.succ_row, l.dep));
+        let mut by_pred = by_succ.clone();
+        by_pred.sort_by_key(|l| (l.pred_row, l.succ_row, l.dep));
+        // The timescale was cut at the page limit.
+        strips_cut = done < total - 0.5;
+        chart = Some(Chart { job, opts, start, per_day, index_of, by_succ, by_pred });
     } else if !cur.cols.is_empty() || strips.is_empty() {
         strips.push(cur);
     }
@@ -806,10 +888,13 @@ pub fn layout(job: &PrintJob) -> Document {
         (0..row_count.div_ceil(rows_per_page)).map(|i| i * rows_per_page..((i + 1) * rows_per_page).min(row_count)).collect()
     };
     let mut pages: Vec<Vec<Item>> = Vec::new();
-    let mut truncated = false;
+    let mut truncated = strips_cut;
+    // Pages looked at, printed or skipped as blank: skipping is cheap but not free.
+    let mut visits = 0usize;
     'outer: for rows in &chunks {
         for strip in &strips {
-            if pages.len() >= MAX_PAGES {
+            visits = visits.saturating_add(1);
+            if visits > MAX_PAGE_VISITS {
                 truncated = true;
                 break 'outer;
             }
@@ -820,21 +905,29 @@ pub fn layout(job: &PrintJob) -> Document {
             {
                 continue;
             }
+            if pages.len() >= MAX_PAGES {
+                truncated = true;
+                break 'outer;
+            }
             let mut items = Vec::new();
             let table_w = draw_table(&mut items, job, &widths, &strip.cols, top, rows.clone());
             if let (Some(c), Some((cx, cw, off))) = (&chart, strip.chart) {
                 let body_h = rows.len() as f32 * ROW_H;
                 let head = Rect::new(cx.max(table_w), top, cw, HEAD_H);
                 let body = Rect::new(head.x, top + HEAD_H, cw, body_h.max(ROW_H));
+                let mut scale = Vec::new();
+                c.timescale(&mut scale, head, off);
+                items.push(Item::Clip { rect: head, items: scale });
+                // Bars and links are clipped to the body: a link from a row on an earlier page
+                // must not cross the timescale.
                 let mut clipped = Vec::new();
-                c.timescale(&mut clipped, head, off);
                 c.background(&mut clipped, body, off);
                 for r in rows.clone() {
                     let y = body.y + (r - rows.start) as f32 * ROW_H + ROW_H;
                     hline(&mut clipped, body.x, body.right(), y, Stroke::new(0.3, job.palette.chart_grid));
                 }
                 c.bars(&mut clipped, body, off, rows.clone());
-                items.push(Item::Clip { rect: Rect::new(head.x, head.y, cw, HEAD_H + body.h), items: clipped });
+                items.push(Item::Clip { rect: body, items: clipped });
                 items.push(Item::Rect {
                     rect: Rect::new(head.x, head.y, cw, HEAD_H + body.h),
                     fill: None,
@@ -852,9 +945,17 @@ pub fn layout(job: &PrintJob) -> Document {
         && let Some(opts) = &chart_opts
         && !truncated
     {
-        let mut items = Vec::new();
-        legend(&mut items, job, opts, Rect::new(0.0, top + 4.0, w, LEGEND_H));
-        pages.push(items);
+        if pages.len() < MAX_PAGES {
+            let mut items = Vec::new();
+            legend(&mut items, job, opts, Rect::new(0.0, top + 4.0, w, LEGEND_H));
+            pages.push(items);
+        } else {
+            truncated = true;
+        }
+    }
+    // Never a document without pages (some PDF readers refuse one).
+    if pages.is_empty() {
+        pages.push(Vec::new());
     }
 
     // Headers and footers (now that the page count is known), then scale into the margins.
@@ -974,6 +1075,100 @@ mod tests {
         for page in &doc.pages {
             assert_eq!((page.width, page.height), (792.0, 612.0));
         }
+    }
+
+    /// Every point an item draws at (a clip counts as its rectangle: what it holds is cut to it).
+    fn points(items: &[Item], out: &mut Vec<(f32, f32)>) {
+        for i in items {
+            match i {
+                Item::Rect { rect, .. } => out.extend([(rect.x, rect.y), (rect.right(), rect.bottom())]),
+                Item::Line { points: ps, .. } | Item::Polygon { points: ps, .. } => out.extend(ps.iter().map(|q| (q.x, q.y))),
+                Item::Text { at, .. } => out.push((at.x, at.y)),
+                Item::Clip { rect, .. } => out.extend([(rect.x, rect.y), (rect.right(), rect.bottom())]),
+            }
+        }
+    }
+
+    /// Regression: header and footer codes were replaced one after another, so a value that
+    /// contained a code was expanded again; nested names could grow a header to gigabytes.
+    #[test]
+    fn header_codes_are_filled_in_once() {
+        let mut p = Project::new("[Manager] plan", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        p.manager = "[Company]".repeat(50);
+        p.company = "x".repeat(1000);
+        let setup =
+            PageSetup { header: ["[Project]".repeat(20), "[Page] of [Pages] [Unknown] [Page".into(), String::new()], ..Default::default() };
+        let sheet = task_sheet(&p, false);
+        let j = job(&p, &setup, &sheet, false);
+        assert_eq!(fill_codes("[Project]", &j, 1, 3), "[Manager] plan");
+        assert_eq!(fill_codes("[Page] of [Pages] [Unknown] [Page", &j, 1, 3), "1 of 3 [Unknown] [Page");
+        assert_eq!(fill_codes("[Manager]", &j, 1, 1).len(), 50 * "[Company]".len(), "not expanded again");
+        assert_eq!(layout(&j).pages.len(), 1);
+    }
+
+    /// Regression: when the timescale was cut at the page limit the document did not say it was
+    /// cut, and a legend page could make it 2,001 pages.
+    #[test]
+    fn the_page_limit_is_kept_and_reported() {
+        let mut p = Project::new("Long", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        p.add_task("A", None);
+        crate::schedule::recalculate(&mut p);
+        let setup = PageSetup { timescale: TimescaleFit::AsShown, legend: LegendPlacement::LegendPage, ..Default::default() };
+        let sheet = task_sheet(&p, true);
+        let mut j = job(&p, &setup, &sheet, true);
+        j.chart = Some(ChartOptions { per_day: 2000.0, ..Default::default() });
+        j.from = NaiveDate::from_ymd_opt(1950, 1, 1);
+        j.to = NaiveDate::from_ymd_opt(2250, 1, 1);
+        let doc = layout(&j);
+        assert!(doc.pages.len() <= MAX_PAGES, "{}", doc.pages.len());
+        assert!(doc.truncated, "the cut timescale is reported");
+    }
+
+    /// Regression: a wide column next to repeated columns, or a scale too big for the paper and
+    /// margins, printed past the edge of the paper; a sheet with nothing to print made a PDF
+    /// without pages.
+    #[test]
+    fn everything_prints_inside_the_paper() {
+        let p = sample::demo_project(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap());
+        let mut sheet = task_sheet(&p, false);
+        sheet.columns.push(PrintColumn { title: "Notes".into(), width: 600.0, align: Align::Left });
+        for row in &mut sheet.rows {
+            row.cells.push(PrintCell { text: "n".repeat(300), ..Default::default() });
+        }
+        for setup in [
+            PageSetup { repeat_columns: 2, ..Default::default() },
+            PageSetup { margin_mm: 50.0, scale_percent: 400, orientation: Orientation::Portrait, ..Default::default() },
+        ] {
+            for chart in [false, true] {
+                let doc = layout(&job(&p, &setup, &sheet, chart));
+                for page in &doc.pages {
+                    let mut pts = Vec::new();
+                    points(&page.items, &mut pts);
+                    for (x, y) in pts {
+                        assert!(
+                            (-0.5..=page.width + 0.5).contains(&x) && (-0.5..=page.height + 0.5).contains(&y),
+                            "({x}, {y}) is off the page"
+                        );
+                    }
+                }
+            }
+        }
+        let empty = Sheet { title: "Empty".into(), columns: Vec::new(), rows: Vec::new() };
+        let setup = PageSetup { print_blank_pages: false, ..Default::default() };
+        assert_eq!(layout(&job(&p, &setup, &empty, true)).pages.len(), 1);
+    }
+
+    /// Regression: links from a row on an earlier page were drawn across the timescale.
+    #[test]
+    fn bars_and_links_are_clipped_below_the_timescale() {
+        let p = sample::demo_project(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap());
+        let sheet = task_sheet(&p, true);
+        let setup = PageSetup::default();
+        let doc = layout(&job(&p, &setup, &sheet, true));
+        let clips: Vec<Rect> =
+            doc.pages[0].items.iter().filter_map(|i| if let Item::Clip { rect, .. } = i { Some(*rect) } else { None }).collect();
+        assert_eq!(clips.len(), 2, "timescale and chart body are clipped apart");
+        assert!(clips[1].y >= clips[0].bottom() - 0.01);
     }
 
     #[test]

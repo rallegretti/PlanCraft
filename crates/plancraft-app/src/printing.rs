@@ -186,23 +186,52 @@ pub fn document(
 // ---------------------------------------------------------------------------------------------
 
 /// Runs a command, giving up after `limit` (a stuck print service must not hang PlanCraft).
-fn run(cmd: &mut Command, limit: Duration) -> Result<String, String> {
-    let mut child = cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().map_err(|e| e.to_string())?;
+/// Why a command failed.
+#[derive(Debug)]
+enum RunError {
+    /// The program is not installed.
+    NotInstalled,
+    /// It could not be started for another reason.
+    Spawn(String),
+    /// It ran and failed (its error output), or did not answer in time.
+    Failed(String),
+}
+
+impl std::fmt::Display for RunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RunError::NotInstalled => f.write_str("the program is not installed"),
+            RunError::Spawn(e) | RunError::Failed(e) => f.write_str(e),
+        }
+    }
+}
+
+fn run(cmd: &mut Command, limit: Duration) -> Result<String, RunError> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { RunError::NotInstalled } else { RunError::Spawn(e.to_string()) })?;
     let start = Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let out = child.wait_with_output().map_err(|e| e.to_string())?;
+                let out = child.wait_with_output().map_err(|e| RunError::Failed(e.to_string()))?;
                 let text = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                return if status.success() { Ok(text) } else { Err(String::from_utf8_lossy(&out.stderr).trim().to_string()) };
+                return if status.success() {
+                    Ok(text)
+                } else {
+                    Err(RunError::Failed(String::from_utf8_lossy(&out.stderr).trim().to_string()))
+                };
             }
             Ok(None) if start.elapsed() < limit => std::thread::sleep(Duration::from_millis(30)),
             Ok(None) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err("the print service did not answer".into());
+                return Err(RunError::Failed("the print service did not answer".into()));
             }
-            Err(e) => return Err(e.to_string()),
+            Err(e) => return Err(RunError::Failed(e.to_string())),
         }
     }
 }
@@ -245,7 +274,8 @@ fn clean_spool(dir: &Path) {
             .ok()
             .and_then(|t| t.elapsed().ok())
             .is_some_and(|age| age > Duration::from_secs(86_400));
-        if old && e.path().extension().is_some_and(|x| x == "pdf") {
+        // Also the temporary files of a write that never finished.
+        if old && e.path().extension().is_some_and(|x| x == "pdf" || x == "tmp") {
             let _ = std::fs::remove_file(e.path());
         }
     }
@@ -273,12 +303,13 @@ pub fn send(pdf: Vec<u8>, printer: Option<String>, copies: u8, title: String) ->
                 if let Some(p) = printer.filter(|p| !p.is_empty()) {
                     cmd.arg("-d").arg(p);
                 }
-                let r = run(cmd.arg(&path), Duration::from_secs(30)).map_err(|e| {
-                    if e.contains("No such file") || e.contains("not found") {
+                let r = run(cmd.arg(&path), Duration::from_secs(30)).map_err(|e| match e {
+                    // Only a missing `lp` means there is no print service; "printer not found"
+                    // and other errors from lp itself are shown as they are.
+                    RunError::NotInstalled => {
                         "Printing needs the system print service (CUPS). Save as PDF and print it from a PDF viewer instead.".to_string()
-                    } else {
-                        format!("Could not print: {e}")
                     }
+                    e => format!("Could not print: {e}"),
                 });
                 // lp has copied the file to the print queue (or failed).
                 let _ = std::fs::remove_file(&path);
@@ -286,8 +317,12 @@ pub fn send(pdf: Vec<u8>, printer: Option<String>, copies: u8, title: String) ->
             } else {
                 // Windows: the default PDF viewer prints it (explorer's exit code means nothing).
                 // The file is removed a day later.
-                let _ = run(Command::new("explorer").arg(&path), Duration::from_secs(10));
-                Ok("Opened in your PDF viewer: print it from there.".to_string())
+                match run(Command::new("explorer").arg(&path), Duration::from_secs(10)) {
+                    Err(RunError::NotInstalled | RunError::Spawn(_)) => {
+                        Err(format!("Could not open the PDF viewer. The PDF is at {}", path.display()))
+                    }
+                    _ => Ok("Opened in your PDF viewer: print it from there.".to_string()),
+                }
             }
         });
         let _ = tx.send(result);

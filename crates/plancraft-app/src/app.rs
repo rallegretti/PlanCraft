@@ -231,6 +231,14 @@ impl PlanCraftApp {
                 Some(mut p) => {
                     if p.extension().is_none() {
                         p.set_extension(FILE_EXTENSION);
+                        // The file dialog only asked about the name as typed.
+                        if p.exists() {
+                            let msg =
+                                format!("{} already exists. Choose it in the dialog to replace it, or pick another name.", p.display());
+                            drop(ws);
+                            self.st.toast(ToastKind::Warning, msg);
+                            return false;
+                        }
                     }
                     Some(p)
                 }
@@ -283,7 +291,19 @@ impl PlanCraftApp {
         let name: String =
             pdf.name.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '-' } else { c }).collect();
         let Some(path) = rfd::FileDialog::new().add_filter("PDF", &["pdf"]).set_file_name(name).save_file() else { return };
-        let path = if path.extension().is_none() { path.with_extension("pdf") } else { path };
+        let path = if path.extension().is_none() {
+            // The file dialog only asked about the name as typed: never replace "x.pdf" unasked.
+            let with_ext = path.with_extension("pdf");
+            if with_ext.exists() {
+                return self.st.toast(
+                    ToastKind::Warning,
+                    format!("{} already exists. Choose it in the dialog to replace it, or pick another name.", with_ext.display()),
+                );
+            }
+            with_ext
+        } else {
+            path
+        };
         match plancraft_core::io::write_atomic(&path, &pdf.bytes, plancraft_core::io::Privacy::KeepExisting) {
             Ok(()) => self.set_status(format!("Saved {}", path.display())),
             Err(e) => self.st.toast(ToastKind::Error, format!("Could not save the PDF: {e}")),
@@ -399,7 +419,10 @@ impl PlanCraftApp {
                 let ws = self.ws.clone();
                 let ws = lock(&ws);
                 if let Some(doc) = ws.active_doc() {
-                    self.dialogs.print = Some(Bound::new(doc, dialogs::print::PrintDialog::new(doc, &self.st)));
+                    // Ctrl+P with the window already open for this plan keeps its changes.
+                    if self.dialogs.print.as_ref().is_none_or(|b| b.doc != doc.handle) {
+                        self.dialogs.print = Some(Bound::new(doc, dialogs::print::PrintDialog::new(doc, &self.st)));
+                    }
                     self.st.start_page = false;
                 }
             }
@@ -1501,6 +1524,15 @@ impl PlanCraftApp {
             self.st.sel = Default::default();
             self.st.gantt.initialized_for = None;
             self.st.cursor_task = None;
+            // The Print window prints its plan as the view shows it; the view now shows another
+            // plan, so it saves its Page Setup and closes.
+            if let Some(mut b) = self.dialogs.print.take() {
+                if Some(b.doc) == active {
+                    self.dialogs.print = Some(b);
+                } else if let Some(doc) = ws.index_of(b.doc).and_then(|i| ws.docs.get_mut(i)) {
+                    b.dialog.commit_setup(doc);
+                }
+            }
             // Each document keeps its own sort and grouping.
             let st = &mut self.st;
             let leaving =
@@ -1948,6 +1980,58 @@ mod ui_tests {
             h.state_mut().exec(&ctx, Command::Print);
             h.run_steps(2);
         }
+    }
+
+    /// Regressions in the Print window: Ctrl+P again threw away unsaved Page Setup changes,
+    /// closing after an Undo saved the undone setup again, and after a tab switch the window
+    /// printed its plan with the other plan's view.
+    #[test]
+    fn the_print_window_keeps_changes_follows_undo_and_closes_on_tab_switch() {
+        use egui_kittest::kittest::Queryable;
+        use plancraft_core::print::Orientation;
+        let mut ws = Workspace::default();
+        let a = ws.add(plancraft_core::sample::demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+        let b = ws.add(Project::new("Other plan", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+        ws.active = ws.index_of(a);
+        let shared = ws.shared();
+        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).build_eframe(move |cc| PlanCraftApp::new(cc, shared));
+        h.run_steps(3);
+        let orientation = |h: &Harness<'static, PlanCraftApp>, handle: u64| {
+            let ws = h.state().ws.lock().unwrap();
+            ws.docs[ws.index_of(handle).unwrap()].project.page_setup.orientation
+        };
+        let ctx = h.ctx.clone();
+
+        h.state_mut().exec(&ctx, Command::Print);
+        h.run_steps(2);
+        h.get_by_label("Portrait").click();
+        h.run_steps(2);
+        h.state_mut().exec(&ctx, Command::Print);
+        h.run_steps(2);
+        h.get_by_label("Close").click();
+        h.run_steps(3);
+        assert_eq!(orientation(&h, a), Orientation::Portrait, "a second Ctrl+P kept the change");
+
+        h.state_mut().exec(&ctx, Command::Print);
+        h.run_steps(2);
+        h.state_mut().exec(&ctx, Command::Undo);
+        h.run_steps(2);
+        h.get_by_label("Close").click();
+        h.run_steps(3);
+        assert_eq!(orientation(&h, a), Orientation::Landscape, "closing did not undo the Undo");
+
+        h.state_mut().exec(&ctx, Command::Print);
+        h.run_steps(2);
+        h.get_by_label("Portrait").click();
+        h.run_steps(2);
+        {
+            let mut ws = h.state().ws.lock().unwrap();
+            ws.active = ws.index_of(b);
+        }
+        h.run_steps(3);
+        assert!(h.state().dialogs.print.is_none(), "switching plans closes the window");
+        assert_eq!(orientation(&h, a), Orientation::Portrait, "and keeps its plan's change");
+        assert_eq!(orientation(&h, b), Orientation::Landscape);
     }
 
     #[test]
