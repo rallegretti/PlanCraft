@@ -714,6 +714,7 @@ fn resume_date_moves_the_remaining_work() {
     assert_eq!(s.stop, Some(dt(2026, 10, 19, 17)));
     assert_eq!(s.resume, Some(dt(2026, 11, 2, 8)));
     assert_eq!(finish(&p, t), dt(2026, 11, 2, 17));
+    // PlanCraft's choice (the page does not say): the pause does not count as duration.
     assert_eq!(duration(&p, t), 2 * DAY, "the gap is not working time");
 }
 
@@ -776,6 +777,9 @@ fn reschedule_uncompleted_work_keeps_actuals_and_moves_the_rest() {
     let after = p.end_of_working_day(d(2026, 10, 26));
     let r = p.reschedule_uncompleted_work(&[], after).unwrap();
     recalculate(&mut p);
+    // How the work moves is PlanCraft's choice (the page only says it moves after the date and
+    // actual dates stay): a task in progress pauses until then, and an unlinked task not started
+    // gets a Start No Earlier Than date.
     assert_eq!(r.split, vec![b]);
     assert_eq!(r.constrained, vec![free], "C follows B through its link; only the unlinked task needs a date");
     assert!(r.skipped.is_empty(), "{:?}", r.skipped);

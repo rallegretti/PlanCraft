@@ -607,6 +607,10 @@ fn agents_update_progress_and_reschedule_uncompleted_work() {
     assert_eq!(build["resume"], "2026-10-27 08:00", "{build}");
     assert_eq!(build["start"], "2026-10-21 08:00", "{build}");
     assert_eq!(build["finish"], "2026-10-29 17:00", "{build}");
+    assert_eq!(build["parts"], json!([["2026-10-21 08:00", "2026-10-21 17:00"], ["2026-10-27 08:00", "2026-10-29 17:00"]]), "{build}");
+    // A resume date before the stop is refused.
+    let e = c.call_err("update_task", json!({ "task": b["id"], "resume": "2026-10-20" }));
+    assert!(e.contains("after Stop"), "{e}");
 
     // Progress as remaining duration, and the resume date set directly.
     let t = c.call("update_task", json!({ "task": b["id"], "remaining_duration": "1d", "resume": null }));

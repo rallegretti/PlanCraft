@@ -321,16 +321,11 @@ pub fn cell(col: TaskCol, p: &Project, idx: usize, ctx: &CellCtx) -> Cell {
             Cell { text: format::date(t.actual_finish), edit_text: Some(format::iso_date(t.actual_finish)), ..Default::default() }
         }
         ActualDuration | RemainingDuration => {
-            let (done, left) = if summary {
-                let done = (s.duration as f64 * f64::from(s.percent_complete.clamp(0.0, 100.0)) / 100.0).round() as Minutes;
-                (done, s.duration.saturating_sub(done).max(0))
-            } else {
-                (t.actual_duration(), t.remaining_duration())
-            };
+            let (done, left) = t.duration_progress();
             Cell::text(p.format_duration(if col == ActualDuration { done } else { left }, false))
         }
         Stop => Cell::text(format::date(s.stop)),
-        Resume => Cell { text: format::date(s.resume), edit_text: Some(format::iso_date(t.resume)), ..Default::default() },
+        Resume => Cell { text: format::date(s.resume), edit_text: Some(format::iso_date(s.resume)), ..Default::default() },
         EarlyStart => Cell::text(format::date(s.early_start)),
         EarlyFinish => Cell::text(format::date(s.early_finish)),
         LateStart => Cell::text(format::date(s.late_start)),

@@ -577,20 +577,21 @@ impl Chart<'_> {
                     (pal.bar_task, pal.bar_task_edge)
                 };
                 let bar = Rect::new(x0, yc - BAR_H / 2.0, (x1 - x0).max(1.0), BAR_H);
-                // A split task: the completed part, a dotted gap, then the remaining part.
-                let split = match (t.sched.stop, t.sched.resume) {
-                    (Some(stop), Some(resume)) if xs(resume) > xs(stop) + 1.0 => Some((xs(stop), xs(resume))),
-                    _ => None,
-                };
-                match split {
-                    Some((xa, xb)) => {
-                        for (a, b) in [(x0, xa), (xb, x1)] {
-                            let r = Rect::new(a, bar.y, (b - a).max(1.0), BAR_H);
-                            out.push(Item::Rect { rect: r, fill: Some(fill), stroke: Some(Stroke::new(0.6, edge)) });
+                // A split task: its working parts joined by dotted lines across the pauses.
+                let split = t.sched.parts.len() > 1;
+                if split {
+                    let mut prev: Option<f32> = None;
+                    for &(a, b) in &t.sched.parts {
+                        let (xa, xb) = (xs(a), xs(b));
+                        if let Some(px) = prev {
+                            out.push(Item::Line { points: vec![pt(px, yc), pt(xa, yc)], stroke: Stroke::dashed(0.8, edge, 1.5) });
                         }
-                        out.push(Item::Line { points: vec![pt(xa, yc), pt(xb, yc)], stroke: Stroke::dashed(0.8, edge, 1.5) });
+                        let r = Rect::new(xa, bar.y, (xb - xa).max(1.0), BAR_H);
+                        out.push(Item::Rect { rect: r, fill: Some(fill), stroke: Some(Stroke::new(0.6, edge)) });
+                        prev = Some(xb);
                     }
-                    None => out.push(Item::Rect { rect: bar, fill: Some(fill), stroke: Some(Stroke::new(0.6, edge)) }),
+                } else {
+                    out.push(Item::Rect { rect: bar, fill: Some(fill), stroke: Some(Stroke::new(0.6, edge)) });
                 }
                 if manual {
                     for (x, dir) in [(bar.x, 1.0), (bar.right(), -1.0)] {
@@ -601,11 +602,27 @@ impl Chart<'_> {
                     }
                 }
                 if o.progress && t.sched.percent_complete > 0.0 {
-                    let px = match split {
-                        Some((xa, _)) => xa,
-                        None => x0 + (x1 - x0) * t.sched.percent_complete.clamp(0.0, 100.0) / 100.0,
-                    };
-                    out.push(Item::Rect { rect: Rect::new(x0, yc - 1.0, px - x0, 2.0), fill: Some(pal.bar_progress), stroke: None });
+                    match (split, t.sched.stop) {
+                        // The work done fills the parts up to the stop.
+                        (true, Some(stop)) => {
+                            for &(a, b) in t.sched.parts.iter().filter(|(a, _)| *a < stop) {
+                                let (xa, xb) = (xs(a), xs(b.min(stop)));
+                                out.push(Item::Rect {
+                                    rect: Rect::new(xa, yc - 1.0, xb - xa, 2.0),
+                                    fill: Some(pal.bar_progress),
+                                    stroke: None,
+                                });
+                            }
+                        }
+                        _ => {
+                            let px = x0 + (x1 - x0) * t.sched.percent_complete.clamp(0.0, 100.0) / 100.0;
+                            out.push(Item::Rect {
+                                rect: Rect::new(x0, yc - 1.0, px - x0, 2.0),
+                                fill: Some(pal.bar_progress),
+                                stroke: None,
+                            });
+                        }
+                    }
                 }
                 if o.slack && t.sched.total_slack > 0 {
                     let lf = task_calendar(p, idx).add(f, t.sched.total_slack);
@@ -1211,6 +1228,9 @@ mod tests {
         };
         let none = count(&p);
         p.set_percent_complete(t, 25).unwrap();
+        crate::schedule::recalculate(&mut p);
+        // Regression: the stop at 17:00 and the resume the next morning drew a gap overnight.
+        assert_eq!(count(&p), none, "progress alone does not split the bar");
         p.set_resume(t, NaiveDate::from_ymd_opt(2026, 10, 26).and_then(|d| d.and_hms_opt(8, 0, 0))).unwrap();
         crate::schedule::recalculate(&mut p);
         assert_eq!(count(&p), none + 1, "one dotted gap between the done and remaining parts");

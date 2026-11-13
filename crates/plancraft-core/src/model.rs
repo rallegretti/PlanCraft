@@ -260,6 +260,13 @@ impl Estimate {
     }
 }
 
+/// A pause in a task: after `work` working minutes of the task, work stops until `resume`.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Split {
+    pub work: Minutes,
+    pub resume: NaiveDateTime,
+}
+
 /// A snapshot of planned values used to measure variance.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Baseline {
@@ -297,10 +304,13 @@ pub struct TaskSchedule {
     /// End of the completed part of an in-progress task (Microsoft Project's Stop field).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop: Option<NaiveDateTime>,
-    /// Start of the remaining part of an in-progress task: the stop, or the later resume date when
-    /// the task is split.
+    /// Start of the remaining part of an in-progress task: the next working moment after the stop,
+    /// or the start of the next part when the task pauses at its stop (Microsoft Project's Resume).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume: Option<NaiveDateTime>,
+    /// The working parts (start, finish) of a split task, in order; empty when it is not split.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parts: Vec<(NaiveDateTime, NaiveDateTime)>,
     /// Human-readable scheduling problems (constraint conflicts, missed deadlines...).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
@@ -359,10 +369,11 @@ pub struct Task {
     pub manual_start: Option<NaiveDateTime>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual_finish: Option<NaiveDateTime>,
-    /// When the remaining work of an in-progress task resumes (Microsoft Project's Resume field).
-    /// Later than the end of the completed part, it splits the bar: work stops, then resumes here.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resume: Option<NaiveDateTime>,
+    /// Pauses in an in-progress task (set with a later Resume date, or by rescheduling uncompleted
+    /// work): the task's working time is laid out from its actual start, and after each split's
+    /// `work` it stops until that split's `resume`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub splits: Vec<Split>,
     /// Delay added by resource leveling (working minutes).
     #[serde(default, skip_serializing_if = "is_zero_i64")]
     pub leveling_delay: Minutes,
@@ -420,7 +431,7 @@ impl Task {
             actual_finish: None,
             manual_start: None,
             manual_finish: None,
-            resume: None,
+            splits: Vec::new(),
             leveling_delay: 0,
             fixed_cost: 0.0,
             notes: String::new(),
@@ -466,6 +477,20 @@ impl Task {
             return 0;
         }
         self.duration.max(0).saturating_sub(self.actual_duration())
+    }
+
+    /// Actual and remaining duration as shown in tables and reports. A summary's come from its
+    /// rolled-up duration and % complete; a leaf's from [`Task::actual_duration`].
+    pub fn duration_progress(&self) -> (Minutes, Minutes) {
+        if !self.sched.is_summary {
+            return (self.actual_duration(), self.remaining_duration());
+        }
+        let total = self.sched.duration.max(0);
+        let pct = f64::from(self.sched.percent_complete);
+        let pct = if pct.is_finite() { pct.clamp(0.0, 100.0) } else { 0.0 };
+        let done = ((total as f64) * pct / 100.0).round() as Minutes;
+        let done = done.clamp(0, total);
+        (done, total.saturating_sub(done))
     }
 
     /// Whether adding or removing people keeps total work the same. Fixed Work tasks always are.

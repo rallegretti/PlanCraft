@@ -76,22 +76,44 @@ pub fn assignment_daily_work(p: &Project, a: &Assignment) -> BTreeMap<NaiveDate,
         return BTreeMap::new();
     };
     let cal = task_calendar(p, ti);
-    distribute(&cal, s, f, a.work as f64, a.contour)
+    distribute_spans(&cal, &task_spans(t, s, f), a.work as f64, a.contour)
+}
+
+/// The working spans of a scheduled task: its parts when it is split, else start to finish.
+pub fn task_spans(t: &Task, start: NaiveDateTime, finish: NaiveDateTime) -> Vec<(NaiveDateTime, NaiveDateTime)> {
+    if t.sched.parts.is_empty() { vec![(start, finish)] } else { t.sched.parts.clone() }
 }
 
 /// Spreads `work` over the working time of `[start, finish)` following `contour`.
 pub fn distribute(cal: &WorkCal, start: NaiveDateTime, finish: NaiveDateTime, work: f64, contour: WorkContour) -> BTreeMap<NaiveDate, f64> {
+    distribute_spans(cal, &[(start, finish)], work, contour)
+}
+
+/// Spreads `work` over the working time of `spans` (in order, not overlapping) following
+/// `contour`, as if they were one stretch: a split task does no work during its pauses.
+pub fn distribute_spans(
+    cal: &WorkCal,
+    spans: &[(NaiveDateTime, NaiveDateTime)],
+    work: f64,
+    contour: WorkContour,
+) -> BTreeMap<NaiveDate, f64> {
     let mut out = BTreeMap::new();
+    let (Some(&(start, _)), Some(&(_, finish))) = (spans.first(), spans.last()) else {
+        return out;
+    };
     if work <= 0.0 || finish <= start {
         return out;
     }
-    let mut days: Vec<(NaiveDate, f64)> = Vec::new();
-    for d in start.date().iter_days().take_while(|d| *d <= finish.date()) {
-        let wm = cal.working_minutes_within(d, start, finish) as f64;
-        if wm > 0.0 {
-            days.push((d, wm));
+    let mut per_day: BTreeMap<NaiveDate, f64> = BTreeMap::new();
+    for &(a, b) in spans.iter().filter(|(a, b)| a < b) {
+        for d in a.date().iter_days().take_while(|d| *d <= b.date()) {
+            let wm = cal.working_minutes_within(d, a, b) as f64;
+            if wm > 0.0 {
+                *per_day.entry(d).or_default() += wm;
+            }
         }
     }
+    let days: Vec<(NaiveDate, f64)> = per_day.into_iter().collect();
     let total: f64 = days.iter().map(|(_, w)| w).sum();
     if total <= 0.0 {
         // No working time in span (e.g. elapsed-time task): spread evenly over calendar days.
@@ -326,7 +348,7 @@ pub fn workload(p: &Project, from: NaiveDate, to: NaiveDate, granularity: Granul
             continue;
         };
         let cal = task_calendar(p, i);
-        for (d, w) in distribute(&cal, s, f, t.sched.work as f64, WorkContour::Flat) {
+        for (d, w) in distribute_spans(&cal, &task_spans(t, s, f), t.sched.work as f64, WorkContour::Flat) {
             if let Some(slot) = bucket_of(d).and_then(|b| unassigned.get_mut(b)) {
                 *slot += w;
             }

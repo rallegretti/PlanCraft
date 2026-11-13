@@ -271,7 +271,7 @@ pub fn task_field_props() -> Map<String, Value> {
         "actual_finish": date_or_null("Actual finish date."),
         "actual_duration": duration("Progress as working time done so far; sets % complete. Past the planned duration, it stretches the duration and completes the task."),
         "remaining_duration": duration("Progress as working time still needed; the duration becomes time done + this, and % complete follows."),
-        "resume": date_or_null("For a task in progress (1-99%): when its remaining work restarts. A date after the work done so far splits the task; null resumes straight away."),
+        "resume": date_or_null("For a task in progress (1-99%): when its remaining work restarts. A date later than its stop pauses the task there until then (a split); a date before the stop is refused; null removes a pause still ahead."),
         "manual_start": date_or_null("Manually entered start (used by manual tasks)."),
         "manual_finish": date_or_null("Manually entered finish (used by manual tasks)."),
         "calendar": { "type": ["integer", "string", "null"], "description": "Task calendar id or name; null uses the project/resource calendars." },

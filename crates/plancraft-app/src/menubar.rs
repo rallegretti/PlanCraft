@@ -399,7 +399,7 @@ fn toolbar(ui: &mut Ui, st: &mut UiState, info: &MenuInfo, settings: &AppSetting
             sep(ui);
             b(
                 ui,
-                "⟳",
+                "⏭",
                 Some("Update Project"),
                 "Update progress through a date, or reschedule work not done yet to start after it",
                 doc,

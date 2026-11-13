@@ -12,7 +12,7 @@
 - **Workload:** estimates (complexity points, three-point PERT and work), time-phased workload, overallocation detection and resource leveling
 - **Tracking:** time entries, the weekly timesheet, progress from tracked time, baselines, variance and earned value
   - Status date, Update Project (progress through a date; reschedule uncompleted work after it) and Mark on Track.
-  - Stop and Resume dates: a task in progress can split, with its remaining work resuming later. Actual and remaining duration entry.
+  - Stop and Resume dates: a task in progress can pause and resume later (a split bar); each reschedule adds a pause and keeps the earlier ones. Resource usage and leveling leave the pauses free. Actual and remaining duration entry.
 - **Desktop app:** two-row command bar, ten views, the major dialogs, undo/redo with history, multiple open documents, CSV export
 - **Custom fields and tables:**
   - Custom task fields: text with an optional pick-list, number, cost, date, duration and flag.
@@ -32,7 +32,7 @@
 - **Network Diagram view:** PERT boxes laid out automatically, with critical highlighting.
 - **Reports:** a project overview dashboard, cost overview and a milestone report (printable). Printing of the usage, calendar and Network Diagram views.
 - **Saved filters and multi-level sort.** Also custom-field formulas and summary rollups.
-- **Recurring tasks and task splitting:** more than one split per task, dragging split parts on the Gantt, and the status-date calculation options (move completed parts back to the status date, remaining parts forward).
+- **Recurring tasks and task splitting:** splitting tasks that have not started, dragging split parts on the Gantt, and the status-date calculation options (move completed parts back to the status date, remaining parts forward).
 - **Leveling options:** level within slack only, a priority-driven order, splitting, and a leveling preview (MS Project's "Leveling Gantt").
 - **Resource pool shared across projects:** one resources file that several projects link to.
 - **Overtime work and cost-rate tables:** effective-dated rates and cost accrual.

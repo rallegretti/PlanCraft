@@ -31,7 +31,7 @@ pub fn tools() -> Vec<Tool> {
         Tool::new(
             "reschedule_uncompleted_work",
             "Reschedule uncompleted work",
-            "Update Project's 'Reschedule uncompleted work to start after': work not done by the end of 'date' moves after it and actual dates stay. A task in progress is split (its remaining work resumes after the date); a task not started gets a Start No Earlier Than constraint. Manually scheduled tasks and other date constraints are left alone and reported.",
+            "Update Project's 'Reschedule uncompleted work to start after': work not done by the end of 'date' moves after it and actual dates stay. A task in progress pauses at its stop and resumes after the date (earlier pauses stay); a task not started, and not already moved past the date by its links, gets a Start No Earlier Than constraint. Manually scheduled tasks and other date constraints are left alone and reported.",
             schema(
                 json!({
                     "date": date("Uncompleted work starts after the end of this day (default: the status date, else today)."),

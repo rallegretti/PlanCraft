@@ -905,7 +905,7 @@ impl Project {
         t.percent_complete = pct;
         if pct == 0 || pct == 100 {
             // Nothing left to resume.
-            t.resume = None;
+            t.splits.clear();
         }
         if pct == 0 {
             t.actual_start = None;
@@ -970,12 +970,11 @@ impl Project {
             } else {
                 let cal = crate::schedule::task_calendar(self, idx);
                 let upto = through.min(finish);
-                let done = match (t.sched.stop, t.sched.resume) {
-                    // A split task does no work between its stop and resume dates.
-                    (Some(stop), Some(resume)) if resume > cal.snap_forward(stop) => {
-                        cal.between(start, upto.min(stop)).max(0) + if upto > resume { cal.between(resume, upto).max(0) } else { 0 }
-                    }
-                    _ => cal.between(start, upto).max(0),
+                // A split task does no work during its pauses.
+                let done = if t.sched.parts.is_empty() {
+                    cal.between(start, upto).max(0)
+                } else {
+                    crate::schedule::work_done_by(&t.sched.parts, &cal, upto)
                 };
                 let pct = done.saturating_mul(100).saturating_add(t.duration / 2) / t.duration.max(1);
                 u8::try_from(pct.clamp(0, 99)).unwrap_or(99)
@@ -990,12 +989,14 @@ impl Project {
     }
 
     /// Microsoft Project's "Mark on Track": sets the tasks' % complete to what their schedule says
-    /// at the status date (today when none is set), never lowering progress already entered.
+    /// at the end of the status date (today when none is set), never lowering progress already
+    /// entered. Same moment as Update Project's default.
     pub fn mark_on_track(&mut self, ids: &[TaskId]) -> PlanResult<TrackingReport> {
         if ids.is_empty() {
             return invalid("select the tasks to mark on track");
         }
-        let at = crate::report::status_moment(self);
+        let day = self.status_date.unwrap_or_else(|| chrono::Local::now().date_naive());
+        let at = self.end_of_working_day(day);
         self.update_progress_through(ids, at, ProgressUpdate::Scheduled)
     }
 
@@ -1004,9 +1005,15 @@ impl Project {
     /// (its remaining part resumes after `after`); a task not started gets a Start No Earlier
     /// Than `after` constraint. `ids` empty = the entire project.
     pub fn reschedule_uncompleted_work(&mut self, ids: &[TaskId], after: NaiveDateTime) -> PlanResult<TrackingReport> {
+        if crate::limits::clamp_datetime(after) != after {
+            return invalid("the date to reschedule after must be between 1900 and the end of 2300");
+        }
         crate::schedule::recalculate(self);
         let mut report = TrackingReport::default();
-        for idx in self.tracking_rows(ids)? {
+        let rows = self.tracking_rows(ids)?;
+        // First the tasks in progress: their remaining work pauses until `after`.
+        let mut not_started = Vec::new();
+        for &idx in &rows {
             let t = self.row(idx)?;
             let id = t.id;
             if t.is_complete() || t.actual_finish.is_some() {
@@ -1018,21 +1025,27 @@ impl Project {
                 }
                 continue;
             }
-            let started = t.percent_complete > 0 || t.actual_start.is_some();
-            if started {
-                if t.percent_complete == 0 || t.sched.resume.is_none() {
-                    // Started but no work done yet: the whole task moves.
-                    if t.sched.start.is_some_and(|s| s < after) {
-                        report.skipped.push((id, "it has an actual start but no progress".into()));
-                    }
-                    continue;
-                }
-                if t.sched.resume.is_some_and(|r| r < after) {
-                    self.row_mut(idx)?.resume = Some(after);
-                    report.split.push(id);
-                }
+            if t.percent_complete == 0 && t.actual_start.is_none() {
+                not_started.push(idx);
                 continue;
             }
+            let Some(resume) = t.sched.resume.filter(|_| t.percent_complete > 0) else {
+                // Started but no work done yet: the whole task would move.
+                if t.sched.start.is_some_and(|s| s < after) {
+                    report.skipped.push((id, "it has an actual start but no progress".into()));
+                }
+                continue;
+            };
+            if resume < after {
+                self.pause_at_stop(idx, after)?;
+                report.split.push(id);
+            }
+        }
+        // Then the tasks not started, with the split tasks' successors already moved.
+        crate::schedule::recalculate(self);
+        for idx in not_started {
+            let t = self.row(idx)?;
+            let id = t.id;
             if !t.sched.start.is_some_and(|s| s < after) {
                 continue;
             }
@@ -1048,6 +1061,19 @@ impl Project {
             report.constrained.push(id);
         }
         Ok(report)
+    }
+
+    /// Makes the task at `idx` stop after the work done so far and resume at `resume`, replacing
+    /// any pause still ahead of it (earlier pauses, in work already done, stay).
+    fn pause_at_stop(&mut self, idx: usize, resume: NaiveDateTime) -> PlanResult<()> {
+        let t = self.row_mut(idx)?;
+        let done = t.actual_duration();
+        t.splits.retain(|s| s.work < done);
+        if t.splits.len() >= crate::schedule::MAX_SPLITS {
+            return invalid("a task can have at most 100 pauses");
+        }
+        t.splits.push(Split { work: done, resume });
+        Ok(())
     }
 
     /// The leaf task a duration-based progress entry applies to.
@@ -1071,16 +1097,21 @@ impl Project {
             return invalid("actual duration must be between 0 and 5 years");
         }
         let t = self.row(idx)?;
-        let (dur, estimated) = (t.duration, t.estimated);
+        let (dur, estimated, current) = (t.duration, t.estimated, t.percent_complete);
         if minutes >= dur && minutes > 0 {
             if minutes > dur {
                 self.set_duration(id, minutes, estimated)?;
-                // The actual finish is the new scheduled finish.
+                // The actual finish is the new scheduled finish, even for a task already complete.
+                self.row_mut(idx)?.actual_finish = None;
                 crate::schedule::recalculate(self);
             }
             return self.set_percent_complete(id, 100);
         }
         let pct = percent_of(minutes, dur);
+        if pct == current {
+            // Unchanged: keep an actual start entered without progress.
+            return Ok(());
+        }
         self.set_percent_complete(id, pct)
     }
 
@@ -1098,31 +1129,54 @@ impl Project {
             return invalid("a task needs some duration; enter remaining duration above zero");
         }
         let pct = if minutes == 0 { 100 } else { percent_of(done, total) };
+        let current = t.percent_complete;
         if total != t.duration {
             self.set_duration(id, total, estimated)?;
             if pct == 100 {
                 // The actual finish is the new scheduled finish.
+                self.row_mut(idx)?.actual_finish = None;
                 crate::schedule::recalculate(self);
             }
+        }
+        if pct == current {
+            // Unchanged: keep an actual start entered without progress.
+            return Ok(());
         }
         self.set_percent_complete(id, pct)
     }
 
-    /// Sets when the remaining work of an in-progress task resumes (`None` = straight after the
-    /// completed part). A date after the completed part splits the task.
+    /// Sets when the remaining work of an in-progress task resumes (Microsoft Project's Resume).
+    /// A date later than the stop makes the task pause there and resume then (a split); `None`, or
+    /// the next working moment after the stop, removes that pause.
     pub fn set_resume(&mut self, id: TaskId, resume: Option<NaiveDateTime>) -> PlanResult<()> {
         let idx = self.require_task(id)?;
-        if resume.is_some() {
-            if self.has_children(idx) {
-                return invalid("a summary task's dates come from its subtasks");
-            }
-            let t = self.row(idx)?;
-            if t.is_milestone() || t.mode == ScheduleMode::Manual || !(1..100).contains(&t.percent_complete) {
-                return invalid("only an automatically scheduled task that is 1-99% complete can resume later");
-            }
+        if resume.is_none() {
+            let t = self.row_mut(idx)?;
+            let done = t.actual_duration();
+            t.splits.retain(|s| s.work < done);
+            return Ok(());
         }
-        self.row_mut(idx)?.resume = resume;
-        Ok(())
+        if self.has_children(idx) {
+            return invalid("a summary task's dates come from its subtasks");
+        }
+        let t = self.row(idx)?;
+        if t.is_milestone() || t.mode == ScheduleMode::Manual || !(1..100).contains(&t.percent_complete) {
+            return invalid("only an automatically scheduled task that is 1-99% complete can resume later");
+        }
+        crate::schedule::recalculate(self);
+        let t = self.row(idx)?;
+        let (Some(stop), Some(date)) = (t.sched.stop, resume) else {
+            return invalid("the task has no stop yet; enter its actual start");
+        };
+        let cal = crate::schedule::task_calendar(self, idx);
+        let (date, next) = (cal.snap_forward(date), cal.snap_forward(stop));
+        if date < next {
+            return invalid(format!("Resume must be after Stop ({})", stop.format("%Y-%m-%d %H:%M")));
+        }
+        if date == next {
+            return self.set_resume(id, None);
+        }
+        self.pause_at_stop(idx, date)
     }
 
     /// Records time spent by a resource on a task.

@@ -294,10 +294,10 @@ Header and footer texts take codes: `[Project]`, `[Manager]`, `[Company]`, `[Vie
 | Tool | Arguments (required in **bold**) | Description |
 |---|---|---|
 | `update_progress_through` | date, mode, tasks | Update Project's "Update work as complete through": each task's % complete becomes what its schedule says at the end of `date` (`mode: "scheduled"`, the default), or only tasks that finish by then become 100% (`"zero_or_hundred"`). Progress already entered is never lowered. `date` defaults to the status date, else today. |
-| `reschedule_uncompleted_work` | date, tasks | Update Project's "Reschedule uncompleted work to start after": work not done by the end of `date` moves after it and actual dates stay. A task in progress is split (its `resume` date moves); a task not started gets a Start No Earlier Than constraint. Manually scheduled tasks and other constraints are left alone and listed under `skipped`. |
+| `reschedule_uncompleted_work` | date, tasks | Update Project's "Reschedule uncompleted work to start after": work not done by the end of `date` moves after it and actual dates stay. A task in progress pauses at its stop and resumes after the date (earlier pauses stay); a task not started, and not already moved past the date by its links, gets a Start No Earlier Than constraint. Manually scheduled tasks and other constraints are left alone and listed under `skipped`. |
 | `mark_on_track` | **tasks** | Set the tasks' % complete to what their schedule says at the status date (today if none is set), never lowering progress. |
 
-Set the status date with `update_project` (`status_date`, or `null` for today). Tasks also take `actual_duration`, `remaining_duration` and `resume` in `create_task`/`update_task`. Task details show `stop` (end of the work done so far) and `resume` (when the rest starts; later than `stop` when the task is split).
+Set the status date with `update_project` (`status_date`, or `null` for today). Tasks also take `actual_duration`, `remaining_duration` and `resume` in `create_task`/`update_task`. Task details show `stop` (end of the work done so far), `resume` (when the rest starts) and, for a split task, `parts` (the start and finish of each working part). Setting `resume` later than `stop` pauses the task there; a date before `stop` is refused, and `null` removes a pause still ahead. Progress fills the parts in order, so work done after a pause never lands inside it.
 
 ### Time tracking
 

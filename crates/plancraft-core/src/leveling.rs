@@ -16,7 +16,7 @@ use crate::duration::Minutes;
 use crate::ids::*;
 use crate::model::*;
 use crate::schedule::{recalculate, task_calendar};
-use crate::workload::{capacity_on, distribute, resource_calendar};
+use crate::workload::{capacity_on, distribute_spans, resource_calendar};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -60,6 +60,8 @@ struct TaskPlan<'a> {
     cal: WorkCal<'a>,
     start: Option<NaiveDateTime>,
     duration: Minutes,
+    /// Working parts of a split task (it has started, so it never moves).
+    parts: Vec<(NaiveDateTime, NaiveDateTime)>,
     /// (resource, work, contour) of its work assignments within the leveling filter.
     assignments: Vec<(ResourceId, f64, WorkContour)>,
 }
@@ -74,7 +76,13 @@ impl<'a> TaskPlan<'a> {
             .filter(|a| p.resource(a.resource).is_some_and(|r| r.kind == ResourceType::Work))
             .map(|a| (a.resource, a.work as f64, a.contour))
             .collect();
-        Some(Self { cal: task_calendar(p, idx), start: if has_dates { t.sched.start } else { None }, duration: t.duration, assignments })
+        Some(Self {
+            cal: task_calendar(p, idx),
+            start: if has_dates { t.sched.start } else { None },
+            duration: t.duration,
+            parts: t.sched.parts.clone(),
+            assignments,
+        })
     }
 
     /// The task's load per resource and day when delayed by `delay`, and the start it then has.
@@ -85,9 +93,11 @@ impl<'a> TaskPlan<'a> {
         };
         let start = if delay > 0 { self.cal.snap_forward(self.cal.add(s, delay)) } else { s };
         let finish = self.cal.add(start, self.duration);
+        let whole = [(start, finish)];
+        let spans: &[(NaiveDateTime, NaiveDateTime)] = if delay == 0 && !self.parts.is_empty() { &self.parts } else { &whole };
         for (rid, work, contour) in &self.assignments {
             let e = out.entry(*rid).or_default();
-            for (d, w) in distribute(&self.cal, start, finish, *work, *contour) {
+            for (d, w) in distribute_spans(&self.cal, spans, *work, *contour) {
                 *e.entry(d).or_default() += w;
             }
         }
