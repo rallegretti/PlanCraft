@@ -10,6 +10,7 @@ use crate::server::Ctx;
 
 pub mod analysis;
 pub mod assignments;
+pub mod board;
 pub mod calendars;
 pub mod custom_fields;
 pub mod dependencies;
@@ -123,6 +124,7 @@ pub fn all_tools() -> Vec<Tool> {
     v.extend(print::tools());
     v.extend(tracking::tools());
     v.extend(recurring::tools());
+    v.extend(board::tools());
     v
 }
 
@@ -283,6 +285,8 @@ pub fn task_field_props() -> Map<String, Value> {
         "estimate": estimate(),
         "deliverable": string("For milestones: the output achieved at this milestone."),
         "show_on_timeline": boolean("Show this task on the timeline view."),
+        "board_status": { "type": ["string", "integer", "null"], "description": "Task Board column (Board Status) by name or id; a column with a Set % Complete value also sets % complete. null puts the card back in the first column." },
+        "show_on_board": boolean("Show this task as a card on the Task Board (default true)."),
         "is_milestone": boolean("Convert to a milestone (true) or a normal task (false)."),
         "predecessors": predecessors("Predecessor links."),
         "resources": string("Resource assignments in 'Resource Names' syntax, e.g. \"Ana[50%], Bob\". Unknown names create new work resources. Replaces existing assignments; \"\" removes all."),

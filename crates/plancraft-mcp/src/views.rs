@@ -351,6 +351,8 @@ pub fn task_detail(p: &Project, id: TaskId) -> Value {
         "notes": t.notes,
         "deliverable": t.deliverable,
         "show_on_timeline": t.show_on_timeline,
+        "board_status": p.board_column_of(idx).filter(|_| !t.sched.is_summary).and_then(|c| p.board_column(c)).map(|c| c.name.clone()),
+        "show_on_board": t.show_on_board,
         "bar_color": t.bar_color.map(|c| format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2])),
         "custom": crate::tools::custom_fields::custom_values_json(p, t),
         "late": report::is_late(t, at, p),

@@ -23,7 +23,7 @@ pub enum Field {
 }
 
 /// Built-in columns and their keys (as saved in table layouts). Keys never change.
-const BUILTIN: [(TaskCol, &str); 53] = [
+const BUILTIN: [(TaskCol, &str); 55] = [
     (TaskCol::Indicators, "indicators"),
     (TaskCol::Mode, "mode"),
     (TaskCol::Wbs, "wbs"),
@@ -77,6 +77,8 @@ const BUILTIN: [(TaskCol, &str); 53] = [
     (TaskCol::Notes, "notes"),
     (TaskCol::UniqueId, "unique_id"),
     (TaskCol::Recurring, "recurring"),
+    (TaskCol::BoardStatus, "board_status"),
+    (TaskCol::ShowOnBoard, "show_on_board"),
 ];
 
 /// A value to sort or group by. Empty values sort after everything else.
@@ -257,6 +259,11 @@ impl Field {
             FreeSlack => mins(s.free_slack),
             TotalSlack => mins(s.total_slack),
             Priority => num(f64::from(t.priority)),
+            // In board order, not by name.
+            BoardStatus if !s.is_summary => p
+                .board_column_of(idx)
+                .and_then(|c| p.board_columns.iter().position(|b| b.id == c))
+                .map_or(SortKey::Missing, |k| num(k as f64)),
             ExpectedWork => t.estimate.map_or(SortKey::Missing, |e| mins(e.expected_work(&p.settings))),
             _ => {
                 let none = |_: TaskId| false;

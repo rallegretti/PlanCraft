@@ -99,6 +99,7 @@ pub fn check_counts(p: &Project) -> PlanResult<()> {
     unique("time entry", p.time_entries.iter().map(|e| e.id.0))?;
     unique("calendar", p.calendars.iter().map(|c| c.id.0))?;
     unique("custom field", p.custom_fields.iter().map(|f| f.id.0))?;
+    unique("board column", p.board_columns.iter().map(|c| c.id.0))?;
     Ok(())
 }
 
@@ -155,6 +156,7 @@ pub fn sanitize(p: &mut Project) -> Vec<String> {
         s.task(t, &calendars);
     }
     s.custom_fields(p);
+    s.board(p);
     if p.page_setup.sanitize() {
         s.note("page setup values were out of range");
     }
@@ -203,7 +205,15 @@ pub fn sanitize(p: &mut Project) -> Vec<String> {
     }
 
     let ids = &mut p.ids;
-    for counter in [&mut ids.task, &mut ids.resource, &mut ids.calendar, &mut ids.assignment, &mut ids.time_entry, &mut ids.custom_field] {
+    for counter in [
+        &mut ids.task,
+        &mut ids.resource,
+        &mut ids.calendar,
+        &mut ids.assignment,
+        &mut ids.time_entry,
+        &mut ids.custom_field,
+        &mut ids.board_column,
+    ] {
         if *counter > MAX_ID {
             *counter = MAX_ID;
             s.note("an id counter is out of range");
@@ -222,6 +232,35 @@ struct Fixer {
 impl Fixer {
     /// Custom field definitions, task values (dropped when their field is gone or of another
     /// kind) and saved table layouts.
+    fn board(&mut self, p: &mut Project) {
+        self.list(&mut p.board_columns, crate::board::MAX_BOARD_COLUMNS, "the board has more than 100 columns");
+        let mut names = HashSet::new();
+        for c in &mut p.board_columns {
+            self.name(&mut c.name);
+            if c.name.trim().is_empty() || !names.insert(crate::board::name_key(&c.name)) {
+                let mut n = 1u32;
+                let mut name = format!("Column {}", c.id.0);
+                while !names.insert(crate::board::name_key(&name)) {
+                    n = n.saturating_add(1);
+                    name = format!("Column {} ({n})", c.id.0);
+                }
+                c.name = name;
+                self.note("a board column name was empty or repeated");
+            }
+            if c.percent_complete.is_some_and(|v| v > 100) {
+                c.percent_complete = Some(100);
+                self.note("a board column's % complete is above 100");
+            }
+        }
+        let columns: HashSet<_> = p.board_columns.iter().map(|c| c.id).collect();
+        for t in &mut p.tasks {
+            if t.board_status.is_some_and(|s| !columns.contains(&s)) {
+                t.board_status = None;
+                self.note("a task was in a board column that does not exist");
+            }
+        }
+    }
+
     fn custom_fields(&mut self, p: &mut Project) {
         use crate::custom::{self, CustomFieldKind, CustomValue};
         let mut names = HashSet::new();

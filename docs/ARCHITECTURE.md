@@ -25,6 +25,7 @@ This crate is pure logic with no UI. Every other component builds on it.
 | `ops` | All editing operations: outline, links, milestones, the duration/work/units rules, assignments, progress, time logging, calendars, and text parsing for the table columns |
 | `baseline` | Baseline and Baseline1–10, interim plans (Start1–10/Finish1–10): saving for the entire project or selected tasks with roll-up into summaries, copying between them, clearing, and per-plan totals |
 | `split` | Split Task: pauses planned in a task (`Gap`: after some work, a pause of some working time) that move with it; the scheduler lays the parts out (`schedule::segments_of`) |
+| `board` | The Task Board: its columns (Board Status values, each with an optional Set % Complete), which column a task's card is in, and moving cards and columns |
 | `recurring` | Recurring tasks: the patterns, occurrence dates, and the summary-with-occurrences each one is |
 | `workload` | Time-phased distribution (with contours), capacity, overallocation, and workload reports |
 | `leveling` | Serial resource leveling that writes `leveling_delay`. It keeps loads incrementally and recalculates only when a delay can move other tasks. |
@@ -109,7 +110,7 @@ The MCP server is a hand-rolled JSON-RPC 2.0 server. It has no async runtime, wh
   - Tool errors come back as `isError` results.
   - Each request locks the shared workspace briefly.
   - The change callback runs after the lock is released.
-- **`tools/*`:** 83 tools grouped by domain.
+- **`tools/*`:** 88 tools grouped by domain.
   - All mutations go through `Document::try_edit(…, ChangeSource::Agent, …)`.
   - Unknown arguments are rejected so agents find their typos.
 - **Transports:**
@@ -128,7 +129,7 @@ The desktop app uses egui and eframe 0.36 with the wgpu renderer.
 - **`widgets::grid`:** a virtualized spreadsheet grid with in-place text and choice editors, column resizing, keyboard navigation, and blank rows for entering new items.
 - **`widgets::timescale`:** the two-tier timescale (units from `plancraft_core::timescale`).
 - **`printing` / `dialogs::print`:** the printed sheet built from the current view (columns left of the divider, sort, group and filter as on screen), the Print window with its preview, and hand-off to the system print service (`lp`; the PDF viewer on Windows) in a background thread with a timeout.
-- **`views/*`:** the twelve views. The Gantt view (also the Tracking Gantt and the Multiple Baselines Gantt) combines the task grid with `gantt_chart`, which draws bars, links, milestone connectors and baselines and handles drag-to-move, resize, progress and link. `network` draws the core's Network Diagram layout (cached per edit) and handles selection, Task Information, drag-to-link, panning and zoom.
+- **`views/*`:** the thirteen views. The Gantt view (also the Tracking Gantt and the Multiple Baselines Gantt) combines the task grid with `gantt_chart`, which draws bars, links, milestone connectors and baselines and handles drag-to-move, resize, progress and link. `network` draws the core's Network Diagram layout (cached per edit) and handles selection, Task Information, drag-to-link, panning and zoom. `board` paints the Task Board's columns and cards and handles selection, dragging cards between columns and the column menu.
 - **`columns`:** task table definitions. Each column defines how to display, edit and commit its value. Tables: Entry, Schedule, Tracking, Work, Cost, Estimates, Variance, Summary.
 - **`dialogs/*`:** Task, Resource and Project Information, Change Working Time, Assign Resources, External Links, Statistics, History, About, and the MCP panel.
 - **`mcp_host`:** starts and stops the HTTP MCP server on the app's `SharedWorkspace`, and repaints the window when agents make changes.

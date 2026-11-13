@@ -230,6 +230,13 @@ enum Op {
     RemoveSplits(usize),
     Recurring(Option<usize>, u8, u16, u8, u8, i64, u16, i64),
     SetRecurrence(usize, u8, u16, u8, u8, i64, u16, i64),
+    AddColumn(String, Option<usize>, Option<u8>),
+    RenameColumn(usize, String),
+    ColumnPercent(usize, Option<u8>),
+    MoveColumn(usize, usize),
+    DeleteColumn(usize),
+    BoardStatus(usize, usize),
+    ShowOnBoard(usize, bool),
     AddField(usize, String, Vec<String>),
     SetCustom(usize, usize, String),
     DeleteField(usize),
@@ -291,6 +298,13 @@ fn edit_op() -> impl Strategy<Value = Op> {
             .prop_map(|(a, k, n, x, y, s, c, d)| Op::Recurring(a, k, n, x, y, s, c, d)),
         (i(), any::<u8>(), prop_oneof![0u16..5, any::<u16>()], any::<u8>(), any::<u8>(), big(), prop_oneof![0u16..30, any::<u16>()], big())
             .prop_map(|(a, k, n, x, y, s, c, d)| Op::SetRecurrence(a, k, n, x, y, s, c, d)),
+        (cell_text(), prop::option::of(any::<usize>()), prop::option::of(any::<u8>())).prop_map(|(n, a, pc)| Op::AddColumn(n, a, pc)),
+        (0usize..8, cell_text()).prop_map(|(k, n)| Op::RenameColumn(k, n)),
+        (0usize..8, prop::option::of(any::<u8>())).prop_map(|(k, pc)| Op::ColumnPercent(k, pc)),
+        (0usize..8, any::<usize>()).prop_map(|(k, to)| Op::MoveColumn(k, to)),
+        (0usize..8).prop_map(Op::DeleteColumn),
+        (i(), 0usize..8).prop_map(|(a, k)| Op::BoardStatus(a, k)),
+        (i(), any::<bool>()).prop_map(|(a, b)| Op::ShowOnBoard(a, b)),
         (0usize..6, cell_text(), prop::collection::vec(cell_text(), 0..4)).prop_map(|(k, n, c)| Op::AddField(k, n, c)),
         (i(), i(), cell_text()).prop_map(|(a, f, t)| Op::SetCustom(a, f, t)),
         i().prop_map(Op::DeleteField),
@@ -342,6 +356,10 @@ fn slot(k: usize) -> PlanSlot {
         1..=13 => PlanSlot::Baseline((k - 1) as u8),
         _ => PlanSlot::Interim((k - 14) as u8),
     }
+}
+
+fn column_at(p: &Project, k: usize) -> plancraft_core::ids::BoardColumnId {
+    p.board_columns.get(k % p.board_columns.len().max(1)).map_or(plancraft_core::ids::BoardColumnId(9999), |c| c.id)
 }
 
 fn field_at(p: &Project, i: usize) -> CustomFieldId {
@@ -433,6 +451,17 @@ fn apply(p: &mut Project, op: &Op) -> PlanResult<()> {
             let rec = recurrence(p, kind, n, x, y, s, c, d);
             p.set_recurrence(task_at(p, i), None, rec)?;
         }
+        Op::AddColumn(name, at, pc) => {
+            p.add_board_column(&name, at, pc)?;
+        }
+        Op::RenameColumn(k, name) => p.rename_board_column(column_at(p, k), &name)?,
+        Op::ColumnPercent(k, pc) => p.set_board_column_percent(column_at(p, k), pc)?,
+        Op::MoveColumn(k, to) => p.move_board_column(column_at(p, k), to)?,
+        Op::DeleteColumn(k) => {
+            p.delete_board_column(column_at(p, k))?;
+        }
+        Op::BoardStatus(i, k) => p.set_board_status(&[task_at(p, i)], column_at(p, k))?,
+        Op::ShowOnBoard(i, b) => p.set_show_on_board(&[task_at(p, i)], b)?,
         Op::AddField(k, name, choices) => {
             let kind = CustomFieldKind::ALL[k % CustomFieldKind::ALL.len()];
             p.add_custom_field(&name, kind, &choices)?;
@@ -650,6 +679,40 @@ fn hostile_baselines_in_a_file_are_clamped_on_open() {
     // A baseline that starts after it finishes is put in order.
     let bl = loaded.tasks[1].baseline_in(2).unwrap();
     assert!(bl.start <= bl.finish);
+}
+
+#[test]
+fn hostile_boards_in_a_file_are_clamped_on_open() {
+    let p = demo_project(start());
+    let mut v = serde_json::to_value(&p).unwrap();
+    let cols: Vec<serde_json::Value> =
+        (1..=300).map(|i| serde_json::json!({ "id": i, "name": if i % 3 == 0 { "Same".to_string() } else { String::new() }, "percent_complete": 255 })).collect();
+    v["board_columns"] = serde_json::Value::Array(cols);
+    v["tasks"][1]["board_status"] = serde_json::json!(99_999);
+    let (mut loaded, notes) = plancraft_core::io::from_json_with_notes(&v.to_string(), std::path::Path::new("x.plancraft")).unwrap();
+    for want in ["more than 100 columns", "column name", "% complete is above 100", "board column that does not exist"] {
+        assert!(notes.iter().any(|n| n.contains(want)), "{want}: {notes:?}");
+    }
+    assert_eq!(loaded.board_columns.len(), plancraft_core::board::MAX_BOARD_COLUMNS);
+    let names: std::collections::HashSet<String> = loaded.board_columns.iter().map(|c| c.name.to_lowercase()).collect();
+    assert_eq!(names.len(), loaded.board_columns.len(), "names are unique");
+    assert!(loaded.ids.board_column >= 300, "the counter stays ahead of stored ids");
+    assert!(limits::sanitize(&mut loaded).is_empty());
+    // Two columns with one id refuse the file, like other repeated ids; no columns at all get
+    // the default board.
+    v["board_columns"] = serde_json::json!([{ "id": 1, "name": "A" }, { "id": 1, "name": "B" }]);
+    assert!(plancraft_core::io::from_json_with_notes(&v.to_string(), std::path::Path::new("x.plancraft")).is_err());
+    v["board_columns"] = serde_json::json!([]);
+    v["tasks"][1]["board_status"] = serde_json::Value::Null;
+    let (loaded, _) = plancraft_core::io::from_json_with_notes(&v.to_string(), std::path::Path::new("x.plancraft")).unwrap();
+    assert_eq!(loaded.board_columns.len(), 4);
+    // Regression: a counter at the very top gave the default columns ids out of range, so the
+    // plan opened but every edit was then refused.
+    v["ids"]["board_column"] = serde_json::json!(u32::MAX);
+    let (loaded, _) = plancraft_core::io::from_json_with_notes(&v.to_string(), std::path::Path::new("x.plancraft")).unwrap();
+    let mut doc = Document::new(1, loaded, None);
+    doc.edit("Rename", |p| p.name = "Still editable".into()).unwrap();
+    assert!(limits::check_counts(&doc.project).is_ok());
 }
 
 #[test]

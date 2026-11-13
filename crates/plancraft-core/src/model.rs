@@ -399,6 +399,12 @@ pub struct Task {
     /// An occurrence of a recurring task (made by it, and changed with it).
     #[serde(default, skip_serializing_if = "is_false")]
     pub occurrence: bool,
+    /// The Task Board column the task is in (Board Status); `None`: the first column.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub board_status: Option<BoardColumnId>,
+    /// Whether the task shows on the Task Board (Show on Board).
+    #[serde(default = "yes", skip_serializing_if = "is_true")]
+    pub show_on_board: bool,
     /// Delay added by resource leveling (working minutes).
     #[serde(default, skip_serializing_if = "is_zero_i64")]
     pub leveling_delay: Minutes,
@@ -470,6 +476,8 @@ impl Task {
             gaps: Vec::new(),
             recurrence: None,
             occurrence: false,
+            board_status: None,
+            show_on_board: true,
             leveling_delay: 0,
             fixed_cost: 0.0,
             notes: String::new(),
@@ -888,6 +896,9 @@ pub struct Project {
     /// Columns chosen for task tables, by table name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tables: Vec<crate::custom::TableLayout>,
+    /// The Task Board's columns, in order (see [`crate::board`]).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub board_columns: Vec<crate::board::BoardColumn>,
     /// Page Setup for printing and PDF export.
     #[serde(default, skip_serializing_if = "crate::print::PageSetup::is_default", deserialize_with = "crate::print::lenient_page_setup")]
     pub page_setup: crate::print::PageSetup,
@@ -906,6 +917,7 @@ impl Project {
         let night = ids.next_calendar();
         let settings = ProjectSettings::default();
         let start_time = crate::calendar::shift(start.and_time(chrono::NaiveTime::MIN), Minutes::from(settings.time.default_start_time));
+        let board_columns = crate::board::default_columns(&mut ids);
         Self {
             format: FILE_FORMAT.into(),
             version: FILE_VERSION,
@@ -927,6 +939,7 @@ impl Project {
             external_projects: Vec::new(),
             custom_fields: Vec::new(),
             tables: Vec::new(),
+            board_columns,
             page_setup: crate::print::PageSetup::default(),
             ids,
             sched: ProjectSchedule::default(),

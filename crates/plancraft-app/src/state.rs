@@ -16,6 +16,7 @@ pub enum ViewKind {
     TrackingGantt,
     MultipleBaselines,
     NetworkDiagram,
+    Board,
     TaskUsage,
     Milestones,
     ResourceSheet,
@@ -33,6 +34,7 @@ impl ViewKind {
             ViewKind::TrackingGantt => "Tracking Gantt",
             ViewKind::MultipleBaselines => "Multiple Baselines Gantt",
             ViewKind::NetworkDiagram => "Network Diagram",
+            ViewKind::Board => "Task Board",
             ViewKind::TaskUsage => "Task Usage",
             ViewKind::Milestones => "Milestones",
             ViewKind::ResourceSheet => "Resource Sheet",
@@ -50,6 +52,7 @@ impl ViewKind {
             ViewKind::TrackingGantt => "📈",
             ViewKind::MultipleBaselines => "📚",
             ViewKind::NetworkDiagram => "🔀",
+            ViewKind::Board => "📇",
             ViewKind::TaskUsage => "📝",
             ViewKind::Milestones => "♦",
             ViewKind::ResourceSheet => "👥",
@@ -61,11 +64,12 @@ impl ViewKind {
         }
     }
 
-    pub const ALL: [ViewKind; 12] = [
+    pub const ALL: [ViewKind; 13] = [
         ViewKind::Gantt,
         ViewKind::TrackingGantt,
         ViewKind::MultipleBaselines,
         ViewKind::NetworkDiagram,
+        ViewKind::Board,
         ViewKind::TaskUsage,
         ViewKind::Milestones,
         ViewKind::Calendar,
@@ -146,6 +150,51 @@ pub enum NetDrag {
     Pan { grab: egui::Pos2 },
     /// Drawing a link from a box.
     Link { from: TaskId },
+}
+
+/// A card (or the selected cards) being dragged on the Task Board.
+#[derive(Clone, Debug)]
+pub struct BoardDrag {
+    pub tasks: Vec<TaskId>,
+}
+
+/// The Board Column window: rename a column and set its % complete, or add one.
+#[derive(Clone, Debug)]
+pub struct ColumnEdit {
+    /// The column changed (`None`: a new one).
+    pub id: Option<plancraft_core::ids::BoardColumnId>,
+    pub name: String,
+    pub percent: String,
+    pub error: Option<String>,
+}
+
+impl ColumnEdit {
+    pub fn new_column() -> Self {
+        Self { id: None, name: String::new(), percent: String::new(), error: None }
+    }
+
+    pub fn existing(c: &plancraft_core::board::BoardColumn) -> Self {
+        Self { id: Some(c.id), name: c.name.clone(), percent: c.percent_complete.map(|v| v.to_string()).unwrap_or_default(), error: None }
+    }
+}
+
+/// Task Board view state.
+pub struct BoardState {
+    pub scroll: egui::Vec2,
+    pub drag: Option<BoardDrag>,
+    pub edit: Option<ColumnEdit>,
+    /// What the open context menu is for: a column header (`Some(id)`) or cards (`None`).
+    pub menu: Option<Option<plancraft_core::ids::BoardColumnId>>,
+    /// Where the cards were drawn on the last frame (columns start at its left edge).
+    pub body: egui::Rect,
+    /// Scroll the selected card into view on the next frame.
+    pub reveal_pending: bool,
+}
+
+impl Default for BoardState {
+    fn default() -> Self {
+        Self { scroll: egui::Vec2::ZERO, drag: None, edit: None, menu: None, body: egui::Rect::NOTHING, reveal_pending: false }
+    }
 }
 
 /// Network Diagram view: where it is scrolled to, zoom, options and the cached layout.
@@ -387,6 +436,7 @@ pub struct UiState {
     pub table: TaskTable,
     pub gantt: GanttState,
     pub network: NetworkState,
+    pub board: BoardState,
     pub table_width: f32,
     pub timeline_visible: bool,
     pub granularity: Granularity,
@@ -425,6 +475,7 @@ impl Default for UiState {
             table: TaskTable::Entry,
             gantt: GanttState::default(),
             network: NetworkState::default(),
+            board: BoardState::default(),
             table_width: 720.0,
             timeline_visible: true,
             granularity: Granularity::Day,

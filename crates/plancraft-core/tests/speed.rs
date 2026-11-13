@@ -236,3 +236,21 @@ fn laying_out_a_10000_task_network_diagram_is_fast() {
     eprintln!("laying out 10,000 tasks twice: {best:?} (limit {limit:?})");
     assert!(best < limit, "took {best:?}; the limit is {limit:?}");
 }
+
+/// Regression: moving cards looked each task up from the start of the list, so moving every card
+/// of a 50,000-task plan into Done took 3 s.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a timing test: `cargo xtask ci` runs it in release")]
+fn moving_50000_cards_on_the_board_is_fast() {
+    let _serial = timed();
+    let mut p = Project::new("Board", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+    let ids = flat_tasks(&mut p, 50_000);
+    let done = p.find_board_column("Done").unwrap();
+    let t = best_of(2, || {
+        let mut q = p.clone();
+        q.set_board_status(&ids, done).unwrap();
+        q.set_show_on_board(&ids, false).unwrap();
+        assert!(q.board().iter().all(|(_, rows)| rows.is_empty()));
+    });
+    assert!(t < Duration::from_millis(500), "moving 50,000 cards took {t:?}");
+}
