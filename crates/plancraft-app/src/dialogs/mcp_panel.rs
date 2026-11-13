@@ -30,8 +30,18 @@ fn heading(ui: &mut egui::Ui, text: &str) {
 
 /// The running executable, quoted for a shell command line.
 fn exe() -> String {
-    let path = std::env::current_exe().map(|p| p.display().to_string()).unwrap_or_else(|_| "plancraft".into());
-    format!("\"{path}\"")
+    format!("\"{}\"", exe_path(std::env::var_os("APPIMAGE"), std::env::current_exe().ok()))
+}
+
+/// The program to start PlanCraft with: the AppImage file when running from one (the AppImage
+/// runtime names it in `$APPIMAGE`; the executable itself sits in a temporary mount that is gone
+/// once PlanCraft closes), else the executable.
+fn exe_path(appimage: Option<std::ffi::OsString>, current: Option<std::path::PathBuf>) -> String {
+    match (appimage.filter(|a| !a.is_empty()), current) {
+        (Some(a), _) => std::path::PathBuf::from(a).display().to_string(),
+        (None, Some(p)) => p.display().to_string(),
+        (None, None) => "plancraft".into(),
+    }
 }
 
 pub fn show(
@@ -110,4 +120,20 @@ pub fn show(
         code_line(ui, &headless, &headless);
         ui.label(RichText::new("Only connect agents you trust: they can change and save your project files.").small().color(theme::pal().TEXT_WEAK));
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: from an AppImage the panel offered the temporary mount's path, which stops
+    /// existing when PlanCraft closes, so the agent setup command it showed never worked.
+    #[test]
+    fn the_command_names_the_appimage_when_there_is_one() {
+        let mounted = Some(std::path::PathBuf::from("/tmp/.mount_PlanCrAbc/usr/bin/plancraft"));
+        assert_eq!(exe_path(Some("/home/a/PlanCraft.AppImage".into()), mounted.clone()), "/home/a/PlanCraft.AppImage");
+        assert_eq!(exe_path(None, mounted.clone()), "/tmp/.mount_PlanCrAbc/usr/bin/plancraft");
+        assert_eq!(exe_path(Some("".into()), mounted), "/tmp/.mount_PlanCrAbc/usr/bin/plancraft");
+        assert_eq!(exe_path(None, None), "plancraft");
+    }
 }

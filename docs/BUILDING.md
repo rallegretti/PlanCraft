@@ -7,6 +7,11 @@ Release packages are made with `cargo xtask`. This is a small Rust program in `x
 | macOS | `PlanCraft-<version>-macos-universal.dmg` | `PlanCraft.app` (Apple Silicon + Intel), with the headless `plancraft-mcp` inside the bundle |
 | Windows | `PlanCraft-<version>-windows-x64.zip` | portable `PlanCraft.exe` (GUI, with icon) and the console `plancraft-mcp.exe` |
 | Linux | `plancraft-<version>-linux-x86_64.tar.gz` | binaries, `install.sh`, desktop entry, icons, `.plancraft` MIME type |
+| Linux | `PlanCraft-<version>-x86_64.AppImage` | the same app as one file that runs without installing |
+
+The Linux binaries are built in an Ubuntu 22.04 container (`xtask/linux-build.Dockerfile`, image `plancraft-build:ubuntu22.04`, made the first time). They need only glibc 2.35, so both Linux packages run on Ubuntu 22.04 and every newer release; built directly on a newer system they would need its glibc. The build uses this machine's Rust toolchain, mounted read-only, and Docker must be installed. `PLANCRAFT_NATIVE_LINUX=1 cargo xtask package linux` builds without the container for a quick local package that runs only on systems at least as new as this one.
+
+The AppImage starts with the AppImage project's type-2 runtime. `cargo xtask` downloads it once from the project's GitHub release `20251108` into `target/appimage/`, and refuses it unless its SHA-256 matches the one pinned in `xtask/src/linux.rs`. The app files are packed with `mksquashfs` (zstd) in the same container.
 
 Every package gets a `.sha256` checksum file next to it. Packages are **not code-signed** yet:
 

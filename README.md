@@ -125,6 +125,21 @@ PlanCraft isn't notarized by Apple yet, so the first time you open it macOS may 
 
 ### Linux
 
+PlanCraft runs on Ubuntu 22.04 or newer, and other 64-bit distributions from 2022 on. There are two packages.
+
+**AppImage** (one file, nothing to install):
+
+1. Download `PlanCraft-<version>-x86_64.AppImage`.
+2. Make it executable and run it:
+   ```bash
+   chmod +x PlanCraft-*-x86_64.AppImage
+   ./PlanCraft-*-x86_64.AppImage
+   ```
+
+If your system lacks FUSE (it says it can't mount the AppImage), run it with `--appimage-extract-and-run`.
+
+**Install package** (adds PlanCraft to your applications menu):
+
 1. Download `plancraft-<version>-linux-x86_64.tar.gz`, then extract it:
    ```bash
    tar xzf plancraft-*-linux-x86_64.tar.gz
@@ -195,6 +210,7 @@ PlanCraft has built-in support for the **Model Context Protocol (MCP)**, the ope
    ```bash
    claude mcp add plancraft -- /path/to/plancraft mcp --attach
    ```
+   With the AppImage, the path is the `.AppImage` file itself.
 
 Changes the AI makes appear in the window as they happen. They're marked with ⚡ in **View ▸ History**, and **Ctrl+Z** undoes them like your own edits.
 
