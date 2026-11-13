@@ -59,11 +59,11 @@ pub fn tools() -> Vec<Tool> {
         Tool::new(
             "save_project",
             "Save a project",
-            "Save the document to its file. With 'path', save as a new file (relative links to external projects are rewritten so they keep working). Fails when another program changed the file since it was opened or last saved, unless overwrite is true.",
+            "Save the document to its file. With 'path', save as a new file (relative links to external projects are rewritten so they keep working). Fails when another program changed the file since it was opened or last saved, or when 'path' names another existing file, unless overwrite is true.",
             schema(
                 json!({
                     "path": string("Optional new file path (Save As)."),
-                    "overwrite": boolean("Replace the file even if another program changed it since it was opened or last saved (default false). Check with the user first."),
+                    "overwrite": boolean("Replace the file even if another program changed it since it was opened or last saved, or replace the existing file at 'path' (default false). Check with the user first."),
                 }),
                 &[],
             ),
@@ -225,10 +225,20 @@ fn save_project(ctx: &Ctx, a: &Args) -> ToolResult {
             Some(p) => {
                 let same =
                     doc.path.as_ref().is_some_and(|cur| std::fs::canonicalize(cur).ok() == std::fs::canonicalize(p).ok() && p.exists());
-                if !same {
+                if same {
+                    // Saving to its own file is a plain Save, with the same check for changes
+                    // made by another program.
+                    if overwrite { doc.save_overwriting()? } else { doc.save()? }
+                } else {
                     ctx.require_file_access("Saving to a new path")?;
+                    if p.exists() && !overwrite {
+                        return err(format!(
+                            "{} already exists; pass overwrite: true to replace it (check with the user first)",
+                            p.display()
+                        ));
+                    }
+                    doc.save_as(p)?
                 }
-                doc.save_as(p)?
             }
             None => {
                 if doc.path.is_none() {

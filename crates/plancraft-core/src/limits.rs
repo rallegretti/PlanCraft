@@ -221,8 +221,15 @@ impl Fixer {
         for f in &mut p.custom_fields {
             self.name(&mut f.name);
             if f.name.trim().is_empty() || !names.insert(f.name.to_lowercase()) {
-                f.name = format!("Field {}", f.id.0);
-                names.insert(f.name.to_lowercase());
+                // A fresh name that no earlier field uses (a later field named the same is
+                // renamed in turn when its own turn comes).
+                let mut n = 1u32;
+                let mut name = format!("Field {}", f.id.0);
+                while !names.insert(name.to_lowercase()) {
+                    n = n.saturating_add(1);
+                    name = format!("Field {} ({n})", f.id.0);
+                }
+                f.name = name;
                 self.note("a custom field name was empty or repeated");
             }
             self.list(&mut f.choices, custom::MAX_CHOICES, "a pick-list has too many entries");
