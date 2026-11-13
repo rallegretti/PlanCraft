@@ -16,12 +16,45 @@ use crate::widgets::timescale;
 
 #[derive(Clone, Debug)]
 pub enum ChartAction {
-    Select { task: TaskId, shift: bool, ctrl: bool },
+    Select {
+        task: TaskId,
+        shift: bool,
+        ctrl: bool,
+    },
     Open(TaskId),
-    MoveTo { task: TaskId, start: NaiveDateTime },
-    SetFinish { task: TaskId, finish: NaiveDateTime },
-    SetProgress { task: TaskId, pct: u8 },
-    Link { from: TaskId, to: TaskId },
+    MoveTo {
+        task: TaskId,
+        start: NaiveDateTime,
+    },
+    SetFinish {
+        task: TaskId,
+        finish: NaiveDateTime,
+    },
+    SetProgress {
+        task: TaskId,
+        pct: u8,
+    },
+    Link {
+        from: TaskId,
+        to: TaskId,
+    },
+    /// Split Task: split the task at this moment.
+    Split {
+        task: TaskId,
+        at: NaiveDateTime,
+    },
+    /// Part `k` (from 1) of a split task now starts at `start`.
+    MovePart {
+        task: TaskId,
+        k: usize,
+        start: NaiveDateTime,
+    },
+    /// Part `k` (from 0, not the last) of a split task now ends at `finish`.
+    SetPartFinish {
+        task: TaskId,
+        k: usize,
+        finish: NaiveDateTime,
+    },
     Command(Command),
 }
 
@@ -340,6 +373,8 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
     // ---- Bars ----
     let label_font = FontId::proportional(11.5);
     let mut hovered: Option<(TaskId, &'static str)> = None;
+    // The part of a split task under the pointer (with the "part" and "part_end" zones).
+    let mut hovered_part: Option<usize> = None;
     let pointer = ui.input(|i| i.pointer.hover_pos());
     for r in first..last.min(input.rows.len()) {
         let idx = match input.rows.get(r) {
@@ -522,7 +557,33 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
         {
             let hit =
                 if t.is_milestone() { Rect::from_center_size(pos2(x0, yc), vec2(14.0, 14.0)) } else { bar_rect.expand2(vec2(2.0, 3.0)) };
-            if hit.contains(pp) {
+            // The parts of a task split as planned (not paused in work under way) move on their own.
+            let planned = !summary && t.splits.is_empty() && t.sched.parts.len() > 1;
+            let part_at =
+                |x: f32| t.sched.parts.iter().position(|&(a, b)| x >= g.x_of(chart_left, a) - 2.0 && x <= g.x_of(chart_left, b) + 2.0);
+            if hit.contains(pp) && g.split_mode {
+                if !summary && !t.is_milestone() {
+                    hovered = Some((t.id, "split"));
+                }
+            } else if hit.contains(pp)
+                && planned
+                && let Some(k) = part_at(pp.x).filter(|&k| k + 1 < t.sched.parts.len() || k > 0)
+            {
+                let end = t.sched.parts.get(k).map_or(x1, |&(_, b)| g.x_of(chart_left, b));
+                hovered_part = Some(k);
+                hovered = Some((
+                    t.id,
+                    if k + 1 < t.sched.parts.len() && pp.x >= end - 5.0 {
+                        "part_end"
+                    } else if k == 0 {
+                        "bar"
+                    } else if k + 1 == t.sched.parts.len() && pp.x >= end - 5.0 {
+                        "end"
+                    } else {
+                        "part"
+                    },
+                ));
+            } else if hit.contains(pp) {
                 let zone = if summary || t.is_milestone() {
                     "bar"
                 } else if pp.x >= hit.right() - 5.0 {
@@ -553,23 +614,31 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
     // ---- Interaction ----
     match hovered {
         Some((_, "select")) => ui.ctx().set_cursor_icon(CursorIcon::PointingHand),
-        Some((_, "end")) => ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal),
+        Some((_, "split")) => ui.ctx().set_cursor_icon(CursorIcon::Crosshair),
+        Some((_, "part")) => ui.ctx().set_cursor_icon(CursorIcon::Move),
+        Some((_, "end" | "part_end")) => ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal),
         Some((_, "progress")) => ui.ctx().set_cursor_icon(CursorIcon::ResizeEast),
         Some(_) => ui.ctx().set_cursor_icon(CursorIcon::Grab),
         None => {}
     }
     if resp.drag_started()
         && !multi
+        && !g.split_mode
         && let Some((tid, zone)) = hovered
         && let Some(t) = p.task(tid)
     {
         let grab_x = resp.interact_pointer_pos().map(|pp| pp.x).unwrap_or(0.0);
         let start = t.sched.start.unwrap_or(p.start);
-        g.drag = Some(match zone {
-            "end" => BarDrag::Resize { task: tid },
-            "progress" => BarDrag::Progress { task: tid },
-            _ if t.sched.is_summary => BarDrag::Link { from: tid },
-            _ => BarDrag::Move { task: tid, grab_dx: grab_x - g.x_of(chart_left, start), origin_start: start },
+        let part = hovered_part.and_then(|k| t.sched.parts.get(k).map(|&(a, _)| (k, a)));
+        g.drag = Some(match (zone, part) {
+            ("part", Some((k, a))) => BarDrag::Part { task: tid, k, grab_dx: grab_x - g.x_of(chart_left, a), origin: a },
+            ("part_end", Some((k, _))) => BarDrag::PartEnd { task: tid, k },
+            _ => match zone {
+                "end" => BarDrag::Resize { task: tid },
+                "progress" => BarDrag::Progress { task: tid },
+                _ if t.sched.is_summary => BarDrag::Link { from: tid },
+                _ => BarDrag::Move { task: tid, grab_dx: grab_x - g.x_of(chart_left, start), origin_start: start },
+            },
         });
     }
     let snap = |t: NaiveDateTime| -> NaiveDateTime {
@@ -610,6 +679,40 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
                             actions.push(ChartAction::MoveTo { task, start: new_start });
                         }
                     }
+                }
+            }
+            BarDrag::Part { task, k, grab_dx, origin } => {
+                let new_start = snap(g.time_at(chart_left, pp.x - grab_dx));
+                if let Some((a, b)) = p.task(task).and_then(|t| t.sched.parts.get(k).copied())
+                    && let Some(sg) = geom.get(&task)
+                {
+                    let x = g.x_of(chart_left, new_start);
+                    let w = (g.x_of(chart_left, b) - g.x_of(chart_left, a)).max(2.0);
+                    let ghost = Rect::from_min_max(pos2(x, sg.y - BAR_H / 2.0 - 1.0), pos2(x + w, sg.y + BAR_H / 2.0 + 1.0));
+                    bp.rect_stroke(ghost, 2.0, Stroke::new(1.5, theme::pal().ACCENT), StrokeKind::Outside);
+                }
+                tooltip_at(ui, pp, &format!("Part {}\nStart: {}", k + 1, format::date_long(Some(new_start))));
+                if resp.drag_stopped() {
+                    g.drag = None;
+                    if new_start != origin {
+                        actions.push(ChartAction::MovePart { task, k, start: new_start });
+                    }
+                }
+            }
+            BarDrag::PartEnd { task, k } => {
+                let new_finish = snap(g.time_at(chart_left, pp.x));
+                if let Some((a, _)) = p.task(task).and_then(|t| t.sched.parts.get(k).copied())
+                    && let Some(sg) = geom.get(&task)
+                {
+                    let x0 = g.x_of(chart_left, a);
+                    let x = g.x_of(chart_left, new_finish).max(x0 + 2.0);
+                    let ghost = Rect::from_min_max(pos2(x0, sg.y - BAR_H / 2.0 - 1.0), pos2(x, sg.y + BAR_H / 2.0 + 1.0));
+                    bp.rect_stroke(ghost, 2.0, Stroke::new(1.5, theme::pal().ACCENT), StrokeKind::Outside);
+                }
+                tooltip_at(ui, pp, &format!("Part {}\nFinish: {}", k + 1, format::date_long(Some(new_finish))));
+                if resp.drag_stopped() {
+                    g.drag = None;
+                    actions.push(ChartAction::SetPartFinish { task, k, finish: new_finish });
                 }
             }
             BarDrag::Resize { task } => {
@@ -719,7 +822,13 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
         }
     }
 
-    if resp.clicked() {
+    if resp.clicked() && g.split_mode {
+        // Split Task is one click: split the bar under the pointer, or do nothing elsewhere.
+        g.split_mode = false;
+        if let (Some((tid, "split")), Some(pp)) = (hovered, resp.interact_pointer_pos()) {
+            actions.push(ChartAction::Split { task: tid, at: g.time_at(chart_left, pp.x) });
+        }
+    } else if resp.clicked() {
         if let Some((tid, _)) = hovered {
             let (shift, ctrl) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
             actions.push(ChartAction::Select { task: tid, shift, ctrl });

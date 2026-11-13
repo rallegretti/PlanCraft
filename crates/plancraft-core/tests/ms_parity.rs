@@ -1017,6 +1017,217 @@ fn earned_value_uses_the_chosen_baseline() {
 }
 
 // ---------------------------------------------------------------------------
+// Split tasks
+// ---------------------------------------------------------------------------
+
+/// A (4 days, Mon 10/19 – Thu 10/22) followed by B (1 day).
+fn four_day_task() -> (Project, TaskId, TaskId) {
+    let mut p = project();
+    let a = task(&mut p, "A", 4 * DAY);
+    let b = task(&mut p, "B", DAY);
+    p.link(a.into(), b, LinkType::FS, Lag::None).unwrap();
+    recalculate(&mut p);
+    (p, a, b)
+}
+
+// Source: https://support.microsoft.com/en-us/project/split-a-task — "Split a task"
+// Splitting a task makes a later part of its work start later; a task can be split into as many
+// parts as needed. The work (the duration) is unchanged, so the finish moves out by the pauses.
+#[test]
+fn splitting_a_task_delays_the_rest_of_its_work() {
+    let (mut p, a, b) = four_day_task();
+    p.split_task(a, dt(2026, 10, 19, 17), dt(2026, 10, 21, 8)).unwrap();
+    p.split_task(a, dt(2026, 10, 22, 17), dt(2026, 10, 26, 8)).unwrap();
+    recalculate(&mut p);
+    let t = p.task(a).unwrap();
+    assert_eq!(t.duration, 4 * DAY);
+    assert_eq!(
+        t.sched.parts,
+        [
+            (dt(2026, 10, 19, 8), dt(2026, 10, 19, 17)),
+            (dt(2026, 10, 21, 8), dt(2026, 10, 22, 17)),
+            (dt(2026, 10, 26, 8), dt(2026, 10, 26, 17)),
+        ]
+    );
+    assert_eq!(start(&p, b), dt(2026, 10, 27, 8), "the successor follows the last part");
+}
+
+// Source: https://support.microsoft.com/en-us/project/split-a-task — "Split a task"
+// Dragging a part until it touches the other part rejoins them.
+#[test]
+fn rejoining_split_parts() {
+    let (mut p, a, _) = four_day_task();
+    p.split_task(a, dt(2026, 10, 20, 17), dt(2026, 10, 26, 8)).unwrap();
+    recalculate(&mut p);
+    p.set_split_length(a, 0, 0).unwrap();
+    recalculate(&mut p);
+    assert!(p.task(a).unwrap().sched.parts.is_empty());
+    assert_eq!(finish(&p, a), dt(2026, 10, 22, 17));
+}
+
+// Source: https://support.microsoft.com/en-us/project/split-a-task — "Move parts of a split task"
+// A later part can be moved on its own; moving the first part moves the whole task (its parts
+// keep their spacing).
+#[test]
+fn moving_parts_of_a_split_task() {
+    let (mut p, a, _) = four_day_task();
+    p.split_task(a, dt(2026, 10, 20, 17), dt(2026, 10, 22, 8)).unwrap();
+    recalculate(&mut p);
+    // The second part moves a day later: the pause grows from 1 to 2 days.
+    p.set_split_length(a, 0, 2 * DAY).unwrap();
+    recalculate(&mut p);
+    assert_eq!(p.task(a).unwrap().sched.parts[1], (dt(2026, 10, 23, 8), dt(2026, 10, 26, 17)));
+    // The whole task starts two days later.
+    p.task_mut(a).unwrap().constraint = Constraint { kind: ConstraintKind::Snet, date: Some(dt(2026, 10, 21, 8)) };
+    recalculate(&mut p);
+    assert_eq!(p.task(a).unwrap().sched.parts, [(dt(2026, 10, 21, 8), dt(2026, 10, 22, 17)), (dt(2026, 10, 27, 8), dt(2026, 10, 28, 17))]);
+}
+
+// Source: https://support.microsoft.com/en-us/project/split-a-task — "Change the duration of a split task"
+// The Duration field holds the work of all the parts together; one part can also be lengthened
+// or shortened on its own.
+#[test]
+fn changing_the_duration_of_a_split_task() {
+    let (mut p, a, _) = four_day_task();
+    p.split_task(a, dt(2026, 10, 20, 17), dt(2026, 10, 22, 8)).unwrap();
+    recalculate(&mut p);
+    p.set_part_duration(a, 0, 3 * DAY).unwrap();
+    recalculate(&mut p);
+    assert_eq!(duration(&p, a), 5 * DAY);
+    assert_eq!(p.task(a).unwrap().sched.parts, [(dt(2026, 10, 19, 8), dt(2026, 10, 21, 17)), (dt(2026, 10, 23, 8), dt(2026, 10, 26, 17))]);
+    p.set_duration(a, 3 * DAY, false).unwrap();
+    recalculate(&mut p);
+    assert_eq!(finish(&p, a), dt(2026, 10, 21, 17), "all 3 days of work fit in the first part");
+    assert!(p.task(a).unwrap().sched.parts.is_empty(), "the pause past the work has no effect");
+}
+
+// Source: https://learn.microsoft.com/en-us/office/vba/api/project.task.split — "Parameters"
+// A split whose end is on or before its start is not created.
+#[test]
+fn a_split_must_end_after_it_starts() {
+    let (mut p, a, _) = four_day_task();
+    assert!(p.split_task(a, dt(2026, 10, 20, 17), dt(2026, 10, 20, 17)).is_err());
+    assert!(p.split_task(a, dt(2026, 10, 20, 17), dt(2026, 10, 20, 9)).is_err());
+    assert!(p.task(a).unwrap().gaps.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Recurring tasks
+// ---------------------------------------------------------------------------
+
+fn weekly(days: u8, interval: u16, end: plancraft_core::recurring::RecurEnd, duration: Minutes) -> plancraft_core::recurring::Recurrence {
+    plancraft_core::recurring::Recurrence {
+        pattern: plancraft_core::recurring::Pattern::Weekly { interval, days },
+        start: d(2026, 10, 19),
+        end,
+        duration,
+        calendar: None,
+        ignore_resource_calendars: false,
+    }
+}
+
+fn occurrences(p: &Project, id: TaskId) -> Vec<&Task> {
+    let i = p.task_index(id).unwrap();
+    p.tasks[p.descendants_range(i)].iter().collect()
+}
+
+// Source: https://support.microsoft.com/en-us/project/create-recurring-tasks — "Create a recurring task"
+// A task can repeat every Tuesday and Thursday, or every three weeks, with each occurrence
+// lasting the duration given; the range ends after a number of occurrences or by a date.
+#[test]
+fn recurring_tasks_follow_their_pattern() {
+    use plancraft_core::recurring::RecurEnd;
+    let mut p = project();
+    let tt = p.add_recurring_task("Stand-up", weekly(0b1010, 1, RecurEnd::After(4), HOUR), None).unwrap();
+    let every3 = p.add_recurring_task("Review", weekly(0b1, 3, RecurEnd::By(d(2026, 12, 1)), 2 * HOUR), None).unwrap();
+    recalculate(&mut p);
+    let starts: Vec<_> = occurrences(&p, tt).iter().map(|t| t.sched.start.unwrap()).collect();
+    assert_eq!(starts, [dt(2026, 10, 20, 8), dt(2026, 10, 22, 8), dt(2026, 10, 27, 8), dt(2026, 10, 29, 8)]);
+    assert!(occurrences(&p, tt).iter().all(|t| t.duration == HOUR));
+    assert_eq!(occurrences(&p, tt)[0].name, "Stand-up 1");
+    let starts: Vec<_> = occurrences(&p, every3).iter().map(|t| t.sched.start.unwrap()).collect();
+    assert_eq!(starts, [dt(2026, 10, 19, 8), dt(2026, 11, 9, 8), dt(2026, 11, 30, 8)]);
+    assert!(p.task(tt).unwrap().sched.is_summary);
+}
+
+// Source: https://support.microsoft.com/en-us/project/create-recurring-tasks — "Create a recurring task" (recurring reminders)
+// A recurring task with a duration of zero is a recurring milestone.
+#[test]
+fn a_zero_duration_recurring_task_is_a_milestone() {
+    use plancraft_core::recurring::RecurEnd;
+    let mut p = project();
+    let r = p.add_recurring_task("Report due", weekly(0b10000, 1, RecurEnd::After(3), 0), None).unwrap();
+    recalculate(&mut p);
+    assert!(occurrences(&p, r).iter().all(|t| t.is_milestone()));
+}
+
+// Source: https://support.microsoft.com/en-us/project/create-recurring-tasks — "Create a recurring task" (assigning resources)
+// Resources assigned to the recurring (summary) task are assigned to every occurrence.
+#[test]
+fn resources_on_a_recurring_task_work_every_occurrence() {
+    use plancraft_core::recurring::RecurEnd;
+    let mut p = project();
+    let r = p.add_recurring_task("Stand-up", weekly(0b11111, 1, RecurEnd::After(5), HOUR), None).unwrap();
+    let ana = p.add_resource("Ana");
+    p.assign(r, ana, Some(1.0), None).unwrap();
+    recalculate(&mut p);
+    assert!(occurrences(&p, r).iter().all(|t| p.assignments_for_task(t.id).any(|a| a.resource == ana)));
+    assert_eq!(p.assignments_for_task(r).count(), 0, "not on the summary row itself");
+}
+
+// Source: https://support.microsoft.com/en-us/project/create-recurring-tasks — "Create a recurring task" (leveling)
+// Recurring tasks get the highest leveling priority, so leveling never delays or splits them.
+#[test]
+fn leveling_never_delays_recurring_tasks() {
+    use plancraft_core::recurring::RecurEnd;
+    let mut p = project();
+    let ana = p.add_resource("Ana");
+    let other = task(&mut p, "Other", DAY);
+    p.task_mut(other).unwrap().priority = 1000;
+    p.assign(other, ana, Some(1.0), None).unwrap();
+    let r = p.add_recurring_task("Workshop", weekly(0b1, 1, RecurEnd::After(1), DAY), None).unwrap();
+    p.task_mut(r).unwrap().priority = 0;
+    p.assign(r, ana, Some(1.0), None).unwrap();
+    plancraft_core::leveling::level_resources(&mut p, &Default::default());
+    recalculate(&mut p);
+    assert_eq!(occurrences(&p, r)[0].sched.start, Some(dt(2026, 10, 19, 8)));
+    assert_eq!(start(&p, other), dt(2026, 10, 20, 8), "the other task waits, whatever its priority");
+}
+
+// Source: https://support.microsoft.com/en-us/project/create-recurring-tasks — "Create a recurring task" (calendar)
+// A recurring task can follow its own calendar, e.g. a night shift, instead of the project's.
+#[test]
+fn a_recurring_task_can_use_its_own_calendar() {
+    use plancraft_core::recurring::RecurEnd;
+    let mut p = project();
+    let night = p.calendars.iter().find(|c| c.name == "Night Shift").map(|c| c.id).unwrap_or_else(|| {
+        let c = plancraft_core::calendar::Calendar::night_shift(CalendarId(77));
+        p.calendars.push(c);
+        CalendarId(77)
+    });
+    let rec = plancraft_core::recurring::Recurrence { calendar: Some(night), ..weekly(0b1, 1, RecurEnd::After(2), HOUR) };
+    let r = p.add_recurring_task("Night check", rec, None).unwrap();
+    recalculate(&mut p);
+    let occ = occurrences(&p, r);
+    assert!(occ.iter().all(|t| t.calendar == Some(night)));
+    assert_eq!(occ[0].sched.start, Some(dt(2026, 10, 19, 23)), "the night shift starts at 23:00 on Monday");
+}
+
+// Source: https://support.microsoft.com/en-us/project/recurring-task-field — "Description"
+// The Recurring field says whether a task is part of a series of recurring tasks.
+#[test]
+fn the_recurring_field_marks_the_series() {
+    use plancraft_core::recurring::RecurEnd;
+    let mut p = project();
+    let plain = task(&mut p, "Plain", DAY);
+    let r = p.add_recurring_task("Stand-up", weekly(0b1, 1, RecurEnd::After(2), HOUR), None).unwrap();
+    let rows: Vec<usize> = (0..p.tasks.len()).collect();
+    let flags: Vec<bool> = rows.iter().map(|&i| p.is_recurring(i)).collect();
+    assert_eq!(flags, [false, true, true, true]);
+    assert!(!p.is_recurring(p.task_index(plain).unwrap()) && p.is_recurring(p.task_index(r).unwrap()));
+}
+
+// ---------------------------------------------------------------------------
 // Network Diagram layout
 // ---------------------------------------------------------------------------
 

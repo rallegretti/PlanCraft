@@ -664,3 +664,67 @@ fn agents_update_progress_and_reschedule_uncompleted_work() {
     // Each update is one undoable edit.
     c.call("undo", json!({}));
 }
+
+#[test]
+fn agents_split_tasks_and_create_recurring_tasks() {
+    let c = Client::new();
+    c.call("new_project", json!({ "name": "Rhythm", "start": "2026-10-19" }));
+    let a = c.call("create_task", json!({ "name": "Build", "duration": "4d" }));
+    let id = a["id"].clone();
+
+    // Split Task: stop after Tuesday, go on next Monday; the duration stays 4 days.
+    let s = c.call("split_task", json!({ "task": id, "start": "2026-10-20", "resume": "2026-10-26" }));
+    assert_eq!(s["parts"].as_array().unwrap().len(), 2, "{s}");
+    assert_eq!(s["parts"][1]["start"], "2026-10-26 08:00");
+    assert_eq!(s["finish"], "2026-10-27 17:00");
+    assert_eq!(s["splits"][0]["length"], "3 days");
+    assert_eq!(c.call("get_task", json!({ "task": id }))["planned_splits"][0]["after_work"], "2 days");
+    let s = c.call("set_split", json!({ "task": id, "split": 1, "length": "1d" }));
+    assert_eq!(s["finish"], "2026-10-23 17:00", "{s}");
+    let s = c.call("set_split", json!({ "task": id, "part": 2, "duration": "3d" }));
+    assert_eq!((s["duration"].as_str(), s["finish"].as_str()), (Some("5 days"), Some("2026-10-26 17:00")), "{s}");
+    c.call_err("set_split", json!({ "task": id, "split": 0, "length": "1d" }));
+    c.call_err("set_split", json!({ "task": id, "split": 4, "length": "1d" }));
+    c.call_err("split_task", json!({ "task": id, "start": "2026-10-21", "resume": "2026-10-20" }));
+    let s = c.call("remove_splits", json!({ "task": id }));
+    assert_eq!((s["removed"].as_u64(), s["parts"].as_array().map(Vec::len)), (Some(1), Some(0)), "{s}");
+
+    // A weekly stand-up on Tuesdays and Thursdays, four times.
+    let r = c.call(
+        "create_recurring_task",
+        json!({ "name": "Stand-up", "pattern": "weekly", "days": ["tuesday", "thu"], "occurrences": 4, "duration": "1h", "start": "2026-10-19" }),
+    );
+    let occ = r["occurrences"].as_array().unwrap();
+    assert_eq!(occ.len(), 4, "{r}");
+    assert_eq!((occ[0]["name"].as_str(), occ[0]["start"].as_str()), (Some("Stand-up 1"), Some("2026-10-20 08:00")));
+    assert_eq!(r["recurrence"]["days"], json!(["tuesday", "thursday"]));
+    let rid = r["id"].clone();
+    // Resources on the recurring task work every occurrence.
+    c.call("create_resource", json!({ "name": "Ana" }));
+    c.call("assign_resource", json!({ "task": rid, "resource": "Ana" }));
+    let first = c.call("get_task", json!({ "task": occ[0]["id"] }));
+    assert_eq!(first["occurrence_of"]["id"], rid, "{first}");
+    assert!(first["resources"].as_str().unwrap().contains("Ana"), "{first}");
+    // Changing the pattern: monthly on the last Friday, six times; new occurrences get Ana too.
+    let u =
+        c.call("update_recurring_task", json!({ "task": rid, "pattern": "monthly", "nth": "last", "weekday": "friday", "occurrences": 6 }));
+    let occ = u["occurrences"].as_array().unwrap();
+    assert_eq!(occ.len(), 6, "{u}");
+    assert_eq!(occ[0]["start"], "2026-10-30 08:00");
+    let last = c.call("get_task", json!({ "task": occ[5]["id"] }));
+    assert!(last["resources"].as_str().unwrap().contains("Ana"), "{last}");
+    assert_eq!(c.call("get_task", json!({ "task": rid }))["recurrence"]["nth"], "last");
+    // Bad patterns are refused.
+    c.call_err("create_recurring_task", json!({ "name": "X", "pattern": "hourly" }));
+    c.call_err("create_recurring_task", json!({ "name": "X", "pattern": "weekly", "days": ["funday"] }));
+    c.call_err("create_recurring_task", json!({ "name": "X", "pattern": "monthly", "day": 32 }));
+    c.call_err("create_recurring_task", json!({ "name": "X", "pattern": "daily", "occurrences": 2, "end": "2027-01-01" }));
+    c.call_err("update_recurring_task", json!({ "task": id, "pattern": "daily" }));
+    // A recurring milestone, inserted above Build.
+    let m = c.call(
+        "create_recurring_task",
+        json!({ "name": "Report", "pattern": "yearly", "month": "december", "day": 1, "occurrences": 2, "duration": 0, "before": id }),
+    );
+    assert_eq!(m["row"], 1, "{m}");
+    assert_eq!(c.call("get_task", json!({ "task": m["occurrences"][0]["id"] }))["kind"], "milestone");
+}

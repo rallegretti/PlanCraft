@@ -74,31 +74,67 @@ pub struct Parts {
 /// Most pauses one task can have; further ones are ignored.
 pub const MAX_SPLITS: usize = 100;
 
-/// The working parts `(start, finish, work before it)` of an in-progress task laid out from its
-/// actual start: after each split's work the task stops until that split's resume date. Splits
-/// that would not leave a gap (or lie past the duration) are ignored, so a task with no real pause
-/// has one part.
-pub fn segments_of(start: NaiveDateTime, splits: &[Split], cal: &WorkCal, dur: Minutes) -> Vec<(NaiveDateTime, NaiveDateTime, Minutes)> {
-    let mut sorted: Vec<Split> = splits.iter().take(MAX_SPLITS).copied().collect();
-    sorted.sort_by_key(|s| s.work);
+/// The planned splits of a task that take effect: inside its work (`0 < work < dur`), with a
+/// length, one per work point (the first), in work order, and together at most
+/// [`MAX_MINUTES`](crate::limits::MAX_MINUTES) long (later ones are cut short).
+pub fn planned_gaps(gaps: &[Gap], dur: Minutes) -> Vec<Gap> {
+    let mut v: Vec<Gap> = gaps.iter().take(MAX_SPLITS).copied().filter(|g| g.work > 0 && g.work < dur && g.length > 0).collect();
+    v.sort_by_key(|g| g.work);
+    v.dedup_by_key(|g| g.work);
+    let mut left = crate::limits::MAX_MINUTES;
+    for g in &mut v {
+        g.length = g.length.min(left);
+        left -= g.length;
+    }
+    v.retain(|g| g.length > 0);
+    v
+}
+
+/// Working time a task spans from start to finish: its duration plus its planned splits.
+pub fn span_of(t: &Task, dur: Minutes) -> Minutes {
+    planned_gaps(&t.gaps, dur).iter().fold(dur, |s, g| s.saturating_add(g.length))
+}
+
+/// The working parts `(start, finish, work before it)` of a task laid out from `start`. After a
+/// planned split's work the task pauses for the split's length; after an in-progress split's work
+/// it stops until that split's resume date. Splits that would not leave a gap (or lie past the
+/// duration) are ignored, so a task with no real pause has one part.
+pub fn segments_of(
+    start: NaiveDateTime,
+    splits: &[Split],
+    gaps: &[Gap],
+    cal: &WorkCal,
+    dur: Minutes,
+) -> Vec<(NaiveDateTime, NaiveDateTime, Minutes)> {
+    enum Until {
+        Date(NaiveDateTime),
+        For(Minutes),
+    }
+    let mut breaks: Vec<(Minutes, Until)> = planned_gaps(gaps, dur).into_iter().map(|g| (g.work, Until::For(g.length))).collect();
+    breaks.extend(splits.iter().take(MAX_SPLITS).map(|s| (s.work, Until::Date(s.resume))));
+    // Planned splits first at the same work point; the sort is stable.
+    breaks.sort_by_key(|b| b.0);
     let mut out = Vec::new();
     let (mut at, mut used) = (start, 0);
-    for s in sorted {
-        if s.work <= used {
+    for (work, until) in breaks {
+        if work <= used {
             continue;
         }
-        if s.work >= dur {
+        if work >= dur {
             break;
         }
-        let end = cal.add(at, s.work - used);
-        let resume = cal.snap_forward(s.resume);
+        let end = cal.add(at, work - used);
+        let resume = match until {
+            Until::Date(d) => cal.snap_forward(d),
+            Until::For(len) => cal.snap_forward(cal.add(cal.snap_forward(end), len)),
+        };
         if resume <= cal.snap_forward(end) {
             // No gap: the part simply goes on.
             continue;
         }
         out.push((at, end, used));
         at = resume;
-        used = s.work;
+        used = work;
     }
     out.push((at, cal.add(at, dur.saturating_sub(used)), used));
     out
@@ -117,7 +153,7 @@ pub fn parts_of(t: &Task, cal: &WorkCal, dur: Minutes) -> Option<Parts> {
     }
     let done = dur.saturating_mul(pct) / 100;
     let remaining = dur.saturating_sub(done);
-    if t.splits.is_empty() {
+    if t.splits.is_empty() && planned_gaps(&t.gaps, dur).is_empty() {
         let stop = cal.add(start, done);
         return Some(Parts {
             stop,
@@ -128,7 +164,7 @@ pub fn parts_of(t: &Task, cal: &WorkCal, dur: Minutes) -> Option<Parts> {
             split: false,
         });
     }
-    let segs = segments_of(start, &t.splits, cal, dur);
+    let segs = segments_of(start, &t.splits, &t.gaps, cal, dur);
     let (stop, resume) = stop_and_resume(&segs, cal, done)?;
     let &(last_start, finish, before) = segs.last()?;
     Some(Parts { stop, resume, remaining, finish, last: (last_start, dur.saturating_sub(before)), split: segs.len() > 1 })
@@ -634,11 +670,13 @@ impl<'a> Engine<'a> {
             let Some(t) = self.task(i) else { continue };
             let cal = self.cal(i);
             let dur = self.duration_of(i);
+            // Working time from start to finish: the duration plus any planned splits.
+            let span = if t.mode == ScheduleMode::Auto { span_of(t, dur) } else { dur };
 
             let place = |start: NaiveDateTime| -> (NaiveDateTime, NaiveDateTime) {
                 if dur > 0 {
                     let s = cal.snap_forward(start);
-                    (s, cal.add(s, dur))
+                    (s, cal.add(s, span))
                 } else {
                     let s = cal.snap_event(start);
                     (s, s)
@@ -662,8 +700,8 @@ impl<'a> Engine<'a> {
                 let cand_start = match edge.kind {
                     LinkType::FS => apply_lag(&self.proj_cal, pf, edge.lag, pdur),
                     LinkType::SS => apply_lag(&self.proj_cal, ps, edge.lag, pdur),
-                    LinkType::FF => cal.sub(apply_lag(&self.proj_cal, pf, edge.lag, pdur), dur),
-                    LinkType::SF => cal.sub(apply_lag(&self.proj_cal, ps, edge.lag, pdur), dur),
+                    LinkType::FF => cal.sub(apply_lag(&self.proj_cal, pf, edge.lag, pdur), span),
+                    LinkType::SF => cal.sub(apply_lag(&self.proj_cal, ps, edge.lag, pdur), span),
                 };
                 if cand_start > es {
                     es = cand_start;
@@ -681,7 +719,7 @@ impl<'a> Engine<'a> {
                 let finish_of = |s: NaiveDateTime| place(s).1;
                 match t.constraint.kind {
                     ConstraintKind::Snet => es = es.max(date),
-                    ConstraintKind::Fnet => es = es.max(cal.sub(date, dur)),
+                    ConstraintKind::Fnet => es = es.max(cal.sub(date, span)),
                     ConstraintKind::Mso => {
                         if warn && driven_by_link && place(es).0 > place(date).0 {
                             warnings.push(format!("'{}': links require a later start than its Must Start On date", t.name));
@@ -689,7 +727,7 @@ impl<'a> Engine<'a> {
                         es = date;
                     }
                     ConstraintKind::Mfo => {
-                        let s = if dur > 0 { cal.sub(date, dur) } else { date };
+                        let s = if dur > 0 { cal.sub(date, span) } else { date };
                         if warn && driven_by_link && place(es).0 > place(s).0 {
                             warnings.push(format!("'{}': links require a later finish than its Must Finish On date", t.name));
                         }
@@ -708,7 +746,7 @@ impl<'a> Engine<'a> {
                             if warn {
                                 warnings.push(format!("'{}' cannot finish by its Finish No Later Than date", t.name));
                             }
-                            es = if dur > 0 { cal.sub(date, dur) } else { date };
+                            es = if dur > 0 { cal.sub(date, span) } else { date };
                         }
                     }
                     ConstraintKind::Asap | ConstraintKind::Alap => {}
@@ -729,18 +767,25 @@ impl<'a> Engine<'a> {
                 s = a;
                 f = match parts {
                     Some(pt) => pt.finish,
-                    None if dur > 0 => cal.add(a, dur),
+                    None if dur > 0 => cal.add(a, span),
                     None => a,
                 };
             }
             if let Some(af) = t.actual_finish {
                 if t.actual_start.is_none() {
-                    s = if dur > 0 { cal.sub(af, dur) } else { af };
+                    s = if dur > 0 { cal.sub(af, span) } else { af };
                 }
                 f = af.max(s);
             }
-            let segments = match (parts, t.actual_start) {
-                (Some(pt), Some(a)) if pt.split => segments_of(a, &t.splits, cal, dur).into_iter().map(|(s, f, _)| (s, f)).collect(),
+            let segments: Vec<(NaiveDateTime, NaiveDateTime)> = match (parts, t.actual_start, t.actual_finish) {
+                (Some(pt), Some(a), _) if pt.split => {
+                    segments_of(a, &t.splits, &t.gaps, cal, dur).into_iter().map(|(s, f, _)| (s, f)).collect()
+                }
+                // Planned splits in a task not under way (or finished as planned): its parts from its start.
+                (None, _, None) if span > dur => {
+                    let segs = segments_of(s, &[], &t.gaps, cal, dur);
+                    if segs.len() > 1 { segs.into_iter().map(|(s, f, _)| (s, f)).collect() } else { Vec::new() }
+                }
                 _ => Vec::new(),
             };
             self.warnings.extend(warnings);
@@ -770,6 +815,7 @@ impl<'a> Engine<'a> {
             let Some(t) = self.task(i) else { continue };
             let cal = self.cal(i);
             let dur = self.duration_of(i);
+            let span = if t.mode == ScheduleMode::Auto { span_of(t, dur) } else { dur };
             let (Some(es), Some(ef)) = (self.date(i).es, self.date(i).ef) else {
                 continue;
             };
@@ -796,14 +842,14 @@ impl<'a> Engine<'a> {
                 let cand_lf = match edge.kind {
                     LinkType::FS => unapply_lag(&self.proj_cal, sls, edge.lag, dur),
                     LinkType::FF => unapply_lag(&self.proj_cal, slf, edge.lag, dur),
-                    LinkType::SS => cal.add(unapply_lag(&self.proj_cal, sls, edge.lag, dur), dur),
-                    LinkType::SF => cal.add(unapply_lag(&self.proj_cal, slf, edge.lag, dur), dur),
+                    LinkType::SS => cal.add(unapply_lag(&self.proj_cal, sls, edge.lag, dur), span),
+                    LinkType::SF => cal.add(unapply_lag(&self.proj_cal, slf, edge.lag, dur), span),
                 };
                 lf = lf.min(cand_lf);
             }
             if let Some(date) = t.constraint.date.filter(|_| t.constraint.kind.needs_date()) {
                 match t.constraint.kind {
-                    ConstraintKind::Snlt => lf = lf.min(if dur > 0 { cal.add(date, dur) } else { date }),
+                    ConstraintKind::Snlt => lf = lf.min(if dur > 0 { cal.add(date, span) } else { date }),
                     ConstraintKind::Fnlt => lf = lf.min(date),
                     ConstraintKind::Mso | ConstraintKind::Mfo => lf = ef,
                     _ => {}
@@ -813,7 +859,7 @@ impl<'a> Engine<'a> {
             // A split task's last part is what can still move: its Late Start is that part's.
             let ls = match self.date(i).parts {
                 Some(pt) if pt.split => cal.sub(lf, pt.last.1),
-                _ if dur > 0 => cal.sub(lf, dur),
+                _ if dur > 0 => cal.sub(lf, span),
                 _ => lf,
             };
             self.set_late(i, ls, lf);

@@ -176,8 +176,12 @@ pub fn level_resources(p: &mut Project, opts: &LevelingOptions) -> LevelingRepor
     let day = p.settings.time.minutes_per_day.max(1);
     let dependents = has_dependents(p);
 
+    // Occurrences of recurring tasks come first and are never delayed (Microsoft gives recurring
+    // tasks the highest leveling priority).
+    let occurrences: HashSet<TaskId> = p.occurrence_rows().into_iter().zip(&p.tasks).filter(|(occ, _)| *occ).map(|(_, t)| t.id).collect();
     let movable = |t: &Task| -> bool {
-        t.active
+        !occurrences.contains(&t.id)
+            && t.active
             && !t.sched.is_summary
             && t.mode == ScheduleMode::Auto
             && t.actual_start.is_none()

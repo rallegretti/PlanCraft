@@ -61,6 +61,8 @@ pub enum TaskCol {
     Milestones,
     Notes,
     UniqueId,
+    /// Yes for a recurring task and its occurrences.
+    Recurring,
 }
 
 /// The values a baseline holds.
@@ -254,6 +256,7 @@ impl TaskCol {
             Milestones => ColumnDef::new("Milestones", 140.0).read_only(),
             Notes => ColumnDef::new("Notes", 200.0),
             UniqueId => ColumnDef::new("Unique ID", 64.0).right().read_only(),
+            Recurring => ColumnDef::new("Recurring", 70.0).center().read_only(),
         }
     }
 }
@@ -293,6 +296,10 @@ pub fn indicators(p: &Project, t: &Task, overallocated: &dyn Fn(TaskId) -> bool)
     }
     if !t.active {
         v.push(("⏸".into(), theme::pal().TEXT_WEAK, "Inactive task".into()));
+    }
+    if t.recurrence.is_some() {
+        let n = p.task_index(t.id).map_or(0, |i| p.descendants_range(i).len());
+        v.insert(0, ("🔁".into(), theme::pal().ACCENT_MID, format!("Recurring task with {n} occurrences")));
     }
     let _ = p;
     v.truncate(2);
@@ -430,6 +437,7 @@ pub fn cell(col: TaskCol, p: &Project, idx: usize, ctx: &CellCtx) -> Cell {
         }
         Notes => Cell::text(t.notes.lines().next().unwrap_or_default().to_string()),
         UniqueId => Cell::weak(t.id.0.to_string()),
+        Recurring => Cell::text(if p.is_recurring(idx) { "Yes" } else { "No" }),
     };
     if summary && col != Name && col != Indicators {
         c.bold = true;

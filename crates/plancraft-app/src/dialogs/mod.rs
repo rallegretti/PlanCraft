@@ -6,6 +6,7 @@ pub mod mcp_panel;
 pub mod misc;
 pub mod print;
 pub mod project_info;
+pub mod recurring;
 pub mod resource_info;
 pub mod task_info;
 pub mod update_project;
@@ -51,6 +52,7 @@ pub struct Dialogs {
     pub update_project: Option<Bound<update_project::UpdateProject>>,
     pub set_baseline: Option<Bound<baseline::SetBaseline>>,
     pub clear_baseline: Option<Bound<baseline::ClearBaseline>>,
+    pub recurring: Option<Bound<recurring::RecurringTask>>,
     /// Follows the active document's selection; reset when the active document changes.
     pub assign: Option<Bound<misc::AssignResources>>,
     pub external: Option<Bound<misc::ExternalLinks>>,

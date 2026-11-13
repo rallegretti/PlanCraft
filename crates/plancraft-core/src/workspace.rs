@@ -39,6 +39,7 @@ fn approx_bytes(p: &Project) -> usize {
                 + t.predecessors.len() * size_of::<crate::model::Dependency>()
                 + t.members.len() * size_of::<crate::model::TaskRef>()
                 + t.splits.len() * size_of::<crate::model::Split>()
+                + t.gaps.len() * size_of::<crate::model::Gap>()
                 + t.baselines.len() * (size_of::<crate::model::Baseline>() + 32)
                 + t.interim.len() * (size_of::<crate::model::Interim>() + 32)
                 + t.sched.parts.len() * size_of::<(chrono::NaiveDateTime, chrono::NaiveDateTime)>()
@@ -554,7 +555,7 @@ mod tests {
         // About 64 KB per snapshot by the estimate; the test budget holds about 64 of them.
         for i in 0..32 {
             let id = p.add_task(format!("Task {i}"), None);
-            p.task_mut(id).unwrap().notes = "x".repeat(1900);
+            p.task_mut(id).unwrap().notes = "x".repeat(1800);
         }
         let h = ws.add(p, None);
         let i = ws.index_of(h).unwrap();

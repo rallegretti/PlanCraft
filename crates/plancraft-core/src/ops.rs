@@ -694,6 +694,23 @@ impl Project {
     ///   work and shares it out by units, like Microsoft Project.
     pub fn assign(&mut self, task: TaskId, resource: ResourceId, units: Option<f64>, work: Option<Minutes>) -> PlanResult<AssignmentId> {
         let ti = self.require_task(task)?;
+        if self.row(ti)?.recurrence.is_some() {
+            // A recurring task's resources work on every occurrence.
+            let level = self.row(ti)?.outline_level.saturating_add(1);
+            let kids: Vec<TaskId> = self
+                .descendants_range(ti)
+                .filter(|&i| !self.has_children(i))
+                .filter_map(|i| self.tasks.get(i))
+                .filter(|t| t.outline_level == level && !t.is_milestone())
+                .map(|t| t.id)
+                .collect();
+            let mut first = None;
+            for kid in kids {
+                let aid = self.assign(kid, resource, units, work)?;
+                first = first.or(Some(aid));
+            }
+            return first.ok_or_else(|| PlanError::Invalid("this recurring task has no occurrences with work to assign".into()));
+        }
         if self.has_children(ti) {
             return invalid("resources cannot be assigned to summary tasks");
         }

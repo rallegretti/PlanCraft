@@ -267,6 +267,15 @@ pub struct Split {
     pub resume: NaiveDateTime,
 }
 
+/// A split planned in a task: after `work` working minutes of the task, work pauses for `length`
+/// working minutes. Unlike a [`Split`] (a pause in work already under way, until a fixed date),
+/// it moves with the task.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Gap {
+    pub work: Minutes,
+    pub length: Minutes,
+}
+
 /// A snapshot of planned values used to measure variance.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Baseline {
@@ -381,6 +390,12 @@ pub struct Task {
     /// `work` it stops until that split's `resume`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub splits: Vec<Split>,
+    /// Splits planned in the task (Split Task): pauses that move with it. See [`Gap`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub gaps: Vec<Gap>,
+    /// A recurring task: this summary's subtasks are its occurrences (see [`crate::recurring`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recurrence: Option<crate::recurring::Recurrence>,
     /// Delay added by resource leveling (working minutes).
     #[serde(default, skip_serializing_if = "is_zero_i64")]
     pub leveling_delay: Minutes,
@@ -449,6 +464,8 @@ impl Task {
             manual_start: None,
             manual_finish: None,
             splits: Vec::new(),
+            gaps: Vec::new(),
+            recurrence: None,
             leveling_delay: 0,
             fixed_cost: 0.0,
             notes: String::new(),

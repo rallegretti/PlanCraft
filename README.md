@@ -75,6 +75,8 @@
 **Estimate and track**
 - Estimate tasks in hours, with optimistic/likely/pessimistic ranges, or with simple complexity points before anyone is assigned.
 - Log hours on a weekly **Timesheet** and turn tracked time into progress with one click.
+- **Split** a task to pause its work and resume it later, and drag the parts around on the Gantt Chart.
+- Add **recurring tasks** such as a weekly stand-up or a monthly report: daily, weekly, monthly or yearly.
 - Set a **status date** and run **Update Project**: bring progress up to date as scheduled, or move work that didn't get done past the status date. Tasks in progress pause and resume after the date, so the work already done stays where it happened. **Mark on Track** brings the selected tasks' progress up to the status date.
 - Save a **baseline** and compare it with the current plan: what slipped, what costs more, and how the project is trending. Keep up to eleven baselines (for example one per phase) and compare them side by side in the **Multiple Baselines Gantt**, or save just the dates as interim plans.
 
