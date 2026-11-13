@@ -121,7 +121,7 @@ PlanCraft isn't signed with a Microsoft certificate yet, so Windows may show *"W
 2. Drag **PlanCraft** into your **Applications** folder.
 3. Open PlanCraft from Applications.
 
-PlanCraft isn't notarized by Apple yet, so the first time you open it macOS may say it can't verify the developer. Open **System Settings ▸ Privacy & Security**, scroll down and click **Open Anyway**. The app runs natively on both Apple Silicon and Intel Macs.
+PlanCraft is signed and notarized by Apple, so it opens like any other app. It runs natively on both Apple Silicon and Intel Macs.
 
 ### Linux
 
