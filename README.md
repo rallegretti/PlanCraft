@@ -74,6 +74,7 @@
 **Estimate and track**
 - Estimate tasks in hours, with optimistic/likely/pessimistic ranges, or with simple complexity points before anyone is assigned.
 - Log hours on a weekly **Timesheet** and turn tracked time into progress with one click.
+- Set a **status date** and run **Update Project**: bring progress up to date as scheduled, or move work that didn't get done past the status date. Tasks in progress split, so the work already done stays where it happened. **Mark on Track** does the same for the tasks you pick.
 - Save a **baseline** and compare it with the current plan: what slipped, what costs more, and how the project is trending.
 
 **Work across projects**
@@ -155,7 +156,7 @@ cargo run --release -p plancraft-app
 4. **Link.** Select tasks in order and press **Ctrl+F2**, or drag one bar onto another in the chart.
 5. **Assign people.** Type names into the *Resource Names* column; new names are added to your team automatically. You can also use **Resource ▸ Assign Resources**.
 6. **Add milestones.** Use **Task ▸ Milestone**, then open it (double-click) to set its deliverable and the tasks that make it up.
-7. **Track progress.** Use the % complete buttons on the Task toolbar, or log hours in the **Timesheet** view.
+7. **Track progress.** Use the % complete buttons or **On Track** on the Task toolbar, log hours in the **Timesheet** view, or use **Project ▸ Update Project** to update everything as of the status date.
 
 ### Handy shortcuts
 

@@ -566,3 +566,46 @@ fn agents_set_page_setup_and_export_pdfs() {
     let e = c.call_err("export_pdf", json!({ "path": pdf.to_str().unwrap(), "overwrite": true, "from": "2026-12-01", "to": "2026-11-01" }));
     assert!(e.contains("before"), "{e}");
 }
+
+#[test]
+fn agents_update_progress_and_reschedule_uncompleted_work() {
+    let c = Client::new();
+    c.call("new_project", json!({ "name": "Track me", "start": "2026-10-19" }));
+    let a = c.call("create_task", json!({ "name": "Design", "duration": "2d" }));
+    let b = c.call("create_task", json!({ "name": "Build", "duration": "4d", "predecessors": [a["id"]] }));
+    let free = c.call("create_task", json!({ "name": "Docs", "duration": "1d" }));
+
+    // Progress through Wednesday, as scheduled: Design done, Build a quarter done.
+    c.call("update_project", json!({ "status_date": "2026-10-21" }));
+    let r = c.call("update_progress_through", json!({}));
+    assert_eq!(r["through"], "2026-10-21", "{r}");
+    assert_eq!(r["updated"].as_array().unwrap().len(), 3, "{r}");
+    let build = c.call("get_task", json!({ "task": b["id"] }));
+    assert_eq!(build["percent_complete_entered"], 25, "{build}");
+    assert_eq!(build["stop"], "2026-10-21 17:00", "{build}");
+
+    // Work not done by Monday moves after it; actual dates stay.
+    let r = c.call("reschedule_uncompleted_work", json!({ "date": "2026-10-26" }));
+    assert_eq!(r["split"][0]["id"], b["id"], "{r}");
+    assert!(r["constrained"].as_array().unwrap().is_empty(), "Docs is already complete: {r}");
+    let build = c.call("get_task", json!({ "task": b["id"] }));
+    assert_eq!(build["resume"], "2026-10-27 08:00", "{build}");
+    assert_eq!(build["start"], "2026-10-21 08:00", "{build}");
+    assert_eq!(build["finish"], "2026-10-29 17:00", "{build}");
+
+    // Progress as remaining duration, and the resume date set directly.
+    let t = c.call("update_task", json!({ "task": b["id"], "remaining_duration": "1d", "resume": null }));
+    assert_eq!(t["duration"], "2 days", "1 day done + 1 day left: {t}");
+    assert_eq!(t["percent_complete_entered"], 50, "{t}");
+    let e = c.call_err("update_task", json!({ "task": free["id"], "resume": "2026-11-02" }));
+    assert!(e.contains("1-99%"), "{e}");
+
+    // 0%-or-100% never lowers progress; Mark on Track needs tasks.
+    let r = c.call("update_progress_through", json!({ "date": "2026-10-19", "mode": "zero_or_hundred" }));
+    assert!(r["updated"].as_array().unwrap().is_empty(), "{r}");
+    assert!(c.call_err("update_progress_through", json!({ "mode": "sometimes" })).contains("scheduled"));
+    assert!(c.call_err("mark_on_track", json!({ "tasks": [] })).contains("at least one"));
+    c.call("mark_on_track", json!({ "tasks": [b["id"]] }));
+    // Each update is one undoable edit.
+    c.call("undo", json!({}));
+}

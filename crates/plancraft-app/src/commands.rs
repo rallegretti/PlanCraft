@@ -60,6 +60,7 @@ pub enum Command {
     // Project
     ProjectInfo,
     ChangeWorkingTime,
+    UpdateProject,
     SetBaseline,
     ClearBaseline,
     UpdateProgressFromTime,

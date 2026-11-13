@@ -20,6 +20,7 @@ pub mod print;
 pub mod resources;
 pub mod tasks;
 pub mod time;
+pub mod tracking;
 
 /// A tool handler.
 pub type Handler = fn(&Ctx, &Args) -> ToolResult;
@@ -119,6 +120,7 @@ pub fn all_tools() -> Vec<Tool> {
     v.extend(analysis::tools());
     v.extend(history::tools());
     v.extend(print::tools());
+    v.extend(tracking::tools());
     v
 }
 
@@ -267,6 +269,9 @@ pub fn task_field_props() -> Map<String, Value> {
         "percent_complete": number("Progress 0-100. Sets actual start/finish automatically."),
         "actual_start": date_or_null("Actual start date."),
         "actual_finish": date_or_null("Actual finish date."),
+        "actual_duration": duration("Progress as working time done so far; sets % complete. Past the planned duration, it stretches the duration and completes the task."),
+        "remaining_duration": duration("Progress as working time still needed; the duration becomes time done + this, and % complete follows."),
+        "resume": date_or_null("For a task in progress (1-99%): when its remaining work restarts. A date after the work done so far splits the task; null resumes straight away."),
         "manual_start": date_or_null("Manually entered start (used by manual tasks)."),
         "manual_finish": date_or_null("Manually entered finish (used by manual tasks)."),
         "calendar": { "type": ["integer", "string", "null"], "description": "Task calendar id or name; null uses the project/resource calendars." },

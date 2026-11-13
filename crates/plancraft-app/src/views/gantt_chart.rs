@@ -353,8 +353,35 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
             } else {
                 (theme::pal().BAR_TASK, theme::pal().BAR_TASK_EDGE)
             };
-            bp.rect_filled(bar_rect, 2.0, fill);
-            bp.rect_stroke(bar_rect, 2.0, Stroke::new(1.0, edge), StrokeKind::Inside);
+            // A split task: the completed part, a dotted gap, then the remaining part.
+            let split = match (t.sched.stop, t.sched.resume) {
+                (Some(stop), Some(resume)) => {
+                    let (xa, xb) = (g.x_of(chart_left, stop), g.x_of(chart_left, resume));
+                    (xb > xa + 2.0).then_some((xa, xb))
+                }
+                _ => None,
+            };
+            match split {
+                Some((xa, xb)) => {
+                    for (a, b) in [(x0, xa), (xb, x1)] {
+                        let r = Rect::from_min_max(pos2(a, bar_rect.top()), pos2(b.max(a + 1.0), bar_rect.bottom()));
+                        bp.rect_filled(r, 2.0, fill);
+                        bp.rect_stroke(r, 2.0, Stroke::new(1.0, edge), StrokeKind::Inside);
+                    }
+                    // Dots only across the visible part, so a far-off resume date stays cheap.
+                    let clip = bp.clip_rect();
+                    let (lo, hi) = ((xa + 2.0).max(clip.left() - 5.0), (xb - 1.0).min(clip.right() + 5.0));
+                    let mut x = lo;
+                    while x < hi {
+                        bp.hline(x..=(x + 2.0).min(hi), yc, Stroke::new(1.0, edge));
+                        x += 5.0;
+                    }
+                }
+                None => {
+                    bp.rect_filled(bar_rect, 2.0, fill);
+                    bp.rect_stroke(bar_rect, 2.0, Stroke::new(1.0, edge), StrokeKind::Inside);
+                }
+            }
             if manual {
                 // Bracket ends mark manually scheduled tasks.
                 for (x, dir) in [(bar_rect.left(), 1.0), (bar_rect.right(), -1.0)] {
@@ -363,7 +390,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
                 }
             }
             if g.show_progress && t.sched.percent_complete > 0.0 {
-                let px = x0 + (x1 - x0) * t.sched.percent_complete / 100.0;
+                let px = split.map_or_else(|| x0 + (x1 - x0) * t.sched.percent_complete / 100.0, |(xa, _)| xa);
                 bp.rect_filled(Rect::from_min_max(pos2(x0, yc - 1.5), pos2(px, yc + 1.5)), 0.0, theme::pal().BAR_PROGRESS);
             }
             if g.show_slack && t.sched.total_slack > 0 {

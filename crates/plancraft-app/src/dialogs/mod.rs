@@ -7,6 +7,7 @@ pub mod print;
 pub mod project_info;
 pub mod resource_info;
 pub mod task_info;
+pub mod update_project;
 pub mod working_time;
 
 use plancraft_core::workspace::{Document, Workspace};
@@ -46,6 +47,7 @@ pub struct Dialogs {
     pub working_time: Option<Bound<working_time::WorkingTime>>,
     pub custom_fields: Option<Bound<custom_fields::CustomFields>>,
     pub print: Option<Bound<print::PrintDialog>>,
+    pub update_project: Option<Bound<update_project::UpdateProject>>,
     /// Follows the active document's selection; reset when the active document changes.
     pub assign: Option<Bound<misc::AssignResources>>,
     pub external: Option<Bound<misc::ExternalLinks>>,

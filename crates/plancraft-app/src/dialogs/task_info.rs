@@ -76,6 +76,9 @@ pub struct TaskInfo {
     fixed_cost: String,
     actual_start: String,
     actual_finish: String,
+    /// Resume date of an in-progress task, and the text it opened with.
+    resume: String,
+    resume_orig: String,
     on_timeline: bool,
     est_kind: EstKind,
     points: String,
@@ -153,6 +156,8 @@ impl TaskInfo {
             fixed_cost: format!("{:.2}", t.fixed_cost),
             actual_start: format::iso(t.actual_start),
             actual_finish: format::iso(t.actual_finish),
+            resume: format::iso(t.resume),
+            resume_orig: format::iso(t.resume),
             on_timeline: t.show_on_timeline,
             est_kind,
             points,
@@ -319,6 +324,10 @@ impl TaskInfo {
             t.actual_finish = afinish;
             t.percent_complete = 100;
         }
+        if self.resume.trim() != self.resume_orig.trim() {
+            let resume = opt_date(p, &self.resume, false)?;
+            p.set_resume(id, resume).map_err(err)?;
+        }
         Ok(())
     }
 
@@ -429,6 +438,19 @@ impl TaskInfo {
             ui.label("Actual finish:");
             ui.add(egui::TextEdit::singleline(&mut self.actual_finish).desired_width(140.0).hint_text("NA"));
             ui.end_row();
+            if !self.summary && !self.milestone {
+                let stop = p.task(self.id).and_then(|t| t.sched.stop);
+                ui.label("Stop:");
+                ui.label(RichText::new(if stop.is_some() { format::iso(stop) } else { "NA".into() }).color(theme::pal().TEXT_WEAK))
+                    .on_hover_text("End of the work done so far");
+                ui.label("Resume:");
+                ui.add_enabled(
+                    stop.is_some(),
+                    egui::TextEdit::singleline(&mut self.resume).desired_width(140.0).hint_text("right after Stop"),
+                )
+                .on_hover_text("When the remaining work restarts. A later date splits the task.");
+                ui.end_row();
+            }
             ui.label("");
             ui.add_enabled(!self.summary, egui::Checkbox::new(&mut self.milestone, "Mark task as milestone"));
             ui.end_row();

@@ -294,6 +294,13 @@ pub struct TaskSchedule {
     /// Duration of summary tasks (computed span); leaf tasks mirror `Task::duration`.
     pub duration: Minutes,
     pub percent_complete: f32,
+    /// End of the completed part of an in-progress task (Microsoft Project's Stop field).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop: Option<NaiveDateTime>,
+    /// Start of the remaining part of an in-progress task: the stop, or the later resume date when
+    /// the task is split.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<NaiveDateTime>,
     /// Human-readable scheduling problems (constraint conflicts, missed deadlines...).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
@@ -352,6 +359,10 @@ pub struct Task {
     pub manual_start: Option<NaiveDateTime>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manual_finish: Option<NaiveDateTime>,
+    /// When the remaining work of an in-progress task resumes (Microsoft Project's Resume field).
+    /// Later than the end of the completed part, it splits the bar: work stops, then resumes here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume: Option<NaiveDateTime>,
     /// Delay added by resource leveling (working minutes).
     #[serde(default, skip_serializing_if = "is_zero_i64")]
     pub leveling_delay: Minutes,
@@ -409,6 +420,7 @@ impl Task {
             actual_finish: None,
             manual_start: None,
             manual_finish: None,
+            resume: None,
             leveling_delay: 0,
             fixed_cost: 0.0,
             notes: String::new(),
@@ -438,6 +450,22 @@ impl Task {
 
     pub fn is_complete(&self) -> bool {
         self.percent_complete >= 100
+    }
+
+    /// Working time done so far: % complete of the duration (Microsoft Project's Actual Duration).
+    pub fn actual_duration(&self) -> Minutes {
+        if self.is_milestone() {
+            return 0;
+        }
+        self.duration.max(0).saturating_mul(Minutes::from(self.percent_complete.min(100))) / 100
+    }
+
+    /// Working time still to do (Microsoft Project's Remaining Duration).
+    pub fn remaining_duration(&self) -> Minutes {
+        if self.is_milestone() {
+            return 0;
+        }
+        self.duration.max(0).saturating_sub(self.actual_duration())
     }
 
     /// Whether adding or removing people keeps total work the same. Fixed Work tasks always are.

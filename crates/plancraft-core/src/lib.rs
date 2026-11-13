@@ -40,7 +40,7 @@ pub mod prelude {
     pub use crate::duration::{DurationUnit, Lag, Minutes, TimeSettings, format_duration, format_work, parse_duration, parse_work};
     pub use crate::ids::*;
     pub use crate::model::*;
-    pub use crate::ops::{PlanError, PlanResult};
+    pub use crate::ops::{PlanError, PlanResult, ProgressUpdate, TrackingReport};
     pub use crate::schedule::{ScheduleReport, recalculate};
     pub use crate::workload::{Granularity, WorkloadReport, workload};
 }

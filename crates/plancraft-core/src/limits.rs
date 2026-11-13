@@ -430,6 +430,7 @@ impl Fixer {
         self.opt_datetime(&mut t.actual_finish);
         self.opt_datetime(&mut t.manual_start);
         self.opt_datetime(&mut t.manual_finish);
+        self.opt_datetime(&mut t.resume);
         if t.calendar.is_some_and(|c| !calendars.contains(&c)) {
             t.calendar = None;
             self.note("a task used a calendar that does not exist");

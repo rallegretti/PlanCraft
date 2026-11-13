@@ -8,7 +8,7 @@
 use std::path::Path;
 
 use chrono::NaiveDate;
-use plancraft_core::calendar::TimeRange;
+use plancraft_core::calendar::{TimeRange, shift};
 use plancraft_core::duration::{DurationUnit, Lag, TimeSettings, best_unit, format_duration, parse_duration};
 use plancraft_core::io::{from_json_with_notes, to_json};
 use plancraft_core::limits::{self, MAX_MINUTES};
@@ -212,6 +212,13 @@ enum Op {
     DeleteField(usize),
     Columns(String, Vec<String>),
     PageSetup(usize, bool, f32, u16, u8, u8, usize, String),
+    StatusDate(Option<i64>),
+    UpdateThrough(Option<usize>, i64, bool),
+    MarkOnTrack(usize),
+    Reschedule(Option<usize>, i64),
+    Resume(usize, Option<i64>),
+    ActualDuration(usize, i64),
+    RemainingDuration(usize, i64),
 }
 
 fn edit_op() -> impl Strategy<Value = Op> {
@@ -256,6 +263,13 @@ fn edit_op() -> impl Strategy<Value = Op> {
             cell_text()
         )
             .prop_map(|(a, b, c, d, e, f, g, h)| Op::PageSetup(a, b, c, d, e, f, g, h)),
+        prop::option::of(big()).prop_map(Op::StatusDate),
+        (prop::option::of(i()), big(), any::<bool>()).prop_map(|(a, m, z)| Op::UpdateThrough(a, m, z)),
+        i().prop_map(Op::MarkOnTrack),
+        (prop::option::of(i()), big()).prop_map(|(a, m)| Op::Reschedule(a, m)),
+        (i(), prop::option::of(big())).prop_map(|(a, m)| Op::Resume(a, m)),
+        (i(), big()).prop_map(|(a, m)| Op::ActualDuration(a, m)),
+        (i(), big()).prop_map(|(a, m)| Op::RemainingDuration(a, m)),
     ]
 }
 
@@ -349,6 +363,22 @@ fn apply(p: &mut Project, op: &Op) -> PlanResult<()> {
                 print_all_columns: portrait,
             });
         }
+        Op::StatusDate(m) => p.set_status_date(m.map(|m| shift(p.start, m).date())),
+        Op::UpdateThrough(i, m, zero) => {
+            let ids: Vec<TaskId> = i.map(|i| task_at(p, i)).into_iter().collect();
+            let how = if zero { ProgressUpdate::ZeroOrHundred } else { ProgressUpdate::Scheduled };
+            p.update_progress_through(&ids, shift(p.start, m), how)?;
+        }
+        Op::MarkOnTrack(i) => {
+            p.mark_on_track(&[task_at(p, i)])?;
+        }
+        Op::Reschedule(i, m) => {
+            let ids: Vec<TaskId> = i.map(|i| task_at(p, i)).into_iter().collect();
+            p.reschedule_uncompleted_work(&ids, shift(p.start, m))?;
+        }
+        Op::Resume(i, m) => p.set_resume(task_at(p, i), m.map(|m| shift(p.start, m)))?,
+        Op::ActualDuration(i, m) => p.set_actual_duration(task_at(p, i), m)?,
+        Op::RemainingDuration(i, m) => p.set_remaining_duration(task_at(p, i), m)?,
     }
     Ok(())
 }

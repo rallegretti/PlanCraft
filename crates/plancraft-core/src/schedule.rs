@@ -48,6 +48,40 @@ struct Dates {
     ef: Option<NaiveDateTime>,
     ls: Option<NaiveDateTime>,
     lf: Option<NaiveDateTime>,
+    /// Completed and remaining parts of an in-progress task.
+    parts: Option<Parts>,
+}
+
+/// The completed and remaining parts of an in-progress task.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Parts {
+    /// End of the completed part (Microsoft Project's Stop field).
+    pub stop: NaiveDateTime,
+    /// Start of the remaining part: the next working moment after `stop`, or the task's later
+    /// resume date (then the task is split).
+    pub resume: NaiveDateTime,
+    /// Working minutes left to do.
+    pub remaining: Minutes,
+    /// The remaining part starts later than the completed part ends.
+    pub split: bool,
+}
+
+/// Splits an in-progress task (actual start, 1-99% complete, no actual finish) into the part done
+/// and the part left; `None` for any other task.
+pub fn parts_of(t: &Task, cal: &WorkCal, dur: Minutes) -> Option<Parts> {
+    let start = t.actual_start?;
+    if t.actual_finish.is_some() || t.is_milestone() || dur <= 0 || t.mode == ScheduleMode::Manual {
+        return None;
+    }
+    let pct = Minutes::from(t.percent_complete);
+    if !(1..100).contains(&pct) {
+        return None;
+    }
+    let done = dur.saturating_mul(pct) / 100;
+    let stop = cal.add(start, done);
+    let next = cal.snap_forward(stop);
+    let resume = t.resume.map(|r| cal.snap_forward(r)).filter(|r| *r > next);
+    Some(Parts { stop, resume: resume.unwrap_or(next), remaining: dur.saturating_sub(done), split: resume.is_some() })
 }
 
 /// Summary of a recalculation.
@@ -321,6 +355,12 @@ impl<'a> Engine<'a> {
         if let Some(d) = self.dates.get_mut(i) {
             d.es = Some(es);
             d.ef = Some(ef);
+        }
+    }
+
+    fn set_parts(&mut self, i: usize, parts: Option<Parts>) {
+        if let Some(d) = self.dates.get_mut(i) {
+            d.parts = parts;
         }
     }
 
@@ -600,9 +640,14 @@ impl<'a> Engine<'a> {
             }
 
             let (mut s, mut f) = place(es);
+            let parts = parts_of(t, cal, dur);
             if let Some(a) = t.actual_start {
                 s = a;
-                f = if dur > 0 { cal.add(a, dur) } else { a };
+                f = match parts {
+                    Some(pt) if pt.split => cal.add(pt.resume, pt.remaining),
+                    _ if dur > 0 => cal.add(a, dur),
+                    _ => a,
+                };
             }
             if let Some(af) = t.actual_finish {
                 if t.actual_start.is_none() {
@@ -611,6 +656,7 @@ impl<'a> Engine<'a> {
                 f = af.max(s);
             }
             self.warnings.extend(warnings);
+            self.set_parts(i, parts);
             self.set_early(i, s, f);
         }
     }
@@ -671,7 +717,12 @@ impl<'a> Engine<'a> {
                 }
             }
             let lf = cal.snap_backward(lf);
-            let ls = if dur > 0 { cal.sub(lf, dur) } else { lf };
+            // A split task's remaining part is what can still move.
+            let ls = match self.date(i).parts {
+                Some(pt) if pt.split => cal.sub(lf, pt.remaining),
+                _ if dur > 0 => cal.sub(lf, dur),
+                _ => lf,
+            };
             self.set_late(i, ls, lf);
         }
     }
@@ -688,7 +739,11 @@ impl<'a> Engine<'a> {
             let (Some(es), Some(ef), Some(ls), Some(lf)) = (d.es, d.ef, d.ls, d.lf) else {
                 continue;
             };
-            let ts = cal.between(es, ls).min(cal.between(ef, lf));
+            let ts = match d.parts {
+                // The start of a split task is fixed; only its remaining part can slip.
+                Some(pt) if pt.split => cal.between(ef, lf),
+                _ => cal.between(es, ls).min(cal.between(ef, lf)),
+            };
             let dur = self.duration_of(i);
             let mut fs = Minutes::MAX;
             for &e in self.outgoing(i) {
@@ -840,6 +895,8 @@ fn calculate(p: &mut Project) -> ScheduleReport {
         t.sched.early_finish = d.ef;
         t.sched.late_start = d.ls;
         t.sched.late_finish = d.lf;
+        t.sched.stop = d.parts.map(|pt| pt.stop);
+        t.sched.resume = d.parts.map(|pt| pt.resume);
         t.sched.total_slack = ts;
         t.sched.free_slack = free_slack.get(i).copied().unwrap_or(0);
         t.sched.duration = if t.is_milestone() { 0 } else { t.duration };
@@ -1021,6 +1078,8 @@ fn rollup_summaries(p: &mut Project) -> Own {
         t.sched.critical = r.critical;
         t.sched.duration = duration;
         t.sched.percent_complete = r.percent;
+        t.sched.stop = None;
+        t.sched.resume = None;
         t.sched.warnings.clear();
         if let (Some(dl), Some(f)) = (t.deadline, r.finish)
             && f > dl

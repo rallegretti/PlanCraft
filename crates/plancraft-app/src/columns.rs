@@ -36,6 +36,10 @@ pub enum TaskCol {
     CostVariance,
     ActualStart,
     ActualFinish,
+    ActualDuration,
+    RemainingDuration,
+    Stop,
+    Resume,
     EarlyStart,
     EarlyFinish,
     LateStart,
@@ -117,7 +121,18 @@ impl TaskTable {
                 Deadline,
             ],
             TaskTable::Tracking => {
-                vec![Indicators, Name, ActualStart, ActualFinish, PercentComplete, Duration, ActualWork, RemainingWork, Cost]
+                vec![
+                    Indicators,
+                    Name,
+                    ActualStart,
+                    ActualFinish,
+                    PercentComplete,
+                    ActualDuration,
+                    RemainingDuration,
+                    ActualWork,
+                    RemainingWork,
+                    Cost,
+                ]
             }
             TaskTable::Work => vec![Indicators, Name, Work, BaselineWork, WorkVariance, ActualWork, RemainingWork, PercentComplete],
             TaskTable::Cost => vec![Indicators, Name, FixedCost, Cost, BaselineCost, CostVariance],
@@ -164,6 +179,10 @@ impl TaskCol {
             CostVariance => ColumnDef::new("Cost Var.", 86.0).right().read_only(),
             ActualStart => ColumnDef::new("Actual Start", 100.0),
             ActualFinish => ColumnDef::new("Actual Finish", 100.0),
+            ActualDuration => ColumnDef::new("Act. Dur.", 76.0).right(),
+            RemainingDuration => ColumnDef::new("Rem. Dur.", 76.0).right(),
+            Stop => ColumnDef::new("Stop", 100.0).read_only(),
+            Resume => ColumnDef::new("Resume", 100.0),
             EarlyStart => ColumnDef::new("Early Start", 100.0).read_only(),
             EarlyFinish => ColumnDef::new("Early Finish", 100.0).read_only(),
             LateStart => ColumnDef::new("Late Start", 100.0).read_only(),
@@ -301,6 +320,17 @@ pub fn cell(col: TaskCol, p: &Project, idx: usize, ctx: &CellCtx) -> Cell {
         ActualFinish => {
             Cell { text: format::date(t.actual_finish), edit_text: Some(format::iso_date(t.actual_finish)), ..Default::default() }
         }
+        ActualDuration | RemainingDuration => {
+            let (done, left) = if summary {
+                let done = (s.duration as f64 * f64::from(s.percent_complete.clamp(0.0, 100.0)) / 100.0).round() as Minutes;
+                (done, s.duration.saturating_sub(done).max(0))
+            } else {
+                (t.actual_duration(), t.remaining_duration())
+            };
+            Cell::text(p.format_duration(if col == ActualDuration { done } else { left }, false))
+        }
+        Stop => Cell::text(format::date(s.stop)),
+        Resume => Cell { text: format::date(s.resume), edit_text: Some(format::iso_date(t.resume)), ..Default::default() },
         EarlyStart => Cell::text(format::date(s.early_start)),
         EarlyFinish => Cell::text(format::date(s.early_finish)),
         LateStart => Cell::text(format::date(s.late_start)),
@@ -452,6 +482,14 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
         }
         FixedCost => task_mut(p, id)?.fixed_cost = format::parse_money(text).ok_or("invalid amount")?,
         ActualStart => task_mut(p, id)?.actual_start = parse_date(p, text, false)?,
+        ActualDuration | RemainingDuration => {
+            let (m, _) = p.parse_duration(text).ok_or_else(|| format!("'{text}' is not a valid duration"))?;
+            if col == ActualDuration { p.set_actual_duration(id, m) } else { p.set_remaining_duration(id, m) }.map_err(err)?;
+        }
+        Resume => {
+            let d = parse_date(p, text, false)?;
+            p.set_resume(id, d).map_err(err)?;
+        }
         ActualFinish => {
             let d = parse_date(p, text, true)?;
             let t = task_mut(p, id)?;

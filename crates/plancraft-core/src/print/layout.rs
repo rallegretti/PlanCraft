@@ -518,7 +518,21 @@ impl Chart<'_> {
                     (pal.bar_task, pal.bar_task_edge)
                 };
                 let bar = Rect::new(x0, yc - BAR_H / 2.0, (x1 - x0).max(1.0), BAR_H);
-                out.push(Item::Rect { rect: bar, fill: Some(fill), stroke: Some(Stroke::new(0.6, edge)) });
+                // A split task: the completed part, a dotted gap, then the remaining part.
+                let split = match (t.sched.stop, t.sched.resume) {
+                    (Some(stop), Some(resume)) if xs(resume) > xs(stop) + 1.0 => Some((xs(stop), xs(resume))),
+                    _ => None,
+                };
+                match split {
+                    Some((xa, xb)) => {
+                        for (a, b) in [(x0, xa), (xb, x1)] {
+                            let r = Rect::new(a, bar.y, (b - a).max(1.0), BAR_H);
+                            out.push(Item::Rect { rect: r, fill: Some(fill), stroke: Some(Stroke::new(0.6, edge)) });
+                        }
+                        out.push(Item::Line { points: vec![pt(xa, yc), pt(xb, yc)], stroke: Stroke::dashed(0.8, edge, 1.5) });
+                    }
+                    None => out.push(Item::Rect { rect: bar, fill: Some(fill), stroke: Some(Stroke::new(0.6, edge)) }),
+                }
                 if manual {
                     for (x, dir) in [(bar.x, 1.0), (bar.right(), -1.0)] {
                         out.push(Item::Line {
@@ -528,7 +542,10 @@ impl Chart<'_> {
                     }
                 }
                 if o.progress && t.sched.percent_complete > 0.0 {
-                    let px = x0 + (x1 - x0) * t.sched.percent_complete.clamp(0.0, 100.0) / 100.0;
+                    let px = match split {
+                        Some((xa, _)) => xa,
+                        None => x0 + (x1 - x0) * t.sched.percent_complete.clamp(0.0, 100.0) / 100.0,
+                    };
                     out.push(Item::Rect { rect: Rect::new(x0, yc - 1.0, px - x0, 2.0), fill: Some(pal.bar_progress), stroke: None });
                 }
                 if o.slack && t.sched.total_slack > 0 {
@@ -974,6 +991,34 @@ mod tests {
         for page in &doc.pages {
             assert_eq!((page.width, page.height), (792.0, 612.0));
         }
+    }
+
+    #[test]
+    fn split_tasks_print_as_two_bars_joined_by_dots() {
+        fn dotted_gaps(items: &[Item]) -> usize {
+            items
+                .iter()
+                .map(|i| match i {
+                    Item::Line { points, stroke } if stroke.dash.is_some() && points.len() == 2 && points[0].y == points[1].y => 1,
+                    Item::Clip { items, .. } => dotted_gaps(items),
+                    _ => 0,
+                })
+                .sum()
+        }
+        let mut p = Project::new("Split", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let t = p.add_task("Build", None);
+        p.set_duration(t, 4 * 480, false).unwrap();
+        crate::schedule::recalculate(&mut p);
+        let setup = PageSetup::default();
+        let count = |p: &Project| {
+            let sheet = task_sheet(p, true);
+            layout(&job(p, &setup, &sheet, true)).pages.iter().map(|pg| dotted_gaps(&pg.items)).sum::<usize>()
+        };
+        let none = count(&p);
+        p.set_percent_complete(t, 25).unwrap();
+        p.set_resume(t, NaiveDate::from_ymd_opt(2026, 10, 26).and_then(|d| d.and_hms_opt(8, 0, 0))).unwrap();
+        crate::schedule::recalculate(&mut p);
+        assert_eq!(count(&p), none + 1, "one dotted gap between the done and remaining parts");
     }
 
     #[test]
