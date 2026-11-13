@@ -189,10 +189,15 @@ fn export_pdf(ctx: &Ctx, a: &Args) -> ToolResult {
     {
         return err("'to' is before 'from'");
     }
-    let (bytes, pages, truncated) = ctx.read(a, |doc| {
-        let p = &doc.project;
-        let mut setup = p.page_setup.clone();
+    // Copy the plan, then lay out and write the PDF without holding the workspace (the app
+    // stays responsive during a long export).
+    let (project, setup) = ctx.read(a, |doc| {
+        let mut setup = doc.project.page_setup.clone();
         apply(&mut setup, a)?;
+        Ok((doc.project.clone(), setup))
+    })?;
+    let (bytes, pages, truncated) = {
+        let p = &project;
         let chart = match view.as_str() {
             "gantt" => Some(print::ChartOptions::default()),
             "tracking" => Some(print::ChartOptions { critical: true, baseline: true, ..Default::default() }),
@@ -212,8 +217,8 @@ fn export_pdf(ctx: &Ctx, a: &Args) -> ToolResult {
             printed: chrono::Local::now().naive_local(),
             palette: print::layout::Palette::default(),
         });
-        Ok((print::pdf::write(&out), out.pages.len(), out.truncated))
-    })?;
+        (print::pdf::write(&out), out.pages.len(), out.truncated)
+    };
     plancraft_core::io::write_atomic(&path, &bytes, plancraft_core::io::Privacy::KeepExisting)
         .map_err(|e| ToolError(format!("could not write {}: {e}", path.display())))?;
     Ok(json!({

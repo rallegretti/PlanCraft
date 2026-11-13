@@ -225,6 +225,75 @@ pub struct PageSetup {
     pub print_all_columns: bool,
 }
 
+/// Reads a plan's Page Setup without ever refusing the plan: values of the wrong type or out of
+/// their type's range (a scale of 70000, a paper size from a newer version) fall back to the
+/// default or are clamped, and [`PageSetup::sanitize`] then brings them into range.
+pub fn lenient_page_setup<'de, D: serde::Deserializer<'de>>(d: D) -> Result<PageSetup, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(PageSetup::from_json(&v))
+}
+
+impl PageSetup {
+    /// Page Setup from JSON, field by field (see [`lenient_page_setup`]).
+    pub fn from_json(v: &serde_json::Value) -> Self {
+        use serde_json::Value;
+        let mut s = PageSetup::default();
+        let Some(m) = v.as_object() else { return s };
+        fn get<T: serde::de::DeserializeOwned>(m: &serde_json::Map<String, Value>, k: &str) -> Option<T> {
+            m.get(k).and_then(|v| T::deserialize(v).ok())
+        }
+        let num = |k: &str| m.get(k).and_then(Value::as_f64).filter(|n| n.is_finite());
+        let texts = |k: &str| -> Option<[String; 3]> {
+            let items = m.get(k)?.as_array()?;
+            let mut out: [String; 3] = Default::default();
+            for (slot, item) in out.iter_mut().zip(items) {
+                *slot = item.as_str().unwrap_or_default().to_string();
+            }
+            Some(out)
+        };
+        if let Some(x) = get(m, "paper") {
+            s.paper = x;
+        }
+        if let Some(x) = get(m, "orientation") {
+            s.orientation = x;
+        }
+        if let Some(x) = get(m, "legend") {
+            s.legend = x;
+        }
+        if let Some(x) = num("margin_mm") {
+            s.margin_mm = x as f32;
+        }
+        if let Some(x) = num("scale_percent") {
+            s.scale_percent = x.clamp(0.0, f64::from(u16::MAX)) as u16;
+        }
+        if let Some(x) = num("repeat_columns") {
+            s.repeat_columns = x.clamp(0.0, f64::from(u8::MAX)) as u8;
+        }
+        match m.get("timescale") {
+            Some(Value::String(t)) if t == "AsShown" => s.timescale = TimescaleFit::AsShown,
+            Some(Value::Object(t)) => {
+                if let Some(n) = t.get("PagesWide").and_then(Value::as_f64).filter(|n| n.is_finite()) {
+                    s.timescale = TimescaleFit::PagesWide(n.clamp(0.0, f64::from(u8::MAX)) as u8);
+                }
+            }
+            _ => {}
+        }
+        if let Some(x) = texts("header") {
+            s.header = x;
+        }
+        if let Some(x) = texts("footer") {
+            s.footer = x;
+        }
+        if let Some(x) = get(m, "print_blank_pages") {
+            s.print_blank_pages = x;
+        }
+        if let Some(x) = get(m, "print_all_columns") {
+            s.print_all_columns = x;
+        }
+        s
+    }
+}
+
 impl Default for PageSetup {
     fn default() -> Self {
         Self {

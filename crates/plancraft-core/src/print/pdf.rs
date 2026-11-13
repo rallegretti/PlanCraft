@@ -116,7 +116,10 @@ impl Content<'_> {
                 }
                 let _ = write!(self.s, "q BT /F1 {} Tf {} rg ", num(*size), color(*c));
                 if *bold {
-                    let _ = write!(self.s, "2 Tr {} RG {} w ", color(*c), num(size * font::BOLD_EXTRA));
+                    // Stroked outlines for weight, and the extra advance layout measured with, so
+                    // centred and right-aligned bold text lands where it was measured.
+                    let extra = num(size * font::BOLD_EXTRA);
+                    let _ = write!(self.s, "2 Tr {} RG {extra} w {extra} Tc ", color(*c));
                 }
                 let _ = writeln!(self.s, "{} {} Td <{hex}> Tj ET Q", num(at.x), num(self.y(at.y)));
             }

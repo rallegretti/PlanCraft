@@ -139,3 +139,34 @@ fn leveling_1000_tasks_is_fast() {
     eprintln!("leveling 1,000 tasks: {took:?} (limit {limit:?})");
     assert!(took < limit, "leveling 1,000 tasks took {took:?}; the limit is {limit:?}");
 }
+
+/// Regression: printing looked tasks up by scanning the plan, and every page walked every link,
+/// so a 10,000-task plan took tens of seconds to lay out (and froze the Print preview).
+#[test]
+fn printing_10000_linked_tasks_is_fast() {
+    use plancraft_core::print::{self, PageSetup};
+    let mut p = Project::new("Big print", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+    let ids = flat_tasks(&mut p, 10_000);
+    for w in ids.windows(2).step_by(2) {
+        p.link(w[0].into(), w[1], LinkType::FS, Lag::None).unwrap();
+    }
+    recalculate(&mut p);
+    let setup = PageSetup::default();
+    let sheet = print::task_sheet(&p, true);
+    let t = Instant::now();
+    let doc = print::layout(&print::PrintJob {
+        project: &p,
+        setup: &setup,
+        sheet: &sheet,
+        chart: Some(print::ChartOptions::default()),
+        from: None,
+        to: None,
+        printed: p.start,
+        palette: print::layout::Palette::default(),
+    });
+    let took = t.elapsed();
+    assert!(doc.pages.len() > 100);
+    let limit = if cfg!(debug_assertions) { Duration::from_secs(30) } else { Duration::from_secs(2) };
+    eprintln!("laying out 10,000 tasks on {} pages: {took:?} (limit {limit:?})", doc.pages.len());
+    assert!(took < limit, "laying out 10,000 tasks took {took:?}; the limit is {limit:?}");
+}

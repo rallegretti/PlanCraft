@@ -147,7 +147,11 @@ proptest! {
 
     /// Random edit sequences never panic, and every accepted edit leaves a valid project.
     #[test]
-    fn random_edits_never_panic(ops in prop::collection::vec(edit_op(), 1..40)) {
+    fn random_edits_never_panic(
+        ops in prop::collection::vec(edit_op(), 1..40),
+        range in prop::option::of((-200_000i64..200_000, 0i64..200_000)),
+        per_day in prop_oneof![Just(20.0f32), 0.0f32..3000.0, Just(f32::NAN)],
+    ) {
         let mut doc = Document::new(1, demo_project(start()), None);
         for op in ops {
             let r = doc.try_edit("junk", ChangeSource::Agent, |p| apply(p, &op));
@@ -156,17 +160,20 @@ proptest! {
             let mut copy = doc.project.clone();
             prop_assert!(limits::sanitize(&mut copy).is_empty(), "{op:?} left values out of range");
         }
-        // Whatever the edits left, the plan prints (table and chart) to a valid PDF.
+        // Whatever the edits left, the plan prints (table and chart) to a valid PDF, also over
+        // any date range and at any zoom.
         let p = &doc.project;
+        let day = |n: i64| plancraft_core::calendar::shift(start().and_hms_opt(0, 0, 0).unwrap(), n * 1440).date();
+        let (from, to) = range.map_or((None, None), |(a, len)| (Some(day(a)), Some(day(a.saturating_add(len)))));
         for chart in [true, false] {
             let sheet = plancraft_core::print::task_sheet(p, chart);
             let out = plancraft_core::print::layout(&plancraft_core::print::PrintJob {
                 project: p,
                 setup: &p.page_setup,
                 sheet: &sheet,
-                chart: chart.then(|| plancraft_core::print::ChartOptions { critical: true, baseline: true, slack: true, ..Default::default() }),
-                from: None,
-                to: None,
+                chart: chart.then(|| plancraft_core::print::ChartOptions { critical: true, baseline: true, slack: true, per_day, ..Default::default() }),
+                from,
+                to,
                 printed: start().and_hms_opt(9, 0, 0).unwrap(),
                 palette: plancraft_core::print::layout::Palette::default(),
             });
@@ -480,4 +487,34 @@ fn hostile_custom_fields_in_a_file_are_clamped_on_open() {
     // What loaded passes the edit checks, so the next edit is not refused.
     let mut q = q;
     assert!(limits::check_edit(&mut q).is_ok());
+}
+
+/// Regression: Page Setup values outside their types (a scale of 70000, 300 pages wide, a paper
+/// size from a newer version, extra header strings) made the whole plan fail to open.
+#[test]
+fn page_setup_values_of_the_wrong_type_never_stop_a_plan_opening() {
+    let p = demo_project(start());
+    let mut v = serde_json::to_value(&p).unwrap();
+    v["page_setup"] = serde_json::json!({
+        "paper": "B5",
+        "orientation": 7,
+        "scale_percent": 70000,
+        "margin_mm": "wide",
+        "timescale": { "PagesWide": 300 },
+        "repeat_columns": -4,
+        "header": ["a", "b", "c", "d", 5],
+        "legend": { "nested": true },
+    });
+    let (loaded, notes) = plancraft_core::io::from_json_with_notes(&v.to_string(), std::path::Path::new("x.plancraft")).unwrap();
+    assert!(notes.iter().any(|n| n.contains("page setup")), "{notes:?}");
+    let s = &loaded.page_setup;
+    assert_eq!(s.paper, plancraft_core::print::Paper::Letter);
+    assert_eq!(s.scale_percent, plancraft_core::print::MAX_SCALE);
+    assert_eq!(s.timescale, plancraft_core::print::TimescaleFit::PagesWide(plancraft_core::print::MAX_PAGES_WIDE));
+    assert_eq!(s.repeat_columns, 0);
+    assert_eq!(s.header, ["a".to_string(), "b".to_string(), "c".to_string()]);
+    // Something that isn't an object at all falls back to the defaults.
+    v["page_setup"] = serde_json::json!("landscape please");
+    let (loaded, _) = plancraft_core::io::from_json_with_notes(&v.to_string(), std::path::Path::new("x.plancraft")).unwrap();
+    assert!(loaded.page_setup.is_default());
 }
