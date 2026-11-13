@@ -2,13 +2,28 @@
 //! Speed gate: the scheduler must stay fast enough to recalculate on every keystroke.
 //!
 //! A 200-task project (summaries, a web of links of every type, lags, constraints, assignments
-//! with resource calendars) must recalculate in under 10 ms. Debug builds are slower, so they get
-//! a looser bound; CI runs this test in release mode too (`cargo test --release --test speed`).
+//! with resource calendars) must recalculate in under 10 ms.
+//!
+//! These tests time themselves, so they only run in release builds (`cargo xtask ci` runs
+//! `cargo test --release --test speed`), one at a time. In a debug build they are ignored: there
+//! they measured the debug code generation and the build machine (leveling took 11 s here and
+//! 29 s on an older Windows PC against a 30 s bound), not the code. Their debug bounds are kept
+//! for running them by hand with `--ignored`.
 
+use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use chrono::NaiveDate;
 use plancraft_core::prelude::*;
+
+/// The tests here time themselves, so they run one at a time: run side by side (the test
+/// runner's default) they measure how many cores the machine has, not the code. Leveling 1,000
+/// tasks took 1.2 s alone on a Mac with two performance cores and 2.2 s next to the others.
+static ONE_AT_A_TIME: Mutex<()> = Mutex::new(());
+
+fn timed() -> MutexGuard<'static, ()> {
+    ONE_AT_A_TIME.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 fn project(tasks: usize) -> Project {
     let mut p = Project::new("Speed", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
@@ -44,7 +59,9 @@ fn project(tasks: usize) -> Project {
 }
 
 #[test]
+#[cfg_attr(debug_assertions, ignore = "a timing test: `cargo xtask ci` runs it in release")]
 fn recalculating_200_tasks_takes_under_10ms() {
+    let _serial = timed();
     let mut p = project(200);
     assert_eq!(p.tasks.len(), 200);
     recalculate(&mut p);
@@ -87,7 +104,9 @@ fn flat_tasks(p: &mut Project, n: usize) -> Vec<TaskId> {
 /// Regression: the cycle check behind every new link rescanned all tasks for every task it
 /// visited, so linking 2,000 tasks into a chain (in reverse order) took about 28 s.
 #[test]
+#[cfg_attr(debug_assertions, ignore = "a timing test: `cargo xtask ci` runs it in release")]
 fn linking_a_2000_task_chain_is_fast() {
+    let _serial = timed();
     let mut p = Project::new("Chain", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
     let ids = flat_tasks(&mut p, 2000);
     let t = Instant::now();
@@ -105,7 +124,9 @@ fn linking_a_2000_task_chain_is_fast() {
 /// Regression: working time between two dates was counted one day at a time, so one date far in
 /// the future (a typo such as 2062, or the 2299 limit) made every recalculation take seconds.
 #[test]
+#[cfg_attr(debug_assertions, ignore = "a timing test: `cargo xtask ci` runs it in release")]
 fn a_far_future_date_keeps_recalculation_fast() {
+    let _serial = timed();
     let mut p = Project::new("Far", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
     let ids = flat_tasks(&mut p, 2000);
     let far = NaiveDate::from_ymd_opt(2299, 6, 1).unwrap().and_hms_opt(8, 0, 0).unwrap();
@@ -122,7 +143,9 @@ fn a_far_future_date_keeps_recalculation_fast() {
 /// Regression: leveling re-sorted, rebuilt every load and recalculated the whole project for each
 /// delayed task (1,000 tasks took about 10 s).
 #[test]
+#[cfg_attr(debug_assertions, ignore = "a timing test: `cargo xtask ci` runs it in release")]
 fn leveling_1000_tasks_is_fast() {
+    let _serial = timed();
     use plancraft_core::leveling::{LevelingOptions, level_resources};
     let mut p = Project::new("Level", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
     let people: Vec<ResourceId> = (0..5).map(|i| p.add_resource(format!("Person {i}"))).collect();
@@ -143,7 +166,9 @@ fn leveling_1000_tasks_is_fast() {
 /// Regression: printing looked tasks up by scanning the plan, and every page walked every link,
 /// so a 10,000-task plan took tens of seconds to lay out (and froze the Print preview).
 #[test]
+#[cfg_attr(debug_assertions, ignore = "a timing test: `cargo xtask ci` runs it in release")]
 fn printing_10000_linked_tasks_is_fast() {
+    let _serial = timed();
     use plancraft_core::print::{self, PageSetup};
     let mut p = Project::new("Big print", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
     let ids = flat_tasks(&mut p, 10_000);
@@ -174,7 +199,9 @@ fn printing_10000_linked_tasks_is_fast() {
 /// The Network Diagram lays out on every edit, so a 10,000-task plan (phases, chains and cross
 /// links) must lay out quickly.
 #[test]
+#[cfg_attr(debug_assertions, ignore = "a timing test: `cargo xtask ci` runs it in release")]
 fn laying_out_a_10000_task_network_diagram_is_fast() {
+    let _serial = timed();
     use plancraft_core::network::{NetworkOptions, boxes_for, layout};
     let mut p = Project::new("Big network", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
     let mut leaves = Vec::new();
