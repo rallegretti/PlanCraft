@@ -150,6 +150,12 @@ pub fn task_row(p: &Project, idx: usize) -> Value {
     if t.is_milestone() {
         m.insert("is_milestone".into(), json!(true));
     }
+    if t.recurrence.is_some() || t.occurrence {
+        m.insert("recurring".into(), json!(true));
+    }
+    if !plancraft_core::schedule::planned_gaps(&t.gaps, t.duration).is_empty() {
+        m.insert("split".into(), json!(true));
+    }
     if t.mode == ScheduleMode::Manual {
         m.insert("mode".into(), json!("manual"));
     }
@@ -372,6 +378,15 @@ pub fn task_detail(p: &Project, id: TaskId) -> Value {
             })
             .collect();
         m.insert("other_baselines".into(), Value::Object(other));
+    }
+    if !t.gaps.is_empty() {
+        m.insert("planned_splits".into(), crate::tools::recurring::planned_splits_json(p, t));
+    }
+    if let Some(r) = &t.recurrence {
+        m.insert("recurrence".into(), crate::tools::recurring::recurrence_json(p, r));
+    }
+    if let Some(parent) = p.recurring_parent(idx).and_then(|i| p.tasks.get(i)) {
+        m.insert("occurrence_of".into(), json!({ "id": parent.id.0, "name": parent.name }));
     }
     if !t.interim.is_empty() {
         let interim: serde_json::Map<String, Value> = t

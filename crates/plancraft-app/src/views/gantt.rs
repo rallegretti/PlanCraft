@@ -405,6 +405,12 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, kind:
     apply_chart_actions(doc, st, &rows, actions, out);
 }
 
+/// A duration dragged on the chart, rounded to whole days (or hours below half a day).
+fn round_dragged(p: &Project, mins: Minutes) -> Minutes {
+    let day = p.settings.time.minutes_per_day.max(1);
+    if mins >= day / 2 { ((mins + day / 2) / day * day).max(day) } else { (mins + 30) / 60 * 60 }
+}
+
 pub fn apply_chart_actions(doc: &mut Document, st: &mut UiState, rows: &[Row], actions: Vec<ChartAction>, out: &mut Vec<Command>) {
     for a in actions {
         match a {
@@ -439,6 +445,59 @@ pub fn apply_chart_actions(doc: &mut Document, st: &mut UiState, rows: &[Row], a
                     st.toast(ToastKind::Warning, e);
                 }
             }
+            ChartAction::Split { task, at } => {
+                let r = doc.edit_msg("Split Task", |p| {
+                    let idx = p.task_index(task).ok_or("task not found")?;
+                    let cal = task_calendar(p, idx);
+                    // Zoomed out, split at the end of the day clicked; zoomed in, at the hour.
+                    let at = if st.gantt.px_per_day >= 72.0 {
+                        let midnight = at.date().and_time(chrono::NaiveTime::MIN);
+                        plancraft_core::calendar::shift(midnight, ((at - midnight).num_minutes() + 30) / 60 * 60)
+                    } else {
+                        cal.day_finish(at.date())
+                    };
+                    // A pause of one working day of the task's calendar.
+                    let resume_from = cal.snap_forward(at);
+                    let day = Some(cal.working_minutes_on(resume_from.date()))
+                        .filter(|m| *m > 0)
+                        .unwrap_or(p.settings.time.minutes_per_day.max(1));
+                    let resume = cal.snap_forward(cal.add(resume_from, day));
+                    p.split_task(task, at, resume).map_err(|e| e.to_string())
+                });
+                match r {
+                    Ok(()) => st.toast(ToastKind::Info, "Task split: drag the later part to move it, or back to rejoin"),
+                    Err(e) => st.toast(ToastKind::Warning, e),
+                }
+            }
+            ChartAction::MovePart { task, k, start } => {
+                let r = doc.edit_msg("Move Split Part", |p| {
+                    let idx = p.task_index(task).ok_or("task not found")?;
+                    let cal = task_calendar(p, idx);
+                    let prev_end = p.task(task).and_then(|t| t.sched.parts.get(k.wrapping_sub(1)).map(|x| x.1)).ok_or("no such part")?;
+                    // Moved back onto the part before it: the parts join.
+                    let length = cal.between(cal.snap_forward(prev_end), start).max(0);
+                    p.set_split_length(task, k.saturating_sub(1), length).map_err(|e| e.to_string())
+                });
+                if let Err(e) = r {
+                    st.toast(ToastKind::Warning, e);
+                }
+            }
+            ChartAction::SetPartFinish { task, k, finish } => {
+                let r = doc.edit_msg("Change Part Duration", |p| {
+                    let idx = p.task_index(task).ok_or("task not found")?;
+                    let cal = task_calendar(p, idx);
+                    let start = p.task(task).and_then(|t| t.sched.parts.get(k).map(|x| x.0)).ok_or("no such part")?;
+                    // Dragged onto or before its own start: no change (rejoin parts by moving them).
+                    let mins = round_dragged(p, cal.between(start, finish).max(0));
+                    if mins <= 0 {
+                        return Ok(());
+                    }
+                    p.set_part_duration(task, k, mins).map_err(|e| e.to_string())
+                });
+                if let Err(e) = r {
+                    st.toast(ToastKind::Warning, e);
+                }
+            }
             ChartAction::SetFinish { task, finish } => {
                 let r = doc.edit_msg("Change Duration", |p| {
                     let idx = p.task_index(task).ok_or("task not found")?;
@@ -454,12 +513,7 @@ pub fn apply_chart_actions(doc: &mut Document, st: &mut UiState, rows: &[Row], a
                         }
                         mins = mins.max(0);
                     }
-                    let day = p.settings.time.minutes_per_day.max(1);
-                    if mins >= day / 2 {
-                        mins = ((mins + day / 2) / day * day).max(day);
-                    } else {
-                        mins = (mins + 30) / 60 * 60;
-                    }
+                    let mins = round_dragged(p, mins);
                     let manual_finish = cal.add(start, mins);
                     if let Some(t) = p.task_mut(task)
                         && t.mode == ScheduleMode::Manual

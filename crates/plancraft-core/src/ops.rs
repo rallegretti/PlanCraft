@@ -694,6 +694,16 @@ impl Project {
     ///   work and shares it out by units, like Microsoft Project.
     pub fn assign(&mut self, task: TaskId, resource: ResourceId, units: Option<f64>, work: Option<Minutes>) -> PlanResult<AssignmentId> {
         let ti = self.require_task(task)?;
+        if self.row(ti)?.recurrence.is_some() {
+            // A recurring task's resources work on every occurrence.
+            let kids = self.occurrences_for_assignment(ti);
+            let mut first = None;
+            for kid in kids {
+                let aid = self.assign(kid, resource, units, work)?;
+                first = first.or(Some(aid));
+            }
+            return first.ok_or_else(|| PlanError::Invalid("this recurring task has no occurrences with work to assign".into()));
+        }
         if self.has_children(ti) {
             return invalid("resources cannot be assigned to summary tasks");
         }
@@ -1284,6 +1294,9 @@ impl Project {
         self.calendar(id).ok_or(PlanError::CalendarNotFound(id))?;
         self.calendars.retain(|c| c.id != id);
         for t in &mut self.tasks {
+            if let Some(r) = t.recurrence.as_mut().filter(|r| r.calendar == Some(id)) {
+                r.calendar = None;
+            }
             if t.calendar == Some(id) {
                 t.calendar = None;
             }

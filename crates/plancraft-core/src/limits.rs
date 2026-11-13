@@ -462,6 +462,22 @@ impl Fixer {
         self.opt_datetime(&mut t.manual_start);
         self.opt_datetime(&mut t.manual_finish);
         self.list(&mut t.splits, crate::schedule::MAX_SPLITS, "a task has more than 100 pauses");
+        self.list(&mut t.gaps, crate::schedule::MAX_SPLITS, "a task has more than 100 splits");
+        for g in &mut t.gaps {
+            self.minutes(&mut g.work, "a task's split is out of range");
+            self.minutes(&mut g.length, "a task's split is out of range");
+        }
+        if let Some(r) = &mut t.recurrence {
+            if r.calendar.is_some_and(|c| !calendars.contains(&c)) {
+                r.calendar = None;
+                self.note("a recurring task used a calendar that does not exist");
+            }
+            if r.validate().is_err() {
+                // Its occurrences stay, as ordinary subtasks.
+                t.recurrence = None;
+                self.note("a recurring task's pattern was not valid");
+            }
+        }
         for sp in &mut t.splits {
             self.minutes(&mut sp.work, "a task's pause is out of range");
             self.datetime(&mut sp.resume);

@@ -24,6 +24,8 @@ This crate is pure logic with no UI. Every other component builds on it.
 | `schedule` | The CPM engine (`recalculate`) |
 | `ops` | All editing operations: outline, links, milestones, the duration/work/units rules, assignments, progress, time logging, calendars, and text parsing for the table columns |
 | `baseline` | Baseline and Baseline1–10, interim plans (Start1–10/Finish1–10): saving for the entire project or selected tasks with roll-up into summaries, copying between them, clearing, and per-plan totals |
+| `split` | Split Task: pauses planned in a task (`Gap`: after some work, a pause of some working time) that move with it; the scheduler lays the parts out (`schedule::segments_of`) |
+| `recurring` | Recurring tasks: the patterns, occurrence dates, and the summary-with-occurrences each one is |
 | `workload` | Time-phased distribution (with contours), capacity, overallocation, and workload reports |
 | `leveling` | Serial resource leveling that writes `leveling_delay`. It keeps loads incrementally and recalculates only when a delay can move other tasks. |
 | `report` | Statistics, milestone status, lateness, earned value |
@@ -107,7 +109,7 @@ The MCP server is a hand-rolled JSON-RPC 2.0 server. It has no async runtime, wh
   - Tool errors come back as `isError` results.
   - Each request locks the shared workspace briefly.
   - The change callback runs after the lock is released.
-- **`tools/*`:** 78 tools grouped by domain.
+- **`tools/*`:** 83 tools grouped by domain.
   - All mutations go through `Document::try_edit(…, ChangeSource::Agent, …)`.
   - Unknown arguments are rejected so agents find their typos.
 - **Transports:**

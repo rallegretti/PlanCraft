@@ -676,6 +676,43 @@ impl PlanCraftApp {
                     report(st, r);
                 }
             }
+            // A recurring task opens its Recurring Task Information instead.
+            Command::TaskInfo
+                if let Some(d) = st
+                    .sel
+                    .single_task()
+                    .or(sel.first().copied())
+                    .and_then(|id| dialogs::recurring::RecurringTask::edit(&doc.project, id)) =>
+            {
+                self.dialogs.recurring = Some(Bound::new(doc, d));
+            }
+            Command::RecurringTask => {
+                let above = sel.first().copied();
+                self.dialogs.recurring = Some(Bound::new(doc, dialogs::recurring::RecurringTask::new(&doc.project, above)));
+            }
+            Command::SplitTask => {
+                st.gantt.split_mode = !st.gantt.split_mode;
+                if st.gantt.split_mode {
+                    if !matches!(st.view, ViewKind::Gantt | ViewKind::TrackingGantt) {
+                        st.view = ViewKind::Gantt;
+                    }
+                    st.toast(ToastKind::Info, "Split Task: click a task's bar where its work should pause");
+                }
+            }
+            Command::RejoinTasks => {
+                let r = doc.edit("Rejoin Split Task", |p| {
+                    let mut n = 0;
+                    for id in &sel {
+                        n += p.remove_splits(*id).unwrap_or(0);
+                    }
+                    n
+                });
+                match r {
+                    Ok(0) => st.toast(ToastKind::Info, "The selected tasks have no splits"),
+                    Ok(_) => {}
+                    Err(e) => st.toast(ToastKind::Warning, e.to_string()),
+                }
+            }
             Command::TaskInfo | Command::TaskNotes => {
                 if let Some(id) = st.sel.single_task().or(sel.first().copied()) {
                     self.dialogs.task_info =
@@ -740,6 +777,7 @@ impl PlanCraftApp {
                         let target_level = p.tasks.get(at).map_or(1, |t| t.outline_level);
                         let at = at.min(p.tasks.len());
                         let mut ids = Vec::new();
+                        let recurring_in_clip = clip.iter().any(|t| t.recurrence.is_some());
                         for (k, t) in clip.iter().enumerate() {
                             let mut nt = t.clone();
                             nt.id = p.ids.next_task();
@@ -748,6 +786,8 @@ impl PlanCraftApp {
                             nt.baseline = None;
                             nt.baselines.clear();
                             nt.interim.clear();
+                            // A pasted occurrence is an ordinary task unless its recurring task comes too.
+                            nt.occurrence &= recurring_in_clip;
                             nt.outline_level = target_level.saturating_add(t.outline_level.saturating_sub(base));
                             ids.push(nt.id);
                             p.tasks.insert(at + k, nt);
@@ -1345,6 +1385,7 @@ impl PlanCraftApp {
                     "Print" => Command::Print,
                     "UpdateProject" => Command::UpdateProject,
                     "SetBaseline" => Command::SetBaseline,
+                    "RecurringTask" => Command::RecurringTask,
                     "ClearBaseline" => Command::ClearBaseline,
                     "Track" => {
                         // Progress through day 10, then a week's pause: split bars to look at.
@@ -1359,6 +1400,37 @@ impl PlanCraftApp {
                                     plancraft_core::ops::ProgressUpdate::Scheduled,
                                 )?;
                                 p.reschedule_uncompleted_work(&[], p.end_of_working_day(after))
+                            });
+                        }
+                        continue;
+                    }
+                    "Recur" => {
+                        // A split task and a weekly recurring task to look at.
+                        if let Some(doc) = lock(&self.ws).active_doc_mut() {
+                            let _ = doc.try_edit("Recur", ChangeSource::User, |p| {
+                                use plancraft_core::recurring::{Pattern, RecurEnd, Recurrence};
+                                let t = p
+                                    .tasks
+                                    .iter()
+                                    .find(|t| !t.sched.is_summary && t.duration >= 4 * 480 && t.percent_complete == 0)
+                                    .map(|t| t.id);
+                                if let Some(t) = t
+                                    && let Some(s) = p.task(t).and_then(|t| t.sched.start)
+                                {
+                                    let day = |n: i64| plancraft_core::calendar::shift(s, n * 24 * 60);
+                                    p.split_task(t, day(1).date().and_hms_opt(17, 0, 0).unwrap_or(s), day(5))?;
+                                }
+                                let start = p.start.date();
+                                let rec = Recurrence {
+                                    pattern: Pattern::Weekly { interval: 1, days: 0b10 },
+                                    start,
+                                    end: RecurEnd::After(6),
+                                    duration: 60,
+                                    calendar: None,
+                                    ignore_resource_calendars: false,
+                                };
+                                p.add_recurring_task("Team meeting", rec, Some(1))?;
+                                Ok::<(), PlanError>(())
                             });
                         }
                         continue;
@@ -1589,6 +1661,12 @@ impl PlanCraftApp {
         for m in agent_msgs {
             self.set_status(m);
         }
+        // Split Task waits for one click on a bar: Escape or leaving the Gantt views cancels it.
+        if self.st.gantt.split_mode
+            && (ctx.input(|i| i.key_pressed(egui::Key::Escape)) || !matches!(self.st.view, ViewKind::Gantt | ViewKind::TrackingGantt))
+        {
+            self.st.gantt.split_mode = false;
+        }
         // A document opened or activated elsewhere (e.g. by an agent) becomes the view.
         let active = ws.active_doc().map(|d| d.handle);
         if active != self.last_active {
@@ -1597,6 +1675,7 @@ impl PlanCraftApp {
             }
             self.st.sel = Default::default();
             self.st.gantt.initialized_for = None;
+            self.st.gantt.split_mode = false;
             self.st.cursor_task = None;
             // The Print window prints its plan as the view shows it; the view now shows another
             // plan, so it saves its Page Setup and closes.
@@ -1737,6 +1816,7 @@ impl PlanCraftApp {
             dialogs::show_bound(&mut self.dialogs.update_project, &mut ws, |d, doc| d.show(&ctx, doc, st));
             dialogs::show_bound(&mut self.dialogs.set_baseline, &mut ws, |d, doc| d.show(&ctx, doc, st));
             dialogs::show_bound(&mut self.dialogs.clear_baseline, &mut ws, |d, doc| d.show(&ctx, doc, st));
+            dialogs::show_bound(&mut self.dialogs.recurring, &mut ws, |d, doc| d.show(&ctx, doc, st));
             let st = &*st;
             dialogs::show_bound(&mut self.dialogs.print, &mut ws, |d, doc| d.show(&ctx, doc, st));
         }
@@ -2176,6 +2256,90 @@ mod ui_tests {
         let p = &ws.active_doc().unwrap().project;
         assert_eq!(p.plan_info(PlanSlot::Baseline(3)).tasks, 1);
         assert!(p.task(leaf).unwrap().baseline_in(3).is_some() && p.task(summary).unwrap().baseline_in(3).is_none());
+    }
+
+    #[test]
+    fn recurring_tasks_and_split_tasks_from_the_window_and_the_chart() {
+        use egui::accesskit::Role;
+        use egui_kittest::kittest::Queryable;
+        let mut h = harness();
+        let ctx = h.ctx.clone();
+        let count = |h: &Harness<'static, PlanCraftApp>| h.state().ws.lock().unwrap().active_doc().unwrap().project.tasks.len();
+        let before = count(&h);
+
+        // Task ▸ Recurring: name it, keep weekly on Mondays, 10 occurrences.
+        h.state_mut().st.sel = Default::default();
+        h.state_mut().exec(&ctx, Command::RecurringTask);
+        h.run_steps(2);
+        let name = h.query_all_by_role(Role::TextInput).next().unwrap();
+        name.focus();
+        name.type_text("Weekly sync");
+        h.run_steps(2);
+        h.get_by_label("  OK  ").click();
+        h.run_steps(3);
+        assert!(h.state().dialogs.recurring.is_none(), "OK closes the window");
+        assert_eq!(count(&h), before + 11, "the recurring task and its 10 occurrences");
+        let id = {
+            let ws = h.state().ws.lock().unwrap();
+            let p = &ws.active_doc().unwrap().project;
+            let t = p.tasks.iter().find(|t| t.name == "Weekly sync").unwrap();
+            assert!(t.recurrence.is_some());
+            let row = p.task_index(t.id).unwrap();
+            assert_eq!(p.tasks[row + 1].name, "Weekly sync 1");
+            t.id
+        };
+
+        // Task Information on a recurring task opens the recurring task's window.
+        h.state_mut().st.sel.select_task(id);
+        h.state_mut().exec(&ctx, Command::TaskInfo);
+        h.run_steps(2);
+        assert!(h.state().dialogs.recurring.is_some() && h.state().dialogs.task_info.is_none());
+        h.get_by_label("Monthly").click();
+        h.run_steps(2);
+        h.get_by_label("  OK  ").click();
+        h.run_steps(3);
+        assert!(matches!(
+            h.state().ws.lock().unwrap().active_doc().unwrap().project.task(id).unwrap().recurrence.unwrap().pattern,
+            plancraft_core::recurring::Pattern::Monthly { .. }
+        ));
+
+        // Split Task waits for one click; Escape or another view cancels it (regression: it
+        // stayed on and split the next bar clicked, even in another plan or view).
+        h.state_mut().exec(&ctx, Command::SplitTask);
+        assert!(h.state().st.gantt.split_mode);
+        h.key_press(egui::Key::Escape);
+        h.run_steps(1);
+        assert!(!h.state().st.gantt.split_mode, "Escape cancels it");
+        h.state_mut().exec(&ctx, Command::SplitTask);
+        h.state_mut().exec(&ctx, Command::SetView(ViewKind::ResourceSheet));
+        h.run_steps(1);
+        assert!(!h.state().st.gantt.split_mode, "another view cancels it");
+        h.state_mut().exec(&ctx, Command::SetView(ViewKind::Gantt));
+        // Split Task on the chart: a click splits the bar; dragging the later part back rejoins it.
+        h.state_mut().exec(&ctx, Command::SplitTask);
+        assert!(h.state().st.gantt.split_mode);
+        let (task, at) = {
+            let ws = h.state().ws.lock().unwrap();
+            let p = &ws.active_doc().unwrap().project;
+            let t = p.tasks.iter().find(|t| !t.sched.is_summary && t.duration >= 3 * 480 && t.percent_complete == 0).unwrap();
+            (t.id, t.sched.start.unwrap() + chrono::Duration::hours(2))
+        };
+        let parts = |h: &mut Harness<'static, PlanCraftApp>, action: views::gantt_chart::ChartAction| {
+            let app = h.state_mut();
+            let mut ws = app.ws.lock().unwrap();
+            let doc = ws.active_doc_mut().unwrap();
+            let rows = views::visible_rows(&doc.project, &app.st);
+            views::gantt::apply_chart_actions(doc, &mut app.st, &rows, vec![action], &mut Vec::new());
+            doc.project.task(task).unwrap().sched.parts.clone()
+        };
+        let split = parts(&mut h, views::gantt_chart::ChartAction::Split { task, at });
+        assert_eq!(split.len(), 2, "split into two parts");
+        let back = parts(&mut h, views::gantt_chart::ChartAction::MovePart { task, k: 1, start: split[0].1 });
+        assert!(back.is_empty(), "moving the part back onto the first rejoins them: {back:?}");
+        parts(&mut h, views::gantt_chart::ChartAction::Split { task, at });
+        h.state_mut().st.sel.select_task(task);
+        h.state_mut().exec(&ctx, Command::RejoinTasks);
+        assert!(h.state().ws.lock().unwrap().active_doc().unwrap().project.task(task).unwrap().gaps.is_empty());
     }
 
     /// Regressions in the Print window: Ctrl+P again threw away unsaved Page Setup changes,

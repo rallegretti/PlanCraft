@@ -60,8 +60,10 @@ struct TaskPlan<'a> {
     cal: WorkCal<'a>,
     start: Option<NaiveDateTime>,
     duration: Minutes,
-    /// Working parts of a split task (it has started, so it never moves).
+    /// Working parts of a split task as scheduled.
     parts: Vec<(NaiveDateTime, NaiveDateTime)>,
+    /// Splits planned in the task: they move with it when it is delayed.
+    gaps: Vec<Gap>,
     /// (resource, work, contour) of its work assignments within the leveling filter.
     assignments: Vec<(ResourceId, f64, WorkContour)>,
 }
@@ -81,6 +83,7 @@ impl<'a> TaskPlan<'a> {
             start: if has_dates { t.sched.start } else { None },
             duration: t.duration,
             parts: t.sched.parts.clone(),
+            gaps: crate::schedule::planned_gaps(&t.gaps, t.duration),
             assignments,
         })
     }
@@ -92,9 +95,8 @@ impl<'a> TaskPlan<'a> {
             return (out, None);
         };
         let start = if delay > 0 { self.cal.snap_forward(self.cal.add(s, delay)) } else { s };
-        let finish = self.cal.add(start, self.duration);
-        let whole = [(start, finish)];
-        let spans: &[(NaiveDateTime, NaiveDateTime)] = if delay == 0 && !self.parts.is_empty() { &self.parts } else { &whole };
+        let moved = self.spans_from(start);
+        let spans: &[(NaiveDateTime, NaiveDateTime)] = if delay == 0 && !self.parts.is_empty() { &self.parts } else { &moved };
         for (rid, work, contour) in &self.assignments {
             let e = out.entry(*rid).or_default();
             for (d, w) in distribute_spans(&self.cal, spans, *work, *contour) {
@@ -104,10 +106,15 @@ impl<'a> TaskPlan<'a> {
         (out, Some(start))
     }
 
+    /// The working parts of the task when it starts at `start`: its planned splits move with it.
+    fn spans_from(&self, start: NaiveDateTime) -> Vec<(NaiveDateTime, NaiveDateTime)> {
+        crate::schedule::segments_of(start, &[], &self.gaps, &self.cal, self.duration).into_iter().map(|(s, f, _)| (s, f)).collect()
+    }
+
     fn finish_after(&self, delay: Minutes) -> Option<NaiveDateTime> {
         let s = self.start?;
         let start = if delay > 0 { self.cal.snap_forward(self.cal.add(s, delay)) } else { s };
-        Some(self.cal.add(start, self.duration))
+        self.spans_from(start).last().map(|&(_, f)| f)
     }
 }
 
@@ -176,8 +183,11 @@ pub fn level_resources(p: &mut Project, opts: &LevelingOptions) -> LevelingRepor
     let day = p.settings.time.minutes_per_day.max(1);
     let dependents = has_dependents(p);
 
+    // Occurrences of recurring tasks come first and are never delayed (Microsoft gives recurring
+    // tasks the highest leveling priority).
     let movable = |t: &Task| -> bool {
-        t.active
+        !t.occurrence
+            && t.active
             && !t.sched.is_summary
             && t.mode == ScheduleMode::Auto
             && t.actual_start.is_none()

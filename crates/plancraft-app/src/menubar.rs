@@ -332,6 +332,7 @@ fn toolbar(ui: &mut Ui, st: &mut UiState, info: &MenuInfo, settings: &AppSetting
             b(ui, "➕", Some("Task"), "Insert a task above the selection (Insert)", doc, Command::InsertTask);
             b(ui, "♦", Some("Milestone"), "Insert a milestone", doc, Command::InsertMilestone);
             b(ui, "☰", Some("Summary"), "Group the selected tasks under a new summary task", doc, Command::InsertSummary);
+            b(ui, "🔁", Some("Recurring"), "Insert a task that repeats daily, weekly, monthly or yearly", doc, Command::RecurringTask);
             b(ui, "🗑", None, "Delete the selected tasks (Delete)", sel, Command::DeleteSelection);
             sep(ui);
             b(ui, "⬅", None, "Outdent (Alt+Shift+Left)", sel, Command::Outdent);
@@ -341,6 +342,18 @@ fn toolbar(ui: &mut Ui, st: &mut UiState, info: &MenuInfo, settings: &AppSetting
             sep(ui);
             b(ui, "🔗", Some("Link"), "Link the selected tasks finish-to-start (Ctrl+F2)", sel, Command::LinkSelected);
             b(ui, "⛓", Some("Unlink"), "Remove links between the selected tasks (Ctrl+Shift+F2)", sel, Command::UnlinkSelected);
+            if button(
+                ui,
+                "➗",
+                Some("Split"),
+                "Split Task: click a bar where its work should pause; drag a part to move it, or back to rejoin",
+                doc,
+                st.gantt.split_mode,
+            )
+            .clicked()
+            {
+                push(Command::SplitTask);
+            }
             sep(ui);
             for pct in [0u8, 25, 50, 75, 100] {
                 if pie(ui, pct, sel).clicked() {

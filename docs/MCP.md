@@ -299,6 +299,18 @@ Header and footer texts take codes: `[Project]`, `[Manager]`, `[Company]`, `[Vie
 
 Set the status date with `update_project` (`status_date`, or `null` for today). Tasks also take `actual_duration`, `remaining_duration` and `resume` in `create_task`/`update_task`. Task details show `stop` (end of the work done so far), `resume` (when the rest starts) and, for a split task, `parts` (the start and finish of each working part). Setting `resume` later than `stop` pauses the task there; a date before `stop` is refused, and `null` removes a pause still ahead. Progress fills the parts in order, so work done after a pause never lands inside it.
 
+### Split tasks and recurring tasks
+
+| Tool | Arguments (required in **bold**) | Description |
+|---|---|---|
+| `split_task` | **resume**, **start**, **task** | Split Task: the task's work stops at 'start' and goes on at 'resume', leaving a pause. The duration (the work) is unchanged, so the finish moves later. The pause moves with the task when its dates change. Splitting inside an existing pause lengthens it; work already done can't be split. Only auto-scheduled tasks with a duration can be split. |
+| `set_split` | duration, length, part, split, **task** | Change the length of a task's split (its pause), numbered 1, 2, ... in order: the parts after it move. A length of 0 rejoins the parts on both sides. With 'part' and 'duration' instead, change the work in one part (numbered from 1); the task's duration changes by the difference. |
+| `remove_splits` | **task** | Remove every split planned in the task, so its work runs without pauses. Pauses in work already under way (from a later resume date or reschedule_uncompleted_work) stay. |
+| `create_recurring_task` | before, calendar, day, days, duration, end, every, ignore_resource_calendars, month, **name**, nth, occurrences, **pattern**, start, weekday, workdays | Create a recurring task: a summary task with one subtask per occurrence ("name 1", "name 2", ...), each starting no earlier than its date. Patterns: daily (every N days or N working days), weekly (every N weeks on given weekdays), monthly (every N months on a day, or the first..last weekday), yearly (a day or nth weekday of a month). End after a number of occurrences or by a date. An occurrence on a non-working day moves to the next working day. Resources assigned to the recurring task go to every occurrence; leveling never delays occurrences. Duration 0 makes recurring milestones. |
+| `update_recurring_task` *(destructive)* | calendar, day, days, duration, end, every, ignore_resource_calendars, month, name, nth, occurrences, pattern, start, **task**, weekday, workdays | Change a recurring task's name, pattern, range, duration or calendar; omitted settings keep their values (switching between daily, weekly and monthly keeps 'every'; between monthly and yearly, the day). Occurrences move to the new dates in order, extra ones are deleted (refused when one has progress or logged time) and new ones get the resources of the first occurrence. Occurrences with progress keep their dates. Tasks added under the recurring task by hand are left alone. |
+
+Task details show `planned_splits` (after how much work each pause comes, and its length), `recurrence` (the pattern in the words the tools take) and, for an occurrence, `occurrence_of`. Assign resources to a recurring task with `assign_resource` on the recurring task itself. Arguments that don't apply to the chosen pattern (e.g. `days` for monthly, `every` for yearly) are refused. A recurring task created `before` an occurrence goes above that occurrence's recurring task. An end date giving more than 999 occurrences is refused.
+
 ### Time tracking
 
 | Tool | Arguments (required in **bold**) | Description |

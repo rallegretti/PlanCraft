@@ -195,10 +195,32 @@ impl Default for NetworkState {
 /// Gantt-chart drag in progress.
 #[derive(Clone, Debug)]
 pub enum BarDrag {
-    Move { task: TaskId, grab_dx: f32, origin_start: NaiveDateTime },
-    Resize { task: TaskId },
-    Progress { task: TaskId },
-    Link { from: TaskId },
+    Move {
+        task: TaskId,
+        grab_dx: f32,
+        origin_start: NaiveDateTime,
+    },
+    Resize {
+        task: TaskId,
+    },
+    Progress {
+        task: TaskId,
+    },
+    Link {
+        from: TaskId,
+    },
+    /// A later part of a split task (part `k`, from 0), moved on its own.
+    Part {
+        task: TaskId,
+        k: usize,
+        grab_dx: f32,
+        origin: NaiveDateTime,
+    },
+    /// The right end of part `k` (not the last) of a split task.
+    PartEnd {
+        task: TaskId,
+        k: usize,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -209,6 +231,8 @@ pub struct GanttState {
     pub drag: Option<BarDrag>,
     pub show_critical: bool,
     pub show_baseline: bool,
+    /// Split Task: the next click on a bar splits the task there.
+    pub split_mode: bool,
     /// The baseline (0–10) the Gantt Chart and Tracking Gantt draw under each bar.
     pub baseline_slot: u8,
     /// Baselines shown in the Multiple Baselines Gantt (bit n = Baseline n).
@@ -229,6 +253,7 @@ impl Default for GanttState {
             drag: None,
             show_critical: false,
             show_baseline: false,
+            split_mode: false,
             baseline_slot: 0,
             multi_baselines: 0b111,
             show_slack: false,

@@ -224,6 +224,12 @@ enum Op {
     Plan(usize, usize, Option<usize>),
     ClearPlan(usize, Option<usize>),
     EvBaseline(u8),
+    Split(usize, i64, i64),
+    SplitLength(usize, usize, i64),
+    PartDuration(usize, usize, i64),
+    RemoveSplits(usize),
+    Recurring(Option<usize>, u8, u16, u8, u8, i64, u16, i64),
+    SetRecurrence(usize, u8, u16, u8, u8, i64, u16, i64),
     AddField(usize, String, Vec<String>),
     SetCustom(usize, usize, String),
     DeleteField(usize),
@@ -268,6 +274,23 @@ fn edit_op() -> impl Strategy<Value = Op> {
         (0usize..26, 0usize..26, prop::option::of(i())).prop_map(|(a, b, t)| Op::Plan(a, b, t)),
         (0usize..26, prop::option::of(i())).prop_map(|(a, t)| Op::ClearPlan(a, t)),
         prop_oneof![0u8..12, any::<u8>()].prop_map(Op::EvBaseline),
+        (i(), big(), big()).prop_map(|(a, s, r)| Op::Split(a, s, r)),
+        (i(), 0usize..4, big()).prop_map(|(a, k, m)| Op::SplitLength(a, k, m)),
+        (i(), 0usize..4, big()).prop_map(|(a, k, m)| Op::PartDuration(a, k, m)),
+        i().prop_map(Op::RemoveSplits),
+        (
+            prop::option::of(i()),
+            any::<u8>(),
+            prop_oneof![0u16..5, any::<u16>()],
+            any::<u8>(),
+            any::<u8>(),
+            big(),
+            prop_oneof![0u16..30, any::<u16>()],
+            big()
+        )
+            .prop_map(|(a, k, n, x, y, s, c, d)| Op::Recurring(a, k, n, x, y, s, c, d)),
+        (i(), any::<u8>(), prop_oneof![0u16..5, any::<u16>()], any::<u8>(), any::<u8>(), big(), prop_oneof![0u16..30, any::<u16>()], big())
+            .prop_map(|(a, k, n, x, y, s, c, d)| Op::SetRecurrence(a, k, n, x, y, s, c, d)),
         (0usize..6, cell_text(), prop::collection::vec(cell_text(), 0..4)).prop_map(|(k, n, c)| Op::AddField(k, n, c)),
         (i(), i(), cell_text()).prop_map(|(a, f, t)| Op::SetCustom(a, f, t)),
         i().prop_map(Op::DeleteField),
@@ -292,6 +315,24 @@ fn edit_op() -> impl Strategy<Value = Op> {
         (i(), big()).prop_map(|(a, m)| Op::ActualDuration(a, m)),
         (i(), big()).prop_map(|(a, m)| Op::RemainingDuration(a, m)),
     ]
+}
+
+/// Any recurrence, out-of-range numbers included: `kind` picks the pattern, `n` the interval,
+/// `x`/`y` the days, `s` the start (minutes from the project start), `count` the occurrences
+/// (0: end by a date `s + d`), `d` the duration.
+#[allow(clippy::too_many_arguments)]
+fn recurrence(p: &Project, kind: u8, n: u16, x: u8, y: u8, s: i64, count: u16, d: i64) -> plancraft_core::recurring::Recurrence {
+    use plancraft_core::recurring::{MonthDay, Nth, Pattern, RecurEnd, Recurrence};
+    let on = if x.is_multiple_of(2) { MonthDay::Day(y) } else { MonthDay::Weekday { nth: Nth::ALL[usize::from(y) % 5], weekday: x / 2 } };
+    let pattern = match kind % 4 {
+        0 => Pattern::Daily { interval: n, workdays: x.is_multiple_of(2) },
+        1 => Pattern::Weekly { interval: n, days: y },
+        2 => Pattern::Monthly { interval: n, on },
+        _ => Pattern::Yearly { month: x % 14, on },
+    };
+    let start = shift(p.start, s).date();
+    let end = if count == 0 { RecurEnd::By(shift(p.start, s.saturating_add(d)).date()) } else { RecurEnd::After(count) };
+    Recurrence { pattern, start, end, duration: d.rem_euclid(5 * 480), calendar: None, ignore_resource_calendars: y.is_multiple_of(2) }
 }
 
 /// Any plan slot, out-of-range numbers included: Scheduled, Baseline 0–12, Interim 0–11.
@@ -378,6 +419,20 @@ fn apply(p: &mut Project, op: &Op) -> PlanResult<()> {
             p.clear_plan(slot(a), &tasks)?;
         }
         Op::EvBaseline(n) => p.set_earned_value_baseline(n)?,
+        Op::Split(i, s, r) => p.split_task(task_at(p, i), shift(p.start, s), shift(p.start, r))?,
+        Op::SplitLength(i, k, m) => p.set_split_length(task_at(p, i), k, m)?,
+        Op::PartDuration(i, k, m) => p.set_part_duration(task_at(p, i), k, m)?,
+        Op::RemoveSplits(i) => {
+            p.remove_splits(task_at(p, i))?;
+        }
+        Op::Recurring(at, kind, n, x, y, s, c, d) => {
+            let rec = recurrence(p, kind, n, x, y, s, c, d);
+            p.add_recurring_task("Every", rec, at)?;
+        }
+        Op::SetRecurrence(i, kind, n, x, y, s, c, d) => {
+            let rec = recurrence(p, kind, n, x, y, s, c, d);
+            p.set_recurrence(task_at(p, i), None, rec)?;
+        }
         Op::AddField(k, name, choices) => {
             let kind = CustomFieldKind::ALL[k % CustomFieldKind::ALL.len()];
             p.add_custom_field(&name, kind, &choices)?;
@@ -595,6 +650,29 @@ fn hostile_baselines_in_a_file_are_clamped_on_open() {
     // A baseline that starts after it finishes is put in order.
     let bl = loaded.tasks[1].baseline_in(2).unwrap();
     assert!(bl.start <= bl.finish);
+}
+
+#[test]
+fn hostile_planned_splits_and_recurrences_in_a_file_are_clamped_on_open() {
+    let p = demo_project(start());
+    let mut v = serde_json::to_value(&p).unwrap();
+    let gaps: Vec<serde_json::Value> = (0..500).map(|i| serde_json::json!({ "work": i * 977 - 3000, "length": i64::MAX - i })).collect();
+    v["tasks"][1]["gaps"] = serde_json::Value::Array(gaps);
+    v["tasks"][2]["recurrence"] = serde_json::json!({
+        "pattern": { "Weekly": { "interval": 0, "days": 0 } },
+        "start": "2026-10-19", "end": { "After": 60000 }, "duration": -5, "calendar": 999,
+    });
+    let (mut loaded, notes) = plancraft_core::io::from_json_with_notes(&v.to_string(), std::path::Path::new("x.plancraft")).unwrap();
+    assert!(notes.iter().any(|n| n.contains("splits")), "{notes:?}");
+    assert!(notes.iter().any(|n| n.contains("recurring task's pattern")), "{notes:?}");
+    let t = &loaded.tasks[1];
+    assert!(t.gaps.len() <= plancraft_core::schedule::MAX_SPLITS);
+    assert!(t.gaps.iter().all(|g| (0..=limits::MAX_MINUTES).contains(&g.work) && (0..=limits::MAX_MINUTES).contains(&g.length)));
+    assert!(loaded.tasks[2].recurrence.is_none());
+    assert!(limits::sanitize(&mut loaded).is_empty());
+    let report = recalculate(&mut loaded);
+    assert!(!report.warnings.iter().any(|w| w.contains("internal error")), "{:?}", report.warnings);
+    assert!(loaded.tasks[1].sched.finish.is_some_and(|f| f.date() <= chrono::NaiveDate::from_ymd_opt(2300, 12, 31).unwrap()));
 }
 
 #[test]

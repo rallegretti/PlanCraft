@@ -32,6 +32,12 @@ pub enum Command {
     InsertTask,
     InsertMilestone,
     InsertSummary,
+    /// The Recurring Task window, for a new recurring task.
+    RecurringTask,
+    /// Split Task: the next click on a Gantt bar splits that task.
+    SplitTask,
+    /// Remove the splits planned in the selected tasks.
+    RejoinTasks,
     DeleteSelection,
     Indent,
     Outdent,
@@ -124,6 +130,8 @@ pub fn task_context_menu(ui: &mut egui::Ui, emit: &mut dyn FnMut(Command)) {
     item(ui, "✔  Mark 100% Complete", Command::SetPercent(100));
     item(ui, "📅  Add to Timeline", Command::ToggleTimeline);
     item(ui, "⏸  Inactivate / Activate", Command::ToggleActive);
+    item(ui, "➗  Split Task", Command::SplitTask);
+    item(ui, "⟲  Rejoin Split Task", Command::RejoinTasks);
     ui.separator();
     item(ui, "✂  Cut", Command::Cut);
     item(ui, "📋  Copy", Command::Copy);
