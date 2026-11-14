@@ -218,6 +218,9 @@ pub struct PageSetup {
     /// Everything prints at this percentage of its normal size.
     pub scale_percent: u16,
     pub timescale: TimescaleFit,
+    /// How the Network Diagram and the Task Board fit on pages: a number of pages across, or
+    /// actual size. Kept apart from `timescale`, so sizing a diagram never changes the Gantt's.
+    pub drawing_fit: TimescaleFit,
     /// The first this many table columns repeat on pages to the right.
     pub repeat_columns: u8,
     pub legend: LegendPlacement,
@@ -275,14 +278,20 @@ impl PageSetup {
         if let Some(x) = num("repeat_columns") {
             s.repeat_columns = x.clamp(0.0, f64::from(u8::MAX)) as u8;
         }
-        match m.get("timescale") {
-            Some(Value::String(t)) if t == "AsShown" => s.timescale = TimescaleFit::AsShown,
-            Some(Value::Object(t)) => {
-                if let Some(n) = t.get("PagesWide").and_then(Value::as_f64).filter(|n| n.is_finite()) {
-                    s.timescale = TimescaleFit::PagesWide(n.clamp(0.0, f64::from(u8::MAX)) as u8);
-                }
-            }
-            _ => {}
+        let fit = |k: &str| match m.get(k) {
+            Some(Value::String(t)) if t == "AsShown" => Some(TimescaleFit::AsShown),
+            Some(Value::Object(t)) => t
+                .get("PagesWide")
+                .and_then(Value::as_f64)
+                .filter(|n| n.is_finite())
+                .map(|n| TimescaleFit::PagesWide(n.clamp(0.0, f64::from(u8::MAX)) as u8)),
+            _ => None,
+        };
+        if let Some(x) = fit("timescale") {
+            s.timescale = x;
+        }
+        if let Some(x) = fit("drawing_fit") {
+            s.drawing_fit = x;
         }
         if let Some(x) = texts("header") {
             s.header = x;
@@ -308,6 +317,8 @@ impl Default for PageSetup {
             margin_mm: 12.7,
             scale_percent: 100,
             timescale: TimescaleFit::PagesWide(1),
+            // Diagrams print at their actual size (readable), not squeezed onto one page width.
+            drawing_fit: TimescaleFit::AsShown,
             repeat_columns: 0,
             legend: LegendPlacement::EveryPage,
             header: [String::new(), "[Project]".into(), String::new()],
@@ -349,8 +360,10 @@ impl PageSetup {
         }
         self.margin_mm = self.margin_mm.clamp(0.0, MAX_MARGIN_MM);
         self.scale_percent = self.scale_percent.clamp(MIN_SCALE, MAX_SCALE);
-        if let TimescaleFit::PagesWide(n) = &mut self.timescale {
-            *n = (*n).clamp(1, MAX_PAGES_WIDE);
+        for fit in [&mut self.timescale, &mut self.drawing_fit] {
+            if let TimescaleFit::PagesWide(n) = fit {
+                *n = (*n).clamp(1, MAX_PAGES_WIDE);
+            }
         }
         self.repeat_columns = self.repeat_columns.min(20);
         for s in self.header.iter_mut().chain(self.footer.iter_mut()) {
@@ -383,6 +396,7 @@ mod tests {
             margin_mm: f32::NAN,
             scale_percent: 0,
             timescale: TimescaleFit::PagesWide(255),
+            drawing_fit: TimescaleFit::PagesWide(0),
             repeat_columns: 200,
             header: ["x".repeat(5000), "a\nb".into(), String::new()],
             ..Default::default()
@@ -391,6 +405,7 @@ mod tests {
         assert_eq!(s.margin_mm, 12.7);
         assert_eq!(s.scale_percent, MIN_SCALE);
         assert_eq!(s.timescale, TimescaleFit::PagesWide(MAX_PAGES_WIDE));
+        assert_eq!(s.drawing_fit, TimescaleFit::PagesWide(1));
         assert_eq!(s.header[0].chars().count(), MAX_HEADER_CHARS);
         assert_eq!(s.header[1], "a b");
         assert!(!s.sanitize());

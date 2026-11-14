@@ -17,11 +17,11 @@ use skrifa::raw::tables::cmap::Cmap;
 use skrifa::raw::{FontData, FontRead};
 
 /// Largest font file read (some CJK collections are tens of megabytes).
-const MAX_FILE: u64 = 160 * 1024 * 1024;
+const MAX_FILE: u64 = 96 * 1024 * 1024;
 /// Largest character map read.
 const MAX_CMAP: u32 = 8 * 1024 * 1024;
 /// Most fallback fonts used.
-const MAX_FALLBACKS: usize = 12;
+const MAX_FALLBACKS: usize = 24;
 /// Font files whose character maps are looked at beyond the well-known ones.
 const MAX_SWEEP: usize = 600;
 /// Directory entries looked at while searching the font folders.
@@ -29,8 +29,10 @@ const MAX_ENTRIES: usize = 50_000;
 
 /// One character from each script worth a fallback font. Latin, Greek and Cyrillic are in the
 /// bundled font already.
-const PROBES: &[char] =
-    &['漢', 'あ', 'ア', '한', 'א', 'ع', 'ก', 'अ', 'ক', 'த', 'ა', 'Ա', 'አ', 'ພ', 'ក', 'မ', 'ᐃ', 'ꆈ', 'ܐ', 'ހ', '中', '日', '語'];
+const PROBES: &[char] = &[
+    '漢', 'あ', 'ア', '한', 'א', 'ع', 'ก', 'अ', 'ক', 'த', 'ა', 'Ա', 'አ', 'ພ', 'ក', 'မ', 'ᐃ', 'ꆈ', 'ܐ', 'ހ', '中', '日', '語', 'ఆ', 'ಕ',
+    'ગ', 'ਕ', 'ക', 'ଓ', 'ཀ', 'ස', 'ᠮ', 'Ꭰ', 'ߊ', 'ⴰ', '\u{3000}',
+];
 
 /// A fallback font file and face, with its character map.
 pub struct Fallback {
@@ -60,11 +62,13 @@ impl Fallback {
     /// engine and the PDF writer share it). `None` if it can no longer be read.
     pub fn face_data(&self) -> Option<&'static [u8]> {
         *self.data.get_or_init(|| {
-            let len = std::fs::metadata(&self.path).ok()?.len();
-            if len > MAX_FILE {
+            // Read from the file opened (a regular file), never more than the cap, even if the
+            // file was replaced since it was found.
+            let mut bytes = Vec::new();
+            open_regular(&self.path)?.take(MAX_FILE + 1).read_to_end(&mut bytes).ok()?;
+            if bytes.len() as u64 > MAX_FILE {
                 return None;
             }
-            let bytes = std::fs::read(&self.path).ok()?;
             // Still a readable font with the same face (the file could have been replaced).
             skrifa::FontRef::from_index(&bytes, self.index).ok()?;
             Some(&*Box::leak(bytes.into_boxed_slice()))
@@ -72,10 +76,17 @@ impl Fallback {
     }
 }
 
+/// The fallback fonts, once found.
+static ALL: OnceLock<Vec<Fallback>> = OnceLock::new();
+
+/// Whether the fallback fonts have been found ([`fallbacks`] returns at once).
+pub fn ready() -> bool {
+    ALL.get().is_some()
+}
+
 /// The fallback fonts on this system, found once. Set `PLANCRAFT_SYSTEM_FONTS=0` to use only the
 /// bundled font (screenshots and tests that must look the same on every machine).
 pub fn fallbacks() -> &'static [Fallback] {
-    static ALL: OnceLock<Vec<Fallback>> = OnceLock::new();
     ALL.get_or_init(|| {
         if std::env::var_os("PLANCRAFT_SYSTEM_FONTS").is_some_and(|v| v == "0") {
             return Vec::new();
@@ -239,12 +250,18 @@ fn preferred(lang: &str) -> Vec<(&'static str, u32)> {
 fn font_files(dirs: &[PathBuf]) -> Vec<(String, PathBuf)> {
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    let mut visited = std::collections::HashSet::new();
     let mut entries = 0usize;
     let mut todo: Vec<(PathBuf, u8)> = dirs.iter().rev().map(|d| (d.clone(), 0)).collect();
     while let Some((dir, depth)) = todo.pop() {
+        // Each folder once, however it is reached (symlinks can loop).
+        if !visited.insert(std::fs::canonicalize(&dir).unwrap_or_else(|_| dir.clone())) {
+            continue;
+        }
         let Ok(read) = std::fs::read_dir(&dir) else { continue };
         let mut subdirs = Vec::new();
-        let mut list: Vec<std::fs::DirEntry> = read.flatten().collect();
+        // No more entries than the budget left, even from one huge folder.
+        let mut list: Vec<std::fs::DirEntry> = read.flatten().take(MAX_ENTRIES.saturating_sub(entries) + 1).collect();
         list.sort_by_key(std::fs::DirEntry::file_name);
         for e in list {
             entries += 1;
@@ -254,9 +271,16 @@ fn font_files(dirs: &[PathBuf]) -> Vec<(String, PathBuf)> {
             let path = e.path();
             let Ok(kind) = e.file_type() else { continue };
             if kind.is_dir() || (kind.is_symlink() && path.is_dir()) {
-                if depth < 5 {
+                // A symlinked folder is followed only into font folders (fontconfig-style
+                // links), never to `/` or a network mount.
+                let fonty = || std::fs::canonicalize(&path).is_ok_and(|t| t.to_string_lossy().to_lowercase().contains("font"));
+                if depth < 5 && (kind.is_dir() || fonty()) {
                     subdirs.push((path, depth + 1));
                 }
+                continue;
+            }
+            // Regular files only (or links to them): a FIFO or device would block or never end.
+            if !(kind.is_file() || (kind.is_symlink() && path.is_file())) {
                 continue;
             }
             let name = e.file_name().to_string_lossy().to_string();
@@ -285,9 +309,31 @@ fn read_at(f: &mut File, at: u64, len: usize) -> Option<Vec<u8>> {
     Some(buf)
 }
 
+/// Opens a regular file for reading; `None` for anything else. On Unix it is opened without
+/// blocking, so a FIFO put in place of a font (even after it was found) cannot hang the caller.
+fn open_regular(path: &Path) -> Option<File> {
+    #[cfg(unix)]
+    let file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        const O_NONBLOCK: i32 = 0o4000;
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        const O_NONBLOCK: i32 = 0x0004;
+        std::fs::OpenOptions::new().read(true).custom_flags(O_NONBLOCK).open(path).ok()?
+    };
+    #[cfg(not(unix))]
+    let file = {
+        if !std::fs::metadata(path).ok()?.is_file() {
+            return None;
+        }
+        File::open(path).ok()?
+    };
+    file.metadata().ok()?.is_file().then_some(file)
+}
+
 /// Reads face `index`'s character map and outline kind without reading the whole file.
 fn probe_file(path: &Path, index: u32) -> Option<(Vec<u8>, bool)> {
-    let mut f = File::open(path).ok()?;
+    let mut f = open_regular(path)?;
     let len = f.metadata().ok()?.len();
     if len > MAX_FILE {
         return None;
@@ -428,6 +474,33 @@ mod tests {
         assert!(probe_file(&dir.path().join("ttc.ttc"), 7).is_none());
     }
 
+    /// A FIFO named like a font, a folder that links to itself and a link to `/` in a font folder
+    /// must neither hang nor wander the disk (regression: opening a FIFO blocked forever and froze
+    /// the app).
+    #[cfg(unix)]
+    #[test]
+    fn special_files_and_links_in_font_folders_are_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("NotoSansCJK-Regular.ttc");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status().is_ok_and(|s| s.success());
+        std::os::unix::fs::symlink(dir.path(), dir.path().join("loop")).unwrap();
+        std::os::unix::fs::symlink("/", dir.path().join("root")).unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let path = dir.path().to_path_buf();
+        std::thread::spawn(move || {
+            let files = font_files(std::slice::from_ref(&path));
+            let found = discover(&[path], "ja_JP.UTF-8");
+            let _ = tx.send((files, found.len()));
+        });
+        let (files, found) = rx.recv_timeout(std::time::Duration::from_secs(20)).expect("finding fonts hung");
+        assert!(files.is_empty(), "{files:?}");
+        assert_eq!(found, 0);
+        if made {
+            assert!(open_regular(&fifo).is_none(), "a FIFO is not opened as a font");
+            assert!(probe_file(&fifo, 0).is_none());
+        }
+    }
+
     #[test]
     fn the_language_picks_the_cjk_font_first() {
         let first = |lang: &str| preferred(lang).into_iter().nth(3).map(|(f, _)| f);
@@ -453,6 +526,9 @@ mod tests {
         }
         let covered = |c: char| found.iter().any(|f| f.covers(c));
         eprintln!("fallbacks: {:?}", found.iter().map(|f| f.path.display().to_string()).collect::<Vec<_>>());
-        eprintln!("漢 {} א {} ก {}", covered('漢'), covered('א'), covered('ก'));
+        for c in PROBES {
+            eprint!("{c}:{} ", covered(*c) || super::super::font::bundled_has(*c));
+        }
+        eprintln!();
     }
 }

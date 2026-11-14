@@ -31,7 +31,7 @@ const BAR_W: f32 = 12.0;
 /// One line of text cut to `width` with an ellipsis.
 fn line(ui: &Ui, text: &str, size: f32, color: Color32, width: f32) -> Arc<egui::Galley> {
     let mut job = LayoutJob::default();
-    job.append(text, 0.0, TextFormat { font_id: FontId::proportional(size), color, ..Default::default() });
+    job.append(&plancraft_core::bidi::display(text), 0.0, TextFormat { font_id: FontId::proportional(size), color, ..Default::default() });
     job.wrap = TextWrapping::truncate_at_width(width.max(1.0));
     ui.fonts_mut(|f| f.layout_job(job))
 }

@@ -27,7 +27,7 @@
   - PDF export written by PlanCraft itself (pure Rust, embedded font subsets, searchable text).
   - Gantt Chart, Tracking Gantt, Multiple Baselines Gantt, task table and Resource Sheet; pages across and down, repeated columns, legend, header and footer codes.
   - The Network Diagram and the Task Board, fitted to a number of pages across or at actual size.
-- **Other scripts:** text the bundled font lacks (Chinese, Japanese, Korean, Hebrew, Thai and more) shows and prints in fallback fonts found on the system; right-to-left text is reordered for display. Not yet: Arabic letter joining and Indic shaping, and right-to-left order while editing.
+- **Other scripts:** text the bundled font lacks (Chinese, Japanese, Korean, Hebrew, Thai and more) shows and prints in fallback fonts found on the system; right-to-left text reads right to left on screen and on paper, and Arabic letters join on screen. Not yet: Arabic letter joining and Indic shaping in PDFs, and right-to-left word order while editing.
 - **MCP server:** 89 tools, resources and prompts over stdio and Streamable HTTP. A live mode works inside the running app (bearer token per session, `plancraft mcp --attach` bridge), and the app binary has a headless `plancraft mcp` mode.
 - **Robustness:** no panics in shipped code (clippy-enforced), guarded edits with rollback, limits on hostile files and arguments, atomic saves, recovery copies, owner-only files.
 - **Quality gates:** `cargo xtask ci`, run locally on Linux, macOS and Windows (fmt, clippy, tests, cargo deny), a scheduler speed gate, hostile-input sweeps and parity tests against Microsoft's published scheduling examples.

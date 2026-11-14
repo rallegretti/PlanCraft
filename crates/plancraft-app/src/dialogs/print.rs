@@ -346,7 +346,8 @@ impl PrintDialog {
             }
         });
         heading(ui, if drawing { "Size" } else { "Timescale" });
-        let mut wide = match s.timescale {
+        // Diagrams have their own size setting, so sizing one never changes the Gantt's timescale.
+        let mut wide = match if drawing { s.drawing_fit } else { s.timescale } {
             TimescaleFit::PagesWide(n) => n,
             TimescaleFit::AsShown => 0,
         };
@@ -363,7 +364,12 @@ impl PrintDialog {
         if ui.radio(wide == 0, if drawing { "Actual size (scale above)" } else { "As zoomed on screen" }).clicked() {
             wide = 0;
         }
-        s.timescale = if wide == 0 { TimescaleFit::AsShown } else { TimescaleFit::PagesWide(wide) };
+        let fit = if wide == 0 { TimescaleFit::AsShown } else { TimescaleFit::PagesWide(wide) };
+        if drawing {
+            s.drawing_fit = fit;
+        } else {
+            s.timescale = fit;
+        }
         if drawing {
             heading(ui, "Pages");
             ui.checkbox(&mut s.print_blank_pages, "Print pages with nothing on them");
@@ -477,7 +483,7 @@ fn paint_items(painter: &Painter, items: &[Item], at: &dyn Fn(print::Pt) -> Pos2
                 let top = at(print::pt(p.x, p.y - ascent * size));
                 let font_id = FontId::proportional(px);
                 // Right-to-left text in display order, as the PDF writes it.
-                let text = plancraft_core::bidi::visual(text);
+                let text = plancraft_core::bidi::display(text);
                 painter.text(top, Align2::LEFT_TOP, &text, font_id.clone(), color(*c));
                 if *bold {
                     painter.text(top + vec2((px * 0.04).max(0.4), 0.0), Align2::LEFT_TOP, &text, font_id, color(*c));

@@ -32,7 +32,7 @@ struct Image {
 
 /// The build image.
 const BUILD_IMAGE: Image =
-    Image { tag: "plancraft-build:ubuntu22.04-2", dockerfile: "linux-build.Dockerfile", about: "Ubuntu 22.04 with gcc and squashfs-tools" };
+    Image { tag: "plancraft-build:ubuntu22.04-3", dockerfile: "linux-build.Dockerfile", about: "Ubuntu 22.04 with gcc and squashfs-tools" };
 
 /// A clean desktop system (display server and Mesa only) for testing the packages.
 const SMOKE_IMAGE: Image = Image {
@@ -41,29 +41,30 @@ const SMOKE_IMAGE: Image = Image {
     about: "a clean Ubuntu 22.04 desktop: Xvfb and Mesa only",
 };
 
-/// Libraries winit and wgpu load at startup (keyboard maps, cursors, screens, input devices,
-/// Wayland surfaces) that a fresh desktop install may not have; copied from the build image, each
+/// Libraries winit and wgpu load at startup (keyboard maps, cursors, input devices, Wayland
+/// surfaces) that a fresh desktop install may not have; copied from the build image, each
 /// into its own folder `lib/plancraft/<name>/`, so the app can add just the ones a system lacks
 /// (a library the system has is always used from the system). Not bundled, on purpose: glibc, libX11/libxcb, libwayland-client, and the
 /// graphics drivers (libGL, libEGL, Vulkan, Mesa). Every desktop has them, and they must match
-/// the system's own drivers and display server.
-const BUNDLED_LIBS: [&str; 8] = [
+/// the system's own drivers and display server. The app trusts only these names (`KNOWN` in
+/// `crates/plancraft-app/src/bundled_libs.rs`; keep the two lists in step).
+const BUNDLED_LIBS: [&str; 7] = [
     "libxkbcommon.so.0",
     "libxkbcommon-x11.so.0",
     "libxcb-xkb.so.1",
     "libXcursor.so.1",
-    "libXrandr.so.2",
     "libXi.so.6",
     "libXrender.so.1",
     "libwayland-egl.so.1",
 ];
 
-/// Starts the AppImage and the tarball's binary in the clean container: every bundled library
-/// must find what it needs there, and each must open its window (it saves a screenshot and quits).
+/// Starts the AppImage, the tarball's binary and a copy installed with `install.sh` in the clean
+/// container: every bundled library must find what it needs there, and each must open its window
+/// (it saves a screenshot and quits).
 const SMOKE_TEST: &str = r#"
 out=$1; image=$2; stage=$3
 fail=0
-bundled=$(printf '%s:' "$stage"/lib/plancraft/*)
+bundled=$(printf '%s:' "$stage"/lib/plancraft/*); bundled=${bundled%:}
 for lib in "$stage"/lib/plancraft/*/* "$stage"/bin/plancraft; do
   missing=$(LD_LIBRARY_PATH="$bundled" ldd "$lib" | grep 'not found')
   if [ -n "$missing" ]; then echo "$lib needs a library a clean system lacks:"; echo "$missing"; fail=1; fi
@@ -80,6 +81,12 @@ start() {
 }
 start appimage "$image"
 start tarball "$stage/bin/plancraft"
+prefix=$(mktemp -d)/prefix
+if "$stage/install.sh" "$prefix" >"$out/install.log" 2>&1; then
+  start installed "$prefix/bin/plancraft"
+else
+  echo "install.sh failed:"; cat "$out/install.log"; fail=1
+fi
 exit $fail
 "#;
 
@@ -130,6 +137,9 @@ here=$(cd "$(dirname "$0")" && pwd)
 uninstall=0
 if [ "${1:-}" = "--uninstall" ]; then uninstall=1; shift; fi
 prefix=${1:-"$HOME/.local"}
+# The libraries' folder belongs to PlanCraft alone: replaced whole on install (so none from an
+# older version stays behind), removed whole on uninstall.
+rm -rf "$prefix/lib/plancraft"
 
 files="bin/plancraft bin/plancraft-mcp share/applications/plancraft.desktop share/mime/packages/plancraft.xml"
 for icon in "$here"/share/icons/hicolor/*/apps/plancraft.*; do
@@ -149,8 +159,13 @@ for f in $files; do
     cp "$here/$f" "$prefix/$f"
   fi
 done
-[ "$uninstall" = 1 ] || chmod 755 "$prefix/bin/plancraft" "$prefix/bin/plancraft-mcp"
-[ "$uninstall" = 0 ] || rmdir "$prefix"/lib/plancraft/* "$prefix/lib/plancraft" 2>/dev/null || true
+if [ "$uninstall" = 0 ]; then
+  chmod 755 "$prefix/bin/plancraft" "$prefix/bin/plancraft-mcp"
+  # Readable by everyone, writable only by the owner (whatever the umask): PlanCraft trusts the
+  # libraries only then.
+  find "$prefix/lib/plancraft" -type d -exec chmod 755 {} +
+  find "$prefix/lib/plancraft" -type f -exec chmod 644 {} +
+fi
 
 command -v update-mime-database >/dev/null 2>&1 && update-mime-database "$prefix/share/mime" >/dev/null 2>&1 || true
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$prefix/share/applications" >/dev/null 2>&1 || true

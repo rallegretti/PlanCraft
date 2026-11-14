@@ -259,8 +259,8 @@ fn printing_a_10000_task_network_diagram_is_fast() {
     let pal = print::layout::Palette::default();
     let t = Instant::now();
     let mut pages = 0;
-    for timescale in [TimescaleFit::AsShown, TimescaleFit::PagesWide(1)] {
-        let setup = PageSetup { timescale, print_blank_pages: false, ..Default::default() };
+    for drawing_fit in [TimescaleFit::AsShown, TimescaleFit::PagesWide(1)] {
+        let setup = PageSetup { drawing_fit, print_blank_pages: false, ..Default::default() };
         let (items, width, height) = print::network::items(&p, &d, print::network::NetPrintOptions::default(), &pal);
         let doc = print::layout_canvas(&print::CanvasJob {
             project: &p,
@@ -277,6 +277,48 @@ fn printing_a_10000_task_network_diagram_is_fast() {
     assert!(pages > 100);
     let limit = if cfg!(debug_assertions) { Duration::from_secs(30) } else { Duration::from_secs(2) };
     eprintln!("printing a 10,000-task network diagram twice ({pages} pages): {took:?} (limit {limit:?})");
+    assert!(took < limit, "took {took:?}; the limit is {limit:?}");
+}
+
+/// Regression: a link line went on every page inside its bounding box, not just the pages it
+/// crosses. With 3,000 tasks linked into a 300-task chain (a common shape: many tasks into a few
+/// late milestones) the PDF took 20 s, 1.5 GB and 2,000 pages, and blank pages were never skipped.
+#[test]
+fn printing_a_hub_shaped_network_diagram_is_fast() {
+    let _serial = timed();
+    use plancraft_core::network::{NetworkOptions, boxes_for, layout};
+    use plancraft_core::print::{self, PageSetup, TimescaleFit};
+    let mut p = Project::new("Hub", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+    let chain = flat_tasks(&mut p, 300);
+    for w in chain.windows(2) {
+        p.link(w[0].into(), w[1], LinkType::FS, Lag::None).unwrap();
+    }
+    let spokes = flat_tasks(&mut p, 3000);
+    for (i, id) in spokes.iter().enumerate() {
+        p.link((*id).into(), chain[299 - (i / 900) % 290], LinkType::FS, Lag::None).unwrap();
+    }
+    recalculate(&mut p);
+    let shown = vec![true; p.tasks.len()];
+    let d = layout(&p, &boxes_for(&p, &shown, &Default::default()), NetworkOptions::default());
+    let pal = print::layout::Palette::default();
+    let t = Instant::now();
+    let setup = PageSetup { drawing_fit: TimescaleFit::AsShown, print_blank_pages: false, ..Default::default() };
+    let (items, width, height) = print::network::items(&p, &d, print::network::NetPrintOptions::default(), &pal);
+    let doc = print::layout_canvas(&print::CanvasJob {
+        project: &p,
+        setup: &setup,
+        title: "Network Diagram",
+        width,
+        height,
+        items,
+        printed: p.start,
+    });
+    let pdf = print::pdf::write(&doc);
+    let took = t.elapsed();
+    let placed: usize = doc.pages.iter().map(|pg| pg.items.len()).sum();
+    eprintln!("hub-shaped network diagram: {} pages, {placed} top-level items, {} KB PDF: {took:?}", doc.pages.len(), pdf.len() / 1024);
+    assert!(doc.pages.len() < 1000, "blank pages are skipped: {} pages", doc.pages.len());
+    let limit = if cfg!(debug_assertions) { Duration::from_secs(60) } else { Duration::from_secs(6) };
     assert!(took < limit, "took {took:?}; the limit is {limit:?}");
 }
 

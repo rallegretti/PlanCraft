@@ -91,6 +91,12 @@ pub fn face(i: usize) -> Option<&'static Face> {
     if i == 0 { bundled() } else { fallback_face(i - 1) }
 }
 
+/// Whether the system fallback fonts have been found, so [`pick`] answers without waiting (see
+/// `fallback::warm_up`).
+pub fn ready() -> bool {
+    super::fallback::ready()
+}
+
 /// Whether the bundled font has `ch`.
 pub fn bundled_has(ch: char) -> bool {
     bundled().and_then(Face::font).and_then(|f| f.charmap().map(ch)).is_some_and(|g| g.to_u32() != 0)
@@ -101,17 +107,30 @@ pub fn metrics() -> FontMetrics {
     bundled().map_or(FALLBACK_METRICS, |f| f.metrics)
 }
 
+/// Characters that are never drawn and take no room: control characters and Unicode's
+/// default-ignorable ones (direction marks, zero-width joiners and spaces, variation selectors,
+/// the byte-order mark, soft hyphens, tags).
+pub fn invisible(ch: char) -> bool {
+    ch.is_control()
+        || matches!(u32::from(ch),
+            0xAD | 0x34F | 0x61C | 0x115F..=0x1160 | 0x17B4..=0x17B5 | 0x180B..=0x180F | 0x200B..=0x200F
+            | 0x202A..=0x202E | 0x2060..=0x206F | 0x3164 | 0xFE00..=0xFE0F | 0xFEFF | 0xFFA0 | 0xFFF0..=0xFFF8
+            | 0x1BCA0..=0x1BCA3 | 0x1D173..=0x1D17A | 0xE0000..=0xE0FFF)
+}
+
+fn bundled_glyph(ch: char) -> Option<u16> {
+    bundled().and_then(Face::font).and_then(|f| f.charmap().map(ch)).and_then(|g| u16::try_from(g.to_u32()).ok()).filter(|g| *g != 0)
+}
+
 /// The face and glyph that print `ch`: the bundled font if it has it, else the first fallback
-/// font that does; `(0, 0)` (the "missing glyph" box) when none has it.
+/// font that does; `(0, 0)` (the "missing glyph" box) when none has it, and for [`invisible`]
+/// characters (which are not drawn). A space no font has prints as an ordinary space.
 pub fn pick(ch: char) -> (usize, u16) {
-    if let Some(g) = bundled().and_then(Face::font).and_then(|f| f.charmap().map(ch)).and_then(|g| u16::try_from(g.to_u32()).ok())
-        && g != 0
-    {
-        return (0, g);
-    }
-    // Control characters and spaces never need a fallback font.
-    if ch.is_control() || ch.is_whitespace() {
+    if invisible(ch) {
         return (0, 0);
+    }
+    if let Some(g) = bundled_glyph(ch) {
+        return (0, g);
     }
     for (i, fb) in super::fallback::fallbacks().iter().enumerate() {
         if let Some(g) = fb.glyph(ch).filter(|g| *g != 0)
@@ -120,12 +139,17 @@ pub fn pick(ch: char) -> (usize, u16) {
             return (i + 1, g);
         }
     }
+    if ch.is_whitespace()
+        && let Some(g) = bundled_glyph(' ')
+    {
+        return (0, g);
+    }
     (0, 0)
 }
 
-/// Whether some font can draw `ch`.
+/// Whether some font can draw `ch` (an invisible character needs none).
 pub fn has_glyph(ch: char) -> bool {
-    ch == ' ' || pick(ch).1 != 0
+    ch == ' ' || invisible(ch) || pick(ch).1 != 0
 }
 
 /// Width of `text` at `size` points.
@@ -136,7 +160,7 @@ pub fn width(text: &str, size: f32, bold: bool) -> f32 {
     let gm = f.glyph_metrics(Size::unscaled(), LocationRef::default());
     let cmap = f.charmap();
     let mut w = 0.0;
-    for ch in text.chars() {
+    for ch in text.chars().filter(|c| !invisible(*c)) {
         w += match cmap.map(ch) {
             Some(g) if g.to_u32() != 0 => gm.advance_width(g).map_or(0.5, |a| a / upm),
             _ => {
@@ -178,6 +202,24 @@ pub fn fit(text: &str, size: f32, bold: bool, max: f32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Direction marks, joiners and the like take no room and are not drawn; spaces the bundled
+    /// font lacks (the ideographic space in Chinese and Japanese text, the narrow no-break space in
+    /// French numbers) print as spaces, not as the missing-glyph box.
+    #[test]
+    fn invisible_characters_and_other_spaces() {
+        let plain = width("ab", 10.0, false);
+        for mark in ['\u{200F}', '\u{200D}', '\u{2066}', '\u{FEFF}', '\t', '\u{AD}'] {
+            assert!(invisible(mark));
+            assert_eq!(width(&format!("a{mark}b"), 10.0, false), plain, "{:?}", mark);
+            assert_eq!(pick(mark), (0, 0));
+            assert!(has_glyph(mark));
+        }
+        for space in ['\u{3000}', '\u{202F}', '\u{2009}', '\u{2003}'] {
+            assert!(!invisible(space));
+            assert_ne!(pick(space).1, 0, "{:?} prints as a space or from a fallback font", space);
+        }
+    }
 
     #[test]
     fn the_print_font_measures_and_fits_text() {

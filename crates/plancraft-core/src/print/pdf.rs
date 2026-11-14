@@ -8,6 +8,8 @@ use super::{Document, Item, Pt, Rect, Rgb, Stroke, font};
 
 /// Largest coordinate written; anything beyond is clamped (PDF readers choke on huge numbers).
 const MAX_COORD: f32 = 100_000.0;
+/// Largest font embedded whole when it cannot be subset (it would go into every PDF).
+const MAX_WHOLE_FONT: usize = 4 * 1024 * 1024;
 
 /// A number for a content stream: finite, clamped, at most 2 decimals.
 fn num(v: f32) -> String {
@@ -200,7 +202,7 @@ fn to_unicode(glyphs: &BTreeMap<u16, char>) -> String {
 /// Characters of `text` in display order (right-to-left text reversed), each with the face and
 /// glyph that print it. Control characters are left out.
 fn glyphs_of(text: &str) -> impl Iterator<Item = (usize, u16)> + '_ {
-    let shown: Vec<char> = crate::bidi::visual(text).chars().filter(|c| !c.is_control()).collect();
+    let shown: Vec<char> = crate::bidi::visual(text).chars().filter(|c| !super::font::invisible(*c)).collect();
     shown.into_iter().map(font::pick)
 }
 
@@ -274,7 +276,7 @@ impl Fonts {
         used.entry(0).or_default().insert(0, '\u{FFFD}');
         for page in &doc.pages {
             each_text(&page.items, &mut |text| {
-                let shown: Vec<char> = crate::bidi::visual(text).chars().filter(|c| !c.is_control()).collect();
+                let shown: Vec<char> = crate::bidi::visual(text).chars().filter(|c| !super::font::invisible(*c)).collect();
                 for ch in shown {
                     let (face, gid) = font::pick(ch);
                     used.entry(face).or_default().entry(gid).or_insert(ch);
@@ -286,10 +288,12 @@ impl Fonts {
             let Some(face) = font::face(face_index) else { continue };
             let keep: BTreeSet<u16> = glyphs.keys().copied().collect();
             let embed = match super::subset::subset(face.data, face.index, &keep) {
-                Some((file, remap)) => Embed::Subset { file, remap },
-                // A whole TrueType font works with glyph ids as CIDs; a CFF one is left out.
-                None if !face.cff && !face.data.starts_with(b"ttcf") => Embed::Whole,
-                None => continue,
+                // A CFF subset is embedded as its bare CFF table, so it must have one.
+                Some((file, remap)) if !face.cff || super::subset::table(&file, b"CFF ").is_some() => Embed::Subset { file, remap },
+                // A whole TrueType font works with glyph ids as CIDs, if it is small enough to put
+                // in every PDF; otherwise (or a CFF font) the face is left out.
+                None if !face.cff && !face.data.starts_with(b"ttcf") && face.data.len() <= MAX_WHOLE_FONT => Embed::Whole,
+                _ => continue,
             };
             fonts.slot_of.insert(face_index, fonts.slots.len());
             fonts.slots.push(FontSlot { face, embed, glyphs });

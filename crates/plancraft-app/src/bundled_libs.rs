@@ -4,12 +4,33 @@
 //! fill gaps: when this system lacks one, the app restarts itself once with just the folders of
 //! the missing ones on `LD_LIBRARY_PATH`. A library the system has is always the system's own
 //! copy, which matches its keyboard data, display server and drivers.
+//!
+//! The folders are trusted only when they look exactly as the packages make them: each holds one
+//! of the known libraries and nothing else, and they and `lib/` are owned by root or by the
+//! binary's owner, never writable by everyone, and writable by a group only when it is the
+//! binary's own group (whose members could replace the binary anyway). So a binary run from a
+//! shared folder like `/tmp` never loads libraries another user planted next to it.
 
+use std::os::unix::fs::MetadataExt;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 /// Set on the restarted process, so it never restarts again.
 const RESTARTED: &str = "PLANCRAFT_BUNDLED_LIBS";
+/// The `LD_LIBRARY_PATH` the app was started with (absent if it had none), for child processes.
+const ORIGINAL: &str = "PLANCRAFT_ORIGINAL_LD_LIBRARY_PATH";
+/// The libraries the packages carry, each in a folder named after it without `.so.N` (keep in
+/// step with `BUNDLED_LIBS` in `xtask/src/linux.rs`).
+const KNOWN: [&str; 7] = [
+    "libxkbcommon.so.0",
+    "libxkbcommon-x11.so.0",
+    "libxcb-xkb.so.1",
+    "libXcursor.so.1",
+    "libXi.so.6",
+    "libXrender.so.1",
+    "libwayland-egl.so.1",
+];
 /// Bounds on reading the loader's configuration (`include` lines can nest).
 const MAX_CONF_DEPTH: usize = 4;
 const MAX_CONF_FILES: usize = 256;
@@ -21,40 +42,86 @@ pub fn use_where_missing() {
         return;
     }
     let Ok(exe) = std::env::current_exe() else { return };
-    let Some(bundle) = exe.parent().and_then(Path::parent).map(|p| p.join("lib/plancraft")) else { return };
-    let missing = missing_dirs(&bundle, &system_dirs());
+    let Ok(owner) = std::fs::metadata(&exe).map(|m| Owner { uid: m.uid(), gid: m.gid() }) else { return };
+    let Some(lib) = exe.parent().and_then(Path::parent).map(|p| p.join("lib")) else { return };
+    let missing = missing_dirs(&lib.join("plancraft"), &system_dirs(), owner);
     if missing.is_empty() {
         return;
     }
+    if missing.is_empty() || !trusted(&lib, owner) {
+        return;
+    }
+    let old = std::env::var_os("LD_LIBRARY_PATH");
     let mut paths = missing;
-    if let Some(old) = std::env::var_os("LD_LIBRARY_PATH") {
+    if let Some(old) = &old {
         // An empty entry would mean the current directory; leave those out.
-        paths.extend(std::env::split_paths(&old).filter(|p| !p.as_os_str().is_empty()));
+        paths.extend(std::env::split_paths(old).filter(|p| !p.as_os_str().is_empty()));
     }
     let Ok(joined) = std::env::join_paths(paths) else { return };
     let mut args = std::env::args_os();
-    let mut cmd = std::process::Command::new(&exe);
+    let mut cmd = Command::new(&exe);
     if let Some(arg0) = args.next() {
         cmd.arg0(arg0);
     }
     cmd.args(args).env("LD_LIBRARY_PATH", joined).env(RESTARTED, "1");
+    if let Some(old) = old {
+        cmd.env(ORIGINAL, old);
+    }
     // `exec` only returns when it fails; the app then starts without the bundled libraries.
     let err = cmd.exec();
     eprintln!("plancraft: could not restart with the bundled libraries: {err}");
 }
 
-/// The folders under `bundle` holding a library that none of `system` has.
-fn missing_dirs(bundle: &Path, system: &[PathBuf]) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(bundle) else { return Vec::new() };
-    let mut out: Vec<PathBuf> = entries
-        .flatten()
-        .map(|e| e.path())
-        .filter(|dir| {
-            std::fs::read_dir(dir)
-                .map(|libs| libs.flatten().any(|lib| !system.iter().any(|d| is_native_library(&d.join(lib.file_name())))))
-                .unwrap_or(false)
-        })
-        .collect();
+/// Gives a child process the environment the app was started with: the bundled libraries are
+/// for PlanCraft only, and a PlanCraft started from it checks for itself.
+pub fn clean_child(cmd: &mut Command) {
+    if std::env::var_os(RESTARTED).is_none() {
+        return;
+    }
+    match std::env::var_os(ORIGINAL) {
+        Some(old) => cmd.env("LD_LIBRARY_PATH", old),
+        None => cmd.env_remove("LD_LIBRARY_PATH"),
+    };
+    cmd.env_remove(RESTARTED).env_remove(ORIGINAL);
+}
+
+/// Who owns the binary.
+#[derive(Clone, Copy)]
+struct Owner {
+    uid: u32,
+    gid: u32,
+}
+
+/// Whether `path` is owned by root or the binary's owner, is not writable by everyone, and is
+/// writable by its group only when that is the binary's group.
+fn safe(path: &Path, owner: Owner) -> bool {
+    std::fs::symlink_metadata(path)
+        .is_ok_and(|m| (m.uid() == 0 || m.uid() == owner.uid) && m.mode() & 0o002 == 0 && (m.mode() & 0o020 == 0 || m.gid() == owner.gid))
+}
+
+/// Whether `lib/` and `lib/plancraft/` can be trusted (see the module notes).
+fn trusted(lib: &Path, owner: Owner) -> bool {
+    safe(lib, owner) && safe(&lib.join("plancraft"), owner)
+}
+
+/// The folders `bundle/<name>/` of known libraries that none of `system` has. A folder counts only
+/// when it holds exactly its one library, and both are owned by root or `owner` and writable by no
+/// one else (see `safe`).
+fn missing_dirs(bundle: &Path, system: &[PathBuf], owner: Owner) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for soname in KNOWN {
+        if system.iter().any(|d| is_native_library(&d.join(soname))) {
+            continue;
+        }
+        let dir = bundle.join(soname.split(".so").next().unwrap_or(soname));
+        let only_it = std::fs::read_dir(&dir).is_ok_and(|entries| {
+            let names: Vec<_> = entries.flatten().map(|e| e.file_name()).collect();
+            names.len() == 1 && names.first().is_some_and(|n| n == soname)
+        });
+        if only_it && safe(&dir, owner) && safe(&dir.join(soname), owner) && is_native_library(&dir.join(soname)) {
+            out.push(dir);
+        }
+    }
     out.sort();
     out
 }
@@ -67,18 +134,15 @@ fn system_dirs() -> Vec<PathBuf> {
         .unwrap_or_default();
     let mut files = 0;
     conf_dirs(Path::new("/etc/ld.so.conf"), 0, &mut files, &mut dirs);
-    for d in [
-        "/lib/x86_64-linux-gnu",
-        "/usr/lib/x86_64-linux-gnu",
-        "/lib/aarch64-linux-gnu",
-        "/usr/lib/aarch64-linux-gnu",
-        "/lib64",
-        "/usr/lib64",
-        "/lib",
-        "/usr/lib",
-    ] {
-        dirs.push(PathBuf::from(d));
-    }
+    // The loader's built-in folders: on Debian-style systems the multiarch folders, `/lib` and
+    // `/usr/lib` (never `/lib64`); on others `/lib64` and `/usr/lib64`, then `/lib` and `/usr/lib`.
+    let multiarch: &[&str] = if cfg!(target_arch = "aarch64") {
+        &["/lib/aarch64-linux-gnu", "/usr/lib/aarch64-linux-gnu"]
+    } else {
+        &["/lib/x86_64-linux-gnu", "/usr/lib/x86_64-linux-gnu"]
+    };
+    let builtin: &[&str] = if multiarch.iter().any(|d| Path::new(d).is_dir()) { multiarch } else { &["/lib64", "/usr/lib64"] };
+    dirs.extend(builtin.iter().chain(&["/lib", "/usr/lib"]).map(PathBuf::from));
     dirs
 }
 
@@ -150,30 +214,69 @@ mod tests {
         b
     }
 
+    fn put(dir: &Path, name: &str, bytes: &[u8]) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join(name), bytes).unwrap();
+    }
+
+    fn mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
     #[test]
-    fn only_folders_of_libraries_the_system_lacks_are_used() {
+    fn only_trusted_folders_of_libraries_the_system_lacks_are_used() {
         let root = std::env::temp_dir().join(format!("plancraft-bundled-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
-        let (bundle, system, multilib) = (root.join("lib/plancraft"), root.join("system"), root.join("lib32"));
+        let (lib, system, multilib) = (root.join("lib"), root.join("system"), root.join("lib32"));
+        let bundle = lib.join("plancraft");
         let native = if cfg!(target_arch = "aarch64") { 0xB7 } else { 0x3E };
-        for name in ["libhave.so.1", "libmissing.so.2", "libonly32.so.0"] {
-            let stem = name.split('.').next().unwrap();
-            std::fs::create_dir_all(bundle.join(stem)).unwrap();
-            std::fs::write(bundle.join(stem).join(name), elf(native, 2)).unwrap();
+        for soname in ["libXi.so.6", "libXcursor.so.1", "libxkbcommon.so.0", "libXrender.so.1"] {
+            put(&bundle.join(soname.split(".so").next().unwrap()), soname, &elf(native, 2));
         }
-        std::fs::create_dir_all(&system).unwrap();
-        std::fs::create_dir_all(&multilib).unwrap();
-        std::fs::write(system.join("libhave.so.1"), elf(native, 2)).unwrap();
-        // A 32-bit copy and a file that is not a library do not count.
-        std::fs::write(multilib.join("libonly32.so.0"), elf(0x03, 1)).unwrap();
-        std::fs::write(system.join("libmissing.so.2"), b"not a library").unwrap();
+        put(&system, "libXi.so.6", &elf(native, 2));
+        // A 32-bit copy and a file that is not a library do not count as the system having it.
+        put(&multilib, "libXcursor.so.1", &elf(0x03, 1));
+        put(&system, "libxkbcommon.so.0", b"not a library");
+        let m = std::fs::metadata(&root).unwrap();
+        let owner = Owner { uid: m.uid(), gid: m.gid() };
+        let stranger = Owner { uid: m.uid().wrapping_add(1), gid: m.gid().wrapping_add(1) };
+        let dirs = vec![system.clone(), multilib.clone()];
+        let expected = vec![bundle.join("libXcursor"), bundle.join("libXrender"), bundle.join("libxkbcommon")];
+        assert_eq!(missing_dirs(&bundle, &dirs, owner), expected);
+        assert!(trusted(&lib, owner));
 
-        let dirs = missing_dirs(&bundle, &[system.clone(), multilib.clone()]);
-        assert_eq!(dirs, vec![bundle.join("libmissing"), bundle.join("libonly32")]);
-        // Nothing missing, or no bundle at all: no restart.
-        assert!(missing_dirs(&bundle, std::slice::from_ref(&bundle.join("libhave"))).len() == 2);
-        assert!(missing_dirs(&root.join("nowhere"), &[system]).is_empty());
+        // Planted files are never used: an unknown library, an extra file in a known folder, a
+        // folder others can write to, or a folder owned by someone else.
+        put(&bundle.join("evil"), "libnot-on-this-system.so.9", &elf(native, 2));
+        put(&bundle.join("libXrender"), "libgcc_s.so.1", &elf(native, 2));
+        mode(&bundle.join("libXcursor"), 0o757);
+        let left = missing_dirs(&bundle, &dirs, owner);
+        assert_eq!(left, vec![bundle.join("libxkbcommon")]);
+        assert!(missing_dirs(&bundle, &dirs, stranger).is_empty() || owner.uid == 0);
+        // Writable by the binary's own group (a umask of 002) is fine; by another group, not.
+        mode(&bundle.join("libxkbcommon"), 0o775);
+        assert_eq!(missing_dirs(&bundle, &dirs, owner), vec![bundle.join("libxkbcommon")]);
+        assert!(missing_dirs(&bundle, &dirs, Owner { gid: owner.gid.wrapping_add(1), ..owner }).is_empty());
+        // `lib/` or `lib/plancraft/` writable by others: nothing from the bundle is trusted.
+        mode(&lib, 0o777);
+        assert!(!trusted(&lib, owner));
+        mode(&lib, 0o755);
+        mode(&bundle, 0o757);
+        assert!(!trusted(&lib, owner));
+        mode(&bundle, 0o755);
+
+        // No bundle at all: no restart.
+        assert!(missing_dirs(&root.join("nowhere"), &dirs, owner).is_empty());
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn child_processes_get_the_original_environment() {
+        // Not restarted (as in tests): children are left alone.
+        let mut cmd = Command::new("true");
+        clean_child(&mut cmd);
+        assert_eq!(cmd.get_envs().count(), 0);
     }
 
     #[test]

@@ -9,5 +9,5 @@
 FROM ubuntu:22.04
 RUN apt-get update \
  && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends gcc libc6-dev squashfs-tools \
-    libxkbcommon0 libxkbcommon-x11-0 libxcb-xkb1 libxcursor1 libxrandr2 libxi6 libxrender1 libwayland-egl1 \
+    libxkbcommon0 libxkbcommon-x11-0 libxcb-xkb1 libxcursor1 libxi6 libxrender1 libwayland-egl1 \
  && rm -rf /var/lib/apt/lists/*

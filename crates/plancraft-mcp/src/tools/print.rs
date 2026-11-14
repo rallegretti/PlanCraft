@@ -20,7 +20,8 @@ fn setup_props() -> serde_json::Map<String, Value> {
         "orientation": string_enum("Page orientation.", &ORIENTATIONS),
         "margin_mm": number("Margin on every side in millimetres (0-50)."),
         "scale_percent": integer("Print at this percentage of normal size (25-400)."),
-        "pages_wide": integer("Spread the timescale (or the Network Diagram or Task Board) over this many pages across (1-20); 0 = the view's zoom (a diagram or board prints at its actual size)."),
+        "pages_wide": integer("Spread the timescale over this many pages across (1-20); 0 = as zoomed on screen. For export_pdf of the Network Diagram or Task Board it sets their size instead (drawing_pages_wide)."),
+        "drawing_pages_wide": integer("Fit the Network Diagram and the Task Board to this many pages across (1-20); 0 = actual size. Saved apart from the Gantt timescale."),
         "repeat_columns": integer("Repeat the first N table columns on pages to the right."),
         "legend": string_enum("Where the bar legend prints.", &LEGENDS),
         "header": { "type": "array", "items": { "type": "string" }, "description": "Up to 3 strings: left, centre, right. Codes: [Project] [Manager] [Company] [View] [Date] [Page] [Pages] [Start] [Finish]." },
@@ -124,6 +125,9 @@ fn apply(s: &mut PageSetup, a: &Args) -> ToolResult<()> {
     if let Some(v) = small(a, "pages_wide", u64::from(print::MAX_PAGES_WIDE))? {
         s.timescale = if v == 0 { TimescaleFit::AsShown } else { TimescaleFit::PagesWide(v as u8) };
     }
+    if let Some(v) = small(a, "drawing_pages_wide", u64::from(print::MAX_PAGES_WIDE))? {
+        s.drawing_fit = if v == 0 { TimescaleFit::AsShown } else { TimescaleFit::PagesWide(v as u8) };
+    }
     if let Some(v) = small(a, "repeat_columns", 20)? {
         s.repeat_columns = v as u8;
     }
@@ -191,12 +195,17 @@ fn export_pdf(ctx: &Ctx, a: &Args) -> ToolResult {
     }
     // Copy the plan, then lay out and write the PDF without holding the workspace (the app
     // stays responsive during a long export).
+    let drawing_view = view == "network" || view == "board";
     let (project, setup) = ctx.read(a, |doc| {
         let mut setup = doc.project.page_setup.clone();
         apply(&mut setup, a)?;
+        // For a diagram, `pages_wide` is its size (unless `drawing_pages_wide` says otherwise).
+        if drawing_view && a.get("drawing_pages_wide").is_none_or(Value::is_null) && a.get("pages_wide").is_some_and(|v| !v.is_null()) {
+            setup.drawing_fit = setup.timescale;
+        }
         Ok((doc.project.clone(), setup))
     })?;
-    let (bytes, pages, truncated) = if view == "network" || view == "board" {
+    let (bytes, pages, truncated) = if drawing_view {
         let out = drawing(&project, &setup, &view);
         (print::pdf::write(&out), out.pages.len(), out.truncated)
     } else {

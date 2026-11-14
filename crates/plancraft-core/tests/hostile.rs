@@ -514,6 +514,7 @@ fn apply(p: &mut Project, op: &Op) -> PlanResult<()> {
                 margin_mm: margin,
                 scale_percent: scale,
                 timescale: if wide % 4 == 0 { TimescaleFit::AsShown } else { TimescaleFit::PagesWide(wide) },
+                drawing_fit: if wide % 3 == 0 { TimescaleFit::AsShown } else { TimescaleFit::PagesWide(wide) },
                 repeat_columns: repeat,
                 legend: LegendPlacement::ALL[legend % 3],
                 header: [text.clone(), "[Page] of [Pages]".into(), text],
@@ -583,6 +584,7 @@ fn hostile_page_setup_in_a_file_is_clamped_on_open() {
         "margin_mm": 1e30,
         "scale_percent": 0,
         "timescale": { "PagesWide": 255 },
+        "drawing_fit": { "PagesWide": 255 },
         "repeat_columns": 255,
         "header": ["x".repeat(10_000), "a\nb", ""],
     });
@@ -593,6 +595,7 @@ fn hostile_page_setup_in_a_file_is_clamped_on_open() {
     assert_eq!(s.margin_mm, plancraft_core::print::MAX_MARGIN_MM);
     assert_eq!(s.scale_percent, plancraft_core::print::MIN_SCALE);
     assert_eq!(s.timescale, plancraft_core::print::TimescaleFit::PagesWide(plancraft_core::print::MAX_PAGES_WIDE));
+    assert_eq!(s.drawing_fit, plancraft_core::print::TimescaleFit::PagesWide(plancraft_core::print::MAX_PAGES_WIDE));
     assert!(s.header[0].chars().count() <= plancraft_core::print::MAX_HEADER_CHARS);
     // A plan with the default setup does not store one.
     assert!(!plancraft_core::io::to_json(&p).unwrap().contains("page_setup"));

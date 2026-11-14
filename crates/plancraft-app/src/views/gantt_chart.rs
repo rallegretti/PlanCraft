@@ -550,7 +550,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
                 bp.text(
                     pos2(x1 + 6.0, yc),
                     Align2::LEFT_CENTER,
-                    plancraft_core::bidi::visual(&names),
+                    plancraft_core::bidi::display(&names),
                     label_font.clone(),
                     theme::pal().TEXT,
                 );

@@ -118,7 +118,7 @@ pub fn show(ui: &mut Ui, rect: Rect, p: &Project, g: &mut GanttState, chart_widt
             painter.text(
                 pos2(x, y.min(rect.bottom() - 6.0)),
                 Align2::CENTER_CENTER,
-                format!("{} {}", plancraft_core::bidi::visual(&t.name), f.format("%-m/%-d")),
+                format!("{} {}", plancraft_core::bidi::display(&t.name), f.format("%-m/%-d")),
                 font.clone(),
                 theme::pal().TEXT,
             );
@@ -129,7 +129,7 @@ pub fn show(ui: &mut Ui, rect: Rect, p: &Project, g: &mut GanttState, chart_widt
             c.text(
                 pos2(r.left() + 4.0, r.center().y),
                 Align2::LEFT_CENTER,
-                plancraft_core::bidi::visual(&t.name),
+                plancraft_core::bidi::display(&t.name),
                 font.clone(),
                 Color32::WHITE,
             );

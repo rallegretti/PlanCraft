@@ -285,6 +285,8 @@ impl std::fmt::Display for RunError {
 }
 
 fn run(cmd: &mut Command, limit: Duration) -> Result<String, RunError> {
+    #[cfg(target_os = "linux")]
+    crate::bundled_libs::clean_child(cmd);
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
