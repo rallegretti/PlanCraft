@@ -547,7 +547,13 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
         if g.show_resource_names && !summary && !t.is_milestone() {
             let names = p.format_resource_names(t.id);
             if !names.is_empty() {
-                bp.text(pos2(x1 + 6.0, yc), Align2::LEFT_CENTER, names, label_font.clone(), theme::pal().TEXT);
+                bp.text(
+                    pos2(x1 + 6.0, yc),
+                    Align2::LEFT_CENTER,
+                    plancraft_core::bidi::display(&names),
+                    label_font.clone(),
+                    theme::pal().TEXT,
+                );
             }
         }
 

@@ -1,5 +1,5 @@
-//! Printing tools: Page Setup (saved with the plan) and PDF export of the Gantt chart or task
-//! table.
+//! Printing tools: Page Setup (saved with the plan) and PDF export of the Gantt chart, the task
+//! table, the Network Diagram or the Task Board.
 
 use std::path::PathBuf;
 
@@ -12,7 +12,7 @@ use crate::args::*;
 const PAPERS: [&str; 5] = ["letter", "legal", "tabloid", "a4", "a3"];
 const ORIENTATIONS: [&str; 2] = ["landscape", "portrait"];
 const LEGENDS: [&str; 3] = ["every_page", "legend_page", "none"];
-const VIEWS: [&str; 4] = ["gantt", "tracking", "baselines", "table"];
+const VIEWS: [&str; 6] = ["gantt", "tracking", "baselines", "table", "network", "board"];
 
 fn setup_props() -> serde_json::Map<String, Value> {
     let Value::Object(m) = json!({
@@ -20,7 +20,8 @@ fn setup_props() -> serde_json::Map<String, Value> {
         "orientation": string_enum("Page orientation.", &ORIENTATIONS),
         "margin_mm": number("Margin on every side in millimetres (0-50)."),
         "scale_percent": integer("Print at this percentage of normal size (25-400)."),
-        "pages_wide": integer("Spread the timescale over this many pages across (1-20); 0 = the view's zoom."),
+        "pages_wide": integer("Spread the timescale over this many pages across (1-20); 0 = as zoomed on screen. For export_pdf of the Network Diagram or Task Board it sets their size instead (drawing_pages_wide)."),
+        "drawing_pages_wide": integer("Fit the Network Diagram and the Task Board to this many pages across (1-20); 0 = actual size. Saved apart from the Gantt timescale."),
         "repeat_columns": integer("Repeat the first N table columns on pages to the right."),
         "legend": string_enum("Where the bar legend prints.", &LEGENDS),
         "header": { "type": "array", "items": { "type": "string" }, "description": "Up to 3 strings: left, centre, right. Codes: [Project] [Manager] [Company] [View] [Date] [Page] [Pages] [Start] [Finish]." },
@@ -39,7 +40,7 @@ pub fn tools() -> Vec<Tool> {
         (
             "view",
             string_enum(
-                "What to print (default gantt): the Gantt chart, the Tracking Gantt (with Baseline), the Multiple Baselines Gantt (Baseline, Baseline1 and Baseline2 bars), or the task table alone.",
+                "What to print (default gantt): the Gantt chart, the Tracking Gantt (with Baseline), the Multiple Baselines Gantt (Baseline, Baseline1 and Baseline2 bars), the task table alone, the Network Diagram (every task as a box, with its links) or the Task Board (cards in their status columns). 'from' and 'to' don't apply to the Network Diagram and the Task Board.",
                 &VIEWS,
             ),
         ),
@@ -60,7 +61,7 @@ pub fn tools() -> Vec<Tool> {
         Tool::new(
             "export_pdf",
             "Export a PDF",
-            "Print the plan to a PDF file: the Gantt chart (task table with bars, links, timescale, legend, header and footer) or the task table, paginated with the plan's Page Setup. Page Setup arguments given here apply to this export only.",
+            "Print the plan to a PDF file: the Gantt chart (task table with bars, links, timescale, legend, header and footer), the task table, the Network Diagram or the Task Board, paginated with the plan's Page Setup. Page Setup arguments given here apply to this export only.",
             schema(Value::Object(export), &["path"]),
             export_pdf,
         ),
@@ -123,6 +124,9 @@ fn apply(s: &mut PageSetup, a: &Args) -> ToolResult<()> {
     }
     if let Some(v) = small(a, "pages_wide", u64::from(print::MAX_PAGES_WIDE))? {
         s.timescale = if v == 0 { TimescaleFit::AsShown } else { TimescaleFit::PagesWide(v as u8) };
+    }
+    if let Some(v) = small(a, "drawing_pages_wide", u64::from(print::MAX_PAGES_WIDE))? {
+        s.drawing_fit = if v == 0 { TimescaleFit::AsShown } else { TimescaleFit::PagesWide(v as u8) };
     }
     if let Some(v) = small(a, "repeat_columns", 20)? {
         s.repeat_columns = v as u8;
@@ -191,12 +195,20 @@ fn export_pdf(ctx: &Ctx, a: &Args) -> ToolResult {
     }
     // Copy the plan, then lay out and write the PDF without holding the workspace (the app
     // stays responsive during a long export).
+    let drawing_view = view == "network" || view == "board";
     let (project, setup) = ctx.read(a, |doc| {
         let mut setup = doc.project.page_setup.clone();
         apply(&mut setup, a)?;
+        // For a diagram, `pages_wide` is its size (unless `drawing_pages_wide` says otherwise).
+        if drawing_view && a.get("drawing_pages_wide").is_none_or(Value::is_null) && a.get("pages_wide").is_some_and(|v| !v.is_null()) {
+            setup.drawing_fit = setup.timescale;
+        }
         Ok((doc.project.clone(), setup))
     })?;
-    let (bytes, pages, truncated) = {
+    let (bytes, pages, truncated) = if drawing_view {
+        let out = drawing(&project, &setup, &view);
+        (print::pdf::write(&out), out.pages.len(), out.truncated)
+    } else {
         let p = &project;
         let chart = match view.as_str() {
             "gantt" => Some(print::ChartOptions::default()),
@@ -230,4 +242,27 @@ fn export_pdf(ctx: &Ctx, a: &Args) -> ToolResult {
         "bytes": bytes.len(),
         "truncated": truncated,
     }))
+}
+
+/// The Network Diagram (every task, summaries left of their subtasks) or the Task Board (every
+/// card) on pages.
+fn drawing(p: &plancraft_core::model::Project, setup: &PageSetup, view: &str) -> print::Document {
+    let pal = print::layout::Palette::default();
+    let (items, width, height, title) = if view == "board" {
+        let columns: Vec<print::board::BoardColumnPrint> = p
+            .board()
+            .into_iter()
+            .map(|(c, rows)| print::board::BoardColumnPrint { name: c.name.clone(), percent: c.percent_complete, rows })
+            .collect();
+        let (items, w, h) = print::board::items(p, &columns, &pal);
+        (items, w, h, "Task Board")
+    } else {
+        let shown = vec![true; p.tasks.len()];
+        let boxes = plancraft_core::network::boxes_for(p, &shown, &Default::default());
+        let d = plancraft_core::network::layout(p, &boxes, Default::default());
+        let opts = print::network::NetPrintOptions { link_labels: false, progress_marks: true, ids_only: false };
+        let (items, w, h) = print::network::items(p, &d, opts, &pal);
+        (items, w, h, "Network Diagram")
+    };
+    print::layout_canvas(&print::CanvasJob { project: p, setup, title, width, height, items, printed: chrono::Local::now().naive_local() })
 }

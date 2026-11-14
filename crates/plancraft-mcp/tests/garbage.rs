@@ -161,6 +161,40 @@ fn every_tool_argument_with_junk() {
     assert!(calls > 1000, "only {calls} calls");
 }
 
+/// `export_pdf` of the Network Diagram and the Task Board (their own layout code): junk in every
+/// other argument (Page Setup values, page counts, headers), with a real path in a temporary
+/// folder.
+#[test]
+fn drawing_pdf_export_with_junk() {
+    count_panics();
+    let dir = tempfile::tempdir().unwrap();
+    let tool = plancraft_mcp::tools::all_tools().into_iter().find(|t| t.name == "export_pdf").unwrap();
+    let props: Vec<String> =
+        tool.input_schema.get("properties").and_then(Value::as_object).map(|m| m.keys().cloned().collect()).unwrap_or_default();
+    assert!(props.iter().any(|p| p == "view"));
+    let mut calls = 0;
+    for view in ["network", "board"] {
+        for prop in props.iter().filter(|p| *p != "view" && *p != "path") {
+            for (k, value) in junk_values().iter().enumerate() {
+                let mut ws = Workspace::default();
+                ws.add(demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+                let s = McpServer::with_options(ws.shared(), ServerOptions { allow_file_access: true, ..ServerOptions::default() });
+                let mut args = Map::new();
+                args.insert("path".into(), json!(dir.path().join(format!("{view}-{k}.pdf")).to_string_lossy()));
+                args.insert("view".into(), json!(view));
+                args.insert(prop.clone(), value.clone());
+                let before = panics();
+                let r = call(&s, "export_pdf", Value::Object(args.clone()));
+                assert!(panics() == before, "export_pdf panicked on {}: {}", Value::Object(args), r["result"]["content"][0]["text"]);
+                assert!(r.get("result").is_some() || r.get("error").is_some(), "{r}");
+                still_alive(&s);
+                calls += 1;
+            }
+        }
+    }
+    assert!(calls > 100, "only {calls} calls");
+}
+
 /// The tools that read or write files, with file access on and every path inside a temporary
 /// folder: junk in any argument (a junk path is turned into a file name in that folder).
 #[test]

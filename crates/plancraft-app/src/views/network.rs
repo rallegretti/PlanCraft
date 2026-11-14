@@ -39,7 +39,11 @@ fn cache_key(doc: &Document, st: &UiState) -> u64 {
 /// Lays out the tasks of the outline the task views show (filter, search, collapsed summaries;
 /// grouping does not apply here), or every subtask passing the filter when summaries are hidden.
 fn diagram(doc: &Document, st: &UiState) -> Arc<Diagram> {
-    let p = &doc.project;
+    Arc::new(layout(&doc.project, st))
+}
+
+/// The diagram the view shows for `p` (also what prints).
+pub fn layout(p: &Project, st: &UiState) -> Diagram {
     let boxes = if st.network.show_summaries {
         let mut shown = vec![false; p.tasks.len()];
         for i in super::outline_rows(p, st).iter().filter_map(super::Row::task) {
@@ -51,13 +55,13 @@ fn diagram(doc: &Document, st: &UiState) -> Arc<Diagram> {
     } else {
         p.tasks.iter().enumerate().map(|(i, t)| (!t.sched.is_summary && super::task_matches(p, st, t)).then_some(i)).collect()
     };
-    Arc::new(network::layout(p, &boxes, st.network.opts))
+    network::layout(p, &boxes, st.network.opts)
 }
 
 /// One line of text cut to `width` with an ellipsis.
 fn line(ui: &Ui, text: &str, size: f32, color: Color32, width: f32) -> Arc<egui::Galley> {
     let mut job = LayoutJob::default();
-    job.append(text, 0.0, TextFormat { font_id: FontId::proportional(size), color, ..Default::default() });
+    job.append(&plancraft_core::bidi::display(text), 0.0, TextFormat { font_id: FontId::proportional(size), color, ..Default::default() });
     job.wrap = TextWrapping::truncate_at_width(width.max(1.0));
     ui.fonts_mut(|f| f.layout_job(job))
 }

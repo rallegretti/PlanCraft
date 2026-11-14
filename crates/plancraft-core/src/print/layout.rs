@@ -18,7 +18,7 @@ use crate::timescale::{Unit, tiers};
 /// Most pages one print produces (hostile plans and settings can't make millions).
 pub const MAX_PAGES: usize = 2000;
 /// Pages looked at (printed or skipped as blank) before giving up.
-const MAX_PAGE_VISITS: usize = 20 * MAX_PAGES;
+pub(crate) const MAX_PAGE_VISITS: usize = 20 * MAX_PAGES;
 /// Smallest printable area in virtual points: a row, the timescale and the bands fit.
 const MIN_AREA_W: f32 = 200.0;
 const MIN_AREA_H: f32 = 160.0;
@@ -165,6 +165,11 @@ pub struct Palette {
     pub bar_inactive: Rgb,
     pub milestone: Rgb,
     pub link: Rgb,
+    /// Lines from tasks to the milestones they are members of (Network Diagram).
+    pub member_link: Rgb,
+    /// The empty part of a progress bar (Task Board cards).
+    pub track: Rgb,
+    pub ok: Rgb,
     pub status_date: Rgb,
     pub deadline: Rgb,
     pub error: Rgb,
@@ -211,6 +216,9 @@ impl Default for Palette {
             bar_inactive: Rgb(0xE6, 0xE8, 0xEC),
             milestone: Rgb(0x1B, 0x3A, 0x8C),
             link: Rgb(0x3C, 0x4A, 0x66),
+            member_link: Rgb(0xC8, 0x96, 0x1E),
+            track: Rgb(0xE6, 0xEA, 0xF1),
+            ok: Rgb(0x2E, 0x8B, 0x57),
             status_date: Rgb(0x8E, 0x44, 0xAD),
             deadline: Rgb(0x2E, 0x8B, 0x57),
             error: Rgb(0xC6, 0x28, 0x28),
@@ -247,7 +255,7 @@ fn text(at: Pt, size: f32, color: Rgb, bold: bool, s: impl Into<String>) -> Item
 }
 
 /// Text placed in a box: fitted (ellipsis), aligned, vertically centred.
-fn boxed_text(out: &mut Vec<Item>, r: Rect, s: &str, size: f32, color: Rgb, bold: bool, align: Align) {
+pub(crate) fn boxed_text(out: &mut Vec<Item>, r: Rect, s: &str, size: f32, color: Rgb, bold: bool, align: Align) {
     let avail = (r.w - 2.0 * PAD).max(0.0);
     let fitted = font::fit(s, size, bold, avail);
     if fitted.is_empty() {
@@ -304,16 +312,15 @@ fn date_range(job: &PrintJob) -> (NaiveDateTime, NaiveDateTime) {
 }
 
 /// Replaces header and footer codes.
-fn fill_codes(s: &str, job: &PrintJob, page: usize, pages: usize) -> String {
-    let p = job.project;
+pub(crate) fn fill_codes(s: &str, p: &Project, view: &str, printed: NaiveDateTime, page: usize, pages: usize) -> String {
     let day = |d: Option<NaiveDateTime>| d.map(|d| d.format("%a %m/%d/%y").to_string()).unwrap_or_default();
     let value = |code: &str| -> Option<String> {
         Some(match code {
             "Project" => p.name.clone(),
             "Manager" => p.manager.clone(),
             "Company" => p.company.clone(),
-            "View" => job.sheet.title.clone(),
-            "Date" => job.printed.format("%b %-d, %Y").to_string(),
+            "View" => view.to_string(),
+            "Date" => printed.format("%b %-d, %Y").to_string(),
             "Pages" => pages.to_string(),
             "Page" => page.to_string(),
             "Start" => day(p.sched.start.or(Some(p.start))),
@@ -858,7 +865,7 @@ fn legend(out: &mut Vec<Item>, job: &PrintJob, opts: &ChartOptions, r: Rect) {
     }
 }
 
-fn scale_item(item: &mut Item, s: f32, dx: f32, dy: f32) {
+pub(crate) fn scale_item(item: &mut Item, s: f32, dx: f32, dy: f32) {
     let tp = |p: &mut Pt| {
         p.x = dx + p.x * s;
         p.y = dy + p.y * s;
@@ -899,15 +906,8 @@ fn scale_item(item: &mut Item, s: f32, dx: f32, dy: f32) {
 /// Lays out the sheet (and chart) on pages.
 pub fn layout(job: &PrintJob) -> Document {
     let setup = job.setup;
-    let (pw, ph) = setup.page_size();
-    let margin = setup.margin_pt().min(pw / 4.0).min(ph / 4.0);
-    // Printable area in virtual points. A scale too large for the paper and margins is reduced
-    // so a row, the timescale and the bands still fit, rather than printing off the page.
-    let (aw, ah) = ((pw - 2.0 * margin).max(1.0), (ph - 2.0 * margin).max(1.0));
-    let s = setup.scale().min(aw / MIN_AREA_W).min(ah / MIN_AREA_H).max(0.001);
-    let (w, h) = (aw / s, ah / s);
-    let has_header = setup.header.iter().any(|t| !t.trim().is_empty());
-    let has_footer = setup.footer.iter().any(|t| !t.trim().is_empty());
+    let frame = Frame::new(setup);
+    let Frame { w, h, has_header, has_footer, .. } = frame;
     let chart_opts = job.chart;
     let legend_every = chart_opts.is_some() && setup.legend == LegendPlacement::EveryPage;
     let top = if has_header { BAND_H } else { 0.0 };
@@ -1071,35 +1071,90 @@ pub fn layout(job: &PrintJob) -> Document {
             truncated = true;
         }
     }
-    // Never a document without pages (some PDF readers refuse one).
-    if pages.is_empty() {
-        pages.push(Vec::new());
-    }
 
     // Headers and footers (now that the page count is known), then scale into the margins.
-    let total = pages.len();
-    let pal = job.palette;
-    let mut out = Vec::with_capacity(total);
-    for (i, mut items) in pages.into_iter().enumerate() {
-        for (texts, y) in [(&setup.header, 0.0), (&setup.footer, h - BAND_H)] {
-            for (k, t) in texts.iter().enumerate() {
-                let filled = fill_codes(t, job, i + 1, total);
-                if filled.trim().is_empty() {
-                    continue;
-                }
-                let align = [Align::Left, Align::Center, Align::Right].get(k).copied().unwrap_or_default();
-                let third = w / 3.0;
-                // Centre text may use the full width; side texts their third.
-                let r = if k == 1 { Rect::new(third / 2.0, y, w - third, BAND_H) } else { Rect::new(k as f32 * third, y, third, BAND_H) };
-                boxed_text(&mut items, r, &filled, TEXT, if k == 1 { pal.text } else { pal.text_weak }, k == 1 && y == 0.0, align);
-            }
-        }
-        for item in &mut items {
-            scale_item(item, s, margin, margin);
-        }
-        out.push(Page { width: pw, height: ph, items });
-    }
+    let out = frame.finish(pages, setup, job.project, &job.sheet.title, job.printed, &job.palette);
     Document { title: format!("{} – {}", job.project.name, job.sheet.title), pages: out, truncated }
+}
+
+/// The printable area of a page in virtual points, and how it maps onto the paper.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Frame {
+    pub pw: f32,
+    pub ph: f32,
+    pub margin: f32,
+    /// Virtual points to paper points.
+    pub s: f32,
+    /// Printable width and height in virtual points (headers and footers included).
+    pub w: f32,
+    pub h: f32,
+    pub has_header: bool,
+    pub has_footer: bool,
+}
+
+impl Frame {
+    pub fn new(setup: &PageSetup) -> Self {
+        let (pw, ph) = setup.page_size();
+        let margin = setup.margin_pt().min(pw / 4.0).min(ph / 4.0);
+        // Printable area in virtual points. A scale too large for the paper and margins is reduced
+        // so a row, the timescale and the bands still fit, rather than printing off the page.
+        let (aw, ah) = ((pw - 2.0 * margin).max(1.0), (ph - 2.0 * margin).max(1.0));
+        let s = setup.scale().min(aw / MIN_AREA_W).min(ah / MIN_AREA_H).max(0.001);
+        let (w, h) = (aw / s, ah / s);
+        let has_header = setup.header.iter().any(|t| !t.trim().is_empty());
+        let has_footer = setup.footer.iter().any(|t| !t.trim().is_empty());
+        Self { pw, ph, margin, s, w, h, has_header, has_footer }
+    }
+
+    /// Height of the header band (0 without a header).
+    pub fn top(&self) -> f32 {
+        if self.has_header { BAND_H } else { 0.0 }
+    }
+
+    /// Height of the footer band (0 without a footer).
+    pub fn bottom(&self) -> f32 {
+        if self.has_footer { BAND_H } else { 0.0 }
+    }
+
+    /// Adds headers and footers (now that the page count is known), then scales the pages into
+    /// the margins. Never returns no pages (some PDF readers refuse a document without any).
+    pub fn finish(
+        &self,
+        mut pages: Vec<Vec<Item>>,
+        setup: &PageSetup,
+        p: &Project,
+        view: &str,
+        printed: NaiveDateTime,
+        pal: &Palette,
+    ) -> Vec<Page> {
+        if pages.is_empty() {
+            pages.push(Vec::new());
+        }
+        let (w, h) = (self.w, self.h);
+        let total = pages.len();
+        let mut out = Vec::with_capacity(total);
+        for (i, mut items) in pages.into_iter().enumerate() {
+            for (texts, y) in [(&setup.header, 0.0), (&setup.footer, h - BAND_H)] {
+                for (k, t) in texts.iter().enumerate() {
+                    let filled = fill_codes(t, p, view, printed, i + 1, total);
+                    if filled.trim().is_empty() {
+                        continue;
+                    }
+                    let align = [Align::Left, Align::Center, Align::Right].get(k).copied().unwrap_or_default();
+                    let third = w / 3.0;
+                    // Centre text may use the full width; side texts their third.
+                    let r =
+                        if k == 1 { Rect::new(third / 2.0, y, w - third, BAND_H) } else { Rect::new(k as f32 * third, y, third, BAND_H) };
+                    boxed_text(&mut items, r, &filled, TEXT, if k == 1 { pal.text } else { pal.text_weak }, k == 1 && y == 0.0, align);
+                }
+            }
+            for item in &mut items {
+                scale_item(item, self.s, self.margin, self.margin);
+            }
+            out.push(Page { width: self.pw, height: self.ph, items });
+        }
+        out
+    }
 }
 
 /// The default printed task table: what agents print with `export_pdf`.
@@ -1218,9 +1273,9 @@ mod tests {
             PageSetup { header: ["[Project]".repeat(20), "[Page] of [Pages] [Unknown] [Page".into(), String::new()], ..Default::default() };
         let sheet = task_sheet(&p, false);
         let j = job(&p, &setup, &sheet, false);
-        assert_eq!(fill_codes("[Project]", &j, 1, 3), "[Manager] plan");
-        assert_eq!(fill_codes("[Page] of [Pages] [Unknown] [Page", &j, 1, 3), "1 of 3 [Unknown] [Page");
-        assert_eq!(fill_codes("[Manager]", &j, 1, 1).len(), 50 * "[Company]".len(), "not expanded again");
+        assert_eq!(fill_codes("[Project]", j.project, &j.sheet.title, j.printed, 1, 3), "[Manager] plan");
+        assert_eq!(fill_codes("[Page] of [Pages] [Unknown] [Page", j.project, &j.sheet.title, j.printed, 1, 3), "1 of 3 [Unknown] [Page");
+        assert_eq!(fill_codes("[Manager]", j.project, &j.sheet.title, j.printed, 1, 1).len(), 50 * "[Company]".len(), "not expanded again");
         assert_eq!(layout(&j).pages.len(), 1);
     }
 

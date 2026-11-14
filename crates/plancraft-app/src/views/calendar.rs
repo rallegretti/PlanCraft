@@ -103,7 +103,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
             painter.with_clip_rect(r).text(
                 pos2(r.left() + 4.0, r.center().y),
                 Align2::LEFT_CENTER,
-                label,
+                plancraft_core::bidi::display(&label),
                 FontId::proportional(11.0),
                 text_color,
             );

@@ -616,6 +616,14 @@ fn agents_set_page_setup_and_export_pdfs() {
     // Dates outside 1900-2300 are refused, like everywhere else.
     let e = c.call_err("export_pdf", json!({ "path": pdf.to_str().unwrap(), "overwrite": true, "from": "0001-01-01" }));
     assert!(e.contains("between"), "{e}");
+    // The Network Diagram and the Task Board print as drawings.
+    for view in ["network", "board"] {
+        let out = c.call("export_pdf", json!({ "path": pdf.to_str().unwrap(), "overwrite": true, "view": view, "pages_wide": 1 }));
+        assert!(out["pages"].as_u64().unwrap() >= 1, "{out}");
+        assert!(std::fs::read(&pdf).unwrap().starts_with(b"%PDF-1.7"));
+    }
+    let e = c.call_err("export_pdf", json!({ "path": pdf.to_str().unwrap(), "overwrite": true, "view": "calendar" }));
+    assert!(e.contains("network") && e.contains("board"), "{e}");
 }
 
 #[test]

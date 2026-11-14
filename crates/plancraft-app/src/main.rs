@@ -10,11 +10,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+#[cfg(target_os = "linux")]
+mod bundled_libs;
 mod columns;
 mod commands;
 mod dialogs;
 mod edit;
 mod fields;
+mod fonts;
 mod format;
 mod logo;
 mod mcp_host;
@@ -64,7 +67,10 @@ fn wgpu_options() -> eframe::WgpuConfiguration {
 }
 
 fn main() -> anyhow::Result<()> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    // `args_os`: a file name that is not valid UTF-8 must not stop the app (`args` would panic);
+    // files are opened by their real name, options read from a lossy copy.
+    let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let args: Vec<String> = raw.iter().map(|a| a.to_string_lossy().into_owned()).collect();
     #[cfg(windows)]
     if matches!(args.first().map(String::as_str), Some("mcp" | "--version" | "--write-icon")) {
         attach_parent_console();
@@ -87,9 +93,13 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Linux packages: fill in window-system libraries this system lacks (restarts once if so).
+    #[cfg(target_os = "linux")]
+    bundled_libs::use_where_missing();
+
     let mut ws = Workspace::default();
-    for a in &args {
-        if a.starts_with('-') {
+    for a in &raw {
+        if a.to_string_lossy().starts_with('-') {
             continue;
         }
         if let Err(e) = ws.open(a) {
@@ -113,6 +123,24 @@ fn main() -> anyhow::Result<()> {
         wgpu_options: wgpu_options(),
         ..Default::default()
     };
-    eframe::run_native("PlanCraft", options, Box::new(move |cc| Ok(Box::new(app::PlanCraftApp::new(cc, shared)))))
-        .map_err(|e| anyhow::anyhow!("{e}"))
+    // A missing display, graphics driver or system library shows up here, sometimes as a panic
+    // inside the windowing library; either way, say plainly what is wrong.
+    let started = plancraft_core::guard::catch("opening the window", || {
+        eframe::run_native("PlanCraft", options, Box::new(move |cc| Ok(Box::new(app::PlanCraftApp::new(cc, shared)))))
+    });
+    match started {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(no_window(&e.to_string())),
+        Err(p) => Err(no_window(&p.message)),
+    }
+}
+
+/// The error shown when the window cannot be opened.
+fn no_window(cause: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "PlanCraft's window could not be opened or failed: {cause}\n\
+         PlanCraft needs a graphical desktop (X11 or Wayland) with working graphics drivers. If the message \
+         above names a library, install it with your system's package manager. Without a desktop, \
+         `plancraft mcp` runs the MCP server, which needs no window."
+    )
 }
