@@ -189,7 +189,7 @@ A milestone is a checkpoint with a **deliverable**, such as "Signed project char
 
 Print any view with a live print preview, or save it as a **PDF**: the Gantt charts, task and resource tables, the Network Diagram and the Task Board. Choose the paper, orientation and scale, how many pages wide it spreads, and your own headers and footers.
 
-![The Print window with its preview](docs/images/print-preview.png)
+![The Print window, here printing the Task Board](docs/images/print-preview.png)
 
 ### Write in any language
 
