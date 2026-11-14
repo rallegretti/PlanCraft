@@ -190,6 +190,36 @@ proptest! {
             prop_assert!(!out.pages.is_empty() && out.pages.len() <= plancraft_core::print::layout::MAX_PAGES);
             prop_assert!(plancraft_core::print::pdf::write(&out).starts_with(b"%PDF"));
         }
+        // And so do the Network Diagram (in both arrangements) and the Task Board.
+        let pal = plancraft_core::print::layout::Palette::default();
+        let shown = vec![true; p.tasks.len()];
+        let boxes = plancraft_core::network::boxes_for(p, &shown, &Default::default());
+        let mut drawings = Vec::new();
+        for ids_only in [false, true] {
+            let opts = plancraft_core::network::NetworkOptions { critical_first: ids_only, ids_only };
+            let d = plancraft_core::network::layout(p, &boxes, opts);
+            let net = plancraft_core::print::network::NetPrintOptions { link_labels: true, progress_marks: true, ids_only };
+            drawings.push(plancraft_core::print::network::items(p, &d, net, &pal));
+        }
+        let columns: Vec<plancraft_core::print::board::BoardColumnPrint> = p
+            .board()
+            .into_iter()
+            .map(|(c, rows)| plancraft_core::print::board::BoardColumnPrint { name: c.name.clone(), percent: c.percent_complete, rows })
+            .collect();
+        drawings.push(plancraft_core::print::board::items(p, &columns, &pal));
+        for (items, width, height) in drawings {
+            let out = plancraft_core::print::layout_canvas(&plancraft_core::print::CanvasJob {
+                project: p,
+                setup: &p.page_setup,
+                title: "Drawing",
+                width,
+                height,
+                items,
+                printed: start().and_hms_opt(9, 0, 0).unwrap(),
+            });
+            prop_assert!(!out.pages.is_empty() && out.pages.len() <= plancraft_core::print::layout::MAX_PAGES);
+            prop_assert!(plancraft_core::print::pdf::write(&out).starts_with(b"%PDF"));
+        }
     }
 }
 

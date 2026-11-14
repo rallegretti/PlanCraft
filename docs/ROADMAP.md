@@ -26,6 +26,7 @@
   - The Print window: a live preview of the exact printed pages, Page Setup saved with the plan, printing through the system print service (CUPS) or the PDF viewer on Windows.
   - PDF export written by PlanCraft itself (pure Rust, embedded font subset, searchable text).
   - Gantt Chart, Tracking Gantt, Multiple Baselines Gantt, task table and Resource Sheet; pages across and down, repeated columns, legend, header and footer codes.
+  - The Network Diagram and the Task Board, fitted to a number of pages across or at actual size.
 - **MCP server:** 89 tools, resources and prompts over stdio and Streamable HTTP. A live mode works inside the running app (bearer token per session, `plancraft mcp --attach` bridge), and the app binary has a headless `plancraft mcp` mode.
 - **Robustness:** no panics in shipped code (clippy-enforced), guarded edits with rollback, limits on hostile files and arguments, atomic saves, recovery copies, owner-only files.
 - **Quality gates:** `cargo xtask ci`, run locally on Linux, macOS and Windows (fmt, clippy, tests, cargo deny), a scheduler speed gate, hostile-input sweeps and parity tests against Microsoft's published scheduling examples.
@@ -33,7 +34,7 @@
 ## Next
 
 - **Interchange:** import CSV and Excel (pure Rust).
-- **Reports:** a project overview dashboard, cost overview and a milestone report (printable). Printing of the usage, calendar and Network Diagram views. Network Diagram box styles and manual box positioning.
+- **Reports:** a project overview dashboard, cost overview and a milestone report (printable). Printing of the usage and calendar views. Network Diagram box styles and manual box positioning.
 - **Saved filters and multi-level sort.** Also custom-field formulas and summary rollups.
 - **Status-date calculation options:** move completed parts back to the status date and remaining parts forward.
 - **Leveling options:** level within slack only, a priority-driven order, splitting, and a leveling preview (MS Project's "Leveling Gantt").

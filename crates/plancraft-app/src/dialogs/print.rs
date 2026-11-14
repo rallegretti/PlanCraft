@@ -116,7 +116,8 @@ impl PrintDialog {
             h.finish(),
             g.px_per_day,
             (g.show_critical, g.show_baseline, g.show_progress, g.show_links, g.show_slack, g.show_resource_names),
-        ) + &format!("|{}|{}", g.baseline_slot, g.multi_baselines);
+        ) + &format!("|{}|{}", g.baseline_slot, g.multi_baselines)
+            + &format!("|{:?}|{:?}", st.network.opts, (st.network.show_summaries, st.network.link_labels, st.network.progress_marks));
         if let Some((k, d)) = &self.cache {
             if *k == key {
                 return d.clone();
@@ -213,7 +214,7 @@ impl PrintDialog {
         if before != (self.view, self.setup.clone(), self.from.clone(), self.to.clone()) {
             ctx.request_repaint();
         }
-        let range_ok = self.range().is_ok();
+        let range_ok = self.view.is_drawing() || self.range().is_ok();
         if (print_now || save_pdf) && range_ok {
             self.commit_setup(doc);
             let bytes = print::pdf::write(&pages);
@@ -234,6 +235,7 @@ impl PrintDialog {
 
     fn settings(&mut self, ui: &mut Ui, pages: &print::Document, print_now: &mut bool, save_pdf: &mut bool, close: &mut bool) {
         let weak = theme::pal().TEXT_WEAK;
+        let drawing = self.view.is_drawing();
         let heading = |ui: &mut Ui, t: &str| {
             ui.add_space(6.0);
             ui.label(RichText::new(t).strong());
@@ -248,12 +250,15 @@ impl PrintDialog {
                 }
             });
             ui.end_row();
-            ui.label("From");
-            ui.add(egui::TextEdit::singleline(&mut self.from).hint_text("project start").desired_width(170.0));
-            ui.end_row();
-            ui.label("To");
-            ui.add(egui::TextEdit::singleline(&mut self.to).hint_text("project finish").desired_width(170.0));
-            ui.end_row();
+            // A drawing has no timescale to limit.
+            if !drawing {
+                ui.label("From");
+                ui.add(egui::TextEdit::singleline(&mut self.from).hint_text("project start").desired_width(170.0));
+                ui.end_row();
+                ui.label("To");
+                ui.add(egui::TextEdit::singleline(&mut self.to).hint_text("project finish").desired_width(170.0));
+                ui.end_row();
+            }
             if printing::HAS_PRINT_SERVICE {
                 ui.label("Printer");
                 let shown = if self.printer.is_empty() { "Default printer".to_string() } else { self.printer.clone() };
@@ -269,7 +274,9 @@ impl PrintDialog {
                 ui.end_row();
             }
         });
-        if let Err(e) = self.range() {
+        if let Err(e) = self.range()
+            && !drawing
+        {
             ui.colored_label(theme::pal().ERROR, e);
         }
         ui.add_space(4.0);
@@ -328,15 +335,17 @@ impl PrintDialog {
             ui.label("Scale");
             ui.add(egui::DragValue::new(&mut s.scale_percent).range(print::MIN_SCALE..=print::MAX_SCALE).suffix(" %"));
             ui.end_row();
-            ui.label("Legend");
-            egui::ComboBox::from_id_salt("print_legend").width(170.0).selected_text(s.legend.label()).show_ui(ui, |ui| {
-                for l in LegendPlacement::ALL {
-                    ui.selectable_value(&mut s.legend, l, l.label());
-                }
-            });
-            ui.end_row();
+            if !drawing {
+                ui.label("Legend");
+                egui::ComboBox::from_id_salt("print_legend").width(170.0).selected_text(s.legend.label()).show_ui(ui, |ui| {
+                    for l in LegendPlacement::ALL {
+                        ui.selectable_value(&mut s.legend, l, l.label());
+                    }
+                });
+                ui.end_row();
+            }
         });
-        heading(ui, "Timescale");
+        heading(ui, if drawing { "Size" } else { "Timescale" });
         let mut wide = match s.timescale {
             TimescaleFit::PagesWide(n) => n,
             TimescaleFit::AsShown => 0,
@@ -351,19 +360,24 @@ impl PrintDialog {
             }
             ui.label(if wide == 1 { "page wide" } else { "pages wide" });
         });
-        if ui.radio(wide == 0, "As zoomed on screen").clicked() {
+        if ui.radio(wide == 0, if drawing { "Actual size (scale above)" } else { "As zoomed on screen" }).clicked() {
             wide = 0;
         }
         s.timescale = if wide == 0 { TimescaleFit::AsShown } else { TimescaleFit::PagesWide(wide) };
-        heading(ui, "Columns and pages");
-        ui.horizontal(|ui| {
-            ui.label("Repeat the first");
-            ui.add(egui::DragValue::new(&mut s.repeat_columns).range(0..=20));
-            ui.label("columns on every page");
-        });
-        ui.checkbox(&mut s.print_all_columns, "Print all table columns")
-            .on_hover_text("Otherwise only the columns left of the divider print, as on screen");
-        ui.checkbox(&mut s.print_blank_pages, "Print pages with no bars on them");
+        if drawing {
+            heading(ui, "Pages");
+            ui.checkbox(&mut s.print_blank_pages, "Print pages with nothing on them");
+        } else {
+            heading(ui, "Columns and pages");
+            ui.horizontal(|ui| {
+                ui.label("Repeat the first");
+                ui.add(egui::DragValue::new(&mut s.repeat_columns).range(0..=20));
+                ui.label("columns on every page");
+            });
+            ui.checkbox(&mut s.print_all_columns, "Print all table columns")
+                .on_hover_text("Otherwise only the columns left of the divider print, as on screen");
+            ui.checkbox(&mut s.print_blank_pages, "Print pages with no bars on them");
+        }
         heading(ui, "Header and footer");
         for (label, texts) in [("Header", &mut s.header), ("Footer", &mut s.footer)] {
             ui.label(RichText::new(label).color(weak));
