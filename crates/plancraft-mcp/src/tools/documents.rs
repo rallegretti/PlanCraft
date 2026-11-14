@@ -47,7 +47,7 @@ pub fn tools() -> Vec<Tool> {
         Tool::new(
             "open_project",
             "Open a project file",
-            "Open a .plancraft project file (or activate it if it is already open) and make it the active document. A Microsoft Project XML file (.xml, MSPDI) is imported as a new unsaved document instead: 'import_notes' then lists what could not be carried over, and save_project with a 'path' keeps it as a .plancraft plan.",
+            "Open a .plancraft project file (or activate it if it is already open) and make it the active document. A Microsoft Project XML file (.xml, MSPDI) is imported as a new unsaved document instead (opening it again while that import is unsaved activates it): 'import_notes' then lists what could not be carried over, and save_project with a .plancraft 'path' keeps it as a plan.",
             json!({
                 "type": "object",
                 "properties": { "path": string("Path of the .plancraft file to open, or of a Microsoft Project .xml file to import.") },
@@ -72,11 +72,11 @@ pub fn tools() -> Vec<Tool> {
         Tool::new(
             "export_mspdi",
             "Export Microsoft Project XML",
-            "Save the plan as a Microsoft Project XML (MSPDI) file that Microsoft Project and other planning tools can open. The document itself is not changed. 'notes' lists what the format could not carry (for example three-point estimates or Task Board columns).",
+            "Save the plan as a Microsoft Project XML (MSPDI) file that Microsoft Project and other planning tools can open. The document itself is not changed. 'notes' lists what the format could not carry (for example three-point estimates or Task Board columns). A relative path is relative to the PlanCraft process's working folder.",
             schema(
                 json!({
                     "path": string("File path ending in .xml (added when missing)."),
-                    "overwrite": boolean("Replace an existing file at 'path' (default false). Check with the user first."),
+                    "overwrite": boolean("Replace an existing Microsoft Project XML file at 'path' (default false). Other .xml files are never replaced. Check with the user first."),
                 }),
                 &["path"],
             ),
@@ -220,9 +220,15 @@ fn open_project(ctx: &Ctx, a: &Args) -> ToolResult {
     let p = PathBuf::from(&path);
     let p = if p.exists() { p } else { with_extension(&path) };
     let out = ctx.with_workspace(|ws| {
+        let before = ws.docs.len();
         let handle = ws.open(&p)?;
         let i = ws.index_of(handle).ok_or_else(|| missing("opened"))?;
-        let doc = doc_at(ws, i)?;
+        let created = ws.docs.len() > before;
+        let doc = doc_at_mut(ws, i)?;
+        if created && doc.imported {
+            // An agent's import is the agent's unsaved work (it may save or close it).
+            doc.user_changes = false;
+        }
         let mut out = project_overview(doc);
         if doc.imported && doc.path.is_none() {
             set(&mut out, "import_notes", json!(doc.load_notes));
@@ -278,6 +284,7 @@ fn save_project(ctx: &Ctx, a: &Args) -> ToolResult {
 
 fn export_mspdi(ctx: &Ctx, a: &Args) -> ToolResult {
     ctx.require_file_access("Exporting files")?;
+    let overwrite = a.bool("overwrite")?.unwrap_or(false);
     let raw = a.req_str("path")?.trim();
     if raw.is_empty() {
         return err("'path' is empty");
@@ -290,8 +297,14 @@ fn export_mspdi(ctx: &Ctx, a: &Args) -> ToolResult {
         Some(_) => return err("'path' must end in .xml"),
     };
     let path = if path.is_absolute() { path } else { std::env::current_dir().map(|c| c.join(&path)).unwrap_or(path) };
-    if path.exists() && !a.bool("overwrite")?.unwrap_or(false) {
-        return err(format!("{} already exists; pass overwrite: true to replace it (check with the user first)", path.display()));
+    if path.exists() {
+        if !overwrite {
+            return err(format!("{} already exists; pass overwrite: true to replace it (check with the user first)", path.display()));
+        }
+        // .xml files are everywhere (build files, settings): only another Project file is replaced.
+        if !plancraft_core::mspdi::is_mspdi_file(&path) {
+            return err(format!("{} is not a Microsoft Project XML file, so it is not replaced; choose another path", path.display()));
+        }
     }
     // Copy the plan, then write without holding the workspace.
     let project = ctx.read(a, |doc| Ok(doc.project.clone()))?;

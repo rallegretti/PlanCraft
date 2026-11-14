@@ -828,9 +828,11 @@ fn agents_export_and_import_microsoft_project_xml() {
     c.call("new_project", json!({ "name": "Exchange", "start": "2026-10-19" }));
     let a = c.call("create_task", json!({ "name": "Design", "duration": "5d" }));
     c.call("create_task", json!({ "name": "Build", "duration": "10d", "predecessors": [a["id"]] }));
+    c.call("update_task", json!({ "task": a["id"], "board_status": "In progress" }));
 
     let out = c.call("export_mspdi", json!({ "path": dir.path().join("plan").to_str().unwrap() }));
     assert_eq!(out["tasks"], 2, "{out}");
+    assert!(out["notes"].as_array().unwrap().iter().any(|n| n.as_str().unwrap().contains("Task Board")), "{out}");
     let xml = dir.path().join("plan.xml");
     assert!(std::fs::read_to_string(&xml).unwrap().contains("<Name>Build</Name>"));
     // Never silently replaces a file, never writes anything but .xml.
@@ -838,6 +840,12 @@ fn agents_export_and_import_microsoft_project_xml() {
     c.call("export_mspdi", json!({ "path": xml.to_str().unwrap(), "overwrite": true }));
     assert!(c.call_err("export_mspdi", json!({ "path": dir.path().join("plan.pdf").to_str().unwrap() })).contains(".xml"));
     assert!(c.call_err("export_mspdi", json!({ "path": " " })).contains("empty"));
+    // Another program's .xml file is never replaced, even with overwrite.
+    let pom = dir.path().join("pom.xml");
+    std::fs::write(&pom, "<project/>").unwrap();
+    let e = c.call_err("export_mspdi", json!({ "path": pom.to_str().unwrap(), "overwrite": true }));
+    assert!(e.contains("not a Microsoft Project XML file"), "{e}");
+    assert_eq!(std::fs::read_to_string(&pom).unwrap(), "<project/>");
 
     // Importing opens a new unsaved document an agent may save or close.
     let opened = c.call("open_project", json!({ "path": xml.to_str().unwrap() }));
@@ -845,6 +853,11 @@ fn agents_export_and_import_microsoft_project_xml() {
     assert_eq!(opened["statistics"]["tasks"], 2, "{opened}");
     let e = c.call_err("save_project", json!({}));
     assert!(e.contains("path"), "{e}");
+    // Opening it again shows the same unsaved import; saving it as .xml is refused.
+    let again = c.call("open_project", json!({ "path": xml.to_str().unwrap() }));
+    assert_eq!(again["document"], opened["document"]);
+    let e = c.call_err("save_project", json!({ "path": xml.to_str().unwrap(), "overwrite": true }));
+    assert!(e.contains(".plancraft"), "{e}");
     let saved = c.call("save_project", json!({ "path": dir.path().join("imported").to_str().unwrap() }));
     assert!(saved["path"].as_str().unwrap().ends_with("imported.plancraft"), "{saved}");
     c.call("close_project", json!({}));

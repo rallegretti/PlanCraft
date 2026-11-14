@@ -16,6 +16,13 @@ use crate::model::*;
 
 /// Most calendar exceptions made from one recurring exception or work week.
 const MAX_EXPANDED: usize = 5_000;
+/// Most days walked expanding recurring exceptions and work weeks in one file (a hostile file
+/// must not keep the importer busy or fill memory).
+const MAX_STEPS: usize = 1_000_000;
+/// Most personal exceptions copied into resources from calendars they are based on.
+const MAX_COPIED: usize = 200_000;
+/// Largest `Period` of a recurring exception that is followed (days, weeks, months or years).
+const MAX_PERIOD: i64 = 1_000;
 /// Most custom field definitions read.
 const MAX_DEFINITIONS: usize = 10_000;
 /// A yearly exception repeating at least this many times is kept as "every year".
@@ -169,16 +176,30 @@ pub fn import(text: &str, fallback_name: &str) -> Result<(Project, Vec<String>),
 fn assign_ids(uids: &[Option<i64>]) -> (Vec<u32>, HashMap<i64, u32>) {
     let valid = |u: i64| u32::try_from(u).ok().filter(|v| (1..=MAX_ID).contains(v));
     let mut next = uids.iter().filter_map(|u| u.and_then(valid)).max().unwrap_or(0);
-    let mut used = HashSet::new();
+    // Past the largest id, fresh ids fill the gaps from 1 up.
+    let mut low = 0u32;
+    let mut used: HashSet<u32> = uids.iter().filter_map(|u| u.and_then(valid)).collect();
+    let mut taken = HashSet::new();
     let mut map = HashMap::new();
     let mut ids = Vec::with_capacity(uids.len());
     for uid in uids {
         let id = match uid.and_then(valid) {
-            Some(v) if used.insert(v) => v,
+            Some(v) if taken.insert(v) => v,
             _ => {
-                next = next.saturating_add(1);
-                used.insert(next);
-                next
+                let fresh = if next < MAX_ID {
+                    next += 1;
+                    next
+                } else {
+                    loop {
+                        low = low.saturating_add(1);
+                        if !used.contains(&low) || low >= MAX_ID {
+                            break low;
+                        }
+                    }
+                };
+                used.insert(fresh);
+                taken.insert(fresh);
+                fresh
             }
         };
         if let Some(u) = uid {
@@ -211,6 +232,24 @@ impl Calendars {
     /// The PlanCraft calendar for a UID: a base calendar, or the base of a derived one.
     fn base_of(&self, uid: i64) -> Option<CalendarId> {
         self.base.get(&uid).copied().or_else(|| self.derived.get(&uid).and_then(|d| d.base).and_then(|b| self.base.get(&b).copied()))
+    }
+}
+
+/// What expanding calendars may still do (see [`MAX_STEPS`]).
+struct Budget {
+    steps: usize,
+}
+
+impl Budget {
+    /// Takes one step; false when the budget is spent.
+    fn step(&mut self) -> bool {
+        match self.steps.checked_sub(1) {
+            Some(left) => {
+                self.steps = left;
+                true
+            }
+            None => false,
+        }
     }
 }
 
@@ -251,6 +290,7 @@ fn day_ranges(e: &Element, notes: &mut Notes) -> Option<Vec<TimeRange>> {
 
 fn calendars(p: &mut Project, records: &[Element], notes: &mut Notes) -> Calendars {
     let mut out = Calendars::default();
+    let mut budget = Budget { steps: MAX_STEPS };
     if records.is_empty() {
         return out;
     }
@@ -273,8 +313,8 @@ fn calendars(p: &mut Project, records: &[Element], notes: &mut Notes) -> Calenda
             *week.day_mut(d) = standard_day(d);
         }
         let mut exceptions = Vec::new();
-        read_week(c, &mut week, &mut exceptions, notes);
-        read_exceptions(c, &mut exceptions, notes);
+        read_week(c, &mut week, &mut exceptions, &mut budget, notes);
+        read_exceptions(c, &mut exceptions, &mut budget, notes);
         if let Some(uid) = int(c, "UID") {
             out.base.entry(uid).or_insert(id);
         }
@@ -287,28 +327,33 @@ fn calendars(p: &mut Project, records: &[Element], notes: &mut Notes) -> Calenda
         let mut exceptions = Vec::new();
         let base_week = base.and_then(|b| out.base.get(&b)).and_then(|id| p.calendar(*id)).map(|c| c.week.clone()).unwrap_or_default();
         let mut week = base_week.clone();
-        read_week(c, &mut week, &mut exceptions, notes);
+        read_week(c, &mut week, &mut exceptions, &mut budget, notes);
         for d in WEEK {
             if week.day(d) != base_week.day(d) {
                 days.push((d, week.day(d).clone()));
             }
         }
-        read_exceptions(c, &mut exceptions, notes);
+        read_exceptions(c, &mut exceptions, &mut budget, notes);
         out.derived.entry(uid).or_insert(Derived { name: text(c, "Name"), base, days, exceptions });
     }
     out
 }
 
 /// Applies a calendar's `WeekDays` (DayType 1–7; DayType 0 is an exception) and `WorkWeeks`.
-fn read_week(c: &Element, week: &mut WorkWeek, exceptions: &mut Vec<CalendarException>, notes: &mut Notes) {
+fn read_week(c: &Element, week: &mut WorkWeek, exceptions: &mut Vec<CalendarException>, budget: &mut Budget, notes: &mut Notes) {
     if let Some(days) = c.child("WeekDays") {
         for wd in days.all("WeekDay") {
             match int(wd, "DayType") {
                 Some(0) => {
                     let Some(period) = wd.child("TimePeriod") else { continue };
                     let (Some(from), Some(to)) = (when(period, "FromDate"), when(period, "ToDate")) else { continue };
-                    let working = day_ranges(wd, notes).unwrap_or_default();
-                    let (from, to) = (from.date(), to.date().max(from.date()));
+                    if exceptions.len() >= limits::MAX_LIST {
+                        notes.add("a calendar has too many exceptions; only the first were imported");
+                        continue;
+                    }
+                    let working = exception_ranges(wd, notes);
+                    let from = limits::clamp_date(from.date());
+                    let to = limits::clamp_date(to.date()).max(from);
                     exceptions.push(CalendarException { name: "Exception".into(), start: from, end: to, working, yearly: false });
                 }
                 Some(code) => {
@@ -331,26 +376,35 @@ fn read_week(c: &Element, week: &mut WorkWeek, exceptions: &mut Vec<CalendarExce
             let mut changed: Vec<(Weekday, Vec<TimeRange>)> = Vec::new();
             for wd in ww.all("WeekDay") {
                 let Some(d) = int(wd, "DayType").and_then(codes::weekday_of) else { continue };
-                if let Some(ranges) = day_ranges(wd, notes) {
+                if let Some(ranges) = day_ranges(wd, notes)
+                    && ranges != *week.day(d)
+                {
                     changed.push((d, ranges));
                 }
             }
-            let mut d = from.date();
-            while d <= to.date() {
-                if let Some((_, ranges)) = changed.iter().find(|(w, _)| *w == d.weekday())
-                    && ranges != week.day(d.weekday())
-                {
-                    if days.len() >= MAX_EXPANDED {
-                        notes.add("a work week covers too many days; only the first were imported");
-                        break;
-                    }
+            if changed.is_empty() {
+                continue;
+            }
+            let (from, to) = (limits::clamp_date(from.date()), limits::clamp_date(to.date()));
+            let mut d = from;
+            while d <= to {
+                if !budget.step() || days.len() >= MAX_EXPANDED {
+                    notes.add("a work week covers too many days; only the first were imported");
+                    break;
+                }
+                if let Some((_, ranges)) = changed.iter().find(|(w, _)| *w == d.weekday()) {
                     days.push((d, ranges.clone(), name.clone()));
                 }
                 let Some(next) = d.checked_add_days(Days::new(1)) else { break };
                 d = next;
             }
         }
-        exceptions.extend(merge_days(days));
+        let room = limits::MAX_LIST.saturating_sub(exceptions.len());
+        let merged = merge_days(days);
+        if merged.len() > room {
+            notes.add("a calendar has too many exceptions; only the first were imported");
+        }
+        exceptions.extend(merged.into_iter().take(room));
     }
 }
 
@@ -383,26 +437,40 @@ fn nth_weekday(year: i32, month: u32, nth: i64, weekday: Weekday) -> Option<Naiv
         }
         return Some(d);
     }
-    NaiveDate::from_weekday_of_month_opt(year, month, weekday, u8::try_from(nth + 1).ok()?)
+    NaiveDate::from_weekday_of_month_opt(year, month, weekday, u8::try_from(nth.checked_add(1)?).ok()?)
 }
 
 /// `MonthItem` 3–9 is Sunday–Saturday.
 fn month_item_weekday(code: i64) -> Option<Weekday> {
-    codes::weekday_of(code - 2)
+    code.checked_sub(2).and_then(codes::weekday_of)
+}
+
+/// The working time of an exception: non-working, the listed times, or (working without
+/// times) a standard working day.
+fn exception_ranges(e: &Element, notes: &mut Notes) -> Vec<TimeRange> {
+    match (flag(e, "DayWorking"), day_ranges(e, notes)) {
+        (_, Some(r)) => r,
+        (Some(true), None) => standard_day(Weekday::Mon),
+        (_, None) => Vec::new(),
+    }
 }
 
 /// The `Exceptions` of a calendar (Project 2007 and later), recurring ones expanded into days.
-fn read_exceptions(c: &Element, out: &mut Vec<CalendarException>, notes: &mut Notes) {
+fn read_exceptions(c: &Element, out: &mut Vec<CalendarException>, budget: &mut Budget, notes: &mut Notes) {
     let Some(list) = c.child("Exceptions") else { return };
     for ex in list.all("Exception") {
+        if out.len() >= limits::MAX_LIST {
+            notes.add("a calendar has too many exceptions; only the first were imported");
+            break;
+        }
         let Some(period) = ex.child("TimePeriod") else { continue };
-        let Some(from) = when(period, "FromDate").map(|d| d.date()) else { continue };
-        let to = when(period, "ToDate").map_or(from, |d| d.date()).max(from);
+        let Some(from) = when(period, "FromDate").map(|d| limits::clamp_date(d.date())) else { continue };
+        let to = when(period, "ToDate").map_or(from, |d| limits::clamp_date(d.date())).max(from);
         let name = ex.text_of("Name").unwrap_or("Exception").to_string();
-        let working = day_ranges(ex, notes).unwrap_or_default();
+        let working = exception_ranges(ex, notes);
         let by_count = flag(ex, "EnteredByOccurrences").unwrap_or(false);
         let count = int(ex, "Occurrences").filter(|n| *n > 0);
-        let period_n = int(ex, "Period").filter(|n| *n > 0).unwrap_or(1);
+        let period_n = int(ex, "Period").filter(|n| *n > 0).unwrap_or(1).min(MAX_PERIOD).unsigned_abs();
         let kind = int(ex, "Type").unwrap_or(1);
         let single = |out: &mut Vec<CalendarException>| {
             out.push(CalendarException { name: name.clone(), start: from, end: to, working: working.clone(), yearly: false });
@@ -411,7 +479,12 @@ fn read_exceptions(c: &Element, out: &mut Vec<CalendarException>, notes: &mut No
         if kind == 2 {
             let years = if by_count { count.unwrap_or(1) } else { i64::from(to.year() - from.year()) + 1 };
             if years >= YEARLY_FOREVER && period_n == 1 {
-                out.push(CalendarException { name, start: from, end: from, working, yearly: true });
+                // On its Month and MonthDay (Month counts from 0), from the first year it falls in.
+                let month = int(ex, "Month").and_then(|m| u32::try_from(m).ok()).filter(|m| *m < 12).map_or(from.month(), |m| m + 1);
+                let day = int(ex, "MonthDay").and_then(|d| u32::try_from(d).ok()).unwrap_or(from.day());
+                let on = |y: i32| NaiveDate::from_ymd_opt(y, month, day);
+                let start = on(from.year()).filter(|d| *d >= from).or_else(|| from.year().checked_add(1).and_then(on)).unwrap_or(from);
+                out.push(CalendarException { name, start, end: start, working, yearly: true });
                 continue;
             }
         }
@@ -426,19 +499,26 @@ fn read_exceptions(c: &Element, out: &mut Vec<CalendarException>, notes: &mut No
                     continue;
                 }
                 let mut d = from;
-                while in_range(d, dates.len()) && dates.len() < MAX_EXPANDED {
+                while in_range(d, dates.len()) && dates.len() < MAX_EXPANDED && budget.step() {
                     dates.push(d);
-                    let Some(next) = d.checked_add_days(Days::new(period_n.unsigned_abs())) else { break };
+                    let Some(next) = d.checked_add_days(Days::new(period_n)) else { break };
                     d = next;
                 }
             }
             // Weekly every `Period` weeks, on the `DaysOfWeek` (1=Sunday … 64=Saturday).
             6 => {
-                let mask = int(ex, "DaysOfWeek").unwrap_or(0);
+                let mask = int(ex, "DaysOfWeek").unwrap_or(0) & 0x7f;
+                if mask == 0 {
+                    notes.add("a weekly calendar exception without days of the week was left out");
+                    continue;
+                }
                 let Some(mut week_start) = from.checked_sub_days(Days::new(u64::from(from.weekday().num_days_from_sunday()))) else {
                     continue;
                 };
-                'weeks: while dates.len() < MAX_EXPANDED {
+                'weeks: while dates.len() < MAX_EXPANDED && budget.step() {
+                    if !by_count && week_start > to {
+                        break;
+                    }
                     for i in 0..7u64 {
                         let Some(d) = week_start.checked_add_days(Days::new(i)) else { break 'weeks };
                         if d < from || mask & (1 << d.weekday().num_days_from_sunday()) == 0 {
@@ -449,7 +529,7 @@ fn read_exceptions(c: &Element, out: &mut Vec<CalendarException>, notes: &mut No
                         }
                         dates.push(d);
                     }
-                    let Some(next) = week_start.checked_add_days(Days::new(7 * period_n.unsigned_abs())) else { break };
+                    let Some(next) = week_start.checked_add_days(Days::new(7 * period_n)) else { break };
                     week_start = next;
                 }
             }
@@ -457,7 +537,7 @@ fn read_exceptions(c: &Element, out: &mut Vec<CalendarException>, notes: &mut No
             2..=5 => {
                 let yearly = kind <= 3;
                 let by_day = kind == 2 || kind == 4;
-                let step = if yearly { 12 * period_n.unsigned_abs() } else { period_n.unsigned_abs() };
+                let step = if yearly { 12 * period_n } else { period_n };
                 let month0 = if yearly {
                     int(ex, "Month").and_then(|m| u32::try_from(m).ok()).filter(|m| *m < 12).map_or(from.month(), |m| m + 1)
                 } else {
@@ -472,7 +552,7 @@ fn read_exceptions(c: &Element, out: &mut Vec<CalendarException>, notes: &mut No
                     continue;
                 }
                 let mut guard = 0;
-                while dates.len() < MAX_EXPANDED && guard < MAX_EXPANDED {
+                while dates.len() < MAX_EXPANDED && guard < MAX_EXPANDED && budget.step() {
                     guard += 1;
                     let d = if by_day {
                         int(ex, "MonthDay")
@@ -511,10 +591,15 @@ fn read_exceptions(c: &Element, out: &mut Vec<CalendarException>, notes: &mut No
                 continue;
             }
         }
-        if dates.len() >= MAX_EXPANDED {
+        if dates.len() >= MAX_EXPANDED || budget.steps == 0 {
             notes.add("a recurring calendar exception repeats too often; only its first occurrences were imported");
         }
-        out.extend(merge_days(dates.into_iter().map(|d| (d, working.clone(), name.clone())).collect()));
+        let room = limits::MAX_LIST.saturating_sub(out.len());
+        let merged = merge_days(dates.into_iter().map(|d| (d, working.clone(), name.clone())).collect());
+        if merged.len() > room {
+            notes.add("a calendar has too many exceptions; only the first were imported");
+        }
+        out.extend(merged.into_iter().take(room));
     }
 }
 
@@ -564,7 +649,7 @@ fn definitions(p: &mut Project, defs: &[Element], notes: &mut Notes) -> Fields {
                 if let Some(id) = int(v, "ID") {
                     list.insert(id, t.to_string());
                 }
-                if slot.kind == CustomFieldKind::Text && flag(d, "RestrictValues").unwrap_or(true) {
+                if slot.kind == CustomFieldKind::Text && flag(d, "RestrictValues").unwrap_or(false) {
                     choices.push(t.to_string());
                 }
             }
@@ -849,6 +934,8 @@ fn resources(p: &mut Project, records: &[Element], cals: &Calendars, notes: &mut
         records.iter().filter(|r| flag(r, "IsNull") != Some(true) && !(int(r, "UID") == Some(0) && r.text_of("Name").is_none())).collect();
     let uids: Vec<Option<i64>> = rows.iter().map(|r| int(r, "UID")).collect();
     let (ids, map) = assign_ids(&uids);
+    let mut copied = 0usize;
+    let mut own_week: HashMap<i64, CalendarId> = HashMap::new();
     for (r, id) in rows.iter().zip(ids) {
         let id = ResourceId(id);
         let name = r.text_of("Name").map_or_else(|| format!("Resource {}", id.0), str::to_string);
@@ -886,19 +973,29 @@ fn resources(p: &mut Project, records: &[Element], cals: &Calendars, notes: &mut
             match cals.derived.get(&uid) {
                 Some(d) => {
                     let base = d.base.and_then(|b| cals.base.get(&b).copied());
-                    res.exceptions = d.exceptions.clone();
+                    // Its exceptions become the resource's time off, within a budget for the
+                    // whole file (a calendar shared by thousands of resources is copied to each).
+                    if copied.saturating_add(d.exceptions.len()) <= MAX_COPIED {
+                        copied += d.exceptions.len();
+                        res.exceptions = d.exceptions.clone();
+                    } else {
+                        notes.add("too many resources share a calendar with time off; some resources' time off was left out");
+                    }
                     if d.days.is_empty() {
                         res.calendar = base;
+                    } else if let Some(own) = own_week.get(&uid) {
+                        res.calendar = Some(*own);
                     } else if p.calendars.len() < MAX_CALENDARS {
-                        // The resource works a different week: a calendar of its own.
+                        // The resource works a different week: a calendar of its own, keeping
+                        // the base calendar's holidays.
                         let mut cal = base.and_then(|b| p.calendar(b)).cloned().unwrap_or_else(|| p.base_calendar().clone());
                         cal.id = p.ids.next_calendar();
                         cal.name = if d.name.is_empty() { res.name.clone() } else { d.name.clone() };
-                        cal.exceptions.clear();
                         for (day, ranges) in &d.days {
                             *cal.week.day_mut(*day) = ranges.clone();
                         }
                         res.calendar = Some(cal.id);
+                        own_week.insert(uid, cal.id);
                         p.calendars.push(cal);
                     } else {
                         res.calendar = base;

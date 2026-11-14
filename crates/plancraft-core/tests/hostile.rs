@@ -166,6 +166,9 @@ proptest! {
             let mut copy = doc.project.clone();
             prop_assert!(limits::sanitize(&mut copy).is_empty(), "{op:?} left values out of range");
         }
+        // Whatever the edits left exports to Microsoft Project XML and imports again.
+        let (xml, _) = plancraft_core::mspdi::to_xml(&doc.project);
+        check_mspdi(&xml)?;
         // Whatever the edits left, the plan prints (table and chart) to a valid PDF, also over
         // any date range and at any zoom.
         let p = &doc.project;
@@ -896,10 +899,40 @@ fn mspdi_sample() -> String {
     plancraft_core::mspdi::to_xml(&p).0
 }
 
-/// Imports MSPDI text: either an error, or a plan that is in range and schedules.
+thread_local! {
+    static PANICS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts panics on this thread, even those a guard turns into an error (the default report
+/// still goes to stderr).
+fn count_panics() {
+    static HOOK: std::sync::Once = std::sync::Once::new();
+    HOOK.call_once(|| {
+        let default = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            PANICS.with(|p| p.set(p.get() + 1));
+            default(info);
+        }));
+    });
+}
+
+fn panics() -> usize {
+    PANICS.with(std::cell::Cell::get)
+}
+
+/// Imports MSPDI text: either an error, or a plan that is in range and schedules; never a panic,
+/// not even one a guard catches.
 fn check_mspdi(text: &str) -> Result<(), TestCaseError> {
-    match plancraft_core::mspdi::from_xml(text, "x") {
-        Err(e) => prop_assert!(!e.contains("internal error"), "a panic was caught: {e}"),
+    check_mspdi_bytes(text.as_bytes())
+}
+
+fn check_mspdi_bytes(bytes: &[u8]) -> Result<(), TestCaseError> {
+    count_panics();
+    let before = panics();
+    let imported = plancraft_core::mspdi::from_bytes(bytes, "x");
+    prop_assert_eq!(panics(), before, "the importer panicked");
+    match imported {
+        Err(_) => {}
         Ok((mut p, _)) => {
             prop_assert!(limits::check_counts(&p).is_ok());
             prop_assert!(plancraft_core::schedule::try_recalculate(&mut p).is_ok());
@@ -908,6 +941,7 @@ fn check_mspdi(text: &str) -> Result<(), TestCaseError> {
             // What was imported exports and imports again.
             let (again, _) = plancraft_core::mspdi::to_xml(&p);
             prop_assert!(plancraft_core::mspdi::from_xml(&again, "x").is_ok());
+            prop_assert_eq!(panics(), before, "scheduling or exporting the import panicked");
         }
     }
     Ok(())
@@ -969,6 +1003,71 @@ proptest! {
         let text: String = parts.concat();
         check_mspdi(&text)?;
     }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(cases(256)))]
+
+    /// Any bytes: UTF-16 of odd length, a byte order mark with nothing after it, broken UTF-8.
+    #[test]
+    fn arbitrary_bytes_never_panic_the_importer(bytes in prop_oneof![
+        prop::collection::vec(any::<u8>(), 0..300),
+        prop::collection::vec(any::<u8>(), 0..300).prop_map(|b| [vec![0xFF, 0xFE], b].concat()),
+        prop::collection::vec(any::<u8>(), 0..300).prop_map(|b| [vec![0xFE, 0xFF], b].concat()),
+    ]) {
+        check_mspdi_bytes(&bytes)?;
+    }
+}
+
+/// Regressions from reviewing the importer: each of these files once made it panic on an
+/// overflow, walk dates for seconds, or fill gigabytes of memory.
+#[test]
+fn hostile_mspdi_calendars_are_bounded() {
+    let timed = |name: &str, xml: String| {
+        let t = std::time::Instant::now();
+        check_mspdi(&xml).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let (p, _) = plancraft_core::mspdi::from_xml(&xml, "x").unwrap();
+        assert!(
+            t.elapsed() < std::time::Duration::from_secs(if cfg!(debug_assertions) { 60 } else { 10 }),
+            "{name} took {:?}",
+            t.elapsed()
+        );
+        p
+    };
+    let cal = |inner: &str| {
+        format!("<Project><Calendars><Calendar><UID>1</UID><IsBaseCalendar>1</IsBaseCalendar>{inner}</Calendar></Calendars></Project>")
+    };
+    // Overflowing values in a recurring exception.
+    for (kind, extra) in [
+        (2, "<Period>9223372036854775807</Period>"),
+        (6, "<Period>9223372036854775807</Period><DaysOfWeek>2</DaysOfWeek>"),
+        (5, "<MonthItem>-9223372036854775808</MonthItem><MonthPosition>9223372036854775807</MonthPosition>"),
+        (3, "<MonthItem>4</MonthItem><MonthPosition>9223372036854775807</MonthPosition>"),
+    ] {
+        let ex = format!(
+            "<Exceptions><Exception><TimePeriod><FromDate>2026-01-01</FromDate><ToDate>2030-01-01</ToDate></TimePeriod><Type>{kind}</Type>{extra}</Exception></Exceptions>"
+        );
+        timed("overflow", cal(&ex));
+    }
+    // A weekly exception on no day, and a work week spanning hundreds of thousands of years.
+    let ex = "<Exceptions><Exception><TimePeriod><FromDate>2026-01-01</FromDate><ToDate>2300-01-01</ToDate></TimePeriod><Type>6</Type><DaysOfWeek>128</DaysOfWeek></Exception></Exceptions>".repeat(50);
+    timed("weekly on no day", cal(&ex));
+    let ww = "<WorkWeeks><WorkWeek><TimePeriod><FromDate>-200000-01-01T00:00:00</FromDate><ToDate>+200000-01-01T00:00:00</ToDate></TimePeriod><WeekDay><DayType>1</DayType><DayWorking>1</DayWorking><WorkingTimes><WorkingTime><FromTime>08:00:00</FromTime><ToTime>12:00:00</ToTime></WorkingTime></WorkingTimes></WeekDay></WorkWeek></WorkWeeks>".repeat(50);
+    timed("endless work weeks", cal(&ww));
+    // Thousands of exceptions that each repeat thousands of times: capped per calendar.
+    let ex = "<Exception><TimePeriod><FromDate>1900-01-01</FromDate></TimePeriod><Type>1</Type><Period>2</Period><EnteredByOccurrences>1</EnteredByOccurrences><Occurrences>9999</Occurrences></Exception>".repeat(3000);
+    let p = timed("many exceptions", cal(&format!("<Exceptions>{ex}</Exceptions>")));
+    assert!(p.calendars.iter().all(|c| c.exceptions.len() <= limits::MAX_LIST));
+    // One resource calendar with a lot of time off shared by thousands of resources.
+    let ex = "<Exception><TimePeriod><FromDate>1900-01-01</FromDate></TimePeriod><Type>1</Type><Period>2</Period><EnteredByOccurrences>1</EnteredByOccurrences><Occurrences>5000</Occurrences></Exception>".repeat(2);
+    let resources: String =
+        (1..=6000).map(|i| format!("<Resource><UID>{i}</UID><Name>R{i}</Name><CalendarUID>2</CalendarUID></Resource>")).collect();
+    let xml = format!(
+        "<Project><Calendars><Calendar><UID>1</UID><IsBaseCalendar>1</IsBaseCalendar></Calendar><Calendar><UID>2</UID><IsBaseCalendar>0</IsBaseCalendar><BaseCalendarUID>1</BaseCalendarUID><Exceptions>{ex}</Exceptions></Calendar></Calendars><Resources>{resources}</Resources></Project>"
+    );
+    let p = timed("shared resource calendar", xml);
+    let copied: usize = p.resources.iter().map(|r| r.exceptions.len()).sum();
+    assert!(copied <= 200_000, "{copied} exceptions copied");
 }
 
 #[test]

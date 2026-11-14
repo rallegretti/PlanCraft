@@ -1551,7 +1551,7 @@ fn mspdi_assignment_contour_codes() {
 }
 
 // Source: https://learn.microsoft.com/en-us/office-project/xml-data-interchange/xml-schema-for-the-extendedattributes-element — "ExtendedAttributes Schema" (FieldID, CFType, Alias)
-// Source: https://learn.microsoft.com/en-us/office/vba/api/project.pjfield — "Members" (pjTaskText1, pjTaskNumber1)
+// Source: https://learn.microsoft.com/en-us/office/vba/api/project.pjfield — the constants table (pjTaskText1, pjTaskNumber1)
 // A custom field is defined by the PjField id of the field it uses (Text1 is 188743731, Number1
 // 188743767), its type (CFType 7 text, 5 number) and its alias; tasks hold values by field id.
 #[test]

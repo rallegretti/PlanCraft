@@ -206,19 +206,7 @@ impl PlanCraftApp {
     }
 
     fn open_path(&mut self, path: PathBuf) {
-        let r = {
-            let mut ws = lock(&self.ws);
-            let r = ws.open(&path);
-            // A plan the user imported is the user's unsaved work.
-            if r.is_ok()
-                && let Some(doc) = ws.active_doc_mut()
-                && doc.imported
-                && doc.path.is_none()
-            {
-                doc.user_changes = true;
-            }
-            r
-        };
+        let r = lock(&self.ws).open(&path);
         match r {
             Ok(_) => {
                 self.settings.add_recent(path.clone());
@@ -315,18 +303,21 @@ impl PlanCraftApp {
         else {
             return;
         };
-        let path = if path.extension().is_none() {
-            // The file dialog only asked about the name as typed: never replace "x.xml" unasked.
-            let with_ext = path.with_extension(ext);
-            if with_ext.exists() {
-                return self.st.toast(
-                    ToastKind::Warning,
-                    format!("{} already exists. Choose it in the dialog to replace it, or pick another name.", with_ext.display()),
-                );
+        let path = match path.extension() {
+            None => {
+                // The file dialog only asked about the name as typed: never replace "x.xml" unasked.
+                let with_ext = path.with_extension(ext);
+                if with_ext.exists() {
+                    return self.st.toast(
+                        ToastKind::Warning,
+                        format!("{} already exists. Choose it in the dialog to replace it, or pick another name.", with_ext.display()),
+                    );
+                }
+                with_ext
             }
-            with_ext
-        } else {
-            path
+            Some(e) if e.eq_ignore_ascii_case(ext) => path,
+            // Never write XML over a plan or any other kind of file.
+            Some(_) => return self.st.toast(ToastKind::Warning, "Choose a file name ending in .xml to export Microsoft Project XML."),
         };
         match plancraft_core::io::write_atomic(&path, xml.as_bytes(), plancraft_core::io::Privacy::KeepExisting) {
             Ok(()) if notes.is_empty() => self.set_status(format!("Exported {}", path.display())),
@@ -1672,7 +1663,7 @@ impl PlanCraftApp {
                 list.push_str(&format!("; and {} more", notes.len() - SHOWN));
             }
             let msg = if doc.imported {
-                format!("Imported {} from Microsoft Project XML. Save it to keep it as a PlanCraft plan. Notes: {list}", doc.title())
+                format!("Imported {} from Microsoft Project XML. Save it to keep it as a PlanCraft plan. Notes: {list}", doc.project.name)
             } else {
                 format!("Opened {}; PlanCraft adjusted out-of-range values: {list}", doc.title())
             };
@@ -2912,7 +2903,11 @@ mod ui_tests {
             assert_eq!(doc.project.tasks.len(), 1);
             assert!(doc.imported && doc.path.is_none() && doc.dirty && doc.user_changes);
         }
-        assert!(h.state().st.toasts.iter().any(|t| t.text.contains("Imported") && t.text.contains("not in the file")));
+        assert!(h.state().st.toasts.iter().any(|t| t.text.contains("Imported Exchange from") && t.text.contains("not in the file")));
+        // Opening it again shows the same unsaved import.
+        h.state_mut().exec(&ctx, Command::OpenPath(path.clone()));
+        h.run_steps(2);
+        assert_eq!(h.state().ws.lock().unwrap().docs.len(), 1);
     }
 
     /// Regression: opening a cell editor and leaving with Enter used to commit the displayed text,

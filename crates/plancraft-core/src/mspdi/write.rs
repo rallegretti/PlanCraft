@@ -78,7 +78,6 @@ pub fn export(p: &Project) -> (String, Vec<String>) {
     if let Some(d) = p.status_date {
         w.leaf("StatusDate", codes::datetime_text(d.and_time(chrono::NaiveTime::MIN)));
     }
-    w.leaf("CurrentDate", codes::datetime_text(chrono::Local::now().naive_local()));
 
     // Custom fields: the first fields of each kind take Text1, Text2, … (and Number1, …).
     let mut slots: HashMap<CustomFieldId, (u32, CustomFieldKind)> = HashMap::new();
@@ -127,7 +126,7 @@ pub fn export(p: &Project) -> (String, Vec<String>) {
         w.leaf("UID", base_uid(c.id));
         w.leaf("Name", &c.name);
         w.leaf("IsBaseCalendar", 1);
-        week(&mut w, &c.week);
+        week(&mut w, &c.week, &mut note);
         exceptions(&mut w, &c.exceptions, &mut note);
         w.close("Calendar");
     }
@@ -228,8 +227,12 @@ pub fn export(p: &Project) -> (String, Vec<String>) {
         let v = tracked.entry((e.task, e.resource)).or_insert(0);
         *v = v.saturating_add(e.minutes);
     }
+    let assigned: std::collections::HashSet<(TaskId, ResourceId)> = p.assignments.iter().map(|a| (a.task, a.resource)).collect();
     if !p.time_entries.is_empty() {
         note("logged time entries were written as the assignments' actual work");
+    }
+    if p.time_entries.iter().any(|e| !assigned.contains(&(e.task, e.resource))) {
+        note("logged time of people not assigned to the task was left out");
     }
     for a in &p.assignments {
         w.open("Assignment");
@@ -276,6 +279,9 @@ pub fn export(p: &Project) -> (String, Vec<String>) {
     if p.tasks.iter().any(|t| t.board_status.is_some() || !t.show_on_board) {
         note("Task Board columns were left out");
     }
+    if p.resources.iter().any(|r| r.kind != ResourceType::Work && (r.calendar.is_some() || !r.exceptions.is_empty())) {
+        note("calendars of material and cost resources were left out");
+    }
     if p.resources.iter().any(|r| r.category != ResourceCategory::TeamMember) {
         note("resource categories were left out");
     }
@@ -283,29 +289,54 @@ pub fn export(p: &Project) -> (String, Vec<String>) {
     (w.finish(), out)
 }
 
-fn week(w: &mut Writer, week: &WorkWeek) {
+/// A leveling delay as an integer in the unit of its format (the schema's type is an integer):
+/// whole days (7) or hours (5) when it divides evenly, otherwise minutes (3).
+fn leveling_delay(minutes: Minutes, minutes_per_day: Minutes) -> (Minutes, i64) {
+    let day = minutes_per_day.max(1);
+    if minutes % day == 0 {
+        (minutes / day, 7)
+    } else if minutes % 60 == 0 {
+        (minutes / 60, 5)
+    } else {
+        (minutes, 3)
+    }
+}
+
+fn week(w: &mut Writer, week: &WorkWeek, note: &mut impl FnMut(&'static str)) {
     use chrono::Weekday::*;
     w.open("WeekDays");
     for d in [Sun, Mon, Tue, Wed, Thu, Fri, Sat] {
         w.open("WeekDay");
         w.leaf("DayType", codes::weekday_code(d));
-        times(w, week.day(d));
+        times(w, week.day(d), note);
         w.close("WeekDay");
     }
     w.close("WeekDays");
 }
 
-/// `DayWorking` and `WorkingTimes` (at most five: later ones are joined into the fifth).
-fn times(w: &mut Writer, ranges: &[TimeRange]) {
+/// `DayWorking` and `WorkingTimes`: at most five, so more are joined across their shortest
+/// breaks (which then count as working time).
+fn times(w: &mut Writer, ranges: &[TimeRange], note: &mut impl FnMut(&'static str)) {
     w.leaf("DayWorking", u8::from(!ranges.is_empty()));
     if ranges.is_empty() {
         return;
     }
-    let mut list: Vec<TimeRange> = ranges.iter().take(MAX_TIMES).copied().collect();
-    if ranges.len() > MAX_TIMES
-        && let (Some(last), Some(end)) = (list.last_mut(), ranges.last())
-    {
-        last.end = end.end;
+    let mut list: Vec<TimeRange> = ranges.to_vec();
+    if list.len() > MAX_TIMES {
+        note("days with more than five working times were written with their shortest breaks worked");
+    }
+    while list.len() > MAX_TIMES {
+        let shortest = list
+            .windows(2)
+            .enumerate()
+            .min_by_key(|(_, p)| p.get(1).map_or(0, |b| b.start).saturating_sub(p.first().map_or(0, |a| a.end)))
+            .map(|(i, _)| i);
+        let Some(i) = shortest else { break };
+        let Some(next) = list.get(i + 1).copied() else { break };
+        if let Some(r) = list.get_mut(i) {
+            r.end = next.end;
+        }
+        list.remove(i + 1);
     }
     w.open("WorkingTimes");
     for r in list {
@@ -329,7 +360,7 @@ fn exceptions(w: &mut Writer, list: &[CalendarException], note: &mut impl FnMut(
             w.leaf("EnteredByOccurrences", 1);
             w.open("TimePeriod");
             w.leaf("FromDate", codes::datetime_text(e.start.and_time(chrono::NaiveTime::MIN)));
-            let last = e.start.with_year(e.start.year().saturating_add(YEARLY_OCCURRENCES - 1)).unwrap_or(e.end);
+            let last = shift_year(e.start, YEARLY_OCCURRENCES - 1).unwrap_or(e.end);
             w.leaf("ToDate", codes::datetime_text(last.and_hms_opt(23, 59, 0).unwrap_or(last.and_time(chrono::NaiveTime::MIN))));
             w.close("TimePeriod");
             w.leaf("Occurrences", YEARLY_OCCURRENCES);
@@ -338,7 +369,7 @@ fn exceptions(w: &mut Writer, list: &[CalendarException], note: &mut impl FnMut(
             w.leaf("Period", 1);
             w.leaf("Month", e.start.month0());
             w.leaf("MonthDay", e.start.day());
-            times(w, &e.working);
+            times(w, &e.working, note);
             w.close("Exception");
             continue;
         }
@@ -360,7 +391,7 @@ fn exceptions(w: &mut Writer, list: &[CalendarException], note: &mut impl FnMut(
             w.leaf("Name", &e.name);
             w.leaf("Type", 1);
             w.leaf("Period", 1);
-            times(w, &e.working);
+            times(w, &e.working, note);
             w.close("Exception");
         }
     }
@@ -385,13 +416,14 @@ fn task(
     w.leaf("UID", t.id.0);
     w.leaf("ID", row + 1);
     w.leaf("Name", &t.name);
-    w.leaf("Type", codes::task_type_code(t.task_type));
+    // Not in the 2007 schema: named after the Task.Active and Task.Manual fields, before Type.
     if !t.active {
         w.leaf("Active", 0);
     }
     if t.mode == ScheduleMode::Manual {
         w.leaf("Manual", 1);
     }
+    w.leaf("Type", codes::task_type_code(t.task_type));
     w.leaf("WBS", p.wbs(row));
     w.leaf("OutlineNumber", p.wbs(row));
     w.leaf("OutlineLevel", t.outline_level);
@@ -442,10 +474,9 @@ fn task(
         w.leaf("Deadline", codes::datetime_text(d));
     }
     if t.leveling_delay > 0 {
-        // In the unit of LevelingDelayFormat (days).
-        let days = t.leveling_delay as f64 / s.time.minutes_per_day.max(1) as f64;
-        w.leaf("LevelingDelay", days);
-        w.leaf("LevelingDelayFormat", 7);
+        let (value, format) = leveling_delay(t.leveling_delay, s.time.minutes_per_day);
+        w.leaf("LevelingDelay", value);
+        w.leaf("LevelingDelayFormat", format);
     }
     w.leaf("IgnoreResourceCalendar", u8::from(t.ignore_resource_calendars));
     if !t.notes.is_empty() {

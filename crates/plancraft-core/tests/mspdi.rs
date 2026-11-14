@@ -74,7 +74,8 @@ fn rich_plan() -> Project {
         t.priority = 900;
         t.task_type = TaskType::FixedDuration;
         t.effort_driven = true;
-        t.leveling_delay = 2 * 480;
+        // Not a whole number of days or hours: written in minutes (LevelingDelay is an integer).
+        t.leveling_delay = 2 * 480 + 25;
         t.fixed_cost = 99.5;
         t.estimated = true;
     }
@@ -124,6 +125,9 @@ fn a_plan_survives_a_round_trip_through_mspdi() {
     let p = rich_plan();
     let (q, xml, out_notes, in_notes) = round_trip(&p);
     assert!(xml.starts_with("<?xml"), "{xml}");
+    assert!(xml.contains("<LevelingDelay>985</LevelingDelay>\n") && xml.contains("<LevelingDelayFormat>3</LevelingDelayFormat>"), "{xml}");
+    let (again, _) = mspdi::to_xml(&p);
+    assert_eq!(xml, again, "the same plan always exports to the same file");
     assert!(in_notes.is_empty(), "nothing is lost reading our own export: {in_notes:?}");
     let _ = out_notes;
 
@@ -333,7 +337,8 @@ fn recurring_calendar_exceptions_are_expanded() {
 #[test]
 fn resource_calendars_become_personal_exceptions_or_a_calendar_of_their_own() {
     let xml = r#"<Project><StartDate>2026-10-19T08:00:00</StartDate><CalendarUID>1</CalendarUID><Calendars>
-      <Calendar><UID>1</UID><Name>Std</Name><IsBaseCalendar>1</IsBaseCalendar></Calendar>
+      <Calendar><UID>1</UID><Name>Std</Name><IsBaseCalendar>1</IsBaseCalendar>
+        <Exceptions><Exception><TimePeriod><FromDate>2026-12-25T00:00:00</FromDate><ToDate>2026-12-25T23:59:00</ToDate></TimePeriod><Name>Christmas</Name><DayWorking>0</DayWorking></Exception></Exceptions></Calendar>
       <Calendar><UID>2</UID><Name>Ana</Name><IsBaseCalendar>0</IsBaseCalendar><BaseCalendarUID>1</BaseCalendarUID>
         <Exceptions><Exception><TimePeriod><FromDate>2026-10-20T00:00:00</FromDate><ToDate>2026-10-21T23:59:00</ToDate></TimePeriod><Name>Leave</Name><Type>1</Type><Period>1</Period><DayWorking>0</DayWorking></Exception></Exceptions></Calendar>
       <Calendar><UID>3</UID><Name>Ben</Name><IsBaseCalendar>0</IsBaseCalendar><BaseCalendarUID>1</BaseCalendarUID>
@@ -353,4 +358,96 @@ fn resource_calendars_become_personal_exceptions_or_a_calendar_of_their_own() {
     let own = p.calendar(ben.calendar.expect("Ben has a calendar of their own")).unwrap();
     assert!(own.week.friday.is_empty());
     assert_eq!(own.week.monday, p.base_calendar().week.monday);
+    // Regression: a calendar of their own dropped the base calendar's holidays.
+    assert_eq!(own.exceptions, p.base_calendar().exceptions);
+    assert_eq!(own.exceptions.len(), 1);
+}
+
+#[test]
+fn ids_at_the_limit_never_make_a_file_unreadable() {
+    let max = plancraft_core::limits::MAX_ID;
+    let xml = format!(
+        "<Project><Tasks><Task><UID>{max}</UID><Name>A</Name><OutlineLevel>1</OutlineLevel></Task><Task><UID>{max}</UID><Name>B</Name><OutlineLevel>1</OutlineLevel></Task><Task><Name>C</Name><OutlineLevel>1</OutlineLevel></Task></Tasks></Project>"
+    );
+    let (p, _) = mspdi::from_xml(&xml, "x").unwrap();
+    let ids: Vec<u32> = p.tasks.iter().map(|t| t.id.0).collect();
+    assert_eq!(ids, [max, 1, 2]);
+}
+
+#[test]
+fn exported_calendars_follow_the_schema() {
+    let mut p = Project::new("Cal", d(2028, 1, 3));
+    let id = p.calendar;
+    let c = p.calendars.iter_mut().find(|c| c.id == id).unwrap();
+    // Six working times on Monday: MSPDI has room for five, so the shortest break is worked.
+    c.week.monday = vec![
+        TimeRange::new(480, 540),
+        TimeRange::new(545, 600),
+        TimeRange::new(660, 720),
+        TimeRange::new(780, 840),
+        TimeRange::new(900, 960),
+        TimeRange::new(1000, 1020),
+    ];
+    c.exceptions.push(CalendarException {
+        name: "Leap".into(),
+        start: d(2028, 2, 29),
+        end: d(2028, 2, 29),
+        working: Vec::new(),
+        yearly: true,
+    });
+    let (xml, notes) = mspdi::to_xml(&p);
+    assert!(notes.iter().any(|n| n.contains("five working times")), "{notes:?}");
+    let (q, _) = mspdi::from_xml(&xml, "x").unwrap();
+    assert_eq!(
+        q.base_calendar().week.monday,
+        vec![
+            TimeRange::new(480, 600),
+            TimeRange::new(660, 720),
+            TimeRange::new(780, 840),
+            TimeRange::new(900, 960),
+            TimeRange::new(1000, 1020)
+        ]
+    );
+    // A yearly exception on 29 February runs for a hundred years, to 28 February 2127.
+    assert!(xml.contains("<ToDate>2127-02-28T23:59:00</ToDate>"), "{xml}");
+}
+
+#[test]
+fn only_project_files_count_as_project_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let ours = dir.path().join("a.xml");
+    mspdi::save(&rich_plan(), &ours).unwrap();
+    assert!(mspdi::is_mspdi_file(&ours));
+    let other = dir.path().join("pom.xml");
+    std::fs::write(&other, "<?xml version=\"1.0\"?>\n<!-- build -->\n<project><modelVersion>4</modelVersion></project>").unwrap();
+    assert!(!mspdi::is_mspdi_file(&other));
+    let prefixed = dir.path().join("p.xml");
+    std::fs::write(&prefixed, "<p:Project xmlns:p=\"x\"></p:Project>").unwrap();
+    assert!(mspdi::is_mspdi_file(&prefixed));
+    assert!(!mspdi::is_mspdi_file(dir.path()));
+    assert!(!mspdi::is_mspdi_file(&dir.path().join("missing.xml")));
+}
+
+#[test]
+fn imports_are_saved_as_plans_and_not_imported_twice() {
+    use plancraft_core::workspace::Workspace;
+    let dir = tempfile::tempdir().unwrap();
+    let xml = dir.path().join("from.xml");
+    mspdi::save(&rich_plan(), &xml).unwrap();
+    let mut ws = Workspace::default();
+    let a = ws.open(&xml).unwrap();
+    let doc = ws.active_doc().unwrap();
+    assert!(doc.imported && doc.user_changes && doc.dirty && doc.path.is_none());
+    // Opening it again while the import is unsaved shows that import.
+    assert_eq!(ws.open(&xml).unwrap(), a);
+    assert_eq!(ws.docs.len(), 1);
+    // Saving it under an .xml name would write a plan that opens as a broken import: refused.
+    let doc = ws.active_doc_mut().unwrap();
+    let e = doc.save_as(&xml).unwrap_err().to_string();
+    assert!(e.contains(".plancraft"), "{e}");
+    assert!(mspdi::is_mspdi_file(&xml), "the original file is untouched");
+    doc.save_as(dir.path().join("kept.plancraft")).unwrap();
+    // Once saved as a plan, opening the .xml again imports a fresh copy.
+    assert_ne!(ws.open(&xml).unwrap(), a);
+    assert_eq!(ws.docs.len(), 2);
 }

@@ -16,6 +16,8 @@ use quick_xml::events::{BytesRef, Event};
 const MAX_DEPTH: usize = 32;
 /// Most elements kept in one record.
 const MAX_RECORD_ELEMENTS: usize = 200_000;
+/// Most elements kept from one file (bounds memory: about 100 bytes each).
+const MAX_DOCUMENT_ELEMENTS: usize = 4_000_000;
 /// Most bytes of text in one element.
 const MAX_TEXT_BYTES: usize = 4 * 1024 * 1024;
 
@@ -76,6 +78,7 @@ pub fn read(text: &str, mut on: impl FnMut(Item) -> Result<(), String>) -> Resul
     // Inside a skipped subtree: how many of its elements are open.
     let mut skipping = 0usize;
     let mut record_elements = 0usize;
+    let mut total_elements = 0usize;
     let mut root_done = false;
     loop {
         let pos = reader.buffer_position();
@@ -88,6 +91,7 @@ pub fn read(text: &str, mut on: impl FnMut(Item) -> Result<(), String>) -> Resul
                     continue;
                 }
                 let name = String::from_utf8_lossy(e.local_name().as_ref()).into_owned();
+                count(&mut total_elements)?;
                 if open(&mut stack, name, root_done, &mut record_elements)? {
                     skipping = 1;
                 }
@@ -97,6 +101,7 @@ pub fn read(text: &str, mut on: impl FnMut(Item) -> Result<(), String>) -> Resul
                     continue;
                 }
                 let name = String::from_utf8_lossy(e.local_name().as_ref()).into_owned();
+                count(&mut total_elements)?;
                 if !open(&mut stack, name, root_done, &mut record_elements)? {
                     root_done |= close(&mut stack, &mut on)?;
                 }
@@ -127,6 +132,14 @@ pub fn read(text: &str, mut on: impl FnMut(Item) -> Result<(), String>) -> Resul
     }
     if !root_done {
         return Err("the file ended before the end of the Project element".into());
+    }
+    Ok(())
+}
+
+fn count(total: &mut usize) -> Result<(), String> {
+    *total = total.saturating_add(1);
+    if *total > MAX_DOCUMENT_ELEMENTS {
+        return Err(format!("the file has more than {MAX_DOCUMENT_ELEMENTS} elements"));
     }
     Ok(())
 }

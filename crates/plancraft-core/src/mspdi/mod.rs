@@ -32,6 +32,42 @@ pub fn is_mspdi_path(path: &Path) -> bool {
     path.extension().is_some_and(|e| e.eq_ignore_ascii_case(EXTENSION))
 }
 
+/// Whether an existing file is a Microsoft Project XML file: its first element is `<Project>`
+/// (looking only at the start of the file).
+pub fn is_mspdi_file(path: &Path) -> bool {
+    let Ok(meta) = std::fs::metadata(path) else { return false };
+    if !meta.is_file() {
+        return false;
+    }
+    let Ok(file) = std::fs::File::open(path) else { return false };
+    let mut head = Vec::new();
+    if file.take(64 * 1024).read_to_end(&mut head).is_err() {
+        return false;
+    }
+    let Some(text) = decode(&head).or_else(|| Some(String::from_utf8_lossy(&head).into_owned())) else { return false };
+    first_element(&text).is_some_and(|name| name == "Project")
+}
+
+/// The local name of the first element in XML text (after the declaration, comments and a
+/// DOCTYPE).
+fn first_element(text: &str) -> Option<&str> {
+    let mut rest = text.trim_start_matches('\u{feff}');
+    loop {
+        rest = rest.trim_start();
+        if let Some(r) = rest.strip_prefix("<?") {
+            rest = r.split_once("?>")?.1;
+        } else if let Some(r) = rest.strip_prefix("<!--") {
+            rest = r.split_once("-->")?.1;
+        } else if let Some(r) = rest.strip_prefix("<!") {
+            rest = r.split_once('>')?.1;
+        } else {
+            let tag = rest.strip_prefix('<')?;
+            let name = tag.split(|c: char| c.is_whitespace() || c == '>' || c == '/').next()?;
+            return Some(name.rsplit(':').next().unwrap_or(name));
+        }
+    }
+}
+
 /// Reads a plan from MSPDI text, treating it as untrusted. `fallback_name` names the plan when
 /// the file does not. Returns the plan (not yet recalculated) and notes on what could not be
 /// carried over or was clamped into range.
@@ -59,6 +95,13 @@ fn decode(bytes: &[u8]) -> Option<String> {
     }
 }
 
+/// Reads a plan from the bytes of an MSPDI file (UTF-8, or UTF-16 with a byte order mark),
+/// treating them as untrusted. The plan is not yet recalculated.
+pub fn from_bytes(bytes: &[u8], fallback_name: &str) -> Result<(Project, Vec<String>), String> {
+    let text = decode(bytes).ok_or_else(|| "the file is not UTF-8 or UTF-16 text".to_string())?;
+    from_xml(&text, fallback_name)
+}
+
 /// Imports a Microsoft Project XML file and recalculates it. Returns the plan and notes.
 pub fn load(path: impl AsRef<Path>) -> FileResult<(Project, Vec<String>)> {
     let path = path.as_ref();
@@ -78,9 +121,8 @@ pub fn load(path: impl AsRef<Path>) -> FileResult<(Project, Vec<String>)> {
         return Err(FileError::TooLarge { path: path.into(), size });
     }
     let import = |message: String| FileError::Import { path: path.into(), message };
-    let text = decode(&bytes).ok_or_else(|| import("the file is not UTF-8 or UTF-16 text".into()))?;
     let fallback = path.file_stem().map_or_else(|| "Imported plan".to_string(), |s| s.to_string_lossy().into_owned());
-    let (mut p, notes) = from_xml(&text, &fallback).map_err(import)?;
+    let (mut p, notes) = from_bytes(&bytes, &fallback).map_err(import)?;
     crate::schedule::try_recalculate(&mut p).map_err(|e| import(format!("the plan could not be scheduled ({})", e.message)))?;
     Ok((p, notes))
 }
