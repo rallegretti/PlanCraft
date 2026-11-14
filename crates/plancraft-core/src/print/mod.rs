@@ -1,17 +1,22 @@
-//! Printing: page setup, page layout of task and resource tables with a Gantt chart, and PDF output.
+//! Printing: page setup, page layout of task and resource tables with a Gantt chart, of the
+//! Network Diagram and the Task Board, and PDF output.
 //!
 //! Layout produces [`Page`]s of simple drawing items (rectangles, lines, polygons, text) in
 //! points with the origin at the top-left. The same pages are written to PDF ([`pdf::write`])
 //! and drawn on screen by the app's Print Preview, so what you preview is what prints.
 
+pub mod board;
+pub mod canvas;
 pub mod fallback;
 pub mod font;
 pub mod layout;
+pub mod network;
 pub mod pdf;
 mod subset;
 
 use serde::{Deserialize, Serialize};
 
+pub use canvas::{CanvasJob, layout_canvas};
 pub use layout::{Align, ChartOptions, PrintCell, PrintColumn, PrintJob, PrintRow, RowKind, Sheet, layout, task_sheet};
 
 /// An RGB colour.

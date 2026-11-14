@@ -33,11 +33,20 @@ pub enum PrintView {
     Baselines,
     TaskTable,
     Resources,
+    Network,
+    Board,
 }
 
 impl PrintView {
-    pub const ALL: [PrintView; 5] =
-        [PrintView::Gantt, PrintView::Tracking, PrintView::Baselines, PrintView::TaskTable, PrintView::Resources];
+    pub const ALL: [PrintView; 7] = [
+        PrintView::Gantt,
+        PrintView::Tracking,
+        PrintView::Baselines,
+        PrintView::TaskTable,
+        PrintView::Resources,
+        PrintView::Network,
+        PrintView::Board,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -46,7 +55,14 @@ impl PrintView {
             PrintView::Baselines => "Multiple Baselines Gantt",
             PrintView::TaskTable => "Task Table",
             PrintView::Resources => "Resource Sheet",
+            PrintView::Network => "Network Diagram",
+            PrintView::Board => "Task Board",
         }
+    }
+
+    /// A drawing printed as it is (tiled over pages) rather than a table with a timescale.
+    pub fn is_drawing(self) -> bool {
+        matches!(self, PrintView::Network | PrintView::Board)
     }
 
     /// The printable view closest to what is on screen.
@@ -55,6 +71,8 @@ impl PrintView {
             ViewKind::TrackingGantt => PrintView::Tracking,
             ViewKind::MultipleBaselines => PrintView::Baselines,
             ViewKind::ResourceSheet | ViewKind::ResourceUsage | ViewKind::Workload | ViewKind::TeamPlanner => PrintView::Resources,
+            ViewKind::NetworkDiagram => PrintView::Network,
+            ViewKind::Board => PrintView::Board,
             _ => PrintView::Gantt,
         }
     }
@@ -173,6 +191,37 @@ pub fn sheet(p: &Project, st: &UiState, view: PrintView, all_columns: bool) -> (
         // Without a chart there is no divider: the whole table prints.
         PrintView::TaskTable => (task_sheet(p, st, view.label(), &pal, true), None),
         PrintView::Resources => (views::resource_sheet::print_sheet(p, &pal), None),
+        // Drawings are not sheets (see `drawing`); an empty sheet if asked anyway.
+        PrintView::Network | PrintView::Board => (Sheet { title: view.label().into(), columns: Vec::new(), rows: Vec::new() }, None),
+    }
+}
+
+/// The items and size of a drawing view (the Network Diagram and the Task Board, as on screen:
+/// the same filter, search, collapsed summaries and view options).
+fn drawing(p: &Project, st: &UiState, view: PrintView) -> (Vec<print::Item>, f32, f32) {
+    let pal = Palette::default();
+    match view {
+        PrintView::Board => {
+            let columns: Vec<print::board::BoardColumnPrint> = p
+                .board()
+                .into_iter()
+                .map(|(c, rows)| print::board::BoardColumnPrint {
+                    name: c.name.clone(),
+                    percent: c.percent_complete,
+                    rows: rows.into_iter().filter(|&i| p.tasks.get(i).is_some_and(|t| views::task_matches(p, st, t))).collect(),
+                })
+                .collect();
+            print::board::items(p, &columns, &pal)
+        }
+        _ => {
+            let net = &st.network;
+            let opts = print::network::NetPrintOptions {
+                link_labels: net.link_labels,
+                progress_marks: net.progress_marks,
+                ids_only: net.opts.ids_only,
+            };
+            print::network::items(p, &views::network::layout(p, st), opts, &pal)
+        }
     }
 }
 
@@ -185,6 +234,18 @@ pub fn document(
     from: Option<NaiveDate>,
     to: Option<NaiveDate>,
 ) -> print::Document {
+    if view.is_drawing() {
+        let (items, width, height) = drawing(p, st, view);
+        return print::layout_canvas(&print::CanvasJob {
+            project: p,
+            setup,
+            title: view.label(),
+            width,
+            height,
+            items,
+            printed: chrono::Local::now().naive_local(),
+        });
+    }
     let (sheet, chart) = sheet(p, st, view, setup.print_all_columns);
     print::layout(&PrintJob {
         project: p,
@@ -397,5 +458,52 @@ mod tests {
         let doc = document(&p, &st, PrintView::Gantt, &print::PageSetup::default(), None, None);
         assert!(!doc.pages.is_empty());
         assert!(print::pdf::write(&doc).starts_with(b"%PDF"));
+    }
+
+    fn texts(items: &[print::Item], out: &mut Vec<String>) {
+        for i in items {
+            match i {
+                print::Item::Text { text, .. } => out.push(text.clone()),
+                print::Item::Clip { items, .. } => texts(items, out),
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn the_network_diagram_and_task_board_print_themselves() {
+        let mut p = plancraft_core::sample::demo_project(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap());
+        recalculate(&mut p);
+        let mut st = UiState::default();
+        assert_eq!(PrintView::for_view(ViewKind::NetworkDiagram), PrintView::Network);
+        assert_eq!(PrintView::for_view(ViewKind::Board), PrintView::Board);
+        let setup = print::PageSetup::default();
+        for view in [PrintView::Network, PrintView::Board] {
+            let doc = document(&p, &st, view, &setup, None, None);
+            assert!(!doc.pages.is_empty() && !doc.truncated);
+            let mut all = Vec::new();
+            for page in &doc.pages {
+                texts(&page.items, &mut all);
+            }
+            // Not the Gantt chart: no timescale, the view's own content instead.
+            assert!(all.iter().any(|t| t == view.label()), "the footer names the view: {all:?}");
+            match view {
+                PrintView::Network => assert!(all.iter().any(|t| t.starts_with("Start: "))),
+                _ => assert!(all.iter().any(|t| t == "Not Started") && all.iter().any(|t| t.starts_with("Due "))),
+            }
+            assert!(print::pdf::write(&doc).starts_with(b"%PDF"));
+        }
+        // The view's filter applies: no milestones means fewer boxes and cards.
+        let count = |st: &UiState, view| {
+            let mut all = Vec::new();
+            for page in &document(&p, st, view, &setup, None, None).pages {
+                texts(&page.items, &mut all);
+            }
+            all.iter().filter(|t| t.starts_with("Start: ") || t.starts_with("Due ")).count()
+        };
+        let (net, board) = (count(&st, PrintView::Network), count(&st, PrintView::Board));
+        st.filter = crate::state::TaskFilter::Milestones;
+        assert!(count(&st, PrintView::Network) < net);
+        assert!(count(&st, PrintView::Board) < board);
     }
 }
