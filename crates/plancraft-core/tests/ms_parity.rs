@@ -1393,3 +1393,184 @@ fn network_diagram_links_leave_on_the_right_and_enter_on_the_left() {
         assert!(pts.windows(2).all(|w| w[0].0 == w[1].0 || w[0].1 == w[1].1), "{pts:?}");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Microsoft Project XML (MSPDI), from the published Project XML Data Interchange Schema Reference
+// on learn.microsoft.com. Each test reads a small hand-written file.
+// ---------------------------------------------------------------------------
+
+/// An MSPDI file starting Monday 2026-10-19 with the given tasks (and optional extra elements
+/// after them).
+fn mspdi(tasks: &str, extra: &str) -> Project {
+    let xml = format!(
+        "<Project><StartDate>2026-10-19T08:00:00</StartDate><MinutesPerDay>480</MinutesPerDay><Tasks>{tasks}</Tasks>{extra}</Project>"
+    );
+    let (mut p, notes) = plancraft_core::mspdi::from_xml(&xml, "MSPDI").unwrap();
+    assert!(notes.is_empty(), "{notes:?}");
+    recalculate(&mut p);
+    p
+}
+
+fn xml_task(uid: u32, name: &str, duration: &str, inner: &str) -> String {
+    format!("<Task><UID>{uid}</UID><Name>{name}</Name><OutlineLevel>1</OutlineLevel><Duration>{duration}</Duration>{inner}</Task>")
+}
+
+fn link_xml(pred: u32, kind: u32, lag: i64, format: u32) -> String {
+    format!(
+        "<PredecessorLink><PredecessorUID>{pred}</PredecessorUID><Type>{kind}</Type><LinkLag>{lag}</LinkLag><LagFormat>{format}</LagFormat></PredecessorLink>"
+    )
+}
+
+// Source: https://learn.microsoft.com/en-us/office-project/xml-data-interchange/xml-schema-for-the-tasks-element — "Tasks Schema" (PredecessorLink Type)
+// A link's type is coded 0 for finish-to-finish, 1 finish-to-start, 2 start-to-finish and 3
+// start-to-start.
+#[test]
+fn mspdi_link_type_codes() {
+    let mut tasks = xml_task(1, "Pred", "PT8H0M0S", "");
+    for (uid, code) in [(2u32, 0u32), (3, 1), (4, 2), (5, 3)] {
+        tasks += &xml_task(uid, &format!("S{code}"), "PT8H0M0S", &link_xml(1, code, 0, 7));
+    }
+    let p = mspdi(&tasks, "");
+    let kinds: Vec<LinkType> = p.tasks[1..].iter().map(|t| t.predecessors[0].kind).collect();
+    assert_eq!(kinds, [LinkType::FF, LinkType::FS, LinkType::SF, LinkType::SS]);
+}
+
+// Source: https://learn.microsoft.com/en-us/office-project/xml-data-interchange/linklag-element — "LinkLag Element"
+// LinkLag holds the lag in tenths of a minute: 4800 is one 8-hour working day.
+#[test]
+fn mspdi_link_lag_is_in_tenths_of_a_minute() {
+    let tasks = xml_task(1, "A", "PT8H0M0S", "") + &xml_task(2, "B", "PT8H0M0S", &link_xml(1, 1, 4800, 7));
+    let p = mspdi(&tasks, "");
+    assert_eq!(p.tasks[1].predecessors[0].lag, Lag::Working(DAY));
+    // A finishes Monday 17:00; one day of lag starts B on Wednesday.
+    assert_eq!(p.tasks[1].sched.start, Some(dt(2026, 10, 21, 8)));
+}
+
+// Source: https://learn.microsoft.com/en-us/office-project/xml-data-interchange/xml-schema-for-the-tasks-element — "Tasks Schema" (ConstraintType)
+// Constraint codes: 0 as soon as possible, 1 as late as possible, 2 must start on, 3 must finish
+// on, 4 start no earlier than, 5 start no later than, 6 finish no earlier than, 7 finish no later than.
+#[test]
+fn mspdi_constraint_type_codes() {
+    let date = "<ConstraintDate>2026-10-21T08:00:00</ConstraintDate>";
+    let mut tasks = String::new();
+    for code in 0..8u32 {
+        tasks += &xml_task(code + 1, &format!("C{code}"), "PT8H0M0S", &format!("<ConstraintType>{code}</ConstraintType>{date}"));
+    }
+    let p = mspdi(&tasks, "");
+    let kinds: Vec<ConstraintKind> = p.tasks.iter().map(|t| t.constraint.kind).collect();
+    use ConstraintKind::*;
+    assert_eq!(kinds, [Asap, Alap, Mso, Mfo, Snet, Snlt, Fnet, Fnlt]);
+    let snet = &p.tasks[4];
+    assert_eq!(snet.sched.start, Some(dt(2026, 10, 21, 8)));
+}
+
+// Source: https://learn.microsoft.com/en-us/office-project/xml-data-interchange/xml-schema-for-the-tasks-element — "Tasks Schema" (Type, DurationFormat)
+// Task types: 0 fixed units, 1 fixed duration, 2 fixed work. A duration format code with a
+// question mark (39 is "d?") marks the duration as estimated.
+#[test]
+fn mspdi_task_type_and_estimated_duration_codes() {
+    let tasks = xml_task(1, "U", "PT8H0M0S", "<Type>0</Type><DurationFormat>7</DurationFormat>")
+        + &xml_task(2, "D", "PT8H0M0S", "<Type>1</Type><DurationFormat>39</DurationFormat>")
+        + &xml_task(3, "W", "PT8H0M0S", "<Type>2</Type>");
+    let p = mspdi(&tasks, "");
+    let types: Vec<TaskType> = p.tasks.iter().map(|t| t.task_type).collect();
+    assert_eq!(types, [TaskType::FixedUnits, TaskType::FixedDuration, TaskType::FixedWork]);
+    assert_eq!(p.tasks.iter().map(|t| t.estimated).collect::<Vec<_>>(), [false, true, false]);
+}
+
+// Source: https://learn.microsoft.com/en-us/office-project/xml-data-interchange/levelingdelay-element — "Remarks"
+// A leveling delay is given in the unit of its LevelingDelayFormat: 3 with format 7 is 3 days.
+#[test]
+fn mspdi_leveling_delay_uses_its_format() {
+    let p = mspdi(&xml_task(1, "Delayed", "PT8H0M0S", "<LevelingDelay>3</LevelingDelay><LevelingDelayFormat>7</LevelingDelayFormat>"), "");
+    assert_eq!(p.tasks[0].leveling_delay, 3 * DAY);
+}
+
+// Source: https://learn.microsoft.com/en-us/office-project/xml-data-interchange/xml-schema-for-the-calendars-element — "Calendars Schema" (WeekDay, Exception)
+// DayType 1–7 is Sunday–Saturday and DayWorking says whether that day is worked; an exception
+// of Type 6 repeats weekly on the DaysOfWeek bits (1 Sunday, 2 Monday, 4 Tuesday, 8 Wednesday …).
+#[test]
+fn mspdi_calendar_day_types_and_weekly_exceptions() {
+    let cal = "<CalendarUID>1</CalendarUID><Calendars><Calendar><UID>1</UID><Name>Six days</Name><IsBaseCalendar>1</IsBaseCalendar><WeekDays>\
+        <WeekDay><DayType>7</DayType><DayWorking>1</DayWorking><WorkingTimes><WorkingTime><FromTime>09:00:00</FromTime><ToTime>13:00:00</ToTime></WorkingTime></WorkingTimes></WeekDay>\
+        <WeekDay><DayType>1</DayType><DayWorking>0</DayWorking></WeekDay></WeekDays>\
+        <Exceptions><Exception><EnteredByOccurrences>1</EnteredByOccurrences><TimePeriod><FromDate>2026-10-19T00:00:00</FromDate><ToDate>2026-12-31T23:59:00</ToDate></TimePeriod>\
+        <Occurrences>2</Occurrences><Name>Tuesdays off</Name><Type>6</Type><Period>1</Period><DaysOfWeek>4</DaysOfWeek><DayWorking>0</DayWorking></Exception></Exceptions>\
+        </Calendar></Calendars>";
+    // The file's elements come in the schema's order: calendars before tasks.
+    let xml = format!(
+        "<Project><StartDate>2026-10-19T08:00:00</StartDate>{cal}<Tasks>{}</Tasks></Project>",
+        xml_task(1, "Three days", "PT24H0M0S", "")
+    );
+    let (mut p, notes) = plancraft_core::mspdi::from_xml(&xml, "MSPDI").unwrap();
+    assert!(notes.is_empty(), "{notes:?}");
+    recalculate(&mut p);
+    let c = p.base_calendar();
+    assert_eq!(c.week.saturday, vec![TimeRange::hours(9, 13)]);
+    assert!(c.week.sunday.is_empty());
+    let off: Vec<NaiveDate> = c.exceptions.iter().map(|e| e.start).collect();
+    assert_eq!(off, [d(2026, 10, 20), d(2026, 10, 27)]);
+    // Monday, then Tuesday is off: Wednesday and Thursday finish the three days.
+    assert_eq!(p.tasks[0].sched.finish, Some(dt(2026, 10, 22, 17)));
+}
+
+// Source: https://learn.microsoft.com/en-us/office-project/xml-data-interchange/xml-schema-for-the-resources-element — "Resources Schema" (Type, IsCostResource, AvailableUnits)
+// Resource Type 0 is a material resource and 1 a work resource; IsCostResource marks a cost
+// resource; an availability period's AvailableUnits is a percentage.
+#[test]
+fn mspdi_resource_types_and_availability() {
+    let res = "<Resources>\
+        <Resource><UID>1</UID><Name>Steel</Name><Type>0</Type><MaterialLabel>t</MaterialLabel></Resource>\
+        <Resource><UID>2</UID><Name>Ana</Name><Type>1</Type><MaxUnits>1</MaxUnits><AvailabilityPeriods><AvailabilityPeriod>\
+          <AvailableFrom>2026-11-01T08:00:00</AvailableFrom><AvailableTo>2026-11-30T17:00:00</AvailableTo><AvailableUnits>50</AvailableUnits></AvailabilityPeriod></AvailabilityPeriods></Resource>\
+        <Resource><UID>3</UID><Name>Travel</Name><Type>1</Type><IsCostResource>1</IsCostResource></Resource></Resources>";
+    let p = mspdi("", res);
+    let kinds: Vec<ResourceType> = p.resources.iter().map(|r| r.kind).collect();
+    assert_eq!(kinds, [ResourceType::Material, ResourceType::Work, ResourceType::Cost]);
+    assert_eq!(p.resources[1].units_on(d(2026, 11, 10)), 0.5);
+    assert_eq!(p.resources[1].units_on(d(2026, 12, 10)), 1.0);
+}
+
+// Source: https://learn.microsoft.com/en-us/office-project/xml-data-interchange/xml-schema-for-the-assignments-element — "Assignments Schema" (Units, WorkContour)
+// An assignment links a task and a resource by their UIDs; WorkContour 0 is flat, 1 back loaded,
+// 2 front loaded and 6 bell.
+#[test]
+fn mspdi_assignment_contour_codes() {
+    let tasks = (1..=4u32).map(|u| xml_task(u, &format!("T{u}"), "PT16H0M0S", "")).collect::<String>();
+    let mut asg = String::from("<Resources><Resource><UID>9</UID><Name>Ana</Name><Type>1</Type></Resource></Resources><Assignments>");
+    for (uid, contour) in [(1u32, 0u32), (2, 1), (3, 2), (4, 6)] {
+        asg += &format!(
+            "<Assignment><UID>{uid}</UID><TaskUID>{uid}</TaskUID><ResourceUID>9</ResourceUID><Units>1</Units><Work>PT16H0M0S</Work><WorkContour>{contour}</WorkContour></Assignment>"
+        );
+    }
+    asg += "</Assignments>";
+    let p = mspdi(&tasks, &asg);
+    let contours: Vec<WorkContour> = p.assignments.iter().map(|a| a.contour).collect();
+    assert_eq!(contours, [WorkContour::Flat, WorkContour::BackLoaded, WorkContour::FrontLoaded, WorkContour::Bell]);
+    assert!(p.assignments.iter().all(|a| a.work == 2 * DAY && a.units == 1.0));
+}
+
+// Source: https://learn.microsoft.com/en-us/office-project/xml-data-interchange/xml-schema-for-the-extendedattributes-element — "ExtendedAttributes Schema" (FieldID, CFType, Alias)
+// Source: https://learn.microsoft.com/en-us/office/vba/api/project.pjfield — "Members" (pjTaskText1, pjTaskNumber1)
+// A custom field is defined by the PjField id of the field it uses (Text1 is 188743731, Number1
+// 188743767), its type (CFType 7 text, 5 number) and its alias; tasks hold values by field id.
+#[test]
+fn mspdi_custom_fields_by_field_id() {
+    let defs = "<ExtendedAttributes>\
+        <ExtendedAttribute><FieldID>188743731</FieldID><FieldName>Text1</FieldName><CFType>7</CFType><Alias>Phase</Alias></ExtendedAttribute>\
+        <ExtendedAttribute><FieldID>188743767</FieldID><FieldName>Number1</FieldName><CFType>5</CFType><Alias>Risk</Alias></ExtendedAttribute>\
+        </ExtendedAttributes>";
+    let values = "<ExtendedAttribute><FieldID>188743731</FieldID><Value>Design</Value></ExtendedAttribute>\
+        <ExtendedAttribute><FieldID>188743767</FieldID><Value>4.5</Value></ExtendedAttribute>";
+    let xml = format!(
+        "<Project><StartDate>2026-10-19T08:00:00</StartDate>{defs}<Tasks>{}</Tasks></Project>",
+        xml_task(1, "A", "PT8H0M0S", values)
+    );
+    let (p, notes) = plancraft_core::mspdi::from_xml(&xml, "MSPDI").unwrap();
+    assert!(notes.is_empty(), "{notes:?}");
+    let field = |name: &str| p.custom_fields.iter().find(|f| f.name == name).unwrap();
+    assert_eq!(field("Phase").kind, CustomFieldKind::Text);
+    assert_eq!(field("Risk").kind, CustomFieldKind::Number);
+    assert_eq!(p.tasks[0].custom.get(&field("Phase").id), Some(&CustomValue::Text("Design".into())));
+    assert_eq!(p.tasks[0].custom.get(&field("Risk").id), Some(&CustomValue::Number(4.5)));
+}

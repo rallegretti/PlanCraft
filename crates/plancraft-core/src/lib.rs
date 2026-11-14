@@ -26,6 +26,7 @@ pub mod io;
 pub mod leveling;
 pub mod limits;
 pub mod model;
+pub mod mspdi;
 pub mod network;
 pub mod ops;
 pub mod paths;

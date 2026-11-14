@@ -17,6 +17,8 @@ thiserror.workspace = true
 skrifa = "0.44"
 epaint_default_fonts = "0.36"
 miniz_oxide = "0.8"
+# Microsoft Project XML (MSPDI) import and export. Pure Rust; entities in a DOCTYPE are never expanded.
+quick-xml = { version = "0.41", default-features = false }
 
 [dev-dependencies]
 proptest = "1"

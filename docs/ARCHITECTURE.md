@@ -31,6 +31,7 @@ This crate is pure logic with no UI. Every other component builds on it.
 | `leveling` | Serial resource leveling that writes `leveling_delay`. It keeps loads incrementally and recalculates only when a delay can move other tasks. |
 | `report` | Statistics, milestone status, lateness, earned value |
 | `io` | `.plancraft` JSON load/save, relative paths, external-link refresh |
+| `mspdi` | Microsoft Project XML (MSPDI) import and export, from Microsoft's published schema reference. `mspdi::xml` streams the file one record (task, resource, assignment, calendar) at a time on `quick-xml` with depth, size and entity limits; `read` maps records into a `Project` (recurring calendar exceptions expanded into dates, resource calendars into personal exceptions) and `write` writes elements in the schema's order. Both return notes on what did not carry over |
 | `workspace` | Open documents with undo/redo snapshots and change attribution (user vs agent) |
 | `sample` | The demo project |
 
@@ -110,7 +111,7 @@ The MCP server is a hand-rolled JSON-RPC 2.0 server. It has no async runtime, wh
   - Tool errors come back as `isError` results.
   - Each request locks the shared workspace briefly.
   - The change callback runs after the lock is released.
-- **`tools/*`:** 88 tools grouped by domain.
+- **`tools/*`:** 89 tools grouped by domain.
   - All mutations go through `Document::try_edit(…, ChangeSource::Agent, …)`.
   - Unknown arguments are rejected so agents find their typos.
 - **Transports:**

@@ -820,3 +820,38 @@ fn agents_work_the_task_board() {
     }
     c.call_err("delete_board_column", json!({ "column": "Done" }));
 }
+
+#[test]
+fn agents_export_and_import_microsoft_project_xml() {
+    let dir = tempfile::tempdir().unwrap();
+    let c = Client::new();
+    c.call("new_project", json!({ "name": "Exchange", "start": "2026-10-19" }));
+    let a = c.call("create_task", json!({ "name": "Design", "duration": "5d" }));
+    c.call("create_task", json!({ "name": "Build", "duration": "10d", "predecessors": [a["id"]] }));
+
+    let out = c.call("export_mspdi", json!({ "path": dir.path().join("plan").to_str().unwrap() }));
+    assert_eq!(out["tasks"], 2, "{out}");
+    let xml = dir.path().join("plan.xml");
+    assert!(std::fs::read_to_string(&xml).unwrap().contains("<Name>Build</Name>"));
+    // Never silently replaces a file, never writes anything but .xml.
+    assert!(c.call_err("export_mspdi", json!({ "path": xml.to_str().unwrap() })).contains("overwrite"));
+    c.call("export_mspdi", json!({ "path": xml.to_str().unwrap(), "overwrite": true }));
+    assert!(c.call_err("export_mspdi", json!({ "path": dir.path().join("plan.pdf").to_str().unwrap() })).contains(".xml"));
+    assert!(c.call_err("export_mspdi", json!({ "path": " " })).contains("empty"));
+
+    // Importing opens a new unsaved document an agent may save or close.
+    let opened = c.call("open_project", json!({ "path": xml.to_str().unwrap() }));
+    assert!(opened["import_notes"].is_array(), "{opened}");
+    assert_eq!(opened["statistics"]["tasks"], 2, "{opened}");
+    let e = c.call_err("save_project", json!({}));
+    assert!(e.contains("path"), "{e}");
+    let saved = c.call("save_project", json!({ "path": dir.path().join("imported").to_str().unwrap() }));
+    assert!(saved["path"].as_str().unwrap().ends_with("imported.plancraft"), "{saved}");
+    c.call("close_project", json!({}));
+
+    // Something that is not a Project XML file is refused with a reason.
+    let bad = dir.path().join("bad.xml");
+    std::fs::write(&bad, "<html/>").unwrap();
+    let e = c.call_err("open_project", json!({ "path": bad.to_str().unwrap() }));
+    assert!(e.contains("not a Microsoft Project XML file"), "{e}");
+}

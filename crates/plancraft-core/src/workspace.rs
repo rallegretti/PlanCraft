@@ -148,6 +148,9 @@ pub struct Document {
     pub last_change: Option<(String, ChangeSource)>,
     /// What opening the file adjusted (values clamped into range), shown once by the app.
     pub load_notes: Vec<String>,
+    /// The plan was imported from another format (Microsoft Project XML): it has no file of its
+    /// own yet, and its load notes say what the import could not carry over.
+    pub imported: bool,
     /// The file as it was when last loaded or saved; `save` refuses to overwrite a file that has
     /// changed since (another program or PlanCraft instance wrote it).
     disk_stamp: Option<io::DiskStamp>,
@@ -166,6 +169,7 @@ impl Document {
             revision: 1,
             last_change: None,
             load_notes: Vec::new(),
+            imported: false,
             disk_stamp: None,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -430,9 +434,13 @@ impl Workspace {
         self.next_handle
     }
 
-    /// Opens a document from disk (or activates it if already open).
+    /// Opens a document from disk (or activates it if already open). A Microsoft Project XML
+    /// file (`.xml`) is imported instead, see [`Workspace::import_mspdi`].
     pub fn open(&mut self, path: impl AsRef<Path>) -> FileResult<u64> {
         let path = path.as_ref();
+        if crate::mspdi::is_mspdi_path(path) {
+            return self.import_mspdi(path);
+        }
         let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         if let Some(i) =
             self.docs.iter().position(|d| d.path.as_ref().is_some_and(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()) == abs))
@@ -448,6 +456,20 @@ impl Workspace {
         if let Some(doc) = self.active_doc_mut() {
             doc.load_notes = notes;
             doc.disk_stamp = stamp;
+        }
+        Ok(handle)
+    }
+
+    /// Imports a Microsoft Project XML file as a new document. It is unsaved (no path): saving
+    /// asks where to keep it as a `.plancraft` plan. The load notes say what was left out. Who
+    /// imported it decides whether it counts as the user's unsaved work (`user_changes`).
+    pub fn import_mspdi(&mut self, path: impl AsRef<Path>) -> FileResult<u64> {
+        let (project, notes) = crate::mspdi::load(path)?;
+        let handle = self.add(project, None);
+        if let Some(doc) = self.active_doc_mut() {
+            doc.load_notes = notes;
+            doc.imported = true;
+            doc.dirty = true;
         }
         Ok(handle)
     }

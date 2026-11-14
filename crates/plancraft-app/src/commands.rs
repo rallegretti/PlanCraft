@@ -22,6 +22,8 @@ pub enum Command {
     Print,
     /// Save the current view as a PDF with the plan's page setup.
     ExportPdf,
+    /// Save the plan as a Microsoft Project XML (MSPDI) file.
+    ExportMspdi,
     Quit,
     StartPage,
     /// Restore a recovery copy (by its stem in the recovery folder).

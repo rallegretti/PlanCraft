@@ -870,3 +870,114 @@ proptest! {
         let _ = cyclic;
     }
 }
+
+// ---------------------------------------------------------------------------
+// Microsoft Project XML (MSPDI) import
+// ---------------------------------------------------------------------------
+
+/// A plan exported to MSPDI, with one of everything the format carries.
+fn mspdi_sample() -> String {
+    let mut p = demo_project(start());
+    p.status_date = Some(start());
+    let f = p.add_custom_field("Phase", CustomFieldKind::Text, &["A".into()]).unwrap();
+    let t = p.tasks[1].id;
+    p.set_custom_value(t, f, Some(CustomValue::Text("A".into()))).unwrap();
+    p.calendars[0].exceptions.push(CalendarException {
+        name: "Yearly".into(),
+        start: start(),
+        end: start(),
+        working: Vec::new(),
+        yearly: true,
+    });
+    p.resources[0].exceptions.push(CalendarException::non_working("Leave", start(), start()));
+    recalculate(&mut p);
+    p.save_plan(PlanSlot::Scheduled, PlanSlot::Baseline(0), &Scope::default()).unwrap();
+    p.save_plan(PlanSlot::Scheduled, PlanSlot::Interim(1), &Scope::default()).unwrap();
+    plancraft_core::mspdi::to_xml(&p).0
+}
+
+/// Imports MSPDI text: either an error, or a plan that is in range and schedules.
+fn check_mspdi(text: &str) -> Result<(), TestCaseError> {
+    match plancraft_core::mspdi::from_xml(text, "x") {
+        Err(e) => prop_assert!(!e.contains("internal error"), "a panic was caught: {e}"),
+        Ok((mut p, _)) => {
+            prop_assert!(limits::check_counts(&p).is_ok());
+            prop_assert!(plancraft_core::schedule::try_recalculate(&mut p).is_ok());
+            let mut copy = p.clone();
+            prop_assert!(limits::sanitize(&mut copy).is_empty(), "values out of range after import");
+            // What was imported exports and imports again.
+            let (again, _) = plancraft_core::mspdi::to_xml(&p);
+            prop_assert!(plancraft_core::mspdi::from_xml(&again, "x").is_ok());
+        }
+    }
+    Ok(())
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(cases(256)))]
+
+    /// A valid export with junk in one value is imported (clamped) or refused, never a panic.
+    #[test]
+    fn mutated_mspdi_files_import_or_fail_cleanly(at in 0usize..5000, junk in prop_oneof![
+        Just("-1".to_string()),
+        Just("99999999999999999999".to_string()),
+        Just("-9223372036854775808".to_string()),
+        Just("1e308".to_string()),
+        Just("NaN".to_string()),
+        Just("+262143-12-31T23:59:59".to_string()),
+        Just("9999-12-31T24:00:00".to_string()),
+        Just("0000-01-01T00:00:00".to_string()),
+        Just("P99999999999Y".to_string()),
+        Just("-PT99999999999H".to_string()),
+        Just("PT".to_string()),
+        Just("25:61:61".to_string()),
+        Just(String::new()),
+        "\\PC{0,12}",
+    ]) {
+        let xml = mspdi_sample();
+        let leaves: Vec<usize> = xml.lines().enumerate().filter(|(_, l)| l.trim_start().starts_with('<') && l.contains("</")).map(|(i, _)| i).collect();
+        let target = leaves[at % leaves.len()];
+        let mutated: String = xml
+            .lines()
+            .enumerate()
+            .map(|(i, l)| {
+                if i != target {
+                    return format!("{l}\n");
+                }
+                let open = l.find('>').unwrap();
+                let close = l.rfind("</").unwrap();
+                format!("{}{}{}\n", &l[..=open], plancraft_core::mspdi::xml::escape(&junk), &l[close..])
+            })
+            .collect();
+        check_mspdi(&mutated)?;
+    }
+
+    /// Random markup built from MSPDI's own pieces never panics the importer.
+    #[test]
+    fn random_mspdi_markup_never_panics(parts in prop::collection::vec(prop_oneof![
+        Just("<Project>"), Just("</Project>"), Just("<Tasks>"), Just("</Tasks>"), Just("<Task>"), Just("</Task>"),
+        Just("<UID>"), Just("</UID>"), Just("<OutlineLevel>"), Just("</OutlineLevel>"), Just("<Duration>"), Just("</Duration>"),
+        Just("<PredecessorLink><PredecessorUID>1</PredecessorUID><Type>9</Type><LinkLag>"), Just("</LinkLag><LagFormat>19</LagFormat></PredecessorLink>"),
+        Just("<Calendars><Calendar><UID>1</UID><Exceptions><Exception><TimePeriod><FromDate>2026-01-01</FromDate><ToDate>2300-12-31</ToDate></TimePeriod><Type>"),
+        Just("</Type><Period>0</Period><MonthItem>9</MonthItem><MonthPosition>4</MonthPosition><DaysOfWeek>127</DaysOfWeek></Exception></Exceptions></Calendar></Calendars>"),
+        Just("<Resources><Resource><UID>1</UID><Name>R</Name><CalendarUID>1</CalendarUID></Resource></Resources>"),
+        Just("<Assignments><Assignment><TaskUID>1</TaskUID><ResourceUID>1</ResourceUID><Units>"), Just("</Units></Assignment></Assignments>"),
+        Just("1"), Just("0"), Just("-7"), Just("4294967296"), Just("PT8H0M0S"), Just("P1Y2M3DT4H5M6.5S"), Just("2026-10-19T08:00:00"),
+        Just("&amp;"), Just("&#x1F600;"), Just("&#0;"), Just("&bogus;"), Just("<![CDATA[x<y]]>"), Just("<!-- c -->"), Just("<!DOCTYPE p>"), Just("<?pi x?>"),
+        Just("<a:Task xmlns:a=\"x\">"), Just("</a:Task>"), Just("<Empty/>"), Just("<"), Just(">"), Just("\u{feff}"),
+    ], 0..60)) {
+        let text: String = parts.concat();
+        check_mspdi(&text)?;
+    }
+}
+
+#[test]
+fn mspdi_files_with_too_many_tasks_are_refused() {
+    let mut xml = String::from("<Project><Tasks>");
+    for i in 0..=limits::MAX_TASKS {
+        xml += &format!("<Task><UID>{}</UID><Name>t</Name></Task>", i + 1);
+    }
+    xml += "</Tasks></Project>";
+    let e = plancraft_core::mspdi::from_xml(&xml, "x").unwrap_err();
+    assert!(e.contains("too many tasks"), "{e}");
+}
