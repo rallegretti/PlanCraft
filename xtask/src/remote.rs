@@ -146,7 +146,7 @@ pub fn dist(target: Target, host: &str) -> Result<Vec<PathBuf>> {
             target.name()
         ))
     } else {
-        format!("export PATH=\"$HOME/.cargo/bin:$PATH\"; cd {REMOTE_DIR} && cargo xtask package {}", target.name())
+        format!("{}export PATH=\"$HOME/.cargo/bin:$PATH\"; cd {REMOTE_DIR} && cargo xtask package {}", forwarded_env(), target.name())
     };
     let mut child = ssh(host).arg(build).stdout(Stdio::piped()).spawn().context("starting remote build")?;
     let mut artifacts = Vec::new();
@@ -177,8 +177,27 @@ pub fn dist(target: Target, host: &str) -> Result<Vec<PathBuf>> {
     Ok(fetched)
 }
 
+/// Settings for the build host that are taken from this machine's environment (Mac signing).
+const FORWARDED: [&str; 3] = ["PLANCRAFT_SIGN_IDENTITY", "PLANCRAFT_NOTARY_PROFILE", "PLANCRAFT_ADHOC_SIGN"];
+
+/// `export KEY='value'; ` for each forwarded setting that is set here.
+fn forwarded_env() -> String {
+    FORWARDED.iter().filter_map(|k| std::env::var(k).ok().map(|v| format!("export {k}={}; ", sh_quote(&v)))).collect()
+}
+
+/// Quotes a value for a POSIX shell.
+fn sh_quote(v: &str) -> String {
+    format!("'{}'", v.replace('\'', "'\\''"))
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn quotes_for_the_shell() {
+        assert_eq!(super::sh_quote("Developer ID Application: A (B)"), "'Developer ID Application: A (B)'");
+        assert_eq!(super::sh_quote("it's"), "'it'\\''s'");
+    }
+
     #[test]
     fn base64_matches_rfc4648() {
         assert_eq!(super::base64(b""), "");

@@ -7,11 +7,17 @@ Release packages are made with `cargo xtask`. This is a small Rust program in `x
 | macOS | `PlanCraft-<version>-macos-universal.dmg` | `PlanCraft.app` (Apple Silicon + Intel), with the headless `plancraft-mcp` inside the bundle |
 | Windows | `PlanCraft-<version>-windows-x64.zip` | portable `PlanCraft.exe` (GUI, with icon) and the console `plancraft-mcp.exe` |
 | Linux | `plancraft-<version>-linux-x86_64.tar.gz` | binaries, `install.sh`, desktop entry, icons, `.plancraft` MIME type |
+| Linux | `PlanCraft-<version>-x86_64.AppImage` | the same app as one file that runs without installing |
 
-Every package gets a `.sha256` checksum file next to it. Packages are **not code-signed** yet:
+The Linux binaries are built in an Ubuntu 22.04 container (`xtask/linux-build.Dockerfile`, image `plancraft-build:ubuntu22.04`, made the first time). They need only glibc 2.35, so both Linux packages run on Ubuntu 22.04 and every newer release; built directly on a newer system they would need its glibc. The build uses this machine's Rust toolchain, mounted read-only, and Docker must be installed. `PLANCRAFT_NATIVE_LINUX=1 cargo xtask package linux` builds without the container for a quick local package that runs only on systems at least as new as this one.
 
-- **macOS:** the app is ad-hoc signed. On first launch, right-click it and choose *Open*.
-- **Windows:** SmartScreen shows "Windows protected your PC". Choose *More info* ▸ *Run anyway*.
+The AppImage starts with the AppImage project's type-2 runtime. `cargo xtask` downloads it once from the project's GitHub release `20251108` into `target/appimage/`, and refuses it unless its SHA-256 matches the one pinned in `xtask/src/linux.rs`. The app files are packed with `mksquashfs` (zstd) in the same container.
+
+Every package gets a `.sha256` checksum file next to it.
+
+- **macOS:** the app and the disk image are signed with the Developer ID certificate and notarized by Apple, with the tickets stapled, so they open without a Gatekeeper warning (see [macOS signing](#macos-signing)).
+- **Windows:** not code-signed yet. SmartScreen shows "Windows protected your PC". Choose *More info* ▸ *Run anyway*.
+- **Linux:** not signed; check the `.sha256`.
 
 ## Commands
 
@@ -73,9 +79,27 @@ For each remote build, `cargo xtask dist` does the following:
 
 ### macOS host
 
-- **Xcode** (or the Command Line Tools), for `lipo`, `codesign` and `hdiutil`.
+- **Xcode** (or the Command Line Tools), for `lipo`, `codesign`, `hdiutil`, `notarytool` and `stapler`.
 - **Rust targets:** `rustup target add aarch64-apple-darwin x86_64-apple-darwin`.
 - **SSH:** turn on *System Settings ▸ General ▸ Sharing ▸ Remote Login*.
+- **Signing:** see below.
+
+### macOS signing
+
+`cargo xtask package mac` (and `dist mac`) signs `PlanCraft.app` with the *Developer ID Application* certificate in the Mac's keychain, using the hardened runtime and a secure timestamp. It sends the app to Apple's notary service and staples the ticket to it, then signs, notarizes and staples the disk image, and finally checks both with Gatekeeper (`spctl`). Notarizing takes a few minutes per upload. It needs:
+
+- **The certificate** in the login keychain. With exactly one Developer ID certificate it is found automatically; with several, set `PLANCRAFT_SIGN_IDENTITY` to its name or SHA-1.
+- **A notarytool profile** in the keychain, whose name is in `~/.config/signing/notary-profile` on the Mac (`PLANCRAFT_NOTARY_PROFILE` overrides it). One profile notarizes every app of your team; you only need one app-specific password per Mac, not per app. To make a profile (it asks for your Apple ID, team ID and an app-specific password):
+  ```bash
+  xcrun notarytool store-credentials <name>
+  ```
+- **An unlocked login keychain.** It is locked in every SSH session, even when you're signed in at the Mac. On a Mac used only for signing, save the login password once in an owner-only file, and `cargo xtask` unlocks the keychain with it:
+  ```bash
+  ssh -t <mac-host> 'umask 077 && mkdir -p ~/.config/signing && read -rs "p?Mac password: " && printf %s "$p" > ~/.config/signing/keychain-password'
+  ```
+  (The Mac's shell is zsh, hence `read "p?prompt"`.) Without the file, run `security unlock-keychain` and the build in the same SSH session.
+
+Everything is checked before the build starts. The `PLANCRAFT_*` settings above are passed on to the build host when `dist` runs remotely. Credentials never leave the Mac, and the password is never printed. Both files must be readable by their owner only, or the build stops. `PLANCRAFT_ADHOC_SIGN=1` makes an ad-hoc signed test build instead (not for release: Gatekeeper warns about it).
 
 ### Windows host
 
@@ -99,6 +123,6 @@ Commands sent to Windows are base64-encoded PowerShell (`-EncodedCommand`), so q
 
 The packaging logic lives in Rust; even the `.icns`, `.ico` and `.res` icon formats are written by our own code. A few platform tools are still used:
 
-- **macOS:** `lipo`, `codesign` and `hdiutil`, which ship with macOS and Xcode.
+- **macOS:** `lipo`, `codesign`, `hdiutil`, `notarytool`, `stapler` and `spctl`, which ship with macOS and Xcode.
 - **Windows:** the MSVC linker, which every Windows Rust build needs anyway.
 - **Linux:** `install.sh` calls the desktop's own update tools to refresh menus and icons.
