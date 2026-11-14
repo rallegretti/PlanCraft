@@ -89,16 +89,17 @@ For each remote build, `cargo xtask dist` does the following:
 `cargo xtask package mac` (and `dist mac`) signs `PlanCraft.app` with the *Developer ID Application* certificate in the Mac's keychain, using the hardened runtime and a secure timestamp. It sends the app to Apple's notary service and staples the ticket to it, then signs, notarizes and staples the disk image, and finally checks both with Gatekeeper (`spctl`). Notarizing takes a few minutes per upload. It needs:
 
 - **The certificate** in the login keychain. With exactly one Developer ID certificate it is found automatically; with several, set `PLANCRAFT_SIGN_IDENTITY` to its name or SHA-1.
-- **A notarytool profile** in the keychain, called `plancraft` unless `PLANCRAFT_NOTARY_PROFILE` names another. Make it once on the Mac (it asks for your Apple ID, team ID and an app-specific password):
+- **A notarytool profile** in the keychain, whose name is in `~/.config/signing/notary-profile` on the Mac (`PLANCRAFT_NOTARY_PROFILE` overrides it). One profile notarizes every app of your team; you only need one app-specific password per Mac, not per app. To make a profile (it asks for your Apple ID, team ID and an app-specific password):
   ```bash
-  xcrun notarytool store-credentials plancraft
+  xcrun notarytool store-credentials <name>
   ```
-- **An unlocked keychain.** Over SSH the login keychain is usually locked; unlock it first:
+- **An unlocked login keychain.** It is locked in every SSH session, even when you're signed in at the Mac. On a Mac used only for signing, save the login password once in an owner-only file, and `cargo xtask` unlocks the keychain with it:
   ```bash
-  ssh -t <mac-host> security unlock-keychain
+  ssh -t <mac-host> 'umask 077 && mkdir -p ~/.config/signing && read -rs "p?Mac password: " && printf %s "$p" > ~/.config/signing/keychain-password'
   ```
+  (The Mac's shell is zsh, hence `read "p?prompt"`.) Without the file, run `security unlock-keychain` and the build in the same SSH session.
 
-Both are checked before the build starts. The settings above are passed on to the build host when `dist` runs remotely. Credentials never leave the Mac's keychain. `PLANCRAFT_ADHOC_SIGN=1` makes an ad-hoc signed test build instead (not for release: Gatekeeper warns about it).
+Everything is checked before the build starts. The `PLANCRAFT_*` settings above are passed on to the build host when `dist` runs remotely. Credentials never leave the Mac, and the password is never printed. Both files must be readable by their owner only, or the build stops. `PLANCRAFT_ADHOC_SIGN=1` makes an ad-hoc signed test build instead (not for release: Gatekeeper warns about it).
 
 ### Windows host
 

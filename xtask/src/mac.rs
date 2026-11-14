@@ -5,12 +5,17 @@
 //!
 //! Releases are signed with the "Developer ID Application" certificate in the Mac's keychain
 //! (hardened runtime, secure timestamp) and notarized by Apple: the app first, so its ticket
-//! can be stapled to it, then the disk image. `notarytool` uses a keychain profile, `plancraft`
-//! unless `PLANCRAFT_NOTARY_PROFILE` names another (made once with
-//! `xcrun notarytool store-credentials plancraft`). `PLANCRAFT_SIGN_IDENTITY` picks the
-//! certificate when the keychain has several. Credentials stay in the keychain; over SSH it must
-//! be unlocked first (`security unlock-keychain`). `PLANCRAFT_ADHOC_SIGN=1` makes an ad-hoc
-//! signed test build instead, which Gatekeeper warns about.
+//! can be stapled to it, then the disk image. `PLANCRAFT_SIGN_IDENTITY` picks the certificate
+//! when the keychain has several. `PLANCRAFT_ADHOC_SIGN=1` makes an ad-hoc signed test build
+//! instead, which Gatekeeper warns about.
+//!
+//! The signing Mac keeps two owner-only files in `~/.config/signing/`:
+//! - `notary-profile`: the name of the `notarytool` keychain profile (made once with
+//!   `xcrun notarytool store-credentials <name>`); `PLANCRAFT_NOTARY_PROFILE` overrides it.
+//! - `keychain-password`: the login password, used to unlock the login keychain, which is
+//!   locked in every SSH session. Without it, unlock the keychain in the same session first.
+//!
+//! The password is never printed or put in an error message.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -89,6 +94,8 @@ pub fn package() -> Result<Vec<PathBuf>> {
 
     match &signing {
         Signing::DeveloperId { identity, profile } => {
+            // The build takes minutes; make sure the keychain hasn't locked again since the checks.
+            unlock_keychain()?;
             step("signing PlanCraft.app with the Developer ID (hardened runtime)");
             run(codesign(identity).args(["--identifier", "dev.plancraft.plancraft-mcp"]).arg(contents.join("MacOS/plancraft-mcp")))?;
             run(codesign(identity).arg(&app))?;
@@ -174,8 +181,17 @@ fn signing(root: &Path) -> Result<Signing> {
             }
         }
     };
-    let profile = env("PLANCRAFT_NOTARY_PROFILE").unwrap_or_else(|| "plancraft".into());
-    const UNLOCK: &str = "if you're signed in over SSH, unlock the keychain first: `security unlock-keychain`";
+    let profile = match env("PLANCRAFT_NOTARY_PROFILE").or_else(|| signing_file("notary-profile").ok().flatten()) {
+        Some(p) => p,
+        None => bail!(
+            "no notary profile named: put its name in ~/.config/signing/notary-profile on this Mac, or set \
+             PLANCRAFT_NOTARY_PROFILE (`xcrun notarytool store-credentials <name>` makes a profile)"
+        ),
+    };
+    unlock_keychain()?;
+    const UNLOCK: &str = "the login keychain is locked (as it is in every SSH session): save the login password in \
+                          ~/.config/signing/keychain-password on this Mac (owner-only), or run `security unlock-keychain` \
+                          in the same session first";
 
     step("checking the signing certificate can be used");
     let probe_dir = root.join("dist/mac-signcheck");
@@ -202,6 +218,43 @@ fn signing(root: &Path) -> Result<Signing> {
         bail!("can't use the notary profile '{profile}': {text}\n{hint}");
     }
     Ok(Signing::DeveloperId { identity, profile })
+}
+
+/// A setting from `~/.config/signing/<name>` on the signing Mac (`None` if there is no such file).
+/// The file must be readable by its owner only, since `keychain-password` holds a password.
+fn signing_file(name: &str) -> Result<Option<String>> {
+    let Some(home) = std::env::var_os("HOME") else { return Ok(None) };
+    let path = PathBuf::from(home).join(".config/signing").join(name);
+    let Ok(meta) = std::fs::metadata(&path) else { return Ok(None) };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o077 != 0 {
+            bail!("{} can be read by other users; make it private with `chmod 600 {}`", path.display(), path.display());
+        }
+    }
+    let _ = meta;
+    let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
+    let text = text.strip_suffix('\n').unwrap_or(&text).to_string();
+    Ok(Some(text).filter(|t| !t.trim().is_empty()))
+}
+
+/// Unlocks the login keychain with the password in `~/.config/signing/keychain-password`, if
+/// there is one. The password goes only to `security`; it is never printed.
+fn unlock_keychain() -> Result<()> {
+    let Some(password) = signing_file("keychain-password")? else { return Ok(()) };
+    step("unlocking the login keychain (password from ~/.config/signing/keychain-password)");
+    let out = Command::new("security")
+        .args(["unlock-keychain", "-p", &password, "login.keychain"])
+        .output()
+        .context("failed to start security unlock-keychain")?;
+    if !out.status.success() {
+        bail!(
+            "couldn't unlock the login keychain with the password in ~/.config/signing/keychain-password (is it still \
+             the login password?)"
+        );
+    }
+    Ok(())
 }
 
 /// `codesign` for distribution: hardened runtime (notarization requires it) and a secure timestamp.
