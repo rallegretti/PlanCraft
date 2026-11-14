@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/plancraft-core", "crates/plancraft-mcp", "crates/plancraft-app", "xtask"]
 
 [workspace.package]
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 license = "CC0-1.0"
 authors = ["rallegretti <rob.allegretti@gmail.com>"]

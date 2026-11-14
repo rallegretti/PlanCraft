@@ -2437,7 +2437,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "plancraft-app"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2456,7 +2456,7 @@ dependencies = [
 
 [[package]]
 name = "plancraft-core"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "epaint_default_fonts",
@@ -2473,7 +2473,7 @@ dependencies = [
 
 [[package]]
 name = "plancraft-mcp"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "chrono",
  "plancraft-core",
@@ -4198,7 +4198,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.3.0"
+version = "0.4.0"
 dependencies = [
  "anyhow",
  "flate2",
