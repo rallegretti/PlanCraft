@@ -4,6 +4,7 @@
 //! points with the origin at the top-left. The same pages are written to PDF ([`pdf::write`])
 //! and drawn on screen by the app's Print Preview, so what you preview is what prints.
 
+pub mod fallback;
 pub mod font;
 pub mod layout;
 pub mod pdf;

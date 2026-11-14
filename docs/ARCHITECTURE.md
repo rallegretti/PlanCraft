@@ -17,7 +17,8 @@ This crate is pure logic with no UI. Every other component builds on it.
 | `ids` | Stable unique ids (`TaskId`, `ResourceId`, …) and their monotonic counters |
 | `duration` | Working-minute durations: formatting and parsing (`3d`, `4h`, `2w`, `3d?`) and lags (`2d`, `-1d`, `50%`, `3ed`) |
 | `custom` | Custom field definitions and values, and saved table layouts (column keys per table) |
-| `print` | Page Setup, page layout of a table with a Gantt chart (pages across and down, timescale, bars, links, legend, header/footer), PDF writer with an embedded TrueType subset of the UI font (`print::pdf`, `print::subset`). The app's Print Preview paints the same pages |
+| `print` | Page Setup, page layout of a table with a Gantt chart (pages across and down, timescale, bars, links, legend, header/footer), PDF writer that embeds subsets of every font a page uses (`print::pdf`, `print::subset`, with the `subsetter` crate for TrueType and CFF). Text prints in the bundled UI font, or in a system fallback font for scripts it lacks (`print::fallback` finds them from their character maps, `print::font::pick` chooses per character). The app's Print Preview paints the same pages |
+| `bidi` | Right-to-left text (Hebrew, Arabic) put in display order with the Unicode Bidirectional Algorithm, for the views and PDFs |
 | `network` | Network Diagram layout: columns by dependency depth (loops, found as strongly connected components, are released once everything leading into them is placed), rows by path (optionally critical first), summaries beside their subtasks, collapsed summaries as one box, right-angled link routes and hit testing |
 | `timescale` | Timescale units and tiers shared by the chart, usage views, timeline and printing |
 | `calendar` | Working weeks, exceptions (including yearly ones), and `WorkCal` date arithmetic: add/sub working time, snapping, and working minutes between two times |
@@ -129,6 +130,7 @@ The desktop app uses egui and eframe 0.36 with the wgpu renderer.
 - **`commands`:** the `Command` enum shared by the menu bar, toolbar, context menus and shortcuts.
 - **`widgets::grid`:** a virtualized spreadsheet grid with in-place text and choice editors, column resizing, keyboard navigation, and blank rows for entering new items.
 - **`widgets::timescale`:** the two-tier timescale (units from `plancraft_core::timescale`).
+- **`fonts`:** adds the system fallback fonts to egui the first time a plan's text, typed text or a recent file name needs them.
 - **`printing` / `dialogs::print`:** the printed sheet built from the current view (columns left of the divider, sort, group and filter as on screen), the Print window with its preview, and hand-off to the system print service (`lp`; the PDF viewer on Windows) in a background thread with a timeout.
 - **`views/*`:** the thirteen views. The Gantt view (also the Tracking Gantt and the Multiple Baselines Gantt) combines the task grid with `gantt_chart`, which draws bars, links, milestone connectors and baselines and handles drag-to-move, resize, progress and link. `network` draws the core's Network Diagram layout (cached per edit) and handles selection, Task Information, drag-to-link, panning and zoom. `board` paints the Task Board's columns and cards and handles selection, dragging cards between columns and the column menu.
 - **`columns`:** task table definitions. Each column defines how to display, edit and commit its value. Tables: Entry, Schedule, Tracking, Work, Cost, Estimates, Variance, Summary.

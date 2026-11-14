@@ -167,7 +167,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
         bp.text(
             pos2(name_rect.left() + 28.0, name_rect.top() + 13.0),
             Align2::LEFT_CENTER,
-            &lane.name,
+            plancraft_core::bidi::visual(&lane.name),
             FontId::proportional(12.5),
             name_color,
         );
@@ -205,7 +205,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
             cp.with_clip_rect(r.intersect(chart)).text(
                 pos2(r.left() + 5.0, r.center().y),
                 Align2::LEFT_CENTER,
-                &t.name,
+                plancraft_core::bidi::visual(&t.name),
                 FontId::proportional(11.5),
                 Color32::WHITE,
             );

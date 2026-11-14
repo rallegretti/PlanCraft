@@ -118,7 +118,7 @@ pub fn show(ui: &mut Ui, rect: Rect, p: &Project, g: &mut GanttState, chart_widt
             painter.text(
                 pos2(x, y.min(rect.bottom() - 6.0)),
                 Align2::CENTER_CENTER,
-                format!("{} {}", t.name, f.format("%-m/%-d")),
+                format!("{} {}", plancraft_core::bidi::visual(&t.name), f.format("%-m/%-d")),
                 font.clone(),
                 theme::pal().TEXT,
             );
@@ -126,7 +126,13 @@ pub fn show(ui: &mut Ui, rect: Rect, p: &Project, g: &mut GanttState, chart_widt
             let r = Rect::from_min_max(pos2(x_of(s), bar.top() + 2.0), pos2(x_of(f), bar.bottom() - 2.0));
             painter.rect_filled(r, 2.0, theme::pal().BAR_TASK);
             let c = painter.with_clip_rect(r);
-            c.text(pos2(r.left() + 4.0, r.center().y), Align2::LEFT_CENTER, &t.name, font.clone(), Color32::WHITE);
+            c.text(
+                pos2(r.left() + 4.0, r.center().y),
+                Align2::LEFT_CENTER,
+                plancraft_core::bidi::visual(&t.name),
+                font.clone(),
+                Color32::WHITE,
+            );
         }
     }
 

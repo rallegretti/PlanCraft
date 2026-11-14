@@ -406,7 +406,8 @@ pub fn show(
             }
             if !content.text.is_empty() {
                 let color = content.color.unwrap_or(theme::pal().TEXT);
-                let galley = cp.layout_no_wrap(content.text.clone(), cell_font.clone(), color);
+                // Right-to-left text (Hebrew, Arabic) shows in display order.
+                let galley = cp.layout_no_wrap(plancraft_core::bidi::visual(&content.text).into_owned(), cell_font.clone(), color);
                 let gx = match def.align {
                     Align::Max => r.right() - 5.0 - galley.size().x,
                     Align::Center => r.center().x - galley.size().x / 2.0,

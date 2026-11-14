@@ -29,6 +29,7 @@ pub struct PlanCraftApp {
     dialogs: Dialogs,
     settings: AppSettings,
     mcp: McpHost,
+    fonts: crate::fonts::FontLoader,
     seen: HashMap<u64, u64>,
     status: Option<(String, Instant)>,
     confirm_close: Option<CloseRequest>,
@@ -87,6 +88,8 @@ impl PlanCraftApp {
             settings.theme = t;
         }
         theme::install(&cc.egui_ctx, settings.theme);
+        // Find fonts for other scripts (Chinese, Hebrew, ...) while the window opens.
+        plancraft_core::print::fallback::warm_up();
         let has_doc = !lock(&ws).docs.is_empty();
         let st = UiState { table_width: settings.table_width, start_page: !has_doc, ..UiState::default() };
         let mut app = Self {
@@ -95,6 +98,7 @@ impl PlanCraftApp {
             dialogs: Dialogs::default(),
             settings,
             mcp: McpHost::default(),
+            fonts: Default::default(),
             seen: HashMap::new(),
             status: None,
             confirm_close: None,
@@ -110,6 +114,9 @@ impl PlanCraftApp {
             crash: None,
             inject_panic: false,
         };
+        for path in &app.settings.recent {
+            app.fonts.ensure(&cc.egui_ctx, &path.to_string_lossy());
+        }
         recovery::spawn_background_writer(&app.recovery, &app.ws, cc.egui_ctx.clone());
         if !app.rec().found.is_empty() && !app.st.start_page {
             app.st.toast(
@@ -1696,6 +1703,7 @@ impl PlanCraftApp {
 
         let ws_arc = self.ws.clone();
         let mut ws = lock(&ws_arc);
+        self.fonts.frame(&ctx, &ws);
 
         // Keep recovery copies of unsaved work up to date.
         // (The background writer also ticks, so copies are made while no frames are drawn.)

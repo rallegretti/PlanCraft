@@ -60,10 +60,16 @@ impl PrintView {
     }
 }
 
-/// A cell's text as it prints: icon-only cells print nothing; glyphs the print font lacks fall
-/// back to the cell's plain text (the Mode column's symbol prints as "Auto Scheduled").
+/// Symbols and emoji (punctuation, arrows, technical symbols, dingbats, pictographs).
+fn is_symbol(c: char) -> bool {
+    matches!(u32::from(c), 0x2000..=0x2E7F | 0x1F000..=0x1FAFF)
+}
+
+/// A cell's text as it prints: icon-only cells print nothing; symbols the bundled print font
+/// lacks fall back to the cell's plain text (the Mode column's symbol prints as "Auto
+/// Scheduled"), whatever fonts the system has. Letters of other scripts print in a system font.
 fn printable(cell: &crate::widgets::grid::Cell) -> String {
-    let ok = |s: &str| s.chars().all(font::has_glyph);
+    let ok = |s: &str| s.chars().all(|c| font::bundled_has(c) || (!is_symbol(c) && font::has_glyph(c)));
     if ok(&cell.text) {
         return cell.text.clone();
     }
@@ -352,6 +358,11 @@ mod tests {
         assert_eq!(printable(&mode), "Auto Scheduled");
         assert_eq!(printable(&Cell::text("Design")), "Design");
         assert_eq!(printable(&Cell { text: "\u{1F916}".into(), ..Default::default() }), "");
+        // Letters of other scripts print as they are (in a system font where one is installed).
+        assert_eq!(printable(&Cell::text("Запуск")), "Запуск");
+        if font::has_glyph('設') {
+            assert_eq!(printable(&Cell::text("設計")), "設計");
+        }
     }
 
     #[test]

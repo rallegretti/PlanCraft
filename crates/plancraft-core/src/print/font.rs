@@ -1,4 +1,5 @@
-//! The print font: egui's bundled Ubuntu Light (the same face the app draws with), used to
+//! Print fonts: egui's bundled Ubuntu Light (the same face the app draws with) first, then
+//! fallback fonts from the system for characters it lacks (see [`super::fallback`]). Used to
 //! measure text for layout and embedded (subset) in PDFs.
 
 use std::sync::OnceLock;
@@ -6,10 +7,10 @@ use std::sync::OnceLock;
 use skrifa::instance::{LocationRef, Size};
 use skrifa::{FontRef, GlyphId, MetadataProvider};
 
-/// Font file bytes (Ubuntu Font Licence; embedding in documents is allowed).
+/// Bundled font file bytes (Ubuntu Font Licence; embedding in documents is allowed).
 pub const DATA: &[u8] = epaint_default_fonts::UBUNTU_LIGHT;
 
-/// PostScript name used in PDFs.
+/// PostScript name of the bundled font in PDFs.
 pub const NAME: &str = "Ubuntu-Light";
 
 /// Extra width of synthetic bold (stroke outline), as a fraction of the font size per glyph.
@@ -26,63 +27,123 @@ pub struct FontMetrics {
     pub italic_angle: f32,
 }
 
-fn font() -> Option<FontRef<'static>> {
-    FontRef::new(DATA).ok()
+const FALLBACK_METRICS: FontMetrics =
+    FontMetrics { units_per_em: 1000.0, ascent: 0.93, descent: -0.19, cap_height: 0.69, bbox: [-0.2, -0.2, 1.0, 1.0], italic_angle: 0.0 };
+
+/// A font face text can print in: face 0 is the bundled font, the others are system fallbacks.
+pub struct Face {
+    pub data: &'static [u8],
+    /// Face index in a font collection (`.ttc`).
+    pub index: u32,
+    /// Name for PDFs.
+    pub name: String,
+    /// CFF outlines rather than TrueType.
+    pub cff: bool,
+    pub metrics: FontMetrics,
 }
 
-pub fn metrics() -> FontMetrics {
-    static M: OnceLock<FontMetrics> = OnceLock::new();
-    *M.get_or_init(|| {
-        let fallback = FontMetrics {
-            units_per_em: 1000.0,
-            ascent: 0.93,
-            descent: -0.19,
-            cap_height: 0.69,
-            bbox: [-0.2, -0.2, 1.0, 1.0],
-            italic_angle: 0.0,
-        };
-        let Some(f) = font() else { return fallback };
+impl Face {
+    fn new(data: &'static [u8], index: u32, name: String, cff: bool) -> Option<Self> {
+        let f = FontRef::from_index(data, index).ok()?;
         let m = f.metrics(Size::unscaled(), LocationRef::default());
         let upm = f32::from(m.units_per_em.max(1));
-        let b = m.bounds.map_or(fallback.bbox, |b| [b.x_min / upm, b.y_min / upm, b.x_max / upm, b.y_max / upm]);
-        FontMetrics {
+        let fb = FALLBACK_METRICS;
+        let b = m.bounds.map_or(fb.bbox, |b| [b.x_min / upm, b.y_min / upm, b.x_max / upm, b.y_max / upm]);
+        let metrics = FontMetrics {
             units_per_em: upm,
             ascent: m.ascent / upm,
             descent: m.descent / upm,
-            cap_height: m.cap_height.map_or(fallback.cap_height, |c| c / upm),
+            cap_height: m.cap_height.map_or(fb.cap_height, |c| c / upm),
             bbox: b,
             italic_angle: m.italic_angle,
+        };
+        Some(Self { data, index, name, cff, metrics })
+    }
+
+    fn font(&self) -> Option<FontRef<'static>> {
+        FontRef::from_index(self.data, self.index).ok()
+    }
+
+    /// Advance width of a glyph as a fraction of the font size.
+    pub fn advance(&self, gid: u16) -> f32 {
+        let Some(f) = self.font() else { return 0.5 };
+        let w = f.glyph_metrics(Size::unscaled(), LocationRef::default()).advance_width(GlyphId::new(u32::from(gid)));
+        w.map_or(0.5, |w| w / self.metrics.units_per_em)
+    }
+}
+
+fn bundled() -> Option<&'static Face> {
+    static F: OnceLock<Option<Face>> = OnceLock::new();
+    F.get_or_init(|| Face::new(DATA, 0, NAME.into(), false)).as_ref()
+}
+
+/// Fallback face `i` (counting from 0), loaded the first time it is needed.
+fn fallback_face(i: usize) -> Option<&'static Face> {
+    static FACES: OnceLock<Vec<OnceLock<Option<Face>>>> = OnceLock::new();
+    let all = super::fallback::fallbacks();
+    let slots = FACES.get_or_init(|| all.iter().map(|_| OnceLock::new()).collect());
+    let fb = all.get(i)?;
+    slots.get(i)?.get_or_init(|| Face::new(fb.face_data()?, fb.index, fb.name.clone(), fb.cff)).as_ref()
+}
+
+/// Face `i`: 0 is the bundled font, 1.. are the system fallbacks.
+pub fn face(i: usize) -> Option<&'static Face> {
+    if i == 0 { bundled() } else { fallback_face(i - 1) }
+}
+
+/// Whether the bundled font has `ch`.
+pub fn bundled_has(ch: char) -> bool {
+    bundled().and_then(Face::font).and_then(|f| f.charmap().map(ch)).is_some_and(|g| g.to_u32() != 0)
+}
+
+/// Bundled font metrics (layout uses them for line placement).
+pub fn metrics() -> FontMetrics {
+    bundled().map_or(FALLBACK_METRICS, |f| f.metrics)
+}
+
+/// The face and glyph that print `ch`: the bundled font if it has it, else the first fallback
+/// font that does; `(0, 0)` (the "missing glyph" box) when none has it.
+pub fn pick(ch: char) -> (usize, u16) {
+    if let Some(g) = bundled().and_then(Face::font).and_then(|f| f.charmap().map(ch)).and_then(|g| u16::try_from(g.to_u32()).ok())
+        && g != 0
+    {
+        return (0, g);
+    }
+    // Control characters and spaces never need a fallback font.
+    if ch.is_control() || ch.is_whitespace() {
+        return (0, 0);
+    }
+    for (i, fb) in super::fallback::fallbacks().iter().enumerate() {
+        if let Some(g) = fb.glyph(ch).filter(|g| *g != 0)
+            && fallback_face(i).is_some()
+        {
+            return (i + 1, g);
         }
-    })
+    }
+    (0, 0)
 }
 
-/// Glyph id for a character (0, the "missing glyph" box, when the font has none).
-pub fn glyph(ch: char) -> u16 {
-    font().and_then(|f| f.charmap().map(ch)).map_or(0, |g| u16::try_from(g.to_u32()).unwrap_or(0))
-}
-
-/// Whether the font can draw `ch`.
+/// Whether some font can draw `ch`.
 pub fn has_glyph(ch: char) -> bool {
-    ch == ' ' || glyph(ch) != 0
-}
-
-/// Advance width of a glyph as a fraction of the font size.
-pub fn advance(gid: u16) -> f32 {
-    let Some(f) = font() else { return 0.5 };
-    let upm = metrics().units_per_em;
-    f.glyph_metrics(Size::unscaled(), LocationRef::default()).advance_width(GlyphId::new(u32::from(gid))).map_or(0.5, |w| w / upm)
+    ch == ' ' || pick(ch).1 != 0
 }
 
 /// Width of `text` at `size` points.
 pub fn width(text: &str, size: f32, bold: bool) -> f32 {
-    let Some(f) = font() else { return text.chars().count() as f32 * size * 0.5 };
-    let upm = metrics().units_per_em;
+    let Some(base) = bundled() else { return text.chars().count() as f32 * size * 0.5 };
+    let Some(f) = base.font() else { return text.chars().count() as f32 * size * 0.5 };
+    let upm = base.metrics.units_per_em;
     let gm = f.glyph_metrics(Size::unscaled(), LocationRef::default());
     let cmap = f.charmap();
     let mut w = 0.0;
     for ch in text.chars() {
-        let gid = cmap.map(ch).unwrap_or(GlyphId::new(0));
-        w += gm.advance_width(gid).map_or(0.5, |a| a / upm);
+        w += match cmap.map(ch) {
+            Some(g) if g.to_u32() != 0 => gm.advance_width(g).map_or(0.5, |a| a / upm),
+            _ => {
+                let (i, g) = pick(ch);
+                face(i).map_or(0.5, |f| f.advance(g))
+            }
+        };
         if bold {
             w += BOLD_EXTRA;
         }
@@ -120,8 +181,9 @@ mod tests {
 
     #[test]
     fn the_print_font_measures_and_fits_text() {
-        assert!(glyph('A') != 0);
+        assert!(pick('A').1 != 0 && pick('A').0 == 0);
         assert!(has_glyph('…'));
+        assert!(bundled_has('Ж'), "Cyrillic is bundled");
         let w = width("Design review", 10.0, false);
         assert!(w > 30.0 && w < 90.0, "{w}");
         assert!(width("ab", 10.0, true) > width("ab", 10.0, false));
@@ -131,5 +193,19 @@ mod tests {
         assert_eq!(fit("Short", 10.0, false, 0.0), "");
         let m = metrics();
         assert!(m.ascent > 0.5 && m.descent < 0.0);
+        assert_eq!(pick('\u{7}'), (0, 0));
+    }
+
+    /// Where the system has a CJK font, Chinese text measures with it (not as boxes).
+    #[test]
+    fn other_scripts_use_system_fonts_where_installed() {
+        let (i, g) = pick('漢');
+        if g == 0 {
+            eprintln!("no CJK font on this system");
+            return;
+        }
+        assert!(i > 0 && face(i).is_some());
+        let w = width("漢字", 10.0, false);
+        assert!(w > 15.0 && w < 25.0, "CJK characters are about one em wide: {w}");
     }
 }

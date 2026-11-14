@@ -15,6 +15,7 @@ mod commands;
 mod dialogs;
 mod edit;
 mod fields;
+mod fonts;
 mod format;
 mod logo;
 mod mcp_host;

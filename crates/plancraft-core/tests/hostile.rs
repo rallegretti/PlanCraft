@@ -1080,3 +1080,40 @@ fn mspdi_files_with_too_many_tasks_are_refused() {
     let e = plancraft_core::mspdi::from_xml(&xml, "x").unwrap_err();
     assert!(e.contains("too many tasks"), "{e}");
 }
+
+/// Text in any script, with direction marks, combining marks and junk mixed in.
+fn any_script_text() -> impl Strategy<Value = String> {
+    prop_oneof![
+        "\\PC{0,40}",
+        "[א-ת0-9 ()\\[\\]a-z\u{05B0}-\u{05C7}\u{200E}\u{200F}\u{202A}-\u{202E}\u{2066}-\u{2069}]{0,30}",
+        "[\u{0600}-\u{06FF}\u{4E00}-\u{4E40}\u{3040}-\u{30FF}\u{AC00}-\u{AC40}\u{0E00}-\u{0E7F}\u{0900}-\u{097F} a-z]{0,30}",
+        any::<String>(),
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: cases(256), ..ProptestConfig::default() })]
+
+    /// Right-to-left reordering, measuring and printing text in any script never panic, keep
+    /// every character, and write a valid PDF (system fallback fonts included).
+    #[test]
+    fn text_in_any_script_prints(texts in prop::collection::vec(any_script_text(), 1..6), size in prop_oneof![Just(9.0f32), -5.0f32..200.0, Just(f32::NAN)]) {
+        count_panics();
+        let before = panics();
+        use plancraft_core::print::{Document, Item, Page, Rgb, font, pt};
+        let mut items = Vec::new();
+        for (i, t) in texts.iter().enumerate() {
+            let shown = plancraft_core::bidi::visual(t);
+            prop_assert_eq!(shown.chars().count(), t.chars().count());
+            let w = font::width(t, 9.0, i % 2 == 0);
+            prop_assert!(w.is_finite() && w >= 0.0);
+            let fitted = font::fit(t, 9.0, false, 60.0);
+            prop_assert!(font::width(&fitted, 9.0, false) <= 60.0 + 0.01 || fitted.is_empty());
+            items.push(Item::Text { at: pt(10.0, 20.0 + 12.0 * i as f32), size, color: Rgb(0, 0, 0), bold: i % 2 == 1, text: t.clone() });
+        }
+        let doc = Document { title: texts.concat(), pages: vec![Page { width: 600.0, height: 800.0, items }], truncated: false };
+        let pdf = plancraft_core::print::pdf::write(&doc);
+        prop_assert!(pdf.starts_with(b"%PDF") && pdf.ends_with(b"%%EOF\n"));
+        prop_assert_eq!(panics(), before, "a panic was caught");
+    }
+}
