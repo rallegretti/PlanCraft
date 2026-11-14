@@ -138,5 +138,6 @@ The desktop app uses egui and eframe 0.36 with the wgpu renderer.
 - **`mcp_host`:** starts and stops the HTTP MCP server on the app's `SharedWorkspace`, and repaints the window when agents make changes.
 - **`theme`:** light and dark palettes; all drawing reads colors from `theme::pal()`, and the Theme setting (System/Light/Dark) switches between them.
 - **`logo`:** the mark as geometry, painted with egui and rasterized for the window icon.
+- **`bundled_libs` (Linux):** the packages carry a few window-system libraries a fresh desktop may lack (`lib/plancraft/<name>/`). At startup the app checks which of them the system lacks and, only if some are missing, restarts itself once with just those folders on `LD_LIBRARY_PATH`; the system's own copies are always preferred.
 
 The UI locks the workspace once per frame. Views either edit the active `Document` directly or emit `Command`s that the app executes after layout.

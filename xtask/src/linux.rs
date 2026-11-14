@@ -4,6 +4,12 @@
 //! The binaries are built in an Ubuntu 22.04 container (`linux-build.Dockerfile`), so they need
 //! glibc 2.35 and run on Ubuntu 22.04 and newer; built on this machine they would need its own,
 //! newer glibc. Set `PLANCRAFT_NATIVE_LINUX=1` to build here anyway (for a quick local package).
+//!
+//! Both packages carry the window-system libraries the app loads at startup that a fresh desktop
+//! may lack (`BUNDLED_LIBS`, each in its own folder under `lib/plancraft/`); the app uses only
+//! the ones the system lacks (`plancraft-app/src/bundled_libs.rs`). Before a package is finished,
+//! it is started in a clean Ubuntu 22.04 container (`linux-smoke.Dockerfile`) and must open its
+//! window there.
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -16,8 +22,66 @@ use sha2::{Digest, Sha256};
 
 use crate::util::{self, artifact, copy, fresh_dir, output, run, step};
 
-/// The build image (made from `xtask/linux-build.Dockerfile` the first time it is needed).
-const BUILD_IMAGE: &str = "plancraft-build:ubuntu22.04";
+/// A container image, made from its Dockerfile in `xtask/` the first time it is needed. Change the
+/// tag when the Dockerfile changes, so existing machines make the new image.
+struct Image {
+    tag: &'static str,
+    dockerfile: &'static str,
+    about: &'static str,
+}
+
+/// The build image.
+const BUILD_IMAGE: Image =
+    Image { tag: "plancraft-build:ubuntu22.04-2", dockerfile: "linux-build.Dockerfile", about: "Ubuntu 22.04 with gcc and squashfs-tools" };
+
+/// A clean desktop system (display server and Mesa only) for testing the packages.
+const SMOKE_IMAGE: Image = Image {
+    tag: "plancraft-smoke:ubuntu22.04",
+    dockerfile: "linux-smoke.Dockerfile",
+    about: "a clean Ubuntu 22.04 desktop: Xvfb and Mesa only",
+};
+
+/// Libraries winit and wgpu load at startup (keyboard maps, cursors, screens, input devices,
+/// Wayland surfaces) that a fresh desktop install may not have; copied from the build image, each
+/// into its own folder `lib/plancraft/<name>/`, so the app can add just the ones a system lacks
+/// (a library the system has is always used from the system). Not bundled, on purpose: glibc, libX11/libxcb, libwayland-client, and the
+/// graphics drivers (libGL, libEGL, Vulkan, Mesa). Every desktop has them, and they must match
+/// the system's own drivers and display server.
+const BUNDLED_LIBS: [&str; 8] = [
+    "libxkbcommon.so.0",
+    "libxkbcommon-x11.so.0",
+    "libxcb-xkb.so.1",
+    "libXcursor.so.1",
+    "libXrandr.so.2",
+    "libXi.so.6",
+    "libXrender.so.1",
+    "libwayland-egl.so.1",
+];
+
+/// Starts the AppImage and the tarball's binary in the clean container: every bundled library
+/// must find what it needs there, and each must open its window (it saves a screenshot and quits).
+const SMOKE_TEST: &str = r#"
+out=$1; image=$2; stage=$3
+fail=0
+bundled=$(printf '%s:' "$stage"/lib/plancraft/*)
+for lib in "$stage"/lib/plancraft/*/* "$stage"/bin/plancraft; do
+  missing=$(LD_LIBRARY_PATH="$bundled" ldd "$lib" | grep 'not found')
+  if [ -n "$missing" ]; then echo "$lib needs a library a clean system lacks:"; echo "$missing"; fail=1; fi
+done
+start() {
+  name=$1; shift
+  rm -f "$out/$name.png"
+  PLANCRAFT_SCREENSHOT="$out/$name.png" APPIMAGE_EXTRACT_AND_RUN=1     timeout 180 xvfb-run -a -s "-screen 0 1440x900x24" "$@" --demo >"$out/$name.log" 2>&1
+  if [ -s "$out/$name.png" ]; then
+    echo "    $name: opened its window"
+  else
+    echo "$name did not open its window on a clean system:"; cat "$out/$name.log"; fail=1
+  fi
+}
+start appimage "$image"
+start tarball "$stage/bin/plancraft"
+exit $fail
+"#;
 
 /// The AppImage runtime (the small launcher at the start of every AppImage), from the AppImage
 /// project's own releases, pinned by the SHA-256 GitHub publishes for it.
@@ -71,6 +135,11 @@ files="bin/plancraft bin/plancraft-mcp share/applications/plancraft.desktop shar
 for icon in "$here"/share/icons/hicolor/*/apps/plancraft.*; do
   files="$files ${icon#"$here"/}"
 done
+# Libraries the app loads at startup that some systems lack; only PlanCraft looks in this
+# folder, and only for the ones the system does not have.
+for lib in "$here"/lib/plancraft/*/*; do
+  files="$files ${lib#"$here"/}"
+done
 
 for f in $files; do
   if [ "$uninstall" = 1 ]; then
@@ -81,6 +150,7 @@ for f in $files; do
   fi
 done
 [ "$uninstall" = 1 ] || chmod 755 "$prefix/bin/plancraft" "$prefix/bin/plancraft-mcp"
+[ "$uninstall" = 0 ] || rmdir "$prefix"/lib/plancraft/* "$prefix/lib/plancraft" 2>/dev/null || true
 
 command -v update-mime-database >/dev/null 2>&1 && update-mime-database "$prefix/share/mime" >/dev/null 2>&1 || true
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$prefix/share/applications" >/dev/null 2>&1 || true
@@ -111,6 +181,7 @@ pub fn package() -> Result<Vec<PathBuf>> {
     step("staging files");
     copy(&release.join("plancraft"), &stage.join("bin/plancraft"), true)?;
     copy(&release.join("plancraft-mcp"), &stage.join("bin/plancraft-mcp"), true)?;
+    bundle_libs(&root, &stage.join("lib/plancraft"))?;
     copy(&root.join("README.md"), &stage.join("README.md"), false)?;
     copy(&root.join("LICENSE"), &stage.join("LICENSE"), false)?;
     copy(&root.join("assets/logo.svg"), &stage.join("share/icons/hicolor/scalable/apps/plancraft.svg"), false)?;
@@ -136,6 +207,7 @@ pub fn package() -> Result<Vec<PathBuf>> {
     artifact(&sum);
 
     let (image, image_sum) = appimage(&root, &stage, &version, arch)?;
+    smoke_test(&root, &stage, &image)?;
     Ok(vec![tarball, sum, image, image_sum])
 }
 
@@ -150,7 +222,7 @@ fn build_binaries(root: &Path) -> Result<PathBuf> {
         util::build_release(None, &[])?;
         return Ok(root.join("target/release"));
     }
-    step(format!("building release binaries in an Ubuntu 22.04 container ({BUILD_IMAGE})"));
+    step(format!("building release binaries in an Ubuntu 22.04 container ({})", BUILD_IMAGE.tag));
     let target = root.join("target/ubuntu22.04");
     let cargo = PathBuf::from(output(Command::new("rustup").args(["which", "cargo"]))?.trim());
     let bin = cargo.parent().context("finding the toolchain")?.to_path_buf();
@@ -159,7 +231,7 @@ fn build_binaries(root: &Path) -> Result<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cargo")))
         .context("finding CARGO_HOME")?;
-    let mut c = container(root)?;
+    let mut c = container(root, &BUILD_IMAGE)?;
     c.arg("-e")
         .arg(format!("CARGO_HOME={}", cargo_home.display()))
         .arg("-e")
@@ -172,21 +244,21 @@ fn build_binaries(root: &Path) -> Result<PathBuf> {
         .arg(format!("{0}:{0}", cargo_home.display()))
         .arg("-v")
         .arg(format!("{0}:{0}:ro", toolchain.display()))
-        .arg(BUILD_IMAGE)
+        .arg(BUILD_IMAGE.tag)
         .arg(&cargo)
         .args(["build", "--release", "--locked", "-p", "plancraft-app", "-p", "plancraft-mcp"]);
     run(&mut c)?;
     Ok(target.join("release"))
 }
 
-/// `docker run` in the build image as this user, with the repository mounted at its own path
-/// (the image is made the first time it is needed).
-fn container(root: &Path) -> Result<Command> {
-    if output(Command::new("docker").args(["image", "inspect", BUILD_IMAGE])).is_err() {
-        step(format!("making the build image {BUILD_IMAGE} (Ubuntu 22.04 with gcc and squashfs-tools)"));
+/// `docker run` as this user, with the repository mounted at its own path; the caller adds the
+/// image's tag and the command (the image is made the first time it is needed).
+fn container(root: &Path, image: &Image) -> Result<Command> {
+    if output(Command::new("docker").args(["image", "inspect", image.tag])).is_err() {
+        step(format!("making the container image {} ({})", image.tag, image.about));
         run(Command::new("docker")
-            .args(["build", "-t", BUILD_IMAGE, "-f"])
-            .arg(root.join("xtask/linux-build.Dockerfile"))
+            .args(["build", "-t", image.tag, "-f"])
+            .arg(root.join("xtask").join(image.dockerfile))
             .arg(root.join("xtask")))?;
     }
     let uid = output(Command::new("id").arg("-u"))?;
@@ -233,6 +305,7 @@ fn appimage(root: &Path, stage: &Path, version: &str, arch: &str) -> Result<(Pat
     for bin in ["plancraft", "plancraft-mcp"] {
         copy(&stage.join("bin").join(bin), &appdir.join("usr/bin").join(bin), true)?;
     }
+    copy_tree(&stage.join("lib"), &appdir.join("usr/lib"))?;
     copy_tree(&stage.join("share"), &appdir.join("usr/share"))?;
     write(&appdir.join("AppRun"), APPRUN, true)?;
     let desktop = format!("{DESKTOP_ENTRY}X-AppImage-Version={version}\n");
@@ -244,8 +317,8 @@ fn appimage(root: &Path, stage: &Path, version: &str, arch: &str) -> Result<(Pat
     step("packing the AppImage");
     let squashfs = root.join("dist/linux/PlanCraft.squashfs");
     let _ = std::fs::remove_file(&squashfs);
-    let mut c = container(root)?;
-    c.args([BUILD_IMAGE, "mksquashfs"]).arg(&appdir).arg(&squashfs).args(["-root-owned", "-noappend", "-comp", "zstd", "-quiet"]);
+    let mut c = container(root, &BUILD_IMAGE)?;
+    c.args([BUILD_IMAGE.tag, "mksquashfs"]).arg(&appdir).arg(&squashfs).args(["-root-owned", "-noappend", "-comp", "zstd", "-quiet"]);
     run(&mut c)?;
     let image = root.join(format!("dist/PlanCraft-{version}-{arch}.AppImage"));
     let mut bytes = runtime;
@@ -260,6 +333,56 @@ fn appimage(root: &Path, stage: &Path, version: &str, arch: &str) -> Result<(Pat
     artifact(&image);
     artifact(&sum);
     Ok((image, sum))
+}
+
+/// The folder a bundled library goes in: its soname without the version (`libXi.so.6` → `libXi`).
+fn lib_dir(soname: &str) -> &str {
+    soname.split(".so").next().unwrap_or(soname)
+}
+
+/// Copies `BUNDLED_LIBS` out of the build image, each into `dest/<name>/` under its soname
+/// (symlinks resolved).
+fn bundle_libs(root: &Path, dest: &Path) -> Result<()> {
+    step("bundling the window-system libraries");
+    fresh_dir(dest)?;
+    for lib in BUNDLED_LIBS {
+        std::fs::create_dir_all(dest.join(lib_dir(lib)))?;
+    }
+    let script = r#"dest=$1; shift; for l in "$@"; do cp -L "/usr/lib/x86_64-linux-gnu/$l" "$dest/${l%%.so*}/" || exit 1; done"#;
+    let mut c = container(root, &BUILD_IMAGE)?;
+    c.args([BUILD_IMAGE.tag, "sh", "-c", script, "sh"]).arg(dest).args(BUNDLED_LIBS);
+    run(&mut c)?;
+    for lib in BUNDLED_LIBS {
+        let path = dest.join(lib_dir(lib)).join(lib);
+        if !path.is_file() {
+            bail!("{lib} was not bundled");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
+        }
+    }
+    Ok(())
+}
+
+/// Starts both packages on a clean system (see `SMOKE_TEST`); fails the build if either does not
+/// open its window. `PLANCRAFT_SKIP_SMOKE_TEST=1` skips it (never for a release).
+fn smoke_test(root: &Path, stage: &Path, image: &Path) -> Result<()> {
+    if std::env::var_os("PLANCRAFT_SKIP_SMOKE_TEST").is_some() {
+        step("SKIPPING the clean-system test (PLANCRAFT_SKIP_SMOKE_TEST): do not release these packages");
+        return Ok(());
+    }
+    if std::env::var_os("PLANCRAFT_NATIVE_LINUX").is_some() {
+        step("skipping the clean-system test: PLANCRAFT_NATIVE_LINUX binaries need this machine's newer glibc");
+        return Ok(());
+    }
+    step("starting both packages on a clean Ubuntu 22.04 desktop");
+    let out = root.join("dist/linux/smoke");
+    fresh_dir(&out)?;
+    let mut c = container(root, &SMOKE_IMAGE)?;
+    c.args([SMOKE_IMAGE.tag, "sh", "-c", SMOKE_TEST, "sh"]).arg(&out).arg(image).arg(stage);
+    run(&mut c).context("a Linux package does not start on a clean system (the log is above; screenshots and logs in dist/linux/smoke)")
 }
 
 /// Copies a directory tree (regular files only).

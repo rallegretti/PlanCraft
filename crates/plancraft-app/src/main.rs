@@ -10,6 +10,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+#[cfg(target_os = "linux")]
+mod bundled_libs;
 mod columns;
 mod commands;
 mod dialogs;
@@ -88,6 +90,10 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // Linux packages: fill in window-system libraries this system lacks (restarts once if so).
+    #[cfg(target_os = "linux")]
+    bundled_libs::use_where_missing();
+
     let mut ws = Workspace::default();
     for a in &args {
         if a.starts_with('-') {
@@ -114,6 +120,23 @@ fn main() -> anyhow::Result<()> {
         wgpu_options: wgpu_options(),
         ..Default::default()
     };
-    eframe::run_native("PlanCraft", options, Box::new(move |cc| Ok(Box::new(app::PlanCraftApp::new(cc, shared)))))
-        .map_err(|e| anyhow::anyhow!("{e}"))
+    // A missing display, graphics driver or system library shows up here, sometimes as a panic
+    // inside the windowing library; either way, say plainly what is wrong.
+    let started = plancraft_core::guard::catch("opening the window", || {
+        eframe::run_native("PlanCraft", options, Box::new(move |cc| Ok(Box::new(app::PlanCraftApp::new(cc, shared)))))
+    });
+    match started {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(no_window(&e.to_string())),
+        Err(p) => Err(no_window(&p.message)),
+    }
+}
+
+/// The error shown when the window cannot be opened.
+fn no_window(cause: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "PlanCraft could not open its window: {cause}\n\
+         It needs a graphical desktop (X11 or Wayland) with working graphics drivers. Without a desktop, \
+         `plancraft mcp` runs the MCP server, which needs no window."
+    )
 }

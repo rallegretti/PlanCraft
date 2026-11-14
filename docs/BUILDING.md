@@ -11,6 +11,15 @@ Release packages are made with `cargo xtask`. This is a small Rust program in `x
 
 The Linux binaries are built in an Ubuntu 22.04 container (`xtask/linux-build.Dockerfile`, image `plancraft-build:ubuntu22.04`, made the first time). They need only glibc 2.35, so both Linux packages run on Ubuntu 22.04 and every newer release; built directly on a newer system they would need its glibc. The build uses this machine's Rust toolchain, mounted read-only, and Docker must be installed. `PLANCRAFT_NATIVE_LINUX=1 cargo xtask package linux` builds without the container for a quick local package that runs only on systems at least as new as this one.
 
+Both Linux packages must work for someone who has none of our software installed. They carry the window-system libraries the app loads at startup that a fresh desktop may lack, each in its own folder under `lib/plancraft/`. They only fill gaps. At startup the app checks which of them the system lacks, looking in the loader's folders from `/etc/ld.so.conf` and the standard ones. If any are missing, it restarts itself once with just those folders on `LD_LIBRARY_PATH` (`crates/plancraft-app/src/bundled_libs.rs`). A library the system has is always used from the system, so it matches the system's keyboard data, display server and drivers. The bundled libraries are:
+- libxkbcommon and libxkbcommon-x11 with libxcb-xkb (keyboard maps);
+- libXcursor, libXrandr, libXi and libXrender (cursors, screens, input devices);
+- libwayland-egl.
+
+They are copied from the build image (`BUNDLED_LIBS` in `xtask/src/linux.rs`). glibc, libX11/libxcb, libwayland-client and the graphics drivers (libGL, libEGL, Vulkan, Mesa) are never bundled: every desktop has them, and they must match the system's own drivers and display server.
+
+Before a Linux build finishes, `cargo xtask package linux` tests both packages on a clean system, a container made from `xtask/linux-smoke.Dockerfile`. That's Ubuntu 22.04 with only a display server (Xvfb) and Mesa, as on a fresh install. Each bundled library must find everything it needs there, and the AppImage and the tarball's binary must each open their window and save a screenshot. The build fails otherwise, and the logs and screenshots are left in `dist/linux/smoke/`. `PLANCRAFT_SKIP_SMOKE_TEST=1` skips the test for a quick local package; never release one built that way.
+
 The AppImage starts with the AppImage project's type-2 runtime. `cargo xtask` downloads it once from the project's GitHub release `20251108` into `target/appimage/`, and refuses it unless its SHA-256 matches the one pinned in `xtask/src/linux.rs`. The app files are packed with `mksquashfs` (zstd) in the same container.
 
 Every package gets a `.sha256` checksum file next to it.
