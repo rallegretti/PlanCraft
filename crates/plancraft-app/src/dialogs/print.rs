@@ -462,9 +462,11 @@ fn paint_items(painter: &Painter, items: &[Item], at: &dyn Fn(print::Pt) -> Pos2
                 }
                 let top = at(print::pt(p.x, p.y - ascent * size));
                 let font_id = FontId::proportional(px);
-                painter.text(top, Align2::LEFT_TOP, text, font_id.clone(), color(*c));
+                // Right-to-left text in display order, as the PDF writes it.
+                let text = plancraft_core::bidi::visual(text);
+                painter.text(top, Align2::LEFT_TOP, &text, font_id.clone(), color(*c));
                 if *bold {
-                    painter.text(top + vec2((px * 0.04).max(0.4), 0.0), Align2::LEFT_TOP, text, font_id, color(*c));
+                    painter.text(top + vec2((px * 0.04).max(0.4), 0.0), Align2::LEFT_TOP, &text, font_id, color(*c));
                 }
             }
             Item::Clip { rect: r, items } => {

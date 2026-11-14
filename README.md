@@ -18,17 +18,20 @@
 </p>
 
 <p align="center">
-  <a href="#what-you-can-do-with-plancraft">Features</a> ·
-  <a href="#screenshots">Screenshots</a> ·
-  <a href="#installing">Install</a> ·
+  <a href="#download"><b>Download</b></a> ·
+  <a href="#features">Features</a> ·
   <a href="#getting-started">Get started</a> ·
   <a href="#planning-with-an-ai-assistant">AI assistants</a> ·
   <a href="#your-plans-are-safe">Your plans are safe</a>
 </p>
 
+<p align="center">
+  <a href="https://github.com/rallegretti/PlanCraft/releases/latest"><b>⬇ Download PlanCraft for Windows, macOS or Linux</b></a>
+</p>
+
 <br>
 
-![The Gantt chart with the critical path highlighted](docs/images/gantt.png)
+![The Gantt Chart with the critical path highlighted](docs/images/gantt.png)
 
 <table>
   <tr>
@@ -53,104 +56,68 @@
 
 <br>
 
-## What you can do with PlanCraft
+## Download
 
-**Plan your project**
-- Break work down into tasks and subtasks, typing straight into the task list like a spreadsheet.
-- See everything on a **Gantt chart**: drag bars to reschedule, stretch them to change a duration, or drag one task onto another to link them.
-- Link tasks so one starts when another finishes, or overlap them with leads and lags. Dates update automatically when anything changes.
-- Mark the deadlines that matter and see the **critical path**, the chain of tasks that sets your finish date.
-- See how the work flows in the **Network Diagram**: a box per task, laid out automatically, with the critical path in red. Drag from one box to another to link them.
+PlanCraft is free. Get the latest version from the **[Releases page](https://github.com/rallegretti/PlanCraft/releases/latest)**: scroll down to **Assets** and pick the file for your computer.
 
-**Hit your milestones**
-- A milestone is a checkpoint with a **deliverable**, for example "Signed project charter" or "Beta ready", and the tasks that must be done to reach it.
-- The Milestones view shows each one's date, deliverable, progress, and whether it's on track, slipping or late.
+| Your computer | File to download | What you get |
+|---|---|---|
+| **Windows** 10 or 11 (64-bit) | `PlanCraft-<version>-windows-x64.zip` | A folder with PlanCraft in it, ready to run |
+| **Mac** with Apple Silicon or Intel, macOS 11 or newer | `PlanCraft-<version>-macos-universal.dmg` | The PlanCraft app, to drag into Applications |
+| **Linux** (64-bit), the easy way | `PlanCraft-<version>-x86_64.AppImage` | One file that runs PlanCraft, nothing to install |
+| **Linux** (64-bit), in your applications menu | `plancraft-<version>-linux-x86_64.tar.gz` | An installer that adds PlanCraft to your menu |
 
-**Manage people and partners**
-- Add team members, whole teams, partner companies, vendors, contractors and equipment, with their hourly rates.
-- Record vacations, holidays and part-time schedules. Work is automatically scheduled around them.
-- Spot overbooked people instantly in **Resource Usage** and **Workload**, then let **Level All** spread the work out for you.
-- Move work between people by dragging it in the **Team Planner**.
-
-**Estimate and track**
-- Estimate tasks in hours, with optimistic/likely/pessimistic ranges, or with simple complexity points before anyone is assigned.
-- Log hours on a weekly **Timesheet** and turn tracked time into progress with one click.
-- **Split** a task to pause its work and resume it later, and drag the parts around on the Gantt Chart.
-- Add **recurring tasks** such as a weekly stand-up or a monthly report: daily, weekly, monthly or yearly.
-- Work the plan on a **Task Board**: drag cards from Not Started to Done, add your own columns, and let a column set the task's % complete.
-- Set a **status date** and run **Update Project**: bring progress up to date as scheduled, or move work that didn't get done past the status date. Tasks in progress pause and resume after the date, so the work already done stays where it happened. **Mark on Track** brings the selected tasks' progress up to the status date.
-- Save a **baseline** and compare it with the current plan: what slipped, what costs more, and how the project is trending. Keep up to eleven baselines (for example one per phase) and compare them side by side in the **Multiple Baselines Gantt**, or save just the dates as interim plans.
-
-**Work across projects**
-- Make a task in one project depend on a task in another project file. When the other project slips, yours picks up the new dates the next time you open it or refresh links.
-- Open several projects at once in tabs.
-
-**Plan with AI**
-- Connect an AI assistant such as **Claude Code**. It can read and change everything in your plan: build a whole task breakdown from a description, link tasks, assign people, log time, level workloads and report on status.
-- You watch the changes appear live, and you can undo anything the AI did.
-
-**Make it yours**
-- Light and **dark mode**, following your system setting or chosen under **View ▸ Theme**.
-- Thirteen views (Gantt Chart, Tracking Gantt, Multiple Baselines Gantt, Network Diagram, Task Board, Task Usage, Calendar, Milestones, Resource Sheet, Resource Usage, Workload, Team Planner and Timesheet), with filters, search and different column layouts.
-- **Print** any Gantt chart, task table or resource sheet with a live print preview, or save it as a **PDF**. Choose paper, orientation, scale, how many pages wide the timescale spreads, the legend, and headers and footers.
-- Undo and redo (up to 200 steps), plus export to CSV for spreadsheets.
-- **Work with Microsoft Project files.** Open a Microsoft Project XML file (`.xml`) to import it, and use **File ▸ Export Microsoft Project XML…** to hand your plan to Microsoft Project or other planning tools. Tasks, outline, links, calendars, resources, assignments, baselines and custom fields come across; PlanCraft tells you anything the other side has no place for.
-
-## Screenshots
-
-| | |
-|---|---|
-| ![Dark mode](docs/images/gantt-dark.png) **Dark mode**, here with the critical path shown | ![Milestones](docs/images/milestones.png) **Milestones**, each with its deliverable, progress and status |
-| ![Resource Usage](docs/images/resource-usage.png) **Resource Usage** shows hours per person per day; overbooked days stand out | ![Workload](docs/images/workload.png) **Workload** compares each person's planned hours with what they have available |
-| ![Team Planner](docs/images/team-planner.png) **Team Planner**: drag work from one person to another | ![Calendar](docs/images/calendar.png) **Calendar** gives a month-at-a-glance view |
-| ![Task Information](docs/images/task-information.png) **Task Information** collects every detail of a task in one place | ![Start Page](docs/images/start-page.png) **Start Page** opens your recent projects or starts a new one |
-
-## Installing
-
-Download the package for your computer from the [Releases page](https://github.com/rallegretti/PlanCraft/releases).
+Each file has a matching `.sha256` file. It's only for checking that a download arrived intact; you don't need it to install.
 
 ### Windows
 
-1. Download `PlanCraft-<version>-windows-x64.zip` and extract it anywhere you like.
-2. Double-click **PlanCraft.exe**.
+1. Download the `.zip` file.
+2. Right-click it in your Downloads folder, choose **Extract All…**, and pick where to keep PlanCraft (your Documents folder is fine).
+3. Open the extracted folder and double-click **PlanCraft.exe**.
 
-PlanCraft isn't signed with a Microsoft certificate yet, so Windows may show *"Windows protected your PC"* the first time. Click **More info**, then **Run anyway**.
+**The first time you open PlanCraft**, Windows may show a blue box saying *"Windows protected your PC"*. This is Windows SmartScreen, which warns about apps it hasn't seen often. Click **More info**, then **Run anyway**. You only need to do this the first time you open each new version.
+
+To start PlanCraft more easily later, right-click **PlanCraft.exe** and choose **Pin to Start** or **Pin to taskbar**.
 
 ### macOS
 
-1. Download `PlanCraft-<version>-macos-universal.dmg` and open it.
-2. Drag **PlanCraft** into your **Applications** folder.
-3. Open PlanCraft from Applications.
+1. Download the `.dmg` file and double-click it.
+2. In the window that opens, drag **PlanCraft** onto the **Applications** folder.
+3. Open PlanCraft from Applications, Launchpad or Spotlight.
 
-PlanCraft is signed and notarized by Apple, so it opens like any other app. It runs natively on both Apple Silicon and Intel Macs.
+The same download runs natively on Apple Silicon and Intel Macs.
 
 ### Linux
 
-PlanCraft runs on Ubuntu 22.04 or newer, and other 64-bit distributions from 2022 on. There are two packages.
+PlanCraft runs on Ubuntu 22.04 or newer, and on other 64-bit distributions from 2022 on.
 
-**AppImage** (one file, nothing to install):
+**AppImage:** one file you can keep anywhere and run.
 
-1. Download `PlanCraft-<version>-x86_64.AppImage`.
-2. Make it executable and run it:
+1. Download the `.AppImage` file.
+2. Allow it to run as a program: right-click it, open **Properties ▸ Permissions** and tick **Allow executing file as program**. Or, in a terminal:
    ```bash
    chmod +x PlanCraft-*-x86_64.AppImage
-   ./PlanCraft-*-x86_64.AppImage
    ```
+3. Double-click it, or run `./PlanCraft-*-x86_64.AppImage`.
 
-If your system lacks FUSE (it says it can't mount the AppImage), run it with `--appimage-extract-and-run`.
+If it reports that FUSE is missing or it can't mount the AppImage, start it with `--appimage-extract-and-run` added to the command.
 
-**Install package** (adds PlanCraft to your applications menu):
+**Install package:** adds PlanCraft to your applications menu, and makes `.plancraft` files open with it.
 
-1. Download `plancraft-<version>-linux-x86_64.tar.gz`, then extract it:
+1. Download the `.tar.gz` file and extract it:
    ```bash
    tar xzf plancraft-*-linux-x86_64.tar.gz
    ```
-2. Install it for your user. This adds PlanCraft to your applications menu and makes `.plancraft` files open with it:
+2. Run the installer. It installs for your user only, so no password is needed:
    ```bash
    ./plancraft-*-linux-x86_64/install.sh
    ```
 
-You can also run `bin/plancraft` directly without installing. To remove PlanCraft later, run `./install.sh --uninstall`.
+To remove it later, run `install.sh --uninstall` from the same folder.
+
+### Updating to a new version
+
+Download the new version and replace the old one the same way: extract the new zip over the old folder on Windows, drag the new app into Applications on a Mac and choose **Replace**, or swap in the new AppImage (or run the new `install.sh`) on Linux. Your plans and settings are kept.
 
 ### Building it yourself
 
@@ -167,6 +134,88 @@ cd PlanCraft
 ```bash
 cargo run --release -p plancraft-app
 ```
+
+## Features
+
+### Plan your project
+
+- Break work down into tasks and subtasks, typing straight into the task list like a spreadsheet.
+- See everything on a **Gantt chart**: drag bars to reschedule, stretch them to change a duration, or drag one task onto another to link them.
+- Link tasks so one starts when another finishes, or overlap them with leads and lags. Dates update automatically when anything changes.
+- Mark the deadlines that matter and see the **critical path**, the chain of tasks that sets your finish date.
+- Add **recurring tasks**, such as a weekly stand-up or a monthly report, and **split** a task to pause its work and resume it later.
+
+![Task Information collects every detail of a task in one place](docs/images/task-information.png)
+
+### See how the work flows
+
+The **Network Diagram** shows a box per task, laid out automatically from the links between them, with the critical path in red. Drag from one box to another to link two tasks.
+
+![The Network Diagram](docs/images/network.png)
+
+### Work the plan on a Task Board
+
+Drag cards from *Not Started* to *Done*, add your own columns, and let a column set a task's % complete. Late tasks stand out in red.
+
+![The Task Board](docs/images/board.png)
+
+### Hit your milestones
+
+A milestone is a checkpoint with a **deliverable**, such as "Signed project charter" or "Beta ready", and the tasks that must be done to reach it. The Milestones view shows each one's date, deliverable and progress, and whether it's on track, slipping or late.
+
+![Milestones, each with its deliverable, progress and status](docs/images/milestones.png)
+
+### Manage people and partners
+
+- Add team members, whole teams, partner companies, vendors, contractors and equipment, with their rates.
+- Record vacations, holidays and part-time schedules. Work is scheduled around them automatically.
+- Spot overbooked people in **Resource Usage** and **Workload**, then let **Level All** spread the work out for you.
+- Move work from one person to another by dragging it in the **Team Planner**.
+
+| | |
+|---|---|
+| ![Resource Usage](docs/images/resource-usage.png) **Resource Usage** shows hours per person per day; overbooked days stand out | ![Team Planner](docs/images/team-planner.png) **Team Planner**: drag work from one person to another |
+
+### Estimate and track progress
+
+- Estimate in hours, with optimistic, likely and pessimistic ranges, or with simple complexity points before anyone is assigned.
+- Log hours on a weekly **Timesheet** and turn the time into progress with one click.
+- Set a **status date** and run **Update Project** to bring progress up to date, or move work that didn't get done to after the status date.
+- Save a **baseline** and compare it with the current plan: what slipped, what costs more, and how the project is trending. Keep up to eleven baselines and compare them side by side.
+
+![The Tracking Gantt compares progress with the baseline](docs/images/tracking.png)
+
+### Print and share
+
+Print any view with a live print preview, or save it as a **PDF**: the Gantt charts, task and resource tables, the Network Diagram and the Task Board. Choose the paper, orientation and scale, how many pages wide it spreads, and your own headers and footers.
+
+![The Print window with its preview](docs/images/print-preview.png)
+
+### Write in any language
+
+Name tasks, people and anything else in your own language: Chinese, Japanese, Korean, Hebrew, Russian, Greek, Thai and many more. PlanCraft uses the fonts already on your computer, on screen and in PDFs, and right-to-left text reads right to left.
+
+![Task names in several languages](docs/images/languages.png)
+
+### Work with Microsoft Project
+
+Open a Microsoft Project XML file (`.xml`) to import it, and use **File ▸ Export Microsoft Project XML…** to hand your plan to Microsoft Project or other planning tools. Tasks, outline, links, calendars, resources, assignments, baselines and custom fields come across, and PlanCraft tells you about anything the other side has no place for.
+
+### Work across projects
+
+- Make a task in one project depend on a task in another project file. When the other project slips, yours picks up the new dates the next time you open it or refresh links.
+- Open several projects at once in tabs.
+
+### Make it yours
+
+- Light and **dark mode**, following your system or chosen under **View ▸ Theme**.
+- Thirteen views (Gantt Chart, Tracking Gantt, Multiple Baselines Gantt, Network Diagram, Task Board, Task Usage, Calendar, Milestones, Resource Sheet, Resource Usage, Workload, Team Planner and Timesheet), with filters, search, grouping and your own columns and custom fields.
+- Undo and redo up to 200 steps, and export to CSV for spreadsheets.
+
+| | |
+|---|---|
+| ![Dark mode](docs/images/gantt-dark.png) **Dark mode**, here with the critical path shown | ![Calendar](docs/images/calendar.png) **Calendar** gives a month-at-a-glance view |
+| ![Workload](docs/images/workload.png) **Workload** compares each person's planned hours with the hours they have | ![Start Page](docs/images/start-page.png) **Start Page** opens your recent projects or starts a new one |
 
 ## Getting started
 
