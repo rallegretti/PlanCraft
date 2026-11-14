@@ -101,6 +101,9 @@ pub fn workspace_from_files<P: AsRef<Path>>(paths: &[P]) -> Result<SharedWorkspa
                 ws.open(&path).map_err(|e| e.to_string())?;
                 continue;
             }
+            if plancraft_core::mspdi::is_mspdi_path(&path) {
+                return Err(format!("{} does not exist (a Microsoft Project XML file can be imported, not created)", path.display()));
+            }
             if let Some(dir) = path.parent()
                 && !dir.as_os_str().is_empty()
                 && !dir.exists()

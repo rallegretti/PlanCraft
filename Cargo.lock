@@ -2462,6 +2462,7 @@ dependencies = [
  "epaint_default_fonts",
  "miniz_oxide 0.8.9",
  "proptest",
+ "quick-xml",
  "serde",
  "serde_json",
  "skrifa",

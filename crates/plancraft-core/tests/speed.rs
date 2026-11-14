@@ -254,3 +254,32 @@ fn moving_50000_cards_on_the_board_is_fast() {
     });
     assert!(t < Duration::from_millis(500), "moving 50,000 cards took {t:?}");
 }
+
+/// Microsoft Project XML import and export of a 10,000-task plan (links, assignments) must not
+/// keep someone waiting: the importer streams the file one record at a time.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a timing test: `cargo xtask ci` runs it in release")]
+fn importing_and_exporting_10000_tasks_as_mspdi_is_fast() {
+    let _serial = timed();
+    let mut p = Project::new("Big exchange", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+    let ids = flat_tasks(&mut p, 10_000);
+    for w in ids.windows(2).step_by(2) {
+        p.link(w[0].into(), w[1], LinkType::FS, Lag::None).unwrap();
+    }
+    let people: Vec<ResourceId> = (0..20).map(|i| p.add_resource(format!("Person {i}"))).collect();
+    for (i, id) in ids.iter().enumerate() {
+        p.assign(*id, people[i % people.len()], None, None).unwrap();
+    }
+    recalculate(&mut p);
+    let t = Instant::now();
+    let (xml, _) = plancraft_core::mspdi::to_xml(&p);
+    let (mut q, notes) = plancraft_core::mspdi::from_xml(&xml, "x").unwrap();
+    recalculate(&mut q);
+    let took = t.elapsed();
+    assert!(notes.is_empty(), "{notes:?}");
+    assert_eq!(q.tasks.len(), 10_000);
+    assert_eq!(q.sched.finish, p.sched.finish);
+    let limit = if cfg!(debug_assertions) { Duration::from_secs(30) } else { Duration::from_secs(2) };
+    eprintln!("MSPDI export + import + recalculation of 10,000 tasks ({} MB): {took:?} (limit {limit:?})", xml.len() / 1_000_000);
+    assert!(took < limit, "took {took:?}; the limit is {limit:?}");
+}

@@ -148,6 +148,12 @@ pub struct Document {
     pub last_change: Option<(String, ChangeSource)>,
     /// What opening the file adjusted (values clamped into range), shown once by the app.
     pub load_notes: Vec<String>,
+    /// The plan was imported from another format (Microsoft Project XML): it has no file of its
+    /// own yet, and its load notes say what the import could not carry over.
+    pub imported: bool,
+    /// The file an imported plan came from (opening it again shows this document while it is
+    /// still unsaved, instead of importing a second copy).
+    pub imported_from: Option<PathBuf>,
     /// The file as it was when last loaded or saved; `save` refuses to overwrite a file that has
     /// changed since (another program or PlanCraft instance wrote it).
     disk_stamp: Option<io::DiskStamp>,
@@ -166,6 +172,8 @@ impl Document {
             revision: 1,
             last_change: None,
             load_notes: Vec::new(),
+            imported: false,
+            imported_from: None,
             disk_stamp: None,
             undo: Vec::new(),
             redo: Vec::new(),
@@ -356,9 +364,20 @@ impl Document {
         Ok(())
     }
 
-    /// Saves to a new path, rewriting relative external links so they still resolve.
+    /// Saves to a new path, rewriting relative external links so they still resolve. A `.xml`
+    /// path is refused: plans are saved as `.plancraft`, and an `.xml` file would be taken for
+    /// Microsoft Project XML when opened (use [`crate::mspdi::save`] to export one).
     pub fn save_as(&mut self, path: impl AsRef<Path>) -> FileResult<()> {
         let path = path.as_ref().to_path_buf();
+        if crate::mspdi::is_mspdi_path(&path) {
+            return Err(io::FileError::Io {
+                path,
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "a plan is saved as a .plancraft file; export it to Microsoft Project XML to write an .xml file",
+                ),
+            });
+        }
         let old = self.path.clone();
         let new_dir = path.parent().map(Path::to_path_buf).unwrap_or_default();
         let new_dir = if new_dir.is_absolute() { new_dir } else { std::env::current_dir().map(|c| c.join(&new_dir)).unwrap_or(new_dir) };
@@ -430,9 +449,13 @@ impl Workspace {
         self.next_handle
     }
 
-    /// Opens a document from disk (or activates it if already open).
+    /// Opens a document from disk (or activates it if already open). A Microsoft Project XML
+    /// file (`.xml`) is imported instead, see [`Workspace::import_mspdi`].
     pub fn open(&mut self, path: impl AsRef<Path>) -> FileResult<u64> {
         let path = path.as_ref();
+        if crate::mspdi::is_mspdi_path(path) {
+            return self.import_mspdi(path);
+        }
         let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         if let Some(i) =
             self.docs.iter().position(|d| d.path.as_ref().is_some_and(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()) == abs))
@@ -448,6 +471,31 @@ impl Workspace {
         if let Some(doc) = self.active_doc_mut() {
             doc.load_notes = notes;
             doc.disk_stamp = stamp;
+        }
+        Ok(handle)
+    }
+
+    /// Imports a Microsoft Project XML file as a new document. It is unsaved (no path): saving
+    /// asks where to keep it as a `.plancraft` plan. The load notes say what was left out. It
+    /// counts as the user's unsaved work; an agent importing a file clears `user_changes`.
+    /// While an earlier import of the same file is still unsaved, that document is activated.
+    pub fn import_mspdi(&mut self, path: impl AsRef<Path>) -> FileResult<u64> {
+        let path = path.as_ref();
+        let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if let Some(i) = self.docs.iter().position(|d| d.path.is_none() && d.imported_from.as_ref() == Some(&abs))
+            && let Some(doc) = self.docs.get(i)
+        {
+            self.active = Some(i);
+            return Ok(doc.handle);
+        }
+        let (project, notes) = crate::mspdi::load(&abs)?;
+        let handle = self.add(project, None);
+        if let Some(doc) = self.active_doc_mut() {
+            doc.load_notes = notes;
+            doc.imported = true;
+            doc.imported_from = Some(abs);
+            doc.dirty = true;
+            doc.user_changes = true;
         }
         Ok(handle)
     }

@@ -94,6 +94,7 @@
 - Thirteen views (Gantt Chart, Tracking Gantt, Multiple Baselines Gantt, Network Diagram, Task Board, Task Usage, Calendar, Milestones, Resource Sheet, Resource Usage, Workload, Team Planner and Timesheet), with filters, search and different column layouts.
 - **Print** any Gantt chart, task table or resource sheet with a live print preview, or save it as a **PDF**. Choose paper, orientation, scale, how many pages wide the timescale spreads, the legend, and headers and footers.
 - Undo and redo (up to 200 steps), plus export to CSV for spreadsheets.
+- **Work with Microsoft Project files.** Open a Microsoft Project XML file (`.xml`) to import it, and use **File ▸ Export Microsoft Project XML…** to hand your plan to Microsoft Project or other planning tools. Tasks, outline, links, calendars, resources, assignments, baselines and custom fields come across; PlanCraft tells you anything the other side has no place for.
 
 ## Screenshots
 
@@ -231,6 +232,11 @@ AI assistants can also work on project files without the window open. The AI Age
 ## Your files
 
 Projects are saved as `.plancraft` files. They are plain text, so they work well with backup tools and version control, and you can open the same project on any computer running PlanCraft.
+
+To exchange plans with Microsoft Project, use Microsoft Project XML (`.xml`):
+
+- **Importing:** open the `.xml` file with **File ▸ Open**. It opens as a new, unsaved plan; save it to keep it as a `.plancraft` file. A message lists anything PlanCraft could not carry over, such as a recurring task's repeat pattern (its occurrences are kept as ordinary tasks).
+- **Exporting:** **File ▸ Export Microsoft Project XML…** writes your plan as `.xml`. PlanCraft-only details, such as three-point estimates, Task Board columns and planned splits, have no place in that format and are listed when you export.
 
 ## License
 

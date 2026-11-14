@@ -33,6 +33,8 @@ pub enum FileError {
     Limit { path: PathBuf, message: String },
     #[error("{path} was changed by another program since it was opened or last saved")]
     ChangedOnDisk { path: PathBuf },
+    #[error("{path} could not be imported: {message}")]
+    Import { path: PathBuf, message: String },
 }
 
 /// What a file looked like on disk (modification time and size), to notice when another program

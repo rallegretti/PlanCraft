@@ -161,6 +161,56 @@ fn every_tool_argument_with_junk() {
     assert!(calls > 1000, "only {calls} calls");
 }
 
+/// The tools that read or write files, with file access on and every path inside a temporary
+/// folder: junk in any argument (a junk path is turned into a file name in that folder).
+#[test]
+fn file_tools_with_junk_in_a_temporary_folder() {
+    count_panics();
+    let dir = tempfile::tempdir().unwrap();
+    let plan = dir.path().join("plan.plancraft");
+    let xml = dir.path().join("plan.xml");
+    plancraft_core::io::save(&demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), &plan).unwrap();
+    plancraft_core::mspdi::save(&demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), &xml).unwrap();
+    std::fs::write(dir.path().join("build.xml"), "<project name=\"other\"/>").unwrap();
+    let in_dir = |v: &Value| match v.as_str() {
+        Some(s) => {
+            let name: String = s.chars().take(60).map(|c| if matches!(c, '/' | '\\' | ':' | '\0') { '_' } else { c }).collect();
+            json!(dir.path().join(if name.trim().is_empty() { "blank".to_string() } else { name }).to_string_lossy())
+        }
+        None => v.clone(),
+    };
+    let paths = [plan.clone(), xml.clone(), dir.path().join("build.xml"), dir.path().join("new.xml"), dir.path().join("new")];
+    let tools = plancraft_mcp::tools::all_tools();
+    let mut calls = 0;
+    for name in ["open_project", "save_project", "new_project", "export_pdf", "export_mspdi"] {
+        let tool = tools.iter().find(|t| t.name == name).unwrap();
+        let props: Vec<String> =
+            tool.input_schema.get("properties").and_then(Value::as_object).map(|m| m.keys().cloned().collect()).unwrap_or_default();
+        for prop in &props {
+            for (k, value) in junk_values().iter().enumerate() {
+                let mut ws = Workspace::default();
+                ws.add(demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+                let s = McpServer::with_options(ws.shared(), ServerOptions { allow_file_access: true, ..ServerOptions::default() });
+                let mut args = Map::new();
+                args.insert("path".into(), json!(paths[k % paths.len()].to_string_lossy()));
+                if name == "new_project" {
+                    args.insert("name".into(), json!("Junk"));
+                }
+                args.insert(prop.clone(), if prop == "path" { in_dir(value) } else { value.clone() });
+                let before = panics();
+                let r = call(&s, name, Value::Object(args.clone()));
+                assert!(panics() == before, "tool '{name}' panicked on {}: {}", Value::Object(args), r["result"]["content"][0]["text"]);
+                assert!(r.get("result").is_some() || r.get("error").is_some(), "{r}");
+                still_alive(&s);
+                calls += 1;
+            }
+        }
+    }
+    assert!(calls > 100, "only {calls} calls");
+    // Nothing escaped the folder, and the other program's .xml file was never replaced.
+    assert_eq!(std::fs::read_to_string(dir.path().join("build.xml")).unwrap(), "<project name=\"other\"/>");
+}
+
 fn arb_json() -> impl Strategy<Value = Value> {
     let leaf = prop_oneof![
         Just(Value::Null),

@@ -213,7 +213,8 @@ impl PlanCraftApp {
                 self.st.start_page = false;
                 self.st.sel = Default::default();
                 self.st.gantt.initialized_for = None;
-                self.set_status(format!("Opened {}", path.display()));
+                let verb = if plancraft_core::mspdi::is_mspdi_path(&path) { "Imported" } else { "Opened" };
+                self.set_status(format!("{verb} {}", path.display()));
             }
             Err(e) => self.st.toast(ToastKind::Error, e.to_string()),
         }
@@ -284,6 +285,51 @@ impl PlanCraftApp {
             return;
         };
         self.save_pdf(pending);
+    }
+
+    /// Saves the plan as a Microsoft Project XML file, saying what the format left out.
+    fn export_mspdi(&mut self) {
+        let Some((name, xml, notes)) = self.with_doc(|doc, _| {
+            let (xml, notes) = plancraft_core::mspdi::to_xml(&doc.project);
+            (doc.project.name.clone(), xml, notes)
+        }) else {
+            return;
+        };
+        let name: String =
+            name.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '-' } else { c }).collect();
+        let ext = plancraft_core::mspdi::EXTENSION;
+        let Some(path) =
+            rfd::FileDialog::new().add_filter("Microsoft Project XML", &[ext]).set_file_name(format!("{name}.{ext}")).save_file()
+        else {
+            return;
+        };
+        let path = match path.extension() {
+            None => {
+                // The file dialog only asked about the name as typed: never replace "x.xml" unasked.
+                let with_ext = path.with_extension(ext);
+                if with_ext.exists() {
+                    return self.st.toast(
+                        ToastKind::Warning,
+                        format!("{} already exists. Choose it in the dialog to replace it, or pick another name.", with_ext.display()),
+                    );
+                }
+                with_ext
+            }
+            Some(e) if e.eq_ignore_ascii_case(ext) => path,
+            // Never write XML over a plan or any other kind of file.
+            Some(_) => return self.st.toast(ToastKind::Warning, "Choose a file name ending in .xml to export Microsoft Project XML."),
+        };
+        match plancraft_core::io::write_atomic(&path, xml.as_bytes(), plancraft_core::io::Privacy::KeepExisting) {
+            Ok(()) if notes.is_empty() => self.set_status(format!("Exported {}", path.display())),
+            Ok(()) => {
+                self.set_status(format!("Exported {}", path.display()));
+                self.st.toast(
+                    ToastKind::Info,
+                    format!("Exported {}. Microsoft Project XML has no place for some things: {}", path.display(), notes.join("; ")),
+                );
+            }
+            Err(e) => self.st.toast(ToastKind::Error, format!("Could not export the plan: {e}")),
+        }
     }
 
     /// Asks where to save a PDF and writes it (no workspace lock is held while the file dialog is open).
@@ -384,7 +430,13 @@ impl PlanCraftApp {
                 self.st.view = ViewKind::Gantt;
             }
             Command::Open => {
-                if let Some(path) = rfd::FileDialog::new().add_filter("PlanCraft project", &[FILE_EXTENSION]).pick_file() {
+                let xml = plancraft_core::mspdi::EXTENSION;
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Plans", &[FILE_EXTENSION, xml])
+                    .add_filter("PlanCraft project", &[FILE_EXTENSION])
+                    .add_filter("Microsoft Project XML", &[xml])
+                    .pick_file()
+                {
                     self.open_path(path);
                 }
             }
@@ -427,6 +479,7 @@ impl PlanCraftApp {
                 }
             }
             Command::ExportPdf => self.export_pdf(),
+            Command::ExportMspdi => self.export_mspdi(),
             Command::McpPanel => {
                 self.dialogs.mcp = true;
                 self.st.start_page = false;
@@ -1609,7 +1662,12 @@ impl PlanCraftApp {
             if notes.len() > SHOWN {
                 list.push_str(&format!("; and {} more", notes.len() - SHOWN));
             }
-            self.st.toast(ToastKind::Warning, format!("Opened {}; PlanCraft adjusted out-of-range values: {list}", doc.title()));
+            let msg = if doc.imported {
+                format!("Imported {} from Microsoft Project XML. Save it to keep it as a PlanCraft plan. Notes: {list}", doc.project.name)
+            } else {
+                format!("Opened {}; PlanCraft adjusted out-of-range values: {list}", doc.title())
+            };
+            self.st.toast(ToastKind::Warning, msg);
         }
     }
 
@@ -2816,6 +2874,40 @@ mod ui_tests {
         let saved = plancraft_core::io::load(&path).unwrap();
         assert!(saved.tasks.iter().any(|t| t.name == "Mine"), "overwritten on request");
         assert!(!h.state().ws.lock().unwrap().active_doc().unwrap().dirty);
+    }
+
+    /// Opening a Microsoft Project XML file imports it as a new plan: the user's unsaved work,
+    /// with no file of its own, and a toast saying what the import could not carry over.
+    #[test]
+    fn opening_microsoft_project_xml_imports_it() {
+        let tmp = crate::recovery::tests::TempDir::new("mspdi");
+        let path = tmp.0.join("from project.xml");
+        let mut plan = Project::new("Exchange", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        plan.add_task("Design", None);
+        plancraft_core::mspdi::save(&plan, &path).unwrap();
+        // A link to a task that is not in the file: the import leaves it out and says so.
+        let xml = std::fs::read_to_string(&path)
+            .unwrap()
+            .replace("<Name>Design</Name>", "<Name>Design</Name><PredecessorLink><PredecessorUID>77</PredecessorUID></PredecessorLink>");
+        std::fs::write(&path, xml).unwrap();
+        let shared = Workspace::default().shared();
+        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).build_eframe(move |cc| PlanCraftApp::new(cc, shared));
+        h.run_steps(2);
+        let ctx = h.ctx.clone();
+        h.state_mut().exec(&ctx, Command::OpenPath(path.clone()));
+        h.run_steps(2);
+        {
+            let ws = h.state().ws.clone();
+            let ws = ws.lock().unwrap();
+            let doc = ws.active_doc().unwrap();
+            assert_eq!(doc.project.tasks.len(), 1);
+            assert!(doc.imported && doc.path.is_none() && doc.dirty && doc.user_changes);
+        }
+        assert!(h.state().st.toasts.iter().any(|t| t.text.contains("Imported Exchange from") && t.text.contains("not in the file")));
+        // Opening it again shows the same unsaved import.
+        h.state_mut().exec(&ctx, Command::OpenPath(path.clone()));
+        h.run_steps(2);
+        assert_eq!(h.state().ws.lock().unwrap().docs.len(), 1);
     }
 
     /// Regression: opening a cell editor and leaving with Enter used to commit the displayed text,
