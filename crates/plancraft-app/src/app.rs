@@ -47,6 +47,8 @@ pub struct PlanCraftApp {
     crash: Option<String>,
     /// Developer/test hook: panic inside the next frame (`PLANCRAFT_CMD=Panic`).
     inject_panic: bool,
+    /// Files the system asked to open (macOS Finder), opened at the start of each frame.
+    inbox: Arc<crate::open_requests::Inbox>,
     /// A Save stopped because another program changed the file: asks to overwrite (by handle).
     confirm_overwrite: Option<u64>,
     /// The close (of a document or the app) to carry on with once the overwrite question is
@@ -113,10 +115,12 @@ impl PlanCraftApp {
             recovery_error: None,
             crash: None,
             inject_panic: false,
+            inbox: crate::open_requests::global(),
         };
         for path in &app.settings.recent {
             app.fonts.ensure(&cc.egui_ctx, &path.to_string_lossy());
         }
+        app.inbox.wake_with(&cc.egui_ctx);
         recovery::spawn_background_writer(&app.recovery, &app.ws, cc.egui_ctx.clone());
         if !app.rec().found.is_empty() && !app.st.start_page {
             app.st.toast(
@@ -1686,6 +1690,9 @@ impl PlanCraftApp {
         if std::mem::take(&mut self.inject_panic) {
             injected_panic();
         }
+        for path in self.inbox.take() {
+            self.open_path(path);
+        }
         let mut out: Vec<Command> = Vec::new();
 
         // Intercept window close when there are unsaved changes.
@@ -2850,6 +2857,38 @@ mod ui_tests {
         assert!(h.state().dialogs.task_info.is_none(), "OK applied to its own plan and closed");
         let own = ws.docs[ws.index_of(a).unwrap()].history();
         assert!(own.iter().any(|(l, _)| l.starts_with("Task Information")), "{own:?}");
+    }
+
+    /// macOS Finder hands files to the running app as events (`mac_open.rs`); the next frame opens
+    /// them like File ▸ Open, wakes the window to do so, and a file already open is only brought
+    /// to the front.
+    #[test]
+    fn files_the_system_asks_to_open_are_opened_on_the_next_frame() {
+        let tmp = crate::recovery::tests::TempDir::new("open-requests");
+        let path = tmp.0.join("From Finder.plancraft");
+        plancraft_core::io::save(&Project::new("From Finder", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), &path).unwrap();
+        let mut h = harness();
+        // Tests never touch the app-wide inbox; each gets its own.
+        let inbox = Arc::new(crate::open_requests::Inbox::default());
+        inbox.wake_with(&h.ctx);
+        h.state_mut().inbox = inbox.clone();
+        let before = h.state().ws.lock().unwrap().docs.len();
+
+        inbox.push([path.clone(), tmp.0.join("missing.plancraft")]);
+        h.run_steps(2);
+        {
+            let ws = h.state().ws.lock().unwrap();
+            assert_eq!(ws.docs.len(), before + 1);
+            assert_eq!(ws.active_doc().unwrap().project.name, "From Finder");
+        }
+        assert!(h.state().st.toasts.iter().any(|t| t.text.contains("missing.plancraft")), "a file that can't be read is reported");
+
+        h.state().ws.lock().unwrap().active = Some(0);
+        inbox.push([path]);
+        h.run_steps(2);
+        let ws = h.state().ws.lock().unwrap();
+        assert_eq!(ws.docs.len(), before + 1, "opening it again does not add a second copy");
+        assert_eq!(ws.active_doc().unwrap().project.name, "From Finder");
     }
 
     /// Regression: Save silently replaced a file another program had changed since it was opened.

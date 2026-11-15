@@ -27,6 +27,9 @@ use crate::util::{self, artifact, copy, fresh_dir, output, run, step};
 const TARGETS: [&str; 2] = ["aarch64-apple-darwin", "x86_64-apple-darwin"];
 const BUNDLE_ID: &str = "dev.plancraft.PlanCraft";
 const MIN_MACOS: &str = "11.0";
+/// The file type of `.plancraft` plans (a JSON document), declared in `Info.plist` so Finder
+/// opens plans with PlanCraft; the app receives them as "open documents" events (`mac_open.rs`).
+const PLAN_TYPE: &str = "dev.plancraft.project";
 
 /// Icon slots in an `.icns` file and their pixel sizes (all stored as PNG).
 const ICNS_SLOTS: [(&[u8; 4], u32); 10] = [
@@ -90,6 +93,7 @@ pub fn package() -> Result<Vec<PathBuf>> {
     std::fs::create_dir_all(contents.join("Resources"))?;
     std::fs::write(contents.join("Resources/PlanCraft.icns"), icns)?;
     std::fs::write(contents.join("Info.plist"), info_plist(&version))?;
+    run(Command::new("plutil").arg("-lint").arg(contents.join("Info.plist")))?;
     std::fs::write(contents.join("PkgInfo"), "APPL????")?;
 
     match &signing {
@@ -358,6 +362,30 @@ fn info_plist(version: &str) -> String {
     <key>LSMinimumSystemVersion</key><string>{MIN_MACOS}</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSHumanReadableCopyright</key><string>Dedicated to the public domain (CC0 1.0)</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key><string>PlanCraft Project</string>
+            <key>CFBundleTypeRole</key><string>Editor</string>
+            <key>CFBundleTypeIconFile</key><string>PlanCraft</string>
+            <key>LSHandlerRank</key><string>Owner</string>
+            <key>LSItemContentTypes</key><array><string>{PLAN_TYPE}</string></array>
+        </dict>
+    </array>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key><string>{PLAN_TYPE}</string>
+            <key>UTTypeDescription</key><string>PlanCraft Project</string>
+            <key>UTTypeIconFile</key><string>PlanCraft</string>
+            <key>UTTypeConformsTo</key><array><string>public.json</string></array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key><array><string>plancraft</string></array>
+                <key>public.mime-type</key><array><string>application/x-plancraft</string></array>
+            </dict>
+        </dict>
+    </array>
 </dict>
 </plist>
 "#
@@ -383,6 +411,24 @@ mod tests {
         let text = "Conducting pre-submission checks for x.dmg...\nSubmission ID received\n  id: 2efe2717-52ef-43a5-96dc-0797e4ca1041\nProcessing complete\n  id: 2efe2717-52ef-43a5-96dc-0797e4ca1041\n  status: Invalid";
         assert_eq!(super::submission_id(text).as_deref(), Some("2efe2717-52ef-43a5-96dc-0797e4ca1041"));
         assert_eq!(super::submission_id("nothing"), None);
+    }
+
+    #[test]
+    fn info_plist_declares_plan_files() {
+        let plist = super::info_plist("1.2.3");
+        for needle in [
+            "<key>CFBundleDocumentTypes</key>",
+            "<key>UTExportedTypeDeclarations</key>",
+            "<string>dev.plancraft.project</string>",
+            "<key>public.filename-extension</key><array><string>plancraft</string></array>",
+            "<key>CFBundleShortVersionString</key><string>1.2.3</string>",
+        ] {
+            assert!(plist.contains(needle), "missing {needle}");
+        }
+        // Balanced tags (`plutil -lint` checks the real file during packaging on the Mac).
+        for tag in ["dict", "array"] {
+            assert_eq!(plist.matches(&format!("<{tag}>")).count(), plist.matches(&format!("</{tag}>")).count(), "{tag}");
+        }
     }
 
     #[test]

@@ -20,8 +20,11 @@ mod fields;
 mod fonts;
 mod format;
 mod logo;
+#[cfg(target_os = "macos")]
+mod mac_open;
 mod mcp_host;
 mod menubar;
+mod open_requests;
 mod printing;
 mod recovery;
 mod settings;
@@ -112,6 +115,9 @@ fn main() -> anyhow::Result<()> {
         ws.add(plancraft_core::sample::demo_project(monday), None);
     }
     let shared = ws.shared();
+    // macOS hands files opened from Finder to the app as events, not on the command line.
+    #[cfg(target_os = "macos")]
+    mac_open::install();
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()

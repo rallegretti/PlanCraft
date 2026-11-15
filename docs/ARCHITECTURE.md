@@ -138,6 +138,7 @@ The desktop app uses egui and eframe 0.36 with the wgpu renderer.
 - **`mcp_host`:** starts and stops the HTTP MCP server on the app's `SharedWorkspace`, and repaints the window when agents make changes.
 - **`theme`:** light and dark palettes; all drawing reads colors from `theme::pal()`, and the Theme setting (System/Light/Dark) switches between them.
 - **`logo`:** the mark as geometry, painted with egui and rasterized for the window icon.
+- **`open_requests` and `mac_open` (macOS):** macOS hands a plan opened from Finder or the Dock to the app as an "open documents" event rather than on the command line, at launch and while it runs. `mac_open` installs the handler when AppKit is about to finish launching (winit owns the application delegate, so it watches that notification) and queues the files in `open_requests`, which the next frame opens like File ▸ Open. `Info.plist` declares the `.plancraft` type (`dev.plancraft.project`).
 - **`bundled_libs` (Linux):** the packages carry a few window-system libraries a fresh desktop may lack (`lib/plancraft/<name>/`). At startup the app checks which of them the system lacks and, only if some are missing, restarts itself once with just those folders on `LD_LIBRARY_PATH`; the system's own copies are always preferred.
 
 The UI locks the workspace once per frame. Views either edit the active `Document` directly or emit `Command`s that the app executes after layout.

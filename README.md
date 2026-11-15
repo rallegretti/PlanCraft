@@ -86,7 +86,7 @@ To start PlanCraft more easily later, right-click **PlanCraft.exe** and choose *
 2. In the window that opens, drag **PlanCraft** onto the **Applications** folder.
 3. Open PlanCraft from Applications, Launchpad or Spotlight.
 
-The same download runs natively on Apple Silicon and Intel Macs.
+The same download runs natively on Apple Silicon and Intel Macs. Double-clicking a `.plancraft` file in Finder opens it in PlanCraft.
 
 ### Linux
 
