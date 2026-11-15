@@ -27,7 +27,8 @@ opt-level = 2
 lto = "thin"
 
 [workspace.lints.rust]
-# Only the Windows console attach in plancraft-app needs `unsafe` (allowed at that one call).
+# Only plancraft-app calls into the OS with `unsafe`: the Windows console attach (allowed at that one
+# call) and the macOS open-documents handler (`mac_open.rs`, allowed in that module).
 unsafe_code = "deny"
 
 [workspace.lints.clippy]

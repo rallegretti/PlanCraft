@@ -27,6 +27,13 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 [dev-dependencies]
 egui_kittest = { version = "0.36", features = ["eframe"] }
 
+# Files opened from Finder arrive as an "open documents" event (`src/mac_open.rs`). Pure Rust
+# bindings to Apple's frameworks, the same versions eframe already uses.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "objc2-core-services", "NSAppleEventDescriptor", "NSAppleEventManager", "NSNotification", "NSString", "NSURL"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication"] }
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Console"] }
 
