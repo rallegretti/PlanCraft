@@ -26,6 +26,11 @@ use objc2_foundation::{NSAppleEventDescriptor, NSAppleEventManager, NSNotificati
 const CORE_EVENT_CLASS: u32 = u32::from_be_bytes(*b"aevt");
 const OPEN_DOCUMENTS: u32 = u32::from_be_bytes(*b"odoc");
 const DIRECT_OBJECT: u32 = u32::from_be_bytes(*b"----");
+/// The kinds of item that name a file: a file URL, an alias, a bookmark and an FSRef. Anything
+/// else is ignored: `fileURLValue` would also read plain text as an old-style (colon-separated)
+/// path and turn it into a made-up file name.
+const FILE_REFERENCES: [u32; 4] =
+    [u32::from_be_bytes(*b"furl"), u32::from_be_bytes(*b"alis"), u32::from_be_bytes(*b"bmrk"), u32::from_be_bytes(*b"fsrf")];
 
 define_class!(
     // SAFETY: NSObject has no subclassing requirements, and this class adds no instance
@@ -100,6 +105,7 @@ fn paths(event: &NSAppleEventDescriptor) -> Vec<PathBuf> {
     };
     items
         .iter()
+        .filter(|item| FILE_REFERENCES.contains(&item.descriptorType()))
         .filter_map(|item| item.fileURLValue())
         .filter(|url| url.isFileURL())
         .filter_map(|url| url.path())
@@ -137,7 +143,9 @@ mod tests {
         let list = NSAppleEventDescriptor::listDescriptor();
         list.insertDescriptor_atIndex(&file("/tmp/Plan A.plancraft"), 1);
         list.insertDescriptor_atIndex(&file("/tmp/Projekt Ü.plancraft"), 2);
-        assert_eq!(paths(&event(Some(&list))), [PathBuf::from("/tmp/Plan A.plancraft"), PathBuf::from("/tmp/Projekt Ü.plancraft")]);
+        // macOS hands back accented names decomposed ("U" and a combining diaeresis), which its
+        // file system treats as the same name.
+        assert_eq!(paths(&event(Some(&list))), [PathBuf::from("/tmp/Plan A.plancraft"), PathBuf::from("/tmp/Projekt U\u{308}.plancraft")]);
     }
 
     #[test]
