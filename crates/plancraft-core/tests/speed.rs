@@ -393,3 +393,31 @@ fn importing_a_50000_row_spreadsheet_is_fast() {
     let limit = Duration::from_secs(3);
     assert!(took < limit, "took {took:?}; the limit is {limit:?}");
 }
+
+/// Tasks years long: placing a task walked its calendar a day at a time, so 2,000 five-year
+/// tasks took 1.7 s to schedule (and a crafted 50,000-task file 40 s); whole months and years
+/// are now stepped over (about 25 ms).
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a timing test: `cargo xtask ci` runs it in release")]
+fn scheduling_2000_five_year_tasks_is_fast() {
+    let _serial = timed();
+    let mut p = Project::new("Long", NaiveDate::from_ymd_opt(1900, 1, 1).unwrap());
+    let mut prev = None;
+    for i in 0..2000 {
+        let id = p.add_task(format!("T{i}"), None);
+        p.set_duration(id, plancraft_core::limits::MAX_MINUTES, false).unwrap();
+        // Every tenth task follows the one before, so dates run far into the future too.
+        if i % 10 != 0
+            && let Some(before) = prev
+        {
+            p.link(TaskRef::Local(before), id, LinkType::FS, Lag::None).unwrap();
+        }
+        prev = Some(id);
+    }
+    let took = best_of(3, || {
+        recalculate(&mut p);
+    });
+    eprintln!("2000 five-year tasks: {took:?}");
+    let limit = Duration::from_millis(500);
+    assert!(took < limit, "took {took:?}; the limit is {limit:?}");
+}
