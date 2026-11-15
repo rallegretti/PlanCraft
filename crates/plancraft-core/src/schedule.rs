@@ -255,18 +255,68 @@ fn calendar_for<'a>(p: &'a Project, task: &Task, resources: &[&'a Resource]) -> 
 const RESOURCE_CALENDAR_SEARCH_DAYS: usize = 3 * 366;
 
 /// What makes two tasks' scheduling calendars identical (see [`calendar_for`]): the task
-/// calendar and, when resource calendars apply, the assigned work resources.
-type CalKey = (Option<CalendarId>, Vec<ResourceId>);
+/// calendar and, when resource calendars apply, each work resource's layer: its base calendar,
+/// and the resource itself only when it has personal exceptions. Resources on the same calendar
+/// without time off of their own give the same working time, so their tasks share one calendar
+/// (and one month-and-year cache): 20,000 resources on the Standard calendar used to fill 20,000
+/// caches, 440 MB.
+type CalKey = (Option<CalendarId>, Vec<(Option<CalendarId>, Option<ResourceId>)>);
 
 fn cal_key(p: &Project, task: &Task, resources: &[&Resource]) -> CalKey {
-    let mut ids: Vec<ResourceId> = if p.settings.use_resource_calendars && !task.ignore_resource_calendars {
-        resources.iter().filter(|r| r.kind == ResourceType::Work).map(|r| r.id).collect()
+    let mut layers: Vec<(Option<CalendarId>, Option<ResourceId>)> = if p.settings.use_resource_calendars && !task.ignore_resource_calendars
+    {
+        resources
+            .iter()
+            .filter(|r| r.kind == ResourceType::Work)
+            .map(|r| (r.calendar, (!r.exceptions.is_empty()).then_some(r.id)))
+            .collect()
     } else {
         Vec::new()
     };
-    ids.sort();
-    ids.dedup();
-    (task.calendar, ids)
+    layers.sort();
+    layers.dedup();
+    (task.calendar, layers)
+}
+
+/// Each task's assigned resources, looked up once.
+fn assigned_resources(p: &Project) -> HashMap<TaskId, Vec<&Resource>> {
+    let resources: HashMap<ResourceId, &Resource> = p.resources.iter().map(|r| (r.id, r)).collect();
+    let mut assigned: HashMap<TaskId, Vec<&Resource>> = HashMap::new();
+    for a in &p.assignments {
+        if let Some(r) = resources.get(&a.resource) {
+            assigned.entry(a.task).or_default().push(r);
+        }
+    }
+    assigned
+}
+
+/// The scheduling calendars of many tasks (drawing or printing a chart), one per distinct
+/// calendar as in a recalculation, so each fills its month-and-year cache once instead of once
+/// per task.
+pub struct TaskCalendars<'a> {
+    p: &'a Project,
+    assigned: HashMap<TaskId, Vec<&'a Resource>>,
+    keys: HashMap<CalKey, usize>,
+    cals: Vec<WorkCal<'a>>,
+}
+
+impl<'a> TaskCalendars<'a> {
+    pub fn new(p: &'a Project) -> Self {
+        Self { p, assigned: assigned_resources(p), keys: HashMap::new(), cals: Vec::new() }
+    }
+
+    /// The scheduling calendar of the task at row `idx` (the same as [`task_calendar`]).
+    pub fn of(&mut self, idx: usize) -> Option<&WorkCal<'a>> {
+        let p = self.p;
+        let task = p.tasks.get(idx)?;
+        let resources = self.assigned.get(&task.id).map(Vec::as_slice).unwrap_or_default();
+        let cals = &mut self.cals;
+        let i = *self.keys.entry(cal_key(p, task, resources)).or_insert_with(|| {
+            cals.push(calendar_for(p, task, resources));
+            cals.len().saturating_sub(1)
+        });
+        self.cals.get(i)
+    }
 }
 
 /// The project calendar used for lags and summary durations.
@@ -384,13 +434,7 @@ impl<'a> Engine<'a> {
         let n = p.tasks.len();
         let is_leaf: Vec<bool> = (0..n).map(|i| !p.has_children(i)).collect();
         let leaves: Vec<usize> = is_leaf.iter().enumerate().filter(|(_, leaf)| **leaf).map(|(i, _)| i).collect();
-        let resources: HashMap<ResourceId, &Resource> = p.resources.iter().map(|r| (r.id, r)).collect();
-        let mut assigned: HashMap<TaskId, Vec<&Resource>> = HashMap::new();
-        for a in &p.assignments {
-            if let Some(r) = resources.get(&a.resource) {
-                assigned.entry(a.task).or_default().push(r);
-            }
-        }
+        let assigned = assigned_resources(p);
         let mut cals: Vec<WorkCal<'a>> = Vec::new();
         let mut cal_keys: HashMap<CalKey, usize> = HashMap::new();
         let cal_of = p
@@ -1237,4 +1281,51 @@ fn rollup_summaries(p: &mut Project) -> Own {
         }
     }
     total_own
+}
+
+#[cfg(test)]
+mod calendar_sharing_tests {
+    #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
+    use super::*;
+    use crate::calendar::CalendarException;
+
+    fn plan() -> Project {
+        let mut p = Project::new("x", chrono::NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let (a, b, c) = (p.add_task("A", None), p.add_task("B", None), p.add_task("C", None));
+        let (ana, ben, cy) = (p.add_resource("Ana"), p.add_resource("Ben"), p.add_resource("Cy"));
+        p.assign(a, ana, None, None).unwrap();
+        p.assign(b, ben, None, None).unwrap();
+        p.assign(c, cy, None, None).unwrap();
+        let off = chrono::NaiveDate::from_ymd_opt(2026, 10, 21).unwrap();
+        p.resource_mut(cy).unwrap().exceptions.push(CalendarException::non_working("Leave", off, off));
+        p
+    }
+
+    /// Resources on the same calendar without time off of their own give their tasks one shared
+    /// calendar; a resource with time off gets its own.
+    #[test]
+    fn resources_on_the_same_calendar_share_one() {
+        let p = plan();
+        let assigned = assigned_resources(&p);
+        let keys: Vec<CalKey> =
+            p.tasks.iter().map(|t| cal_key(&p, t, assigned.get(&t.id).map(Vec::as_slice).unwrap_or_default())).collect();
+        assert_eq!(keys[0], keys[1], "Ana and Ben work the same time");
+        assert_ne!(keys[0], keys[2], "Cy has leave");
+    }
+
+    /// `TaskCalendars` gives each task the calendar `task_calendar` gives it.
+    #[test]
+    fn task_calendars_match_each_tasks_own() {
+        let p = plan();
+        let mut cals = TaskCalendars::new(&p);
+        let from = chrono::NaiveDate::from_ymd_opt(2026, 10, 19).unwrap().and_hms_opt(8, 0, 0).unwrap();
+        for idx in 0..p.tasks.len() {
+            let own = task_calendar(&p, idx);
+            for mins in [0, 480, 3 * 480, 400 * 480] {
+                assert_eq!(cals.of(idx).unwrap().add(from, mins), own.add(from, mins), "task {idx}, {mins} minutes");
+            }
+        }
+        assert_eq!(cals.cals.len(), 2);
+        assert!(cals.of(99).is_none());
+    }
 }

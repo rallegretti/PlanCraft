@@ -3,6 +3,7 @@
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 
+use crate::calendar::WorkCal;
 use crate::duration::Minutes;
 use crate::ids::TaskId;
 use crate::model::*;
@@ -78,21 +79,27 @@ pub fn status_moment(p: &Project) -> NaiveDateTime {
     }
 }
 
-/// Fraction of the baseline (or current) span that should be complete at `at`.
-fn planned_fraction(start: NaiveDateTime, finish: NaiveDateTime, at: NaiveDateTime, p: &Project) -> f64 {
+/// Fraction of the baseline (or current) span that should be complete at `at`, in the project
+/// calendar `wc`.
+fn planned_fraction(start: NaiveDateTime, finish: NaiveDateTime, at: NaiveDateTime, wc: &WorkCal) -> f64 {
     if at <= start {
         return 0.0;
     }
     if at >= finish {
         return 1.0;
     }
-    let wc = project_calendar(p);
     let total = wc.between(start, finish);
     if total <= 0 { 1.0 } else { wc.between(start, at) as f64 / total as f64 }
 }
 
 /// Whether a task is behind schedule at `at` (should have progressed further).
 pub fn is_late(t: &Task, at: NaiveDateTime, p: &Project) -> bool {
+    is_late_in(t, at, &project_calendar(p))
+}
+
+/// [`is_late`] with the project calendar already made: checking many tasks with one calendar
+/// fills its month-and-year cache once.
+pub fn is_late_in(t: &Task, at: NaiveDateTime, wc: &WorkCal) -> bool {
     if t.sched.is_summary || t.is_complete() || !t.active {
         return false;
     }
@@ -104,7 +111,7 @@ pub fn is_late(t: &Task, at: NaiveDateTime, p: &Project) -> bool {
     {
         return true;
     }
-    let expected = planned_fraction(s, f, at, p) * 100.0;
+    let expected = planned_fraction(s, f, at, wc) * 100.0;
     (t.sched.percent_complete as f64) + 0.5 < expected
 }
 
@@ -159,10 +166,11 @@ pub fn earned_value(p: &Project, at: NaiveDateTime) -> Option<EarnedValue> {
     let mut ev = EarnedValue::default();
     let mut any_baseline = false;
     let slot = p.settings.earned_value_baseline;
+    let wc = project_calendar(p);
     for t in leaves {
         let Some(b) = t.baseline_in(slot) else { continue };
         any_baseline = true;
-        ev.bcws += b.cost * planned_fraction(b.start, b.finish, at, p);
+        ev.bcws += b.cost * planned_fraction(b.start, b.finish, at, &wc);
         ev.bcwp += b.cost * t.sched.percent_complete as f64 / 100.0;
         // Actual cost (ACWP): the cost of the work done so far. Progress entered as actual work
         // (tracked time) counts as that work; progress entered as % complete counts as that share
@@ -217,7 +225,7 @@ pub fn project_stats(p: &Project) -> ProjectStats {
         milestones: leaves.iter().filter(|t| t.is_milestone()).count(),
         completed_tasks: leaves.iter().filter(|t| t.is_complete()).count(),
         in_progress_tasks: leaves.iter().filter(|t| t.percent_complete > 0 && !t.is_complete()).count(),
-        late_tasks: leaves.iter().filter(|t| is_late(t, at, p)).count(),
+        late_tasks: leaves.iter().filter(|t| is_late_in(t, at, &wc)).count(),
         critical_tasks: leaves.iter().filter(|t| t.sched.critical).count(),
         resources: p.resources.len(),
         overallocated_resources: over,

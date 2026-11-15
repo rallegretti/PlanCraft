@@ -306,12 +306,12 @@ pub fn shift(dt: NaiveDateTime, mins: Minutes) -> NaiveDateTime {
     dt.checked_add_signed(delta).unwrap_or(if mins < 0 { NaiveDateTime::MIN } else { NaiveDateTime::MAX })
 }
 
-/// The last day of `d`'s month.
 /// The last day of `d`'s year.
 fn year_last_day(d: NaiveDate) -> Option<NaiveDate> {
     NaiveDate::from_ymd_opt(d.year(), 12, 31)
 }
 
+/// The last day of `d`'s month.
 fn month_last_day(d: NaiveDate) -> Option<NaiveDate> {
     let (y, m) = if d.month() == 12 { (d.year().checked_add(1)?, 1) } else { (d.year(), d.month() + 1) };
     NaiveDate::from_ymd_opt(y, m, 1).and_then(|first| first.pred_opt())
@@ -451,7 +451,8 @@ impl<'a> WorkCal<'a> {
     /// minute (e.g. 17:00), not at the start of the next working period.
     pub fn add(&self, dt: NaiveDateTime, mins: Minutes) -> NaiveDateTime {
         if mins < 0 {
-            return self.sub(dt, -mins);
+            // Saturating: `-i64::MIN` does not exist.
+            return self.sub(dt, mins.saturating_neg());
         }
         if mins == 0 {
             return self.snap_forward(dt);
@@ -522,7 +523,7 @@ impl<'a> WorkCal<'a> {
     /// Subtracts working minutes from `dt`; the result is the start of the earliest consumed minute.
     pub fn sub(&self, dt: NaiveDateTime, mins: Minutes) -> NaiveDateTime {
         if mins < 0 {
-            return self.add(dt, -mins);
+            return self.add(dt, mins.saturating_neg());
         }
         if mins == 0 {
             return self.snap_backward(dt);
@@ -720,7 +721,7 @@ mod tests {
     /// time. The stepping must give exactly these results.
     fn walk_add(wc: &WorkCal, dt: NaiveDateTime, mins: Minutes) -> NaiveDateTime {
         if mins <= 0 {
-            return if mins == 0 { wc.snap_forward(dt) } else { walk_sub(wc, dt, -mins) };
+            return if mins == 0 { wc.snap_forward(dt) } else { walk_sub(wc, dt, mins.saturating_neg()) };
         }
         let start = wc.snap_forward(dt);
         let (mut d, mut m, mut remaining, mut idle) = (start.date(), minute_of_day(start), mins, 0);
@@ -749,7 +750,7 @@ mod tests {
 
     fn walk_sub(wc: &WorkCal, dt: NaiveDateTime, mins: Minutes) -> NaiveDateTime {
         if mins <= 0 {
-            return if mins == 0 { wc.snap_backward(dt) } else { walk_add(wc, dt, -mins) };
+            return if mins == 0 { wc.snap_backward(dt) } else { walk_add(wc, dt, mins.saturating_neg()) };
         }
         let end = wc.snap_backward(dt);
         let (mut d, mut m) = (end.date(), minute_of_day(end));
@@ -786,6 +787,16 @@ mod tests {
     /// day gives: holidays, a combined resource calendar, a month-long shutdown, a leave long
     /// enough to reach the idle-day limit, durations equal to a month's working time, and dates
     /// near the ends of time.
+    /// `i64::MIN` minutes has no positive counterpart: it saturates instead of overflowing.
+    #[test]
+    fn the_most_negative_duration_does_not_overflow() {
+        let cal = Calendar::standard(CalendarId(1));
+        let wc = WorkCal::single(&cal);
+        let p = dt(2026, 10, 19, 8, 0);
+        assert_eq!(wc.add(p, Minutes::MIN), wc.sub(p, Minutes::MAX));
+        assert_eq!(wc.sub(p, Minutes::MIN), wc.add(p, Minutes::MAX));
+    }
+
     #[test]
     fn add_and_sub_match_a_day_by_day_walk() {
         let mut cal = Calendar::standard(CalendarId(1));
@@ -856,24 +867,50 @@ mod tests {
             std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(64)
         ))]
 
-        /// Random holidays (some yearly, some months long), times and durations up to ten years:
-        /// stepping over months and years agrees with walking day by day, both ways.
+        /// Random calendars (standard, around the clock, a night shift, a three-day week, or none
+        /// at all), holidays (some yearly, some long enough to reach the idle-day limit), a
+        /// resource layer with leave, and random times and durations, either way: stepping over
+        /// months and years agrees with walking day by day.
         #[test]
         fn add_and_sub_match_a_day_by_day_walk_for_random_calendars(
-            holidays in proptest::collection::vec((0i64..4000, 0i64..400, proptest::bool::ANY), 0..8),
-            start_day in 0i64..4000,
+            week in 0usize..5,
+            holidays in proptest::collection::vec((0i64..4000, 0i64..2000, proptest::bool::ANY), 0..8),
+            leave in proptest::option::of((0i64..4000, 0i64..400)),
+            start_day in -200i64..4000,
             minute in 0u32..1440,
-            mins in 0i64..(2 * crate::limits::MAX_MINUTES),
+            mins in -(2 * crate::limits::MAX_MINUTES)..(2 * crate::limits::MAX_MINUTES),
         ) {
             let base = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
-            let mut cal = Calendar::standard(CalendarId(1));
+            let mut cal = match week {
+                0 => Calendar::standard(CalendarId(1)),
+                1 => Calendar::twenty_four_hours(CalendarId(1)),
+                n => {
+                    let mut c = Calendar::standard(CalendarId(1));
+                    c.week = match n {
+                        2 => WorkWeek::uniform(&[TimeRange::hours(0, 6), TimeRange::new(22 * 60, 1440)], &[]),
+                        3 => WorkWeek { tuesday: Vec::new(), thursday: Vec::new(), ..WorkWeek::uniform(&[TimeRange::hours(9, 15)], &[]) },
+                        _ => WorkWeek::uniform(&[], &[]),
+                    };
+                    c
+                }
+            };
             for (from, len, yearly) in holidays {
                 let a = base + chrono::Duration::days(from);
                 let mut h = CalendarException::non_working("Off", a, a + chrono::Duration::days(len));
                 h.yearly = yearly && len < 30;
                 cal.exceptions.push(h);
             }
-            let wc = WorkCal::single(&cal);
+            let other = Calendar::standard(CalendarId(2));
+            let personal: Vec<CalendarException> = leave
+                .map(|(from, len)| {
+                    let a = base + chrono::Duration::days(from);
+                    CalendarException::non_working("Leave", a, a + chrono::Duration::days(len))
+                })
+                .into_iter()
+                .collect();
+            let single = WorkCal::single(&cal);
+            let layered = WorkCal::from_layers(vec![CalLayer::new(&cal, &[]), CalLayer::new(&other, &personal)]);
+            let wc = if leave.is_some() { layered } else { single };
             let p = at(base + chrono::Duration::days(start_day), minute);
             proptest::prop_assert_eq!(wc.add(p, mins), walk_add(&wc, p, mins));
             proptest::prop_assert_eq!(wc.sub(p, mins), walk_sub(&wc, p, mins));

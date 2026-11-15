@@ -394,12 +394,13 @@ fn importing_a_50000_row_spreadsheet_is_fast() {
     assert!(took < limit, "took {took:?}; the limit is {limit:?}");
 }
 
-/// Tasks years long: placing a task walked its calendar a day at a time, so 2,000 five-year
-/// tasks took 1.7 s to schedule (and a crafted 50,000-task file 40 s); whole months and years
-/// are now stepped over (about 25 ms).
+/// The longest tasks PlanCraft allows (5 years of round-the-clock work, about 21 years on a
+/// standard week): placing a task walked its calendar a day at a time, so 2,000 of them took
+/// 1.7 s to schedule (and a crafted 50,000-task file 40 s); whole months and years are now
+/// stepped over (about 25 ms).
 #[test]
 #[cfg_attr(debug_assertions, ignore = "a timing test: `cargo xtask ci` runs it in release")]
-fn scheduling_2000_five_year_tasks_is_fast() {
+fn scheduling_2000_of_the_longest_tasks_is_fast() {
     let _serial = timed();
     let mut p = Project::new("Long", NaiveDate::from_ymd_opt(1900, 1, 1).unwrap());
     let mut prev = None;
@@ -417,7 +418,31 @@ fn scheduling_2000_five_year_tasks_is_fast() {
     let took = best_of(3, || {
         recalculate(&mut p);
     });
-    eprintln!("2000 five-year tasks: {took:?}");
+    eprintln!("2000 of the longest tasks: {took:?}");
     let limit = Duration::from_millis(500);
+    assert!(took < limit, "took {took:?}; the limit is {limit:?}");
+}
+
+/// Long tasks, each with two resources of its own on the Standard calendar. Each task's resources
+/// used to give it a calendar (and a month-and-year cache) of its own: 20,000 such tasks took
+/// 10 s and 440 MB. Resources on the same calendar without time off now share one.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a timing test: `cargo xtask ci` runs it in release")]
+fn scheduling_long_tasks_with_many_resources_is_fast() {
+    let _serial = timed();
+    let mut p = Project::new("Crowded", NaiveDate::from_ymd_opt(2026, 1, 5).unwrap());
+    for i in 0..5_000 {
+        let id = p.add_task(format!("T{i}"), None);
+        p.set_duration(id, plancraft_core::limits::MAX_MINUTES, false).unwrap();
+        for k in 0..2 {
+            let r = p.add_resource(format!("R{i}-{k}"));
+            p.assign(id, r, Some(1.0), None).unwrap();
+        }
+    }
+    let took = best_of(3, || {
+        recalculate(&mut p);
+    });
+    eprintln!("5,000 long tasks with 10,000 resources: {took:?}");
+    let limit = Duration::from_millis(1500);
     assert!(took < limit, "took {took:?}; the limit is {limit:?}");
 }
