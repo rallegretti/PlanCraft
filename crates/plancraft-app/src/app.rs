@@ -255,7 +255,7 @@ impl PlanCraftApp {
                     for text in dialog.texts() {
                         self.fonts.ensure(&self.egui_ctx, text);
                     }
-                    self.dialogs.import = Some(dialog);
+                    self.dialogs.import.push(dialog);
                 }
                 Err(e) => self.st.toast(ToastKind::Error, e.to_string()),
             }
@@ -1921,14 +1921,16 @@ impl PlanCraftApp {
             dialogs::show_bound(&mut self.dialogs.print, &mut ws, |d, doc| d.show(&ctx, doc, st));
         }
         // Import Spreadsheet makes a new document.
-        if let Some(dialog) = &mut self.dialogs.import {
+        if let Some(dialog) = self.dialogs.import.first_mut() {
             match dialog.show(&ctx, &mut ws) {
                 dialogs::import::Outcome::Open => {}
-                dialogs::import::Outcome::Cancelled => self.dialogs.import = None,
+                dialogs::import::Outcome::Cancelled => {
+                    self.dialogs.import.remove(0);
+                }
                 dialogs::import::Outcome::Imported(handle) => {
                     let path = dialog.path.clone();
                     let name = ws.index_of(handle).and_then(|i| ws.docs.get(i)).map(|d| d.project.name.clone()).unwrap_or_default();
-                    self.dialogs.import = None;
+                    self.dialogs.import.remove(0);
                     self.settings.add_recent(path);
                     self.st.start_page = false;
                     self.st.sel = Default::default();
@@ -2983,8 +2985,6 @@ mod ui_tests {
         assert!(!h.state().ws.lock().unwrap().active_doc().unwrap().dirty);
     }
 
-    /// Opening a Microsoft Project XML file imports it as a new plan: the user's unsaved work,
-    /// with no file of its own, and a toast saying what the import could not carry over.
     /// Opening a spreadsheet shows the Import Spreadsheet window; Import makes an unsaved plan
     /// and reports what it left out.
     #[test]
@@ -3000,12 +3000,12 @@ mod ui_tests {
         let ctx = h.ctx.clone();
         h.state_mut().exec(&ctx, Command::OpenPath(path.clone()));
         h.run_steps(2);
-        assert!(h.state().dialogs.import.is_some(), "the window opens instead of a failed load");
+        assert_eq!(h.state().dialogs.import.len(), 1, "the window opens instead of a failed load");
         assert!(h.state().ws.lock().unwrap().docs.is_empty(), "nothing is imported before Import");
 
         h.get_by_label("  Import  ").click();
         h.run_steps(2);
-        assert!(h.state().dialogs.import.is_none());
+        assert!(h.state().dialogs.import.is_empty());
         {
             let ws = h.state().ws.clone();
             let ws = ws.lock().unwrap();
@@ -3023,6 +3023,32 @@ mod ui_tests {
         );
     }
 
+    /// Regression (review): opening several spreadsheets at once kept only the last window.
+    #[test]
+    fn several_spreadsheets_opened_at_once_each_get_a_window() {
+        use egui_kittest::kittest::Queryable;
+        let tmp = crate::recovery::tests::TempDir::new("csv-queue");
+        let (a, b) = (tmp.0.join("First.csv"), tmp.0.join("Second.csv"));
+        std::fs::write(&a, "Task\nA\n").unwrap();
+        std::fs::write(&b, "Task\nB\n").unwrap();
+        let shared = Workspace::default().shared();
+        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).build_eframe(move |cc| PlanCraftApp::new(cc, shared));
+        h.run_steps(2);
+        let ctx = h.ctx.clone();
+        h.state_mut().exec(&ctx, Command::OpenPath(a));
+        h.state_mut().exec(&ctx, Command::OpenPath(b));
+        h.run_steps(2);
+        assert_eq!(h.state().dialogs.import.len(), 2);
+        h.get_by_label("  Import  ").click();
+        h.run_steps(2);
+        h.get_by_label("  Import  ").click();
+        h.run_steps(2);
+        let names: Vec<String> = h.state().ws.lock().unwrap().docs.iter().map(|d| d.project.name.clone()).collect();
+        assert_eq!(names, ["First", "Second"]);
+    }
+
+    /// Opening a Microsoft Project XML file imports it as a new plan: the user's unsaved work,
+    /// with no file of its own, and a toast saying what the import could not carry over.
     #[test]
     fn opening_microsoft_project_xml_imports_it() {
         let tmp = crate::recovery::tests::TempDir::new("mspdi");

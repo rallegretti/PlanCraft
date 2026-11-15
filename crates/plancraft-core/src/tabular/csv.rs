@@ -58,15 +58,37 @@ pub fn read(text: &str, limits: &mut Limits) -> Grid {
     let mut cell = String::new();
     let mut quoted = false;
     let mut chars = body.chars().peekable();
-    // Ends the current cell; returns false once the row is full (extra cells are dropped).
-    let end_cell = |row: &mut Vec<String>, cell: &mut String, limits: &mut Limits| {
-        let text = std::mem::take(cell);
-        if row.len() < limits.max_columns() {
-            row.push(limits.cell(text));
-        } else {
+    // Ends the current cell (cells past the last column are dropped); false once the file's
+    // budget of cells and text is spent.
+    let end_cell = |row: &mut Vec<String>, cell: &mut String, limits: &mut Limits| -> bool {
+        let text = unguard(std::mem::take(cell));
+        if row.len() >= limits.max_columns() {
             limits.columns_cut();
+            return true;
         }
+        if !limits.spend(1, text.len()) {
+            return false;
+        }
+        row.push(limits.cell(text));
+        true
     };
+    // Ends the current row: kept when it has any text (without its empty cells at the end).
+    let end_row = |rows: &mut Vec<Vec<String>>, row: &mut Vec<String>, limits: &mut Limits| -> bool {
+        while row.last().is_some_and(|c| c.trim().is_empty()) {
+            row.pop();
+        }
+        if row.is_empty() {
+            return true;
+        }
+        if rows.len() > limits.max_rows() {
+            limits.rows_cut();
+            row.clear();
+            return false;
+        }
+        rows.push(std::mem::take(row));
+        true
+    };
+    let mut full = false;
     while let Some(c) = chars.next() {
         if quoted {
             if c == '"' {
@@ -89,26 +111,37 @@ pub fn read(text: &str, limits: &mut Limits) -> Grid {
             }
             '\r' if chars.peek() == Some(&'\n') => {}
             '\n' | '\r' => {
-                end_cell(&mut row, &mut cell, limits);
-                if row.iter().any(|c| !c.trim().is_empty()) {
-                    if rows.len() > limits.max_rows() {
-                        limits.rows_cut();
-                        break;
-                    }
-                    rows.push(std::mem::take(&mut row));
-                } else {
-                    row.clear();
+                if !end_cell(&mut row, &mut cell, limits) || !end_row(&mut rows, &mut row, limits) {
+                    full = true;
+                    break;
                 }
             }
-            c if c == sep => end_cell(&mut row, &mut cell, limits),
+            c if c == sep => {
+                if !end_cell(&mut row, &mut cell, limits) {
+                    full = true;
+                    break;
+                }
+            }
             c => limits.push_char(&mut cell, c),
         }
     }
-    end_cell(&mut row, &mut cell, limits);
-    if row.iter().any(|c| !c.trim().is_empty()) && rows.len() <= limits.max_rows() {
-        rows.push(row);
+    if !full && end_cell(&mut row, &mut cell, limits) {
+        end_row(&mut rows, &mut row, limits);
     }
     Grid::from_rows(rows)
+}
+
+/// A cell PlanCraft's own export guarded against running as a formula (an apostrophe in front of
+/// `=`, `+`, `-`, `@` or a tab or line break), without the apostrophe.
+fn unguard(cell: String) -> String {
+    match cell.strip_prefix('\'') {
+        Some(rest)
+            if rest.starts_with(['\t', '\r', '\n']) || rest.trim_start().starts_with(['=', '+', '-', '@', '＝', '＋', '－', '＠']) =>
+        {
+            rest.to_string()
+        }
+        _ => cell,
+    }
 }
 
 #[cfg(test)]
@@ -123,7 +156,8 @@ mod tests {
     fn reads_quoted_cells_with_separators_quotes_and_line_breaks() {
         let g = grid("Name,Notes\r\n\"Design, phase 1\",\"Say \"\"hi\"\"\nthen go\"\r\nBuild,\r\n");
         assert_eq!(g.headers, ["Name", "Notes"]);
-        assert_eq!(g.rows, [vec!["Design, phase 1".to_string(), "Say \"hi\"\nthen go".into()], vec!["Build".into(), String::new()]]);
+        // Empty cells at the end of a row are not kept.
+        assert_eq!(g.rows, [vec!["Design, phase 1".to_string(), "Say \"hi\"\nthen go".into()], vec!["Build".into()]]);
     }
 
     #[test]
@@ -148,6 +182,23 @@ mod tests {
         assert_eq!(decode(&[0xFF, 0xFE, b'N', 0, b'o', 0]), "No");
         assert_eq!(decode(b"Caf\xE9"), "Café");
         assert_eq!(decode("Projekt Ü".as_bytes()), "Projekt Ü");
+    }
+
+    #[test]
+    fn the_exports_formula_guard_comes_off() {
+        let g = grid("Name\n\"'-Prep\"\n\"'=1+1\"\n'tis\n");
+        assert_eq!(g.rows, [vec!["-Prep".to_string()], vec!["=1+1".into()], vec!["'tis".into()]]);
+    }
+
+    #[test]
+    fn a_file_full_of_separators_stops_at_the_cell_budget() {
+        let line = ",".repeat(1000) + "x\n";
+        let text = format!("Name\n{}", line.repeat(6000));
+        let mut limits = Limits::default();
+        let g = read(&text, &mut limits);
+        let cells: usize = g.rows.iter().map(Vec::len).sum();
+        assert!(cells <= super::super::MAX_CELLS, "{cells} cells kept");
+        assert!(limits.into_notes().iter().any(|n| n.contains("only its first part")));
     }
 
     #[test]

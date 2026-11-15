@@ -57,8 +57,9 @@ pub struct Dialogs {
     /// Follows the active document's selection; reset when the active document changes.
     pub assign: Option<Bound<misc::AssignResources>>,
     pub external: Option<Bound<misc::ExternalLinks>>,
-    /// Import Spreadsheet (not bound to a document: it makes a new one).
-    pub import: Option<import::ImportSheet>,
+    /// Import Spreadsheet windows, shown one at a time (not bound to a document: each makes a new
+    /// one). Several files opened at once each get their turn.
+    pub import: Vec<import::ImportSheet>,
     pub stats: bool,
     pub about: bool,
     pub history: bool,

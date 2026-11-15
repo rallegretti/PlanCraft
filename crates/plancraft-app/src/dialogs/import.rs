@@ -22,7 +22,36 @@ pub struct ImportSheet {
     sheets: Sheets,
     sheet: usize,
     options: ImportOptions,
+    /// The user picked the date order: it is no longer guessed again when columns change.
+    date_order_set: bool,
+    /// What the preview shows of the current worksheet, worked out once (cells shortened and in
+    /// display order), not every frame.
+    preview: Preview,
     error: Option<String>,
+}
+
+#[derive(Default)]
+struct Preview {
+    headers: Vec<String>,
+    cells: Vec<Vec<String>>,
+    more_rows: usize,
+}
+
+impl Preview {
+    fn of(grid: &Grid) -> Preview {
+        let columns = grid.headers.len().max(grid.rows.iter().take(PREVIEW_ROWS).map(Vec::len).max().unwrap_or(0)).min(PREVIEW_COLUMNS);
+        let shown = |text: &str| bidi::display(&short(text)).into_owned();
+        Preview {
+            headers: (0..columns).map(|c| shown(grid.headers.get(c).map_or("", String::as_str))).collect(),
+            cells: grid
+                .rows
+                .iter()
+                .take(PREVIEW_ROWS)
+                .map(|r| (0..columns).map(|c| shown(r.get(c).map_or("", String::as_str))).collect())
+                .collect(),
+            more_rows: grid.rows.len().saturating_sub(PREVIEW_ROWS),
+        }
+    }
 }
 
 /// What the window did this frame.
@@ -37,20 +66,33 @@ impl ImportSheet {
     pub fn new(path: PathBuf, sheets: Sheets) -> Self {
         let name = path.file_stem().map_or_else(|| "Imported plan".to_string(), |s| s.to_string_lossy().into_owned());
         let options = sheets.sheets.first().map(|(_, g)| ImportOptions::guess(g, name.clone())).unwrap_or_default();
-        Self { path, sheets, sheet: 0, options, error: None }
+        let preview = sheets.sheets.first().map(|(_, g)| Preview::of(g)).unwrap_or_default();
+        Self { path, sheets, sheet: 0, options, date_order_set: false, preview, error: None }
+    }
+
+    /// Switches to another worksheet: its own guesses and preview (the plan's name stays).
+    fn pick_sheet(&mut self, sheet: usize) {
+        self.sheet = sheet;
+        let name = std::mem::take(&mut self.options.name);
+        self.options = self.grid().map(|g| ImportOptions::guess(g, name.clone())).unwrap_or_default();
+        self.options.name = name;
+        self.date_order_set = false;
+        self.preview = self.grid().map(Preview::of).unwrap_or_default();
     }
 
     fn grid(&self) -> Option<&Grid> {
         self.sheets.sheets.get(self.sheet).map(|(_, g)| g)
     }
 
-    /// All the text the window shows (headings, preview cells, sheet names), for loading fonts.
+    /// The text the window shows (sheet names, the preview), for loading fonts. Other sheets'
+    /// previews are loaded when they are picked.
     pub fn texts(&self) -> impl Iterator<Item = &str> {
-        self.sheets.sheets.iter().flat_map(|(name, g)| {
-            std::iter::once(name.as_str())
-                .chain(g.headers.iter().map(String::as_str))
-                .chain(g.rows.iter().take(PREVIEW_ROWS).flatten().map(String::as_str))
-        })
+        self.sheets
+            .sheets
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .chain(self.preview.headers.iter().map(String::as_str))
+            .chain(self.preview.cells.iter().flatten().map(String::as_str))
     }
 
     /// Picks the field for a column; a field can belong to one column only.
@@ -65,6 +107,12 @@ impl ImportSheet {
         }
         if let Some(c) = self.options.columns.get_mut(column) {
             *c = field;
+        }
+        // A column newly read as Start or Finish may tell the date order.
+        if !self.date_order_set
+            && let Some(grid) = self.sheets.sheets.get(self.sheet).map(|(_, g)| g)
+        {
+            self.options.date_order = tabular::guess_date_order(grid, &self.options.columns);
         }
     }
 
@@ -100,10 +148,7 @@ impl ImportSheet {
                         }
                     });
                     if sheet != self.sheet {
-                        self.sheet = sheet;
-                        let name = std::mem::take(&mut self.options.name);
-                        self.options = self.grid().map(|g| ImportOptions::guess(g, name.clone())).unwrap_or_default();
-                        self.options.name = name;
+                        self.pick_sheet(sheet);
                     }
                 }
                 egui::Grid::new("import_settings").num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
@@ -112,8 +157,11 @@ impl ImportSheet {
                     ui.end_row();
                     ui.label("Dates like 03/04/2026");
                     ui.horizontal(|ui| {
-                        ui.radio_value(&mut self.options.date_order, DateOrder::MonthFirst, "Month first (March 4)");
-                        ui.radio_value(&mut self.options.date_order, DateOrder::DayFirst, "Day first (3 April)");
+                        let month = ui.radio_value(&mut self.options.date_order, DateOrder::MonthFirst, "Month first (March 4)");
+                        let day = ui.radio_value(&mut self.options.date_order, DateOrder::DayFirst, "Day first (3 April)");
+                        if month.clicked() || day.clicked() {
+                            self.date_order_set = true;
+                        }
                     });
                     ui.end_row();
                 });
@@ -157,25 +205,17 @@ impl ImportSheet {
 
     /// The column choosers above the first rows of the sheet.
     fn preview(&mut self, ui: &mut egui::Ui) {
-        let Some(grid) = self.grid() else { return };
-        let columns = grid.headers.len().max(grid.rows.iter().take(PREVIEW_ROWS).map(Vec::len).max().unwrap_or(0)).min(PREVIEW_COLUMNS);
-        let headers: Vec<String> = (0..columns).map(|c| grid.headers.get(c).cloned().unwrap_or_default()).collect();
-        let cells: Vec<Vec<String>> = grid
-            .rows
-            .iter()
-            .take(PREVIEW_ROWS)
-            .map(|r| (0..columns).map(|c| short(r.get(c).map_or("", String::as_str))).collect())
-            .collect();
-        let more_rows = grid.rows.len().saturating_sub(PREVIEW_ROWS);
         let mut chosen: Vec<(usize, Option<Field>)> = Vec::new();
         // A solid bar that is always shown: a wide sheet has more columns to the right.
         ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+        let preview = &self.preview;
+        let columns = &self.options.columns;
         egui::ScrollArea::horizontal().max_height(300.0).scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible).show(
             ui,
             |ui| {
                 egui::Grid::new("import_preview").striped(true).spacing([10.0, 4.0]).show(ui, |ui| {
-                    for (c, heading) in headers.iter().enumerate() {
-                        let field = self.options.columns.get(c).copied().flatten();
+                    for (c, heading) in preview.headers.iter().enumerate() {
+                        let field = columns.get(c).copied().flatten();
                         let mut pick = field;
                         egui::ComboBox::from_id_salt(("import_column", c))
                             .width(130.0)
@@ -193,21 +233,21 @@ impl ImportSheet {
                         }
                     }
                     ui.end_row();
-                    for heading in &headers {
-                        ui.label(RichText::new(bidi::display(&short(heading))).strong());
+                    for heading in &preview.headers {
+                        ui.label(RichText::new(heading).strong());
                     }
                     ui.end_row();
-                    for row in &cells {
+                    for row in &preview.cells {
                         for cell in row {
-                            ui.label(bidi::display(cell));
+                            ui.label(cell);
                         }
                         ui.end_row();
                     }
                 });
             },
         );
-        if more_rows > 0 {
-            ui.label(RichText::new(format!("…and {more_rows} more rows")).small().color(theme::pal().TEXT_WEAK));
+        if preview.more_rows > 0 {
+            ui.label(RichText::new(format!("…and {} more rows", preview.more_rows)).small().color(theme::pal().TEXT_WEAK));
         }
         for (c, f) in chosen {
             self.choose(c, f);
@@ -215,13 +255,14 @@ impl ImportSheet {
     }
 }
 
-/// A cell shortened for the preview, on one line.
+/// A cell shortened for the preview, on one line (shortened first: a cell can be long).
 fn short(text: &str) -> String {
-    let one_line = text.replace(['\r', '\n'], " ");
-    match one_line.char_indices().nth(PREVIEW_CHARS) {
-        Some((end, _)) => format!("{}…", one_line.get(..end).unwrap_or("")),
-        None => one_line,
-    }
+    let (head, cut) = match text.char_indices().nth(PREVIEW_CHARS) {
+        Some((end, _)) => (text.get(..end).unwrap_or(""), true),
+        None => (text, false),
+    };
+    let one_line = head.replace(['\r', '\n'], " ");
+    if cut { format!("{one_line}…") } else { one_line }
 }
 
 #[cfg(test)]
@@ -259,6 +300,21 @@ mod tests {
         assert!(doc.path.is_none() && doc.imported && doc.dirty);
         assert_eq!(doc.project.tasks.len(), 2);
         assert!(doc.load_notes.iter().any(|n| n.contains("Extra")), "{:?}", doc.load_notes);
+    }
+
+    /// Regression (review): mapping a column the headings didn't give away as Start kept the
+    /// month-first guess, so 25/10/2026 could not be read.
+    #[test]
+    fn choosing_a_date_column_guesses_the_date_order_again() {
+        let mut d = dialog("Task,Kick-off\nA,25/10/2026\n");
+        assert_eq!(d.options.date_order, DateOrder::MonthFirst);
+        d.choose(1, Some(Field::Start));
+        assert_eq!(d.options.date_order, DateOrder::DayFirst);
+        // Once the user picks it, it stays.
+        d.date_order_set = true;
+        d.options.date_order = DateOrder::MonthFirst;
+        d.choose(1, Some(Field::Start));
+        assert_eq!(d.options.date_order, DateOrder::MonthFirst);
     }
 
     #[test]

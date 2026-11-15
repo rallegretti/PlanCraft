@@ -15,10 +15,10 @@ pub fn tools() -> Vec<Tool> {
         Tool::new(
             "import_spreadsheet",
             "Import a task list from Excel or CSV",
-            "Import a task list from a spreadsheet (.csv, .tsv, .xlsx, .xlsm, .xlsb, .xls or .ods) as a new unsaved document. Each row with a task name becomes a task. Columns are matched to task fields by their headings (Name, Duration, Start, Finish, Predecessors, Resource Names, % Complete, Outline Level or WBS, Milestone, Notes, ID); pass 'columns' to correct the guesses. Call it first with preview: true to see the headings, the guessed fields and the first rows without importing anything. Predecessors name tasks by the ID column (or, without one, by row number among the imported tasks), like '3' or '3FS+2d'. A start date later than the schedule gives is kept as a Start No Earlier Than constraint. 'import_notes' lists what could not be read. Save it with save_project and a .plancraft 'path' to keep it.",
+            "Import a task list from a spreadsheet (.csv, .tsv, .xlsx, .xlsm or .xlsb; save .xls and .ods files as .xlsx or CSV first) as a new unsaved document. Each row with a task name becomes a task. Columns are matched to task fields by their headings (Name, Duration, Start, Finish, Predecessors, Resource Names, % Complete, Outline Level or WBS, Milestone, Notes, ID); pass 'columns' to correct the guesses. Call it first with preview: true to see the headings, the guessed fields and the first rows without importing anything. Predecessors name tasks by the ID column (or, without one, by row number among the imported tasks), like '3' or '3FS+2d'. A start date later than the schedule gives is kept as a Start No Earlier Than constraint. 'import_notes' lists what could not be read. Save it with save_project and a .plancraft 'path' to keep it.",
             schema(
                 json!({
-                    "path": string("Path of the spreadsheet file."),
+                    "path": string("Path of the spreadsheet file (.csv, .tsv, .xlsx, .xlsm or .xlsb)."),
                     "sheet": string("Worksheet to import, by name or number (1 = the first; default 1)."),
                     "preview": boolean("Only report the worksheets, headings, guessed fields and first rows; import nothing (default false)."),
                     "columns": {
@@ -49,6 +49,29 @@ pub fn tools() -> Vec<Tool> {
     ]
 }
 
+/// The most characters of a cell or heading a reply shows.
+const SHOWN_CHARS: usize = 200;
+/// The most names an error lists.
+const SHOWN_NAMES: usize = 20;
+
+/// A cell or heading as a reply shows it: at most `SHOWN_CHARS` characters.
+fn shown(text: &str) -> String {
+    match text.char_indices().nth(SHOWN_CHARS) {
+        Some((end, _)) => format!("{}…", text.get(..end).unwrap_or("")),
+        None => text.to_string(),
+    }
+}
+
+/// Names for an error message: the first `SHOWN_NAMES`, shortened.
+fn name_list<'a>(names: impl ExactSizeIterator<Item = &'a str>) -> String {
+    let total = names.len();
+    let mut list: Vec<String> = names.take(SHOWN_NAMES).map(shown).collect();
+    if total > SHOWN_NAMES {
+        list.push(format!("and {} more", total.saturating_sub(SHOWN_NAMES)));
+    }
+    list.join(", ")
+}
+
 /// An absolute path (relative ones are relative to the working folder).
 fn absolute(path: PathBuf) -> PathBuf {
     if path.is_absolute() { path } else { std::env::current_dir().map(|c| c.join(&path)).unwrap_or(path) }
@@ -67,10 +90,11 @@ fn pick_sheet(sheets: &tabular::Sheets, a: &Args) -> ToolResult<usize> {
     }
     match text.parse::<usize>() {
         Ok(n) if (1..=sheets.sheets.len()).contains(&n) => Ok(n.saturating_sub(1)),
-        _ => {
-            let names: Vec<&str> = sheets.sheets.iter().map(|(n, _)| n.as_str()).collect();
-            err(format!("there is no worksheet '{text}'; the file has: {}", names.join(", ")))
-        }
+        _ => err(format!(
+            "there is no worksheet '{}'; the file has: {}",
+            shown(&text),
+            name_list(sheets.sheets.iter().map(|(n, _)| n.as_str()))
+        )),
     }
 }
 
@@ -81,7 +105,7 @@ fn column_of(grid: &Grid, key: &str) -> ToolResult<usize> {
     }
     match key.trim().parse::<usize>() {
         Ok(n) if (1..=tabular::MAX_COLUMNS).contains(&n) => Ok(n.saturating_sub(1)),
-        _ => err(format!("there is no column '{key}'; the headings are: {}", grid.headers.join(", "))),
+        _ => err(format!("there is no column '{}'; the headings are: {}", shown(key), name_list(grid.headers.iter().map(String::as_str)))),
     }
 }
 
@@ -93,7 +117,7 @@ fn columns_json(grid: &Grid, columns: &[Option<Field>]) -> Value {
             .map(|c| {
                 json!({
                     "column": c.saturating_add(1),
-                    "heading": grid.headers.get(c).cloned().unwrap_or_default(),
+                    "heading": shown(grid.headers.get(c).map_or("", String::as_str)),
                     "field": columns.get(c).copied().flatten().map(Field::key),
                 })
             })
@@ -124,7 +148,7 @@ fn import_spreadsheet(ctx: &Ctx, a: &Args) -> ToolResult {
                 Value::String(s) if s.trim().is_empty() => None,
                 Value::String(s) => Some(Field::from_key(s).ok_or_else(|| {
                     let keys: Vec<&str> = Field::ALL.iter().map(|f| f.key()).collect();
-                    ToolError::from(format!("'{s}' is not a field; use one of {}", keys.join(", ")))
+                    ToolError::from(format!("'{}' is not a field; use one of {}", shown(s), keys.join(", ")))
                 })?),
                 _ => return err(format!("columns.{key} must be a field name or null")),
             };
@@ -141,16 +165,16 @@ fn import_spreadsheet(ctx: &Ctx, a: &Args) -> ToolResult {
             }
         }
     }
-    if let Some(order) = a.str("date_order")? {
-        options.date_order = match order {
-            "month_first" => DateOrder::MonthFirst,
-            "day_first" => DateOrder::DayFirst,
-            other => return err(format!("'{other}' is not a date order; use month_first or day_first")),
-        };
+    match a.str("date_order")? {
+        Some("month_first") => options.date_order = DateOrder::MonthFirst,
+        Some("day_first") => options.date_order = DateOrder::DayFirst,
+        Some(other) => return err(format!("'{}' is not a date order; use month_first or day_first", shown(other))),
+        // Columns newly read as Start or Finish may tell the date order.
+        None => options.date_order = tabular::guess_date_order(grid, &options.columns),
     }
 
     if a.bool("preview")?.unwrap_or(false) {
-        let rows: Vec<&Vec<String>> = grid.rows.iter().take(5).collect();
+        let rows: Vec<Vec<String>> = grid.rows.iter().take(5).map(|r| r.iter().map(|c| shown(c)).collect()).collect();
         return Ok(json!({
             "worksheets": sheets.sheets.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
             "worksheet": sheets.sheets.get(sheet).map(|(n, _)| n.as_str()),

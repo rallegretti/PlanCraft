@@ -11,7 +11,7 @@ use crate::duration::Minutes;
 use crate::ids::{ResourceId, TaskId};
 use crate::limits::{self, MAX_LINKS_PER_TASK, MAX_MINUTES, MAX_OUTLINE_LEVEL, MAX_RESOURCES, MAX_TASKS, MAX_UNITS};
 use crate::model::{
-    Assignment, Constraint, ConstraintKind, Dependency, LinkType, Project, ScheduleMode, Task, TaskKind, TaskRef, WorkContour,
+    Assignment, Constraint, ConstraintKind, Dependency, LinkType, Project, ResourceType, ScheduleMode, Task, TaskKind, TaskRef, WorkContour,
 };
 
 /// Counts repeated notes, so a thousand bad cells make one line.
@@ -100,14 +100,18 @@ fn build_plan(grid: &Grid, options: &ImportOptions) -> Result<(Project, Vec<Stri
     let summary: Vec<bool> = (0..ids.len()).map(|i| p.has_children(i)).collect();
     let is_summary = |i: usize| summary.get(i).copied().unwrap_or(false);
 
-    // Durations and milestones.
+    // Durations and milestones. One working-time calendar for all rows: it keeps what it has
+    // worked out about the months it has seen.
+    let base = p.base_calendar().clone();
+    let cal = WorkCal::single(&base);
     for (i, &r) in rows.iter().enumerate() {
         let Some(&id) = ids.get(i) else { continue };
         let milestone = get(r, Field::Milestone).is_some_and(is_yes);
         let duration = get(r, Field::Duration);
         if is_summary(i) {
-            if milestone || duration.is_some() {
-                notes.add("summary tasks take their duration from their subtasks; the file's value was not used");
+            // Its duration follows from its subtasks (as the file's own value usually does).
+            if milestone {
+                notes.add("a summary task can't be a milestone; its subtasks set its dates");
             }
             continue;
         }
@@ -121,7 +125,12 @@ fn build_plan(grid: &Grid, options: &ImportOptions) -> Result<(Project, Vec<Stri
             },
             // No duration: the working time between the start and the finish.
             None => match (starts.get(i).copied().flatten(), finishes.get(i).copied().flatten()) {
-                (Some(s), Some(f)) if f >= s => Some((WorkCal::single(p.base_calendar()).between(s, f), false)),
+                // Durations stop at 5 years of work, which 25 years of calendar always holds on a
+                // working week; counting further would only take time.
+                (Some(s), Some(f)) if f >= s => {
+                    let f = s.checked_add_signed(chrono::Duration::days(25 * 366)).map_or(f, |cap| f.min(cap));
+                    Some((cal.between(s, f), false))
+                }
                 _ => None,
             },
         };
@@ -137,6 +146,9 @@ fn build_plan(grid: &Grid, options: &ImportOptions) -> Result<(Project, Vec<Stri
             }
         }
         if milestone {
+            if t.duration > 0 && minutes.is_some() {
+                notes.add("a task marked as a milestone had a duration; milestones take none");
+            }
             t.kind = TaskKind::Milestone;
             t.duration = 0;
             t.estimated = false;
@@ -148,50 +160,19 @@ fn build_plan(grid: &Grid, options: &ImportOptions) -> Result<(Project, Vec<Stri
 
     limits::check_counts(&p).map_err(|e| e.to_string())?;
     let mut sanitized = limits::sanitize(&mut p);
-    let schedule =
-        |p: &mut Project| crate::schedule::try_recalculate(p).map_err(|e| format!("the plan could not be scheduled ({})", e.message));
+    let schedule = |p: &mut Project| {
+        crate::schedule::try_recalculate(p).map(|_| ()).map_err(|e| format!("the plan could not be scheduled ({})", e.message))
+    };
     schedule(&mut p)?;
 
-    // The file's dates: a task the schedule puts earlier than the file says keeps the file's date
-    // as a Start No Earlier Than (or, with only a finish, Finish No Earlier Than) constraint.
-    let mut constrained = false;
-    for i in 0..ids.len() {
-        if is_summary(i) {
-            continue;
-        }
-        let Some(t) = p.tasks.get_mut(i) else { continue };
-        if t.mode != ScheduleMode::Auto {
-            continue;
-        }
-        let (start, finish) = (starts.get(i).copied().flatten(), finishes.get(i).copied().flatten());
-        match (start, t.sched.start, finish, t.sched.finish) {
-            (Some(s), Some(scheduled), _, _) if s > scheduled => {
-                t.constraint = Constraint { kind: ConstraintKind::Snet, date: Some(s) };
-                constrained = true;
-                notes.add("a task kept its start date from the file as a Start No Earlier Than constraint");
-            }
-            (Some(s), Some(scheduled), _, _) if s < scheduled => {
-                notes.add("a task starts later than the file says, after its predecessors");
-            }
-            (None, _, Some(f), Some(scheduled)) if f > scheduled => {
-                t.constraint = Constraint { kind: ConstraintKind::Fnet, date: Some(f) };
-                constrained = true;
-                notes.add("a task kept its finish date from the file as a Finish No Earlier Than constraint");
-            }
-            _ => {}
-        }
-    }
-    if constrained {
-        schedule(&mut p)?;
-    }
+    date_constraints(&mut p, &starts, &finishes, &summary, &mut notes, &schedule)?;
 
     // Progress, now that the tasks have dates (complete work starts where the task does).
     if let Some(c) = col(Field::PercentComplete) {
         let values: Vec<Option<f64>> = rows.iter().map(|&r| parse_number(grid.cell(r, c))).collect();
-        // Spreadsheets store 50% as 0.5: a column of fractions up to 1 is read as fractions.
-        let fractions = values.iter().flatten().all(|v| *v <= 1.0)
-            && values.iter().flatten().any(|v| v.fract() != 0.0)
-            && !rows.iter().any(|&r| grid.cell(r, c).contains('%'));
+        // Spreadsheets store 50% as 0.5 (and 100% as 1): a column of numbers no bigger than 1,
+        // none written with a %, holds fractions.
+        let fractions = values.iter().flatten().all(|v| *v <= 1.0) && !rows.iter().any(|&r| grid.cell(r, c).contains('%'));
         let mut changed = false;
         for (i, value) in values.iter().enumerate() {
             let Some(v) = value else {
@@ -200,7 +181,22 @@ fn build_plan(grid: &Grid, options: &ImportOptions) -> Result<(Project, Vec<Stri
                 }
                 continue;
             };
-            let Some(&id) = ids.get(i).filter(|_| !is_summary(i)) else { continue };
+            if is_summary(i) {
+                // Its subtasks' values (when the file has them) give it the same figure.
+                let level = p.tasks.get(i).map_or(0, |t| t.outline_level);
+                let subtasks_have_values = p
+                    .tasks
+                    .iter()
+                    .enumerate()
+                    .skip(i.saturating_add(1))
+                    .take_while(|(_, t)| t.outline_level > level)
+                    .any(|(j, _)| values.get(j).copied().flatten().is_some());
+                if !subtasks_have_values {
+                    notes.add("a summary task's % Complete comes from its subtasks; the file's value was not used");
+                }
+                continue;
+            }
+            let Some(&id) = ids.get(i) else { continue };
             let pct = if fractions { v * 100.0 } else { *v };
             if p.tasks.get(i).is_some_and(|t| t.id == id) && p.set_percent_complete_at(i, pct.round().clamp(0.0, 100.0) as u8).is_ok() {
                 changed = true;
@@ -228,6 +224,143 @@ fn build_plan(grid: &Grid, options: &ImportOptions) -> Result<(Project, Vec<Stri
     }
     out.append(&mut sanitized);
     Ok((p, out))
+}
+
+/// Keeps the file's dates: a task (or summary) the schedule puts earlier than the file says gets
+/// the file's date as a Start No Earlier Than constraint (with only a finish, Finish No Earlier
+/// Than). Constraints are added in rounds, earliest tasks first: a task whose date follows from
+/// one constrained in this round (through links or its summary) waits for the next round, when
+/// the schedule may already put it on its date. Without the rounds a constraint early in a chain
+/// would pin every later task that has a date too.
+fn date_constraints(
+    p: &mut Project,
+    starts: &[Option<NaiveDateTime>],
+    finishes: &[Option<NaiveDateTime>],
+    summary: &[bool],
+    notes: &mut Notes,
+    schedule: &dyn Fn(&mut Project) -> Result<(), String>,
+) -> Result<(), String> {
+    /// Each round recalculates the plan; after this many, what is left is constrained at once.
+    const ROUNDS: usize = 8;
+    let n = p.tasks.len();
+    let index: HashMap<TaskId, usize> = p.tasks.iter().enumerate().map(|(i, t)| (t.id, i)).collect();
+    // Edges from each task to the ones whose dates follow from it: link successors and subtasks.
+    let mut next: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut incoming = vec![0usize; n];
+    let mut stack: Vec<(usize, u16)> = Vec::new();
+    for (i, t) in p.tasks.iter().enumerate() {
+        while stack.last().is_some_and(|&(_, level)| level >= t.outline_level) {
+            stack.pop();
+        }
+        let links = t.predecessors.iter().filter_map(|d| match d.predecessor {
+            TaskRef::Local(id) => index.get(&id).copied(),
+            TaskRef::External { .. } => None,
+        });
+        for f in links.chain(stack.last().map(|&(parent, _)| parent)) {
+            if let Some(list) = next.get_mut(f) {
+                list.push(i);
+            }
+            if let Some(c) = incoming.get_mut(i) {
+                *c = c.saturating_add(1);
+            }
+        }
+        stack.push((i, t.outline_level));
+    }
+    let date = |list: &[Option<NaiveDateTime>], i: usize| list.get(i).copied().flatten();
+    let is_summary = |i: usize| summary.get(i).copied().unwrap_or(false);
+    // A summary's date usually comes from its subtasks; it is the summary's own (and kept as a
+    // constraint) only when no subtask starts on or before it in the file.
+    let mut subtree_end = vec![n; n];
+    let mut open: Vec<(usize, u16)> = Vec::new();
+    for (i, t) in p.tasks.iter().enumerate() {
+        while open.last().is_some_and(|&(_, level)| level >= t.outline_level) {
+            if let Some((top, _)) = open.pop()
+                && let Some(e) = subtree_end.get_mut(top)
+            {
+                *e = i;
+            }
+        }
+        open.push((i, t.outline_level));
+    }
+    let own_date = |i: usize| match date(starts, i) {
+        Some(s) if is_summary(i) => {
+            let end = subtree_end.get(i).copied().unwrap_or(n);
+            !(i.saturating_add(1)..end).any(|j| date(starts, j).is_some_and(|d| d <= s))
+        }
+        _ => true,
+    };
+    for round in 0..ROUNDS {
+        let wanted: Vec<Option<Constraint>> = (0..n)
+            .map(|i| {
+                let t = p.tasks.get(i)?;
+                if t.mode != ScheduleMode::Auto || t.constraint.kind != ConstraintKind::Asap || !own_date(i) {
+                    return None;
+                }
+                match (date(starts, i), t.sched.start, date(finishes, i), t.sched.finish) {
+                    (Some(s), Some(at), _, _) if s > at => Some(Constraint { kind: ConstraintKind::Snet, date: Some(s) }),
+                    (None, _, Some(f), Some(at)) if f > at && !is_summary(i) => {
+                        Some(Constraint { kind: ConstraintKind::Fnet, date: Some(f) })
+                    }
+                    _ => None,
+                }
+            })
+            .collect();
+        let is_wanted = |i: usize| wanted.get(i).is_some_and(Option::is_some);
+        if !(0..n).any(is_wanted) {
+            break;
+        }
+        // Which wanted tasks follow from another wanted task (in link and outline order; a task
+        // in a loop of links is never reached and counts as following).
+        let mut follows = vec![false; n];
+        let mut reached = vec![false; n];
+        let mut left = incoming.clone();
+        let mut ready: Vec<usize> = (0..n).filter(|&i| left.get(i) == Some(&0)).collect();
+        while let Some(i) = ready.pop() {
+            if let Some(r) = reached.get_mut(i) {
+                *r = true;
+            }
+            let passes = is_wanted(i) || follows.get(i).copied().unwrap_or(false);
+            for &s in next.get(i).map_or(&[][..], Vec::as_slice) {
+                if passes && let Some(f) = follows.get_mut(s) {
+                    *f = true;
+                }
+                if let Some(l) = left.get_mut(s) {
+                    *l = l.saturating_sub(1);
+                    if *l == 0 {
+                        ready.push(s);
+                    }
+                }
+            }
+        }
+        let last = round.saturating_add(1) == ROUNDS;
+        let free = |i: usize| reached.get(i).copied().unwrap_or(false) && !follows.get(i).copied().unwrap_or(true);
+        let mut chosen: Vec<usize> = (0..n).filter(|&i| is_wanted(i) && (last || free(i))).collect();
+        if chosen.is_empty() {
+            // Only tasks caught in loops of links are left: constrain them all.
+            chosen = (0..n).filter(|&i| is_wanted(i)).collect();
+        }
+        for i in chosen {
+            let (Some(Some(c)), Some(t)) = (wanted.get(i), p.tasks.get_mut(i)) else { continue };
+            t.constraint = *c;
+            notes.add(match c.kind {
+                ConstraintKind::Fnet => "a task kept its finish date from the file as a Finish No Earlier Than constraint",
+                _ => "a task kept its start date from the file as a Start No Earlier Than constraint",
+            });
+        }
+        schedule(p)?;
+    }
+    for (i, t) in p.tasks.iter().enumerate() {
+        if let (Some(s), Some(at)) = (date(starts, i), t.sched.start)
+            && s < at
+            && !is_summary(i)
+        {
+            notes.add("a task starts later than the file says, after its predecessors");
+        }
+        if is_summary(i) && date(starts, i).is_none() && date(finishes, i).is_some() {
+            notes.add("a summary task's finish date was not used; its subtasks set it");
+        }
+    }
+    Ok(())
 }
 
 /// Links from the Predecessors column. A link names its predecessor by the ID column (or, with
@@ -276,13 +409,10 @@ fn links(p: &mut Project, grid: &Grid, options: &ImportOptions, rows: &[usize], 
                 notes.add("a link to a task in another project was left out");
                 continue;
             }
-            let digits_end = part.find(|c: char| !c.is_ascii_digit()).unwrap_or(part.len());
-            let (digits, rest) = part.split_at(digits_end);
-            let Some(&pi) = keys.get(&normalize_key(digits)) else {
+            let Some((pi, rest)) = link_target(part, &keys) else {
                 notes.add("a link to a task that is not in the file was left out");
                 continue;
             };
-            let rest = rest.trim();
             let (kind, lag_text) = match (rest.get(..2).and_then(LinkType::parse), rest.get(2..)) {
                 (Some(kind), Some(lag)) => (kind, lag.trim()),
                 _ => (LinkType::FS, rest),
@@ -326,14 +456,20 @@ fn resources(p: &mut Project, grid: &Grid, options: &ImportOptions, rows: &[usiz
         let Some(duration) = p.tasks.get(i).filter(|t| t.id == task).map(|t| t.duration) else { continue };
         let mut assigned: Vec<ResourceId> = Vec::new();
         for part in text.split([',', ';']).map(str::trim).filter(|s| !s.is_empty()) {
-            let (name, units) = match part.split_once('[') {
+            // `Ana`, `Ana[50%]`, `Ana[0.5]`, or a material with its amount: `Cement[5 bags]`.
+            let (name, units, material) = match part.split_once('[') {
                 Some((n, rest)) => {
                     let inner = rest.trim_end_matches(']').trim();
-                    let value = parse_number(inner.trim_end_matches('%')).unwrap_or(100.0);
-                    let units = if inner.contains('%') || value > 10.0 { value / 100.0 } else { value };
-                    (n.trim(), units)
+                    let number_end = inner.find(|c: char| !(c.is_ascii_digit() || c == '.' || c == ',')).unwrap_or(inner.len());
+                    let (number, label) = (inner.get(..number_end).unwrap_or(""), inner.get(number_end..).unwrap_or("").trim());
+                    let value = parse_number(number).unwrap_or(100.0);
+                    match label {
+                        "%" => (n.trim(), value / 100.0, None),
+                        "" => (n.trim(), if value > 10.0 { value / 100.0 } else { value }, None),
+                        label => (n.trim(), value, Some(label)),
+                    }
                 }
-                None => (part, 1.0),
+                None => (part, 1.0, None),
             };
             if name.is_empty() {
                 continue;
@@ -347,10 +483,15 @@ fn resources(p: &mut Project, grid: &Grid, options: &ImportOptions, rows: &[usiz
                 }
                 None => {
                     let rid = p.add_resource(name);
+                    if let (Some(label), Some(r)) = (material, p.resources.last_mut().filter(|r| r.id == rid)) {
+                        r.kind = ResourceType::Material;
+                        r.material_label = label.to_string();
+                    }
                     by_name.insert(key, rid);
                     rid
                 }
             };
+            let is_work = p.resources.iter().rev().find(|r| r.id == rid).is_none_or(|r| r.kind == ResourceType::Work);
             if assigned.contains(&rid) {
                 continue;
             }
@@ -360,22 +501,41 @@ fn resources(p: &mut Project, grid: &Grid, options: &ImportOptions, rows: &[usiz
             }
             assigned.push(rid);
             let units = if units.is_finite() && units > 0.0 { units.min(MAX_UNITS) } else { 1.0 };
-            // What `assign` does for a new work resource on a new Fixed Units task that is not
-            // effort driven (every imported task): work is the duration at the units. Done
-            // directly, as `assign` looks up the task and its assignments in the whole plan.
+            // What `assign` does for a new resource on a new Fixed Units task that is not effort
+            // driven (every imported task): a work resource works the duration at its units, a
+            // material one has no work. Done directly, as `assign` looks up the task and its
+            // assignments in the whole plan.
             let id = p.ids.next_assignment();
             p.assignments.push(Assignment {
                 id,
                 task,
                 resource: rid,
                 units,
-                work: limits::clamp_minutes((duration as f64 * units).round() as Minutes),
+                work: if is_work { limits::clamp_minutes((duration as f64 * units).round() as Minutes) } else { 0 },
                 actual_work: 0,
                 cost: 0.0,
                 contour: WorkContour::Flat,
             });
         }
     }
+}
+
+/// The task a link names, and the rest of the link (type and lag). The task's key is the longest
+/// start of `part` that is a known ID (`T12FS+1d` names `T12`, not `T1`), and what follows it
+/// must be empty or start a link type or lag, so `10` never quietly links to task `1`.
+fn link_target<'a>(part: &'a str, keys: &HashMap<String, usize>) -> Option<(usize, &'a str)> {
+    /// Longer text is not a link (IDs are short); it is reported, not searched.
+    const LONGEST: usize = 256;
+    if part.len() > LONGEST {
+        return None;
+    }
+    let ends: Vec<usize> = part.char_indices().map(|(i, _)| i).skip(1).chain(std::iter::once(part.len())).collect();
+    ends.into_iter().rev().find_map(|end| {
+        let (key, rest) = (part.get(..end)?, part.get(end..)?.trim());
+        let i = *keys.get(&normalize_key(key))?;
+        let starts_link = rest.is_empty() || rest.starts_with(['+', '-']) || rest.get(..2).and_then(LinkType::parse).is_some();
+        starts_link.then_some((i, rest))
+    })
 }
 
 /// A key for matching IDs: numbers without leading zeros (`007` and `7` match), other text as is.
@@ -431,6 +591,13 @@ pub(crate) fn numeric_date_parts(text: &str) -> Option<(u32, u32, i32)> {
     Some((a.parse().ok()?, b.parse().ok()?, year))
 }
 
+/// A weekday's name or its abbreviation (`Mon`, `Tues`, `Thursday`).
+fn is_weekday(word: &str) -> bool {
+    const DAYS: [&str; 7] = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+    let w = word.to_lowercase();
+    w.chars().count() >= 2 && DAYS.iter().any(|d| d.starts_with(w.as_str()))
+}
+
 /// A time of day after a date (`13:30`, `1:30 PM`).
 fn time_of_day(text: &str) -> Option<NaiveTime> {
     let t = text.trim().to_uppercase();
@@ -441,10 +608,9 @@ fn time_of_day(text: &str) -> Option<NaiveTime> {
 /// at the start of the working day (or, for a finish, ends at its end).
 pub(crate) fn parse_date(p: &Project, text: &str, order: DateOrder, finish: bool) -> Option<NaiveDateTime> {
     let mut t = text.trim();
-    // A weekday in front, as Microsoft Project writes dates ("Mon 10/19/26").
+    // A weekday in front, as Microsoft Project writes dates ("Mon 10/19/26", "Monday, 19 Oct 2026").
     if let Some((word, rest)) = t.split_once(' ')
-        && word.chars().all(char::is_alphabetic)
-        && rest.trim_start().starts_with(|c: char| c.is_ascii_digit())
+        && is_weekday(word.trim_end_matches([',', '.']))
     {
         t = rest.trim();
     }
@@ -463,7 +629,16 @@ pub(crate) fn parse_date(p: &Project, text: &str, order: DateOrder, finish: bool
             }
         })
     } else {
-        p.parse_datetime(t, finish)
+        // Month names written out ("October 19, 2026", "19 October 2026"), then the forms people
+        // type in PlanCraft.
+        ["%B %d, %Y", "%B %d %Y", "%d %B %Y", "%d %B, %Y"]
+            .iter()
+            .find_map(|f| NaiveDate::parse_from_str(t, f).ok())
+            .map(|date| {
+                let wc = WorkCal::single(p.base_calendar());
+                if finish { wc.day_finish(date) } else { wc.day_start(date) }
+            })
+            .or_else(|| p.parse_datetime(t, finish))
     };
     found.map(limits::clamp_datetime)
 }
@@ -603,6 +778,82 @@ mod tests {
         let (p, notes) = import("Name,Outline Level,Predecessors\nPhase,1,2\nStep,2,\nOther,1,3\n");
         assert!(p.tasks.iter().all(|t| t.predecessors.is_empty()));
         assert!(notes.iter().any(|n| n.contains("itself or its own summary")), "{notes:?}");
+    }
+
+    /// Regression (review): a constraint early in a chain pinned every later task with a date.
+    #[test]
+    fn only_the_first_task_of_a_chain_is_constrained() {
+        let (p, _) = import("Name,Duration,Start,Predecessors\nA,1d,2026-10-19,\nB,1d,2026-10-26,\nC,1d,2026-10-27,2\nD,1d,2026-10-28,3\n");
+        let kinds: Vec<ConstraintKind> = p.tasks.iter().map(|t| t.constraint.kind).collect();
+        assert_eq!(kinds, [ConstraintKind::Asap, ConstraintKind::Snet, ConstraintKind::Asap, ConstraintKind::Asap]);
+        assert_eq!(task(&p, "D").sched.start.unwrap().date(), day(2026, 10, 28));
+    }
+
+    /// Regression (review): a summary row's start date was dropped, so its subtasks started on the
+    /// plan's first day.
+    #[test]
+    fn a_summary_rows_start_date_holds_its_subtasks() {
+        let (p, notes) =
+            import("Name,Outline Level,Duration,Start,% Complete\nPhase 1,1,,2026-10-19,\nA,2,2d,,\nPhase 2,1,,2026-11-02,50\nB,2,3d,,\n");
+        assert_eq!(task(&p, "Phase 2").constraint.kind, ConstraintKind::Snet);
+        assert_eq!(task(&p, "B").sched.start.unwrap().date(), day(2026, 11, 2));
+        assert_eq!(task(&p, "B").constraint.kind, ConstraintKind::Asap);
+        assert!(notes.iter().any(|n| n.contains("summary task's % Complete")), "{notes:?}");
+    }
+
+    /// Regression (review): "Oct 19, 2026" lost its month to the weekday rule.
+    #[test]
+    fn month_names_and_weekdays_are_read() {
+        for text in ["Oct 19, 2026", "October 19, 2026", "Mon 10/19/26", "Monday, 19 Oct 2026", "19 October 2026"] {
+            let (p, _) = import(&format!("Name,Start\nA,\"{text}\"\n"));
+            assert_eq!(p.start.date(), day(2026, 10, 19), "{text}");
+        }
+    }
+
+    /// Regression (review): IDs that are not numbers (T1, T2) never linked.
+    #[test]
+    fn ids_that_are_not_numbers_link() {
+        let (p, notes) = import("ID,Name,Predecessors\nT1,A,\nT2,B,T1\nT12,C,\"T2FS+1d, T1 SS\"\nT3,D,10\n");
+        assert_eq!(task(&p, "B").predecessors.len(), 1);
+        let c = task(&p, "C");
+        assert_eq!(c.predecessors.len(), 2);
+        assert_eq!(c.predecessors[0].predecessor, TaskRef::Local(task(&p, "B").id));
+        assert_eq!(c.predecessors[1].kind, LinkType::SS);
+        assert!(task(&p, "D").predecessors.is_empty(), "10 is not a key, and never task 1");
+        assert!(notes.iter().any(|n| n.contains("not in the file")), "{notes:?}");
+    }
+
+    /// Regression (review): a workbook's 100% arrives as 1 and was read as 1%.
+    #[test]
+    fn a_column_of_zeros_and_ones_is_read_as_fractions() {
+        let (p, _) = import("Name,Duration,Start,% Complete\nA,1d,2026-10-19,1\nB,1d,2026-10-19,0\n");
+        assert_eq!((task(&p, "A").percent_complete, task(&p, "B").percent_complete), (100, 0));
+    }
+
+    /// Regression (review): a material amount made a work resource at 500%.
+    #[test]
+    fn material_amounts_make_material_resources() {
+        let (p, _) = import("Name,Duration,Resources\nPour,2d,\"Cement[5 bags], Ana\"\n");
+        let cement = p.resources.iter().find(|r| r.name == "Cement").unwrap();
+        assert_eq!(cement.kind, ResourceType::Material);
+        assert_eq!(cement.material_label, "bags");
+        assert_eq!(p.format_resource_names(task(&p, "Pour").id), "Cement[5 bags],Ana");
+        let a = p.assignments.iter().find(|a| a.resource == cement.id).unwrap();
+        assert_eq!((a.units, a.work), (5.0, 0));
+    }
+
+    /// Regression (review): each row built its own working-time calendar and counted 400 years
+    /// of it, about 5 ms a row. (Scheduling tasks 5 years long takes its own time, as it does
+    /// when such a plan is opened, so the test keeps the rows few.)
+    #[test]
+    fn long_date_spans_are_quick() {
+        let rows: String = (0..300).map(|i| format!("T{i},1900-01-01,2300-12-31\n")).collect();
+        let t = std::time::Instant::now();
+        let (p, _) = import(&format!("Name,Start,Finish\n{rows}"));
+        assert_eq!(p.tasks.len(), 300);
+        assert!(p.tasks.iter().all(|t| t.duration <= MAX_MINUTES));
+        let limit = std::time::Duration::from_secs(if cfg!(debug_assertions) { 20 } else { 2 });
+        assert!(t.elapsed() < limit, "took {:?}", t.elapsed());
     }
 
     #[test]

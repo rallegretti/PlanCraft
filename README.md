@@ -204,7 +204,7 @@ Open a Microsoft Project XML file (`.xml`) to import it, and use **File ▸ Expo
 
 ### Bring in a task list from Excel or CSV
 
-Started your plan in a spreadsheet? Open it with **File ▸ Open** (or **File ▸ Import Excel or CSV…**): Excel (`.xlsx`, `.xls`), OpenDocument (`.ods`) and CSV files all work. PlanCraft shows the first rows and guesses what each column holds from its heading (task name, duration, start, finish, predecessors, people, % complete, outline level or WBS, milestone, notes); change any guess before you import. Your list becomes a new plan with its links, people and progress, and PlanCraft tells you about anything it couldn't read.
+Started your plan in a spreadsheet? Open it with **File ▸ Open** (or **File ▸ Import Excel or CSV…**): Excel (`.xlsx`) and CSV files work; save an older `.xls` or a LibreOffice `.ods` file as `.xlsx` or CSV first. PlanCraft shows the first rows and guesses what each column holds from its heading (task name, duration, start, finish, predecessors, people, % complete, outline level or WBS, milestone, notes); change any guess before you import. Your list becomes a new plan with its links, people and progress, and PlanCraft tells you about anything it couldn't read.
 
 ### Work across projects
 
@@ -215,7 +215,7 @@ Started your plan in a spreadsheet? Open it with **File ▸ Open** (or **File �
 
 - Light and **dark mode**, following your system or chosen under **View ▸ Theme**.
 - Thirteen views (Gantt Chart, Tracking Gantt, Multiple Baselines Gantt, Network Diagram, Task Board, Task Usage, Calendar, Milestones, Resource Sheet, Resource Usage, Workload, Team Planner and Timesheet), with filters, search, grouping and your own columns and custom fields.
-- Undo and redo up to 200 steps, and export the task list to CSV for spreadsheets (PlanCraft reads it back the same way).
+- Undo and redo up to 200 steps, and export the task list to CSV for spreadsheets (PlanCraft reads its tasks, outline, links, people and progress back in).
 
 | | |
 |---|---|
@@ -292,7 +292,7 @@ To exchange plans with Microsoft Project, use Microsoft Project XML (`.xml`):
 - **Importing:** open the `.xml` file with **File ▸ Open**. It opens as a new, unsaved plan; save it to keep it as a `.plancraft` file. A message lists anything PlanCraft could not carry over, such as a recurring task's repeat pattern (its occurrences are kept as ordinary tasks).
 - **Exporting:** **File ▸ Export Microsoft Project XML…** writes your plan as `.xml`. PlanCraft-only details, such as three-point estimates, Task Board columns and planned splits, have no place in that format and are listed when you export.
 
-To bring in a task list from a spreadsheet, open the `.xlsx`, `.xls`, `.ods` or `.csv` file with **File ▸ Open**:
+To bring in a task list from a spreadsheet, open the `.xlsx` or `.csv` file with **File ▸ Open** (save an older `.xls` or a LibreOffice `.ods` file in one of those formats first):
 
 - **Choosing columns:** the Import Spreadsheet window shows the first rows and what PlanCraft guessed each column holds. Pick another field for any column, or leave it out. For dates like 03/04/2026, say whether the month or the day comes first (PlanCraft guesses from your dates).
 - **What comes across:** each row with a task name becomes a task. Predecessors refer to the ID column (or, without one, to the row number), like `3` or `3FS+2d`. A start date later than the schedule would give keeps the task on that date with a Start No Earlier Than constraint. People named in the resource column become resources.

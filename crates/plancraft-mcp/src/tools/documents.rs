@@ -47,7 +47,7 @@ pub fn tools() -> Vec<Tool> {
         Tool::new(
             "open_project",
             "Open a project file",
-            "Open a .plancraft project file (or activate it if it is already open) and make it the active document. A Microsoft Project XML file (.xml, MSPDI) or a spreadsheet (.csv, .xlsx, .xls, .ods; columns guessed from their headings, see import_spreadsheet to choose them) is imported as a new unsaved document instead (opening it again while that import is unsaved activates it): 'import_notes' then lists what could not be carried over, and save_project with a .plancraft 'path' keeps it as a plan.",
+            "Open a .plancraft project file (or activate it if it is already open) and make it the active document. A Microsoft Project XML file (.xml, MSPDI) or a spreadsheet (.csv, .xlsx, .xlsm, .xlsb; columns guessed from their headings, see import_spreadsheet to choose them) is imported as a new unsaved document instead (opening it again while that import is unsaved activates it): 'import_notes' then lists what could not be carried over, and save_project with a .plancraft 'path' keeps it as a plan.",
             json!({
                 "type": "object",
                 "properties": { "path": string("Path of the .plancraft file to open, or of a Microsoft Project .xml file or spreadsheet to import.") },

@@ -1,5 +1,5 @@
-//! Task lists from spreadsheets: importing CSV, tab-separated text and workbooks (Excel `.xlsx`,
-//! `.xlsm`, `.xlsb`, `.xls`; OpenDocument `.ods`), and exporting a plan's task list as CSV.
+//! Task lists from spreadsheets: importing CSV, tab-separated text and Excel workbooks (`.xlsx`,
+//! `.xlsm`, `.xlsb`), and exporting a plan's task list as CSV.
 //!
 //! Importing takes three steps, so a person (or an agent) can check the middle one:
 //! 1. [`read_path`] / [`read_bytes`] read the file into worksheets of text cells.
@@ -31,7 +31,12 @@ pub use export::to_csv;
 /// File extensions read as CSV text.
 pub const TEXT_EXTENSIONS: [&str; 3] = ["csv", "tsv", "txt"];
 /// File extensions read as workbooks.
-pub const WORKBOOK_EXTENSIONS: [&str; 5] = ["xlsx", "xlsm", "xlsb", "xls", "ods"];
+pub const WORKBOOK_EXTENSIONS: [&str; 3] = ["xlsx", "xlsm", "xlsb"];
+
+/// At most this many cells (including empty ones between them) are kept from a file.
+pub const MAX_CELLS: usize = 5_000_000;
+/// At most this much text is kept from a file, all cells together.
+pub const MAX_TEXT_BYTES: usize = 128 * 1024 * 1024;
 
 /// At most this many columns are read; more are dropped (with a note).
 pub const MAX_COLUMNS: usize = 1_024;
@@ -81,11 +86,26 @@ pub(crate) struct Limits {
     rows_cut: bool,
     columns_cut: bool,
     cells_cut: bool,
+    /// Cells and bytes of text kept so far, against `MAX_CELLS` and `MAX_TEXT_BYTES`.
+    cells: usize,
+    text: usize,
+    full: bool,
 }
 
 impl Limits {
     /// The most bytes a cell keeps (about the longest notes a task can have).
-    const MAX_CELL_BYTES: usize = MAX_NOTES_CHARS;
+    pub(crate) const MAX_CELL_BYTES: usize = MAX_NOTES_CHARS;
+
+    /// Counts `cells` more cells holding `bytes` of text against the file's budget; false (and
+    /// nothing more is read) once it is spent.
+    fn spend(&mut self, cells: usize, bytes: usize) -> bool {
+        self.cells = self.cells.saturating_add(cells.max(1));
+        self.text = self.text.saturating_add(bytes);
+        if self.cells > MAX_CELLS || self.text > MAX_TEXT_BYTES {
+            self.full = true;
+        }
+        !self.full
+    }
 
     fn max_rows(&self) -> usize {
         MAX_TASKS
@@ -141,6 +161,9 @@ impl Limits {
         if self.cells_cut {
             self.notes.push("very long cells were shortened".to_string());
         }
+        if self.full {
+            self.notes.push("the file holds more than PlanCraft reads; only its first part was read".to_string());
+        }
         self.notes
     }
 }
@@ -151,7 +174,7 @@ pub fn read_bytes(bytes: &[u8], extension: &str) -> Result<Sheets, String> {
     let workbook = WORKBOOK_EXTENSIONS.contains(&extension.to_ascii_lowercase().as_str());
     let sheets = crate::guard::catch("reading a spreadsheet", || {
         if workbook {
-            workbook::read(bytes, &mut limits)
+            workbook::read(bytes, &extension.to_ascii_lowercase(), &mut limits)
         } else {
             Ok(vec![("Sheet 1".to_string(), csv::read(&csv::decode(bytes), &mut limits))])
         }

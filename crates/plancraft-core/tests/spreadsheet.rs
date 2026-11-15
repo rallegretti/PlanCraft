@@ -53,9 +53,62 @@ fn a_plan_exported_to_csv_imports_back_the_same() {
         assert_eq!(original.format_resource_names(t.id), back.format_resource_names(back.tasks[i].id), "{}", t.name);
     }
     assert!(notes.iter().any(|n| n.contains("not imported: Unique ID")), "the columns it can't use are named: {notes:?}");
+    // The dates follow from the links again: only a milestone whose date came from its member
+    // tasks (which a CSV has no column for) keeps it as a constraint. Regression (review): every
+    // task with a predecessor was pinned.
+    let made_of_members = original.tasks.iter().filter(|t| !t.members.is_empty()).count();
+    let constrained = back.tasks.iter().filter(|t| t.constraint.kind != plancraft_core::model::ConstraintKind::Asap).count();
+    assert!(constrained <= made_of_members, "{constrained} constraints for {made_of_members} milestones: {notes:?}");
+    for (a, b) in original.tasks.iter().zip(&back.tasks) {
+        if a.members.is_empty() && !a.is_summary() && a.recurrence.is_none() {
+            assert_eq!(a.sched.start, b.sched.start, "{}", a.name);
+        }
+    }
 }
 
-/// A minimal workbook: the parts Excel needs, one sheet, inline strings, a number and a date.
+/// A minimal workbook around a sheet's `<sheetData>` (and an optional shared-string table).
+fn workbook(sheet_data: &str, shared: Option<&str>) -> Vec<u8> {
+    let mut files = vec![
+        (
+            "[Content_Types].xml",
+            r#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/><Override PartName="/xl/sharedStrings.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml"/></Types>"#.to_string(),
+        ),
+        (
+            "_rels/.rels",
+            r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#.to_string(),
+        ),
+        (
+            "xl/workbook.xml",
+            r#"<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Plan" sheetId="1" r:id="rId1"/></sheets></workbook>"#.to_string(),
+        ),
+        (
+            "xl/_rels/workbook.xml.rels",
+            r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/><Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings" Target="sharedStrings.xml"/></Relationships>"#.to_string(),
+        ),
+        (
+            "xl/styles.xml",
+            r#"<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="14" applyNumberFormat="1"/></cellXfs></styleSheet>"#.to_string(),
+        ),
+        (
+            "xl/worksheets/sheet1.xml",
+            format!(r#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>{sheet_data}</sheetData></worksheet>"#),
+        ),
+    ];
+    if let Some(sst) = shared {
+        files.push(("xl/sharedStrings.xml", format!(r#"<?xml version="1.0" encoding="UTF-8"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="1" uniqueCount="1">{sst}</sst>"#)));
+    }
+    let mut out = std::io::Cursor::new(Vec::new());
+    let mut zip = zip::ZipWriter::new(&mut out);
+    let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+    for (name, body) in files {
+        zip.start_file(name, options).unwrap();
+        zip.write_all(body.as_bytes()).unwrap();
+    }
+    zip.finish().unwrap();
+    out.into_inner()
+}
+
+/// A minimal workbook: one sheet, inline strings, a number and a date.
 fn xlsx(sheet_rows: &[&[&str]]) -> Vec<u8> {
     let cell = |r: usize, c: usize, v: &str| {
         let col = char::from(b'A' + u8::try_from(c).unwrap());
@@ -76,41 +129,7 @@ fn xlsx(sheet_rows: &[&[&str]]) -> Vec<u8> {
             format!(r#"<row r="{}">{}</row>"#, r + 1, cells.iter().enumerate().map(|(c, v)| cell(r, c, v)).collect::<String>())
         })
         .collect();
-    let files = [
-        (
-            "[Content_Types].xml",
-            r#"<?xml version="1.0" encoding="UTF-8"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>"#.to_string(),
-        ),
-        (
-            "_rels/.rels",
-            r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>"#.to_string(),
-        ),
-        (
-            "xl/workbook.xml",
-            r#"<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="Plan" sheetId="1" r:id="rId1"/></sheets></workbook>"#.to_string(),
-        ),
-        (
-            "xl/_rels/workbook.xml.rels",
-            r#"<?xml version="1.0" encoding="UTF-8"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>"#.to_string(),
-        ),
-        (
-            "xl/styles.xml",
-            r#"<?xml version="1.0" encoding="UTF-8"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="14" applyNumberFormat="1"/></cellXfs></styleSheet>"#.to_string(),
-        ),
-        (
-            "xl/worksheets/sheet1.xml",
-            format!(r#"<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>{rows}</sheetData></worksheet>"#),
-        ),
-    ];
-    let mut out = std::io::Cursor::new(Vec::new());
-    let mut zip = zip::ZipWriter::new(&mut out);
-    let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-    for (name, body) in files {
-        zip.start_file(name, options).unwrap();
-        zip.write_all(body.as_bytes()).unwrap();
-    }
-    zip.finish().unwrap();
-    out.into_inner()
+    workbook(&rows, None)
 }
 
 #[test]
@@ -147,6 +166,41 @@ fn a_workbook_that_would_unpack_to_gigabytes_is_refused() {
     bytes[at + 24..at + 28].copy_from_slice(&0x7FFF_FFFFu32.to_le_bytes());
     let err = tabular::read_bytes(&bytes, "xlsx").unwrap_err();
     assert!(err.contains("unpacks to more than"), "{err}");
+}
+
+/// Regression (review): a sheet with cells only in A1 and XFD1048576 made calamine allocate a
+/// grid spanning them (550 GB) and abort the process; cells are now read one at a time.
+#[test]
+fn a_sheet_with_cells_far_apart_reads_in_little_memory() {
+    let bytes = workbook(
+        r#"<row r="1"><c r="A1" t="inlineStr"><is><t>Name</t></is></c></row><row r="1048576"><c r="XFD1048576" t="inlineStr"><is><t>far</t></is></c></row>"#,
+        None,
+    );
+    let sheets = tabular::read_bytes(&bytes, "xlsx").unwrap();
+    let (_, grid) = &sheets.sheets[0];
+    assert_eq!(grid.headers, ["Name"]);
+    assert!(grid.rows.iter().all(|r| r.len() <= tabular::MAX_COLUMNS));
+    assert!(sheets.notes.iter().any(|n| n.contains("columns")), "{:?}", sheets.notes);
+}
+
+/// Regression (review): one 1 MB shared string used by thousands of cells was copied into each
+/// (gigabytes); each copy is now shortened and counted against the file's budget.
+#[test]
+fn a_shared_string_used_by_many_cells_stays_within_the_budget() {
+    let big = "x".repeat(1024 * 1024);
+    let cells: String = (1..=4000).map(|r| format!(r#"<row r="{r}"><c r="A{r}" t="s"><v>0</v></c></row>"#)).collect();
+    let bytes = workbook(&cells, Some(&format!("<si><t>{big}</t></si>")));
+    let sheets = tabular::read_bytes(&bytes, "xlsx").unwrap();
+    let kept: usize = sheets.sheets.iter().flat_map(|(_, g)| g.rows.iter().flatten()).map(String::len).sum();
+    assert!(kept <= tabular::MAX_TEXT_BYTES, "{kept} bytes kept");
+    assert!(sheets.notes.iter().any(|n| n.contains("only its first part") || n.contains("shortened")), "{:?}", sheets.notes);
+}
+
+#[test]
+fn legacy_xls_and_ods_files_are_not_read() {
+    assert!(!tabular::is_table_path(std::path::Path::new("old.xls")));
+    assert!(!tabular::is_table_path(std::path::Path::new("sheet.ods")));
+    assert!(tabular::is_table_path(std::path::Path::new("plan.XLSX")));
 }
 
 #[test]

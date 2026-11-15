@@ -30,7 +30,7 @@
 - **Other scripts:** text the bundled font lacks (Chinese, Japanese, Korean, Hebrew, Thai and more) shows and prints in fallback fonts found on the system; right-to-left text reads right to left on screen and on paper, and Arabic letters join on screen. Not yet: Arabic letter joining and Indic shaping in PDFs, and right-to-left word order while editing.
 - **Interchange:**
   - Microsoft Project XML (MSPDI) import and export, following Microsoft's published schema (under its Open Specification Promise), with notes on anything the other side has no place for.
-  - Task lists from spreadsheets: CSV and tab-separated text, Excel (`.xlsx`, `.xlsm`, `.xlsb`, `.xls`) and OpenDocument (`.ods`), all pure Rust. The Import Spreadsheet window guesses what each column holds from its heading and lets you change it. CSV export of the task list reads back the same way.
+  - Task lists from spreadsheets: CSV and tab-separated text and Excel (`.xlsx`, `.xlsm`, `.xlsb`), all pure Rust, read cell by cell within limits. The Import Spreadsheet window guesses what each column holds from its heading and lets you change it. The task list's CSV export reads back in.
 - **Packages:** a universal macOS disk image (Developer ID signed and notarized), a portable Windows zip, and a Linux AppImage and installable tarball for x86_64 and arm64, each tested on a clean system before release.
 - **MCP server:** 91 tools, resources and prompts over stdio and Streamable HTTP. A live mode works inside the running app (bearer token per session, `plancraft mcp --attach` bridge), and the app binary has a headless `plancraft mcp` mode.
 - **Robustness:** no panics in shipped code (clippy-enforced), guarded edits with rollback, limits on hostile files and arguments, atomic saves, recovery copies, owner-only files.
@@ -53,4 +53,4 @@
 
 ## Later
 
-- **More interchange:** importing resources (not only tasks) from spreadsheets, and choosing which columns the CSV export writes.
+- **More interchange:** legacy Excel `.xls` and OpenDocument `.ods` (they need a reader that streams cells, so a hostile file can't exhaust memory), importing resources (not only tasks) from spreadsheets, and choosing which columns the CSV export writes.
