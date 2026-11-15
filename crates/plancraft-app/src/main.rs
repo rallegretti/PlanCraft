@@ -105,6 +105,11 @@ fn main() -> anyhow::Result<()> {
         if a.to_string_lossy().starts_with('-') {
             continue;
         }
+        // A spreadsheet opens in the Import Spreadsheet window once the app is up.
+        if plancraft_core::tabular::is_table_path(std::path::Path::new(a)) {
+            open_requests::global().push([std::path::PathBuf::from(a)]);
+            continue;
+        }
         if let Err(e) = ws.open(a) {
             eprintln!("plancraft: {e}");
         }

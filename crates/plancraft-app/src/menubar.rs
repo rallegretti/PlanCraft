@@ -238,6 +238,7 @@ fn file_menu(ui: &mut Ui, info: &MenuInfo, settings: &AppSettings, push: &dyn Fn
     item(ui, "Save As…", "Ctrl+Shift+S", doc, Command::SaveAs);
     item(ui, "Print…", "Ctrl+P", doc, Command::Print);
     item(ui, "Export PDF…", "", doc, Command::ExportPdf);
+    item(ui, "Import Excel or CSV…", "", true, Command::ImportSpreadsheet);
     item(ui, "Export CSV…", "", doc, Command::ExportCsv);
     item(ui, "Export Microsoft Project XML…", "", doc, Command::ExportMspdi);
     ui.separator();

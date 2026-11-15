@@ -206,6 +206,10 @@ fn file_tools_with_junk_in_a_temporary_folder() {
     plancraft_core::io::save(&demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), &plan).unwrap();
     plancraft_core::mspdi::save(&demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), &xml).unwrap();
     std::fs::write(dir.path().join("build.xml"), "<project name=\"other\"/>").unwrap();
+    let csv = dir.path().join("plan.csv");
+    let mut demo = demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+    plancraft_core::schedule::recalculate(&mut demo);
+    std::fs::write(&csv, plancraft_core::tabular::to_csv(&demo)).unwrap();
     let in_dir = |v: &Value| match v.as_str() {
         Some(s) => {
             let name: String = s.chars().take(60).map(|c| if matches!(c, '/' | '\\' | ':' | '\0') { '_' } else { c }).collect();
@@ -213,10 +217,18 @@ fn file_tools_with_junk_in_a_temporary_folder() {
         }
         None => v.clone(),
     };
-    let paths = [plan.clone(), xml.clone(), dir.path().join("build.xml"), dir.path().join("new.xml"), dir.path().join("new")];
+    let paths = [
+        plan.clone(),
+        xml.clone(),
+        dir.path().join("build.xml"),
+        dir.path().join("new.xml"),
+        dir.path().join("new"),
+        csv.clone(),
+        dir.path().join("new.csv"),
+    ];
     let tools = plancraft_mcp::tools::all_tools();
     let mut calls = 0;
-    for name in ["open_project", "save_project", "new_project", "export_pdf", "export_mspdi"] {
+    for name in ["open_project", "save_project", "new_project", "export_pdf", "export_mspdi", "import_spreadsheet", "export_csv"] {
         let tool = tools.iter().find(|t| t.name == name).unwrap();
         let props: Vec<String> =
             tool.input_schema.get("properties").and_then(Value::as_object).map(|m| m.keys().cloned().collect()).unwrap_or_default();
@@ -243,6 +255,37 @@ fn file_tools_with_junk_in_a_temporary_folder() {
     assert!(calls > 100, "only {calls} calls");
     // Nothing escaped the folder, and the other program's .xml file was never replaced.
     assert_eq!(std::fs::read_to_string(dir.path().join("build.xml")).unwrap(), "<project name=\"other\"/>");
+}
+
+/// import_spreadsheet with junk as a column heading, as a field, as a sheet and as a date order.
+#[test]
+fn spreadsheet_import_with_junk_columns() {
+    count_panics();
+    let dir = tempfile::tempdir().unwrap();
+    let csv = dir.path().join("plan.csv");
+    std::fs::write(&csv, "Task,Duration,Start,Predecessors\nA,2d,2026-10-19,\nB,3d,,1\n").unwrap();
+    let mut calls = 0;
+    for value in junk_values() {
+        let key = value.as_str().map_or_else(|| value.to_string(), str::to_string);
+        for args in [
+            json!({ "path": csv.to_string_lossy(), "columns": { "Task": value.clone() } }),
+            json!({ "path": csv.to_string_lossy(), "columns": { key.clone(): "name" } }),
+            json!({ "path": csv.to_string_lossy(), "columns": { "Duration": value.clone(), "Start": "name" }, "preview": true }),
+            json!({ "path": csv.to_string_lossy(), "sheet": value.clone(), "date_order": value.clone(), "name": value.clone() }),
+        ] {
+            let s = McpServer::with_options(
+                Workspace::default().shared(),
+                ServerOptions { allow_file_access: true, ..ServerOptions::default() },
+            );
+            let before = panics();
+            let r = call(&s, "import_spreadsheet", args.clone());
+            assert!(panics() == before, "import_spreadsheet panicked on {args}: {}", r["result"]["content"][0]["text"]);
+            assert!(r.get("result").is_some() || r.get("error").is_some(), "{r}");
+            still_alive(&s);
+            calls += 1;
+        }
+    }
+    assert!(calls > 40, "only {calls} calls");
 }
 
 fn arb_json() -> impl Strategy<Value = Value> {

@@ -368,3 +368,28 @@ fn importing_and_exporting_10000_tasks_as_mspdi_is_fast() {
     eprintln!("MSPDI export + import + recalculation of 10,000 tasks ({} MB): {took:?} (limit {limit:?})", xml.len() / 1_000_000);
     assert!(took < limit, "took {took:?}; the limit is {limit:?}");
 }
+
+/// The largest spreadsheet PlanCraft imports: 50,000 rows in an outline, each linked to the one
+/// before, with resources and start dates. (Regression: looking each task up by id made this
+/// take 9 s; it takes about 0.4 s.)
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a timing test: `cargo xtask ci` runs it in release")]
+fn importing_a_50000_row_spreadsheet_is_fast() {
+    let _serial = timed();
+    let mut csv = String::from("ID,Name,Outline Level,Duration,Start,Predecessors,Resource Names,% Complete\n");
+    for i in 1..=50_000usize {
+        let level = if i % 10 == 1 { 1 } else { 2 };
+        let pred = if i > 1 && level == 2 { (i - 1).to_string() } else { String::new() };
+        let start = if i % 100 == 2 { "2026-11-02" } else { "" };
+        csv += &format!("{i},Task {i},{level},{}d,{start},{pred},\"Person {}, Person {}\",{}\n", 1 + i % 5, i % 97, i % 89, i % 3 * 25);
+    }
+    let t = Instant::now();
+    let sheets = plancraft_core::tabular::read_bytes(csv.as_bytes(), "csv").unwrap();
+    let (_, grid) = &sheets.sheets[0];
+    let (p, notes) = plancraft_core::tabular::build(grid, &plancraft_core::tabular::ImportOptions::guess(grid, "Big")).unwrap();
+    let took = t.elapsed();
+    eprintln!("imported {} tasks, {} resources, {} notes: {took:?}", p.tasks.len(), p.resources.len(), notes.len());
+    assert_eq!(p.tasks.len(), 50_000);
+    let limit = Duration::from_secs(3);
+    assert!(took < limit, "took {took:?}; the limit is {limit:?}");
+}

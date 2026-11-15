@@ -23,8 +23,15 @@ epaint_default_fonts = "0.36"
 miniz_oxide = "0.8"
 # Microsoft Project XML (MSPDI) import and export. Pure Rust; entities in a DOCTYPE are never expanded.
 quick-xml = { version = "0.41", default-features = false }
+# Spreadsheet import (CSV and workbooks: .xlsx, .xls, .xlsb, .ods). All pure Rust. `zip` reads a
+# workbook's declared sizes before calamine unpacks it; `encoding_rs` decodes Windows-1252 CSV.
+calamine = { version = "0.38", default-features = false, features = ["chrono"] }
+zip = { version = "9", default-features = false }
+encoding_rs = "0.8"
 
 [dev-dependencies]
+# Builds workbooks for the import tests.
+zip = { version = "9", default-features = false }
 proptest = "1"
 tempfile = "3"
 

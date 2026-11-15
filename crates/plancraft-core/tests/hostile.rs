@@ -1150,3 +1150,114 @@ proptest! {
         prop_assert_eq!(panics(), before, "a panic was caught");
     }
 }
+
+// ---------------------------------------------------------------------------
+// Spreadsheet import (CSV and workbooks)
+// ---------------------------------------------------------------------------
+
+/// Reads `bytes` as a spreadsheet, builds a plan with the guessed columns and with `columns`
+/// (any field on any column), and checks nothing panicked and everything is in range.
+fn check_spreadsheet(bytes: &[u8], extension: &str, columns: &[Option<plancraft_core::tabular::Field>]) -> Result<(), TestCaseError> {
+    use plancraft_core::tabular::{self, DateOrder, ImportOptions};
+    count_panics();
+    let before = panics();
+    let read = tabular::read_bytes(bytes, extension);
+    prop_assert_eq!(panics(), before, "reading panicked");
+    let Ok(sheets) = read else { return Ok(()) };
+    for (_, grid) in &sheets.sheets {
+        let guessed = ImportOptions::guess(grid, "x");
+        let chosen = ImportOptions { columns: columns.to_vec(), date_order: DateOrder::DayFirst, name: "\u{0}x".repeat(3) };
+        for options in [guessed, chosen] {
+            if let Ok((mut p, _)) = tabular::build(grid, &options) {
+                prop_assert!(limits::check_counts(&p).is_ok());
+                let mut copy = p.clone();
+                prop_assert!(limits::sanitize(&mut copy).is_empty(), "values out of range after import");
+                prop_assert!(plancraft_core::schedule::try_recalculate(&mut p).is_ok());
+                // What was imported exports again and reads back.
+                let csv = tabular::to_csv(&p);
+                prop_assert!(tabular::read_bytes(csv.as_bytes(), "csv").is_ok());
+            }
+            prop_assert_eq!(panics(), before, "building the plan panicked");
+        }
+    }
+    Ok(())
+}
+
+fn field() -> impl Strategy<Value = Option<plancraft_core::tabular::Field>> {
+    prop::option::of(prop::sample::select(plancraft_core::tabular::Field::ALL.to_vec()))
+}
+
+/// Cells that look like what spreadsheets hold: dates in every order, durations, predecessors,
+/// resources, outline numbers, percentages, quotes and separators.
+fn sheet_cell() -> impl Strategy<Value = String> {
+    prop_oneof![
+        cell_text(),
+        "[0-9]{1,2}[/.-][0-9]{1,2}[/.-][0-9]{2,4}( [0-9]{1,2}:[0-9]{2}( ?[AP]M)?)?",
+        "(Mon |Tue )?[0-9]{4}-[0-9]{2}-[0-9]{2}([ T][0-9]{2}:[0-9]{2})?",
+        "[A-Za-z]{1,6}(\\[[0-9]{0,4}%?\\])?(, ?[A-Za-z]{1,6})*",
+        "[0-9]{1,3}(\\.[0-9]{1,3}){0,4}",
+        "[0-9]{0,3}([.,][0-9]{0,3})?%?",
+        "\"[^\"]{0,6}\"\"?",
+        "(yes|no|x|1|0|TRUE|n/a)",
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig { cases: cases(256), ..ProptestConfig::default() })]
+
+    /// Any grid of plausible cells, with any column matched to any field.
+    #[test]
+    fn spreadsheet_rows_never_panic_the_importer(
+        rows in prop::collection::vec(prop::collection::vec(sheet_cell(), 0..8), 0..20),
+        columns in prop::collection::vec(field(), 0..9),
+        sep in prop::sample::select(vec![",", ";", "\t"]),
+    ) {
+        let text: String = rows.iter().map(|r| r.join(sep) + "\n").collect();
+        check_spreadsheet(text.as_bytes(), "csv", &columns)?;
+    }
+
+    /// Any bytes, as CSV and as each kind of workbook (zip, OLE and junk headers in front).
+    #[test]
+    fn arbitrary_bytes_never_panic_the_spreadsheet_reader(
+        body in prop::collection::vec(any::<u8>(), 0..400),
+        head in prop::sample::select(vec![&b""[..], b"PK\x03\x04", b"\xD0\xCF\x11\xE0\xA1\xB1\x1A\xE1", b"\xEF\xBB\xBF", b"\xFF\xFE", b"sep="]),
+        extension in prop::sample::select(vec!["csv", "tsv", "xlsx", "xls", "xlsb", "ods"]),
+        columns in prop::collection::vec(field(), 0..6),
+    ) {
+        let bytes = [head, &body[..]].concat();
+        check_spreadsheet(&bytes, extension, &columns)?;
+    }
+}
+
+/// Regressions and edge cases for the spreadsheet import.
+#[test]
+fn hostile_spreadsheets_are_bounded() {
+    use plancraft_core::tabular::{self, ImportOptions};
+    // A huge outline level, a 5000-year duration, dates outside 1900–2300, a link to itself and
+    // to a missing row, a resource list longer than any task should have.
+    let resources = (0..2000).map(|i| format!("R{i}")).collect::<Vec<_>>().join(",");
+    let text = format!(
+        "Name,Outline Level,Duration,Start,Finish,Predecessors,Resources,% Complete\n\
+         A,99999,5000y,0001-01-01,9999-12-31,1,\"{resources}\",1e308\n\
+         B,-5,99999999999d,12/31/1899,13/13/2026,\"1,2,999999999999999999999\",,NaN\n"
+    );
+    let sheets = tabular::read_bytes(text.as_bytes(), "csv").unwrap();
+    let (_, grid) = &sheets.sheets[0];
+    let (mut p, notes) = tabular::build(grid, &ImportOptions::guess(grid, "x")).unwrap();
+    assert!(limits::check_counts(&p).is_ok());
+    assert!(limits::sanitize(&mut p.clone()).is_empty(), "{notes:?}");
+    assert!(plancraft_core::schedule::try_recalculate(&mut p).is_ok());
+    assert_eq!(p.tasks.len(), 2);
+    assert!(p.tasks.iter().all(|t| t.duration <= MAX_MINUTES));
+
+    // A very long cell is shortened; a very wide row is cut.
+    let wide = format!("{}\n{}\n", (0..2000).map(|i| format!("C{i}")).collect::<Vec<_>>().join(","), "x,".repeat(2000));
+    let long = format!("Name\n\"{}\"\n", "y".repeat(500_000));
+    for text in [wide, long] {
+        let sheets = tabular::read_bytes(text.as_bytes(), "csv").unwrap();
+        assert!(!sheets.notes.is_empty(), "the cut is reported");
+        let (_, grid) = &sheets.sheets[0];
+        assert!(grid.headers.len() <= tabular::MAX_COLUMNS);
+        assert!(grid.rows.iter().flatten().all(|c| c.len() <= limits::MAX_NOTES_CHARS));
+    }
+}

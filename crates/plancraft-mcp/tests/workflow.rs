@@ -876,3 +876,56 @@ fn agents_export_and_import_microsoft_project_xml() {
     let e = c.call_err("open_project", json!({ "path": bad.to_str().unwrap() }));
     assert!(e.contains("not a Microsoft Project XML file"), "{e}");
 }
+
+/// An agent previews a spreadsheet, corrects a column the headings didn't give away, imports it,
+/// saves it as a plan, and exports it as CSV again.
+#[test]
+fn spreadsheet_import_and_csv_export() {
+    let dir = tempfile::tempdir().unwrap();
+    let csv = dir.path().join("team.csv");
+    std::fs::write(&csv, "Step,Days,Begins,After,People\nDesign,3,19/10/2026,,Ana\nBuild,5,,1,\"Ana; Ben\"\nShip,0,,2,\n").unwrap();
+    let c = Client::new();
+
+    let preview = c.call("import_spreadsheet", json!({ "path": csv.to_str().unwrap(), "preview": true }));
+    assert_eq!(preview["rows"], 3);
+    assert_eq!(preview["date_order"], "day_first", "19/10/2026 can only be day first");
+    let fields: Vec<Value> = preview["columns"].as_array().unwrap().iter().map(|c| c["field"].clone()).collect();
+    assert_eq!(fields, [Value::Null, json!("duration"), json!("start"), json!("predecessors"), Value::Null]);
+    assert_eq!(c.call("list_documents", json!({}))["documents"].as_array().unwrap().len(), 0, "a preview imports nothing");
+
+    let imported = c.call(
+        "import_spreadsheet",
+        json!({ "path": csv.to_str().unwrap(), "columns": { "Step": "name", "5": "resources" }, "name": "Team plan" }),
+    );
+    assert_eq!(imported["project"]["name"], "Team plan");
+    let tasks = c.call("list_tasks", json!({}));
+    let build = task(&tasks, "Build");
+    assert_eq!(build["start"], "2026-10-22 08:00");
+    assert_eq!(build["resources"], "Ana,Ben");
+    assert_eq!(task(&tasks, "Ship")["kind"], "milestone");
+    assert!(imported["import_notes"].as_array().unwrap().is_empty(), "{}", imported["import_notes"]);
+
+    let saved = dir.path().join("team.plancraft");
+    c.call("save_project", json!({ "path": saved.to_str().unwrap() }));
+    assert!(saved.exists());
+
+    let out = dir.path().join("again.csv");
+    let exported = c.call("export_csv", json!({ "path": out.to_str().unwrap() }));
+    assert_eq!(exported["tasks"], 3);
+    assert!(c.call_err("export_csv", json!({ "path": out.to_str().unwrap() })).contains("already exists"));
+    let back = c.call("import_spreadsheet", json!({ "path": out.to_str().unwrap() }));
+    assert_eq!(back["project"]["name"], "again");
+    assert_eq!(task(&c.call("list_tasks", json!({})), "Build")["predecessors"], "1");
+
+    let wrong = c.call_err("import_spreadsheet", json!({ "path": csv.to_str().unwrap(), "columns": { "Nope": "name" } }));
+    assert!(wrong.contains("there is no column 'Nope'"), "{wrong}");
+    let wrong = c.call_err("import_spreadsheet", json!({ "path": csv.to_str().unwrap(), "columns": { "Step": "title" } }));
+    assert!(wrong.contains("not a field"), "{wrong}");
+
+    // A start column the headings don't give away: once chosen, its dates tell the order.
+    // Regression (review): the order was guessed before columns were changed.
+    let kickoff = dir.path().join("kickoff.csv");
+    std::fs::write(&kickoff, "Task,Kick-off\nA,25/10/2026\n").unwrap();
+    c.call("import_spreadsheet", json!({ "path": kickoff.to_str().unwrap(), "columns": { "Kick-off": "start" } }));
+    assert_eq!(task(&c.call("list_tasks", json!({})), "A")["start"], "2026-10-26 08:00", "25 October 2026 is a Sunday");
+}

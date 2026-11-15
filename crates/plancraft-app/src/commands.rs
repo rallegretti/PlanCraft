@@ -18,6 +18,8 @@ pub enum Command {
     Undo,
     Redo,
     ExportCsv,
+    /// Pick a CSV or spreadsheet file to import as a new plan.
+    ImportSpreadsheet,
     /// The Print window (preview, page setup, print, save as PDF).
     Print,
     /// Save the current view as a PDF with the plan's page setup.
