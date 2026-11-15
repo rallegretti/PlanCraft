@@ -20,6 +20,7 @@ pub mod milestones;
 pub mod print;
 pub mod recurring;
 pub mod resources;
+pub mod spreadsheet;
 pub mod tasks;
 pub mod time;
 pub mod tracking;
@@ -111,6 +112,7 @@ impl Tool {
 pub fn all_tools() -> Vec<Tool> {
     let mut v = Vec::new();
     v.extend(documents::tools());
+    v.extend(spreadsheet::tools());
     v.extend(tasks::tools());
     v.extend(milestones::tools());
     v.extend(dependencies::tools());

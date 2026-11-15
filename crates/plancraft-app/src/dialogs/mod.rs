@@ -2,6 +2,7 @@
 
 pub mod baseline;
 pub mod custom_fields;
+pub mod import;
 pub mod mcp_panel;
 pub mod misc;
 pub mod print;
@@ -56,6 +57,8 @@ pub struct Dialogs {
     /// Follows the active document's selection; reset when the active document changes.
     pub assign: Option<Bound<misc::AssignResources>>,
     pub external: Option<Bound<misc::ExternalLinks>>,
+    /// Import Spreadsheet (not bound to a document: it makes a new one).
+    pub import: Option<import::ImportSheet>,
     pub stats: bool,
     pub about: bool,
     pub history: bool,

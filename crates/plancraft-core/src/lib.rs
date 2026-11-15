@@ -37,6 +37,7 @@ pub mod report;
 pub mod sample;
 pub mod schedule;
 pub mod split;
+pub mod tabular;
 pub mod timescale;
 pub mod workload;
 pub mod workspace;

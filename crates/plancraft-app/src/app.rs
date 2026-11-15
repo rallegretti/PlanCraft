@@ -49,6 +49,8 @@ pub struct PlanCraftApp {
     inject_panic: bool,
     /// Files the system asked to open (macOS Finder), opened at the start of each frame.
     inbox: Arc<crate::open_requests::Inbox>,
+    /// The window's context, for work done outside a frame's `Ui` (loading fonts for a file).
+    egui_ctx: egui::Context,
     /// A Save stopped because another program changed the file: asks to overwrite (by handle).
     confirm_overwrite: Option<u64>,
     /// The close (of a document or the app) to carry on with once the overwrite question is
@@ -81,6 +83,12 @@ const MAX_CRASH_CHARS: usize = 400;
 enum CloseRequest {
     Document(u64),
     App,
+}
+
+/// The file extensions offered when picking a spreadsheet to import.
+fn spreadsheet_extensions() -> Vec<&'static str> {
+    let text = plancraft_core::tabular::TEXT_EXTENSIONS.into_iter().filter(|e| *e != "txt");
+    text.chain(plancraft_core::tabular::WORKBOOK_EXTENSIONS).collect()
 }
 
 /// Shown when an earlier session left unsaved work but the Start Page, which lists it, is not shown.
@@ -119,6 +127,7 @@ impl PlanCraftApp {
             crash: None,
             inject_panic: false,
             inbox: crate::open_requests::global(),
+            egui_ctx: cc.egui_ctx.clone(),
         };
         for path in &app.settings.recent {
             app.fonts.ensure(&cc.egui_ctx, &path.to_string_lossy());
@@ -238,6 +247,20 @@ impl PlanCraftApp {
     }
 
     fn open_path(&mut self, path: PathBuf) {
+        // A task list from a spreadsheet: ask what its columns hold first.
+        if plancraft_core::tabular::is_table_path(&path) {
+            match plancraft_core::tabular::read_path(&path) {
+                Ok(sheets) => {
+                    let dialog = dialogs::import::ImportSheet::new(path, sheets);
+                    for text in dialog.texts() {
+                        self.fonts.ensure(&self.egui_ctx, text);
+                    }
+                    self.dialogs.import = Some(dialog);
+                }
+                Err(e) => self.st.toast(ToastKind::Error, e.to_string()),
+            }
+            return;
+        }
         let r = lock(&self.ws).open(&path);
         match r {
             Ok(_) => {
@@ -389,54 +412,13 @@ impl PlanCraftApp {
     }
 
     fn export_csv(&mut self) {
-        let Some((name, csv)) = self.with_doc(|doc, _| {
-            let p = &doc.project;
-            // UTF-8 byte order mark: Excel then reads names with accents correctly.
-            let mut s = String::from("\u{feff}ID,Unique ID,WBS,Outline Level,Name,Milestone,Duration,Start,Finish,% Complete,Work (h),Cost,Predecessors,Resources,Critical");
-            // A cell starting with = + - @ (or a tab/CR/LF, also after leading spaces) would run as
-            // a formula in a spreadsheet: prefix it with an apostrophe so it stays text.
-            let q = |v: &str| {
-                let risky = v.starts_with(['\t', '\r', '\n']) || v.trim_start().starts_with(['=', '+', '-', '@', '＝', '＋', '－', '＠']);
-                let guarded = if risky { format!("'{v}") } else { v.to_string() };
-                format!("\"{}\"", guarded.replace('"', "\"\""))
-            };
-            for f in &p.custom_fields {
-                s += &format!(",{}", q(&f.name));
-            }
-            s.push('\n');
-            for (i, t) in p.tasks.iter().enumerate() {
-                s += &format!(
-                    "{},{},{},{},{},{},{},{},{},{:.0},{:.2},{:.2},{},{},{}",
-                    i + 1,
-                    t.id.0,
-                    q(&p.wbs(i)),
-                    t.outline_level,
-                    q(&t.name),
-                    t.is_milestone(),
-                    q(&p.format_duration(t.sched.duration, t.estimated)),
-                    crate::format::iso(t.sched.start),
-                    crate::format::iso(t.sched.finish),
-                    t.sched.percent_complete,
-                    t.sched.work as f64 / 60.0,
-                    t.sched.cost,
-                    q(&p.format_predecessors(t.id)),
-                    q(&p.format_resource_names(t.id)),
-                    t.sched.critical
-                );
-                for f in &p.custom_fields {
-                    let v = t.custom.get(&f.id).map(|v| p.custom_value_text(f.id, v)).unwrap_or_default();
-                    s += &format!(",{}", q(&v));
-                }
-                s.push('\n');
-            }
-            (p.name.clone(), s)
-        }) else {
+        let Some((name, csv)) = self.with_doc(|doc, _| (doc.project.name.clone(), plancraft_core::tabular::to_csv(&doc.project))) else {
             return;
         };
         if let Some(path) = rfd::FileDialog::new().add_filter("CSV", &["csv"]).set_file_name(format!("{name}.csv")).save_file() {
-            match std::fs::write(&path, csv) {
+            match plancraft_core::io::write_atomic(&path, csv.as_bytes(), plancraft_core::io::Privacy::KeepExisting) {
                 Ok(()) => self.set_status(format!("Exported {}", path.display())),
-                Err(e) => self.st.toast(ToastKind::Error, e.to_string()),
+                Err(e) => self.st.toast(ToastKind::Error, format!("Could not save the CSV file: {e}")),
             }
         }
     }
@@ -463,11 +445,21 @@ impl PlanCraftApp {
             }
             Command::Open => {
                 let xml = plancraft_core::mspdi::EXTENSION;
+                let sheets = spreadsheet_extensions();
+                let all: Vec<&str> = [FILE_EXTENSION, xml].into_iter().chain(sheets.iter().copied()).collect();
                 if let Some(path) = rfd::FileDialog::new()
-                    .add_filter("Plans", &[FILE_EXTENSION, xml])
+                    .add_filter("Plans and task lists", &all)
                     .add_filter("PlanCraft project", &[FILE_EXTENSION])
                     .add_filter("Microsoft Project XML", &[xml])
+                    .add_filter("Excel, CSV and other spreadsheets", &sheets)
                     .pick_file()
+                {
+                    self.open_path(path);
+                }
+            }
+            Command::ImportSpreadsheet => {
+                if let Some(path) =
+                    rfd::FileDialog::new().add_filter("Excel, CSV and other spreadsheets", &spreadsheet_extensions()).pick_file()
                 {
                     self.open_path(path);
                 }
@@ -1695,7 +1687,11 @@ impl PlanCraftApp {
                 list.push_str(&format!("; and {} more", notes.len() - SHOWN));
             }
             let msg = if doc.imported {
-                format!("Imported {} from Microsoft Project XML. Save it to keep it as a PlanCraft plan. Notes: {list}", doc.project.name)
+                let from = match &doc.imported_from {
+                    Some(p) if plancraft_core::mspdi::is_mspdi_path(p) => "Microsoft Project XML",
+                    _ => "a spreadsheet",
+                };
+                format!("Imported {} from {from}. Save it to keep it as a PlanCraft plan. Notes: {list}", doc.project.name)
             } else {
                 format!("Opened {}; PlanCraft adjusted out-of-range values: {list}", doc.title())
             };
@@ -1923,6 +1919,23 @@ impl PlanCraftApp {
             dialogs::show_bound(&mut self.dialogs.recurring, &mut ws, |d, doc| d.show(&ctx, doc, st));
             let st = &*st;
             dialogs::show_bound(&mut self.dialogs.print, &mut ws, |d, doc| d.show(&ctx, doc, st));
+        }
+        // Import Spreadsheet makes a new document.
+        if let Some(dialog) = &mut self.dialogs.import {
+            match dialog.show(&ctx, &mut ws) {
+                dialogs::import::Outcome::Open => {}
+                dialogs::import::Outcome::Cancelled => self.dialogs.import = None,
+                dialogs::import::Outcome::Imported(handle) => {
+                    let path = dialog.path.clone();
+                    let name = ws.index_of(handle).and_then(|i| ws.docs.get(i)).map(|d| d.project.name.clone()).unwrap_or_default();
+                    self.dialogs.import = None;
+                    self.settings.add_recent(path);
+                    self.st.start_page = false;
+                    self.st.sel = Default::default();
+                    self.st.gantt.initialized_for = None;
+                    self.set_status(format!("Imported {name}. Save it to keep it as a PlanCraft plan."));
+                }
+            }
         }
         // Assign Resources works on the active document's selection: start afresh when the
         // active document changes, so typed units never carry over to another plan.
@@ -2972,6 +2985,44 @@ mod ui_tests {
 
     /// Opening a Microsoft Project XML file imports it as a new plan: the user's unsaved work,
     /// with no file of its own, and a toast saying what the import could not carry over.
+    /// Opening a spreadsheet shows the Import Spreadsheet window; Import makes an unsaved plan
+    /// and reports what it left out.
+    #[test]
+    fn opening_a_spreadsheet_imports_it_through_the_import_window() {
+        use egui_kittest::kittest::Queryable;
+        let tmp = crate::recovery::tests::TempDir::new("csv-import");
+        let path = tmp.0.join("Team plan.csv");
+        std::fs::write(&path, "Task,Duration,Start,Predecessors,Owner,Budget\nDesign,3d,2026-10-19,,Ana,100\nBuild,5d,,1,Ben,200\n")
+            .unwrap();
+        let shared = Workspace::default().shared();
+        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).build_eframe(move |cc| PlanCraftApp::new(cc, shared));
+        h.run_steps(2);
+        let ctx = h.ctx.clone();
+        h.state_mut().exec(&ctx, Command::OpenPath(path.clone()));
+        h.run_steps(2);
+        assert!(h.state().dialogs.import.is_some(), "the window opens instead of a failed load");
+        assert!(h.state().ws.lock().unwrap().docs.is_empty(), "nothing is imported before Import");
+
+        h.get_by_label("  Import  ").click();
+        h.run_steps(2);
+        assert!(h.state().dialogs.import.is_none());
+        {
+            let ws = h.state().ws.clone();
+            let ws = ws.lock().unwrap();
+            let doc = ws.active_doc().unwrap();
+            assert_eq!(doc.project.name, "Team plan");
+            assert_eq!(doc.project.tasks.len(), 2);
+            assert_eq!(doc.project.resources.len(), 2);
+            assert!(doc.imported && doc.path.is_none() && doc.dirty);
+        }
+        assert!(!h.state().st.start_page);
+        assert!(
+            h.state().st.toasts.iter().any(|t| t.text.contains("from a spreadsheet") && t.text.contains("Budget")),
+            "{:?}",
+            h.state().st.toasts.iter().map(|t| &t.text).collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn opening_microsoft_project_xml_imports_it() {
         let tmp = crate::recovery::tests::TempDir::new("mspdi");

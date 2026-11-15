@@ -1,8 +1,9 @@
-//! Files the operating system asks the running app to open. On macOS, double-clicking a plan in
-//! Finder (or dropping it on PlanCraft's Dock icon) sends an "open documents" event to the app,
-//! whether it is starting or already running, instead of passing the file on the command line
-//! (`mac_open.rs`). The event handler queues the paths here and wakes the app, which opens them
-//! at the start of its next frame, the same way as File ▸ Open.
+//! Files the app is asked to open while it runs. On macOS, double-clicking a plan in Finder (or
+//! dropping it on PlanCraft's Dock icon) sends an "open documents" event to the app, whether it
+//! is starting or already running, instead of passing the file on the command line
+//! (`mac_open.rs`); spreadsheets named on the command line wait here too, so they open in the
+//! Import Spreadsheet window. The paths are queued here and the app is woken, which opens them at
+//! the start of its next frame, the same way as File ▸ Open.
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, PoisonError};
@@ -20,7 +21,6 @@ pub struct Inbox {
 
 impl Inbox {
     /// Queues files to open and asks the app to draw a frame.
-    #[cfg_attr(not(any(target_os = "macos", test)), allow(dead_code))]
     pub fn push(&self, paths: impl IntoIterator<Item = PathBuf>) {
         {
             let mut queue = self.paths.lock().unwrap_or_else(PoisonError::into_inner);

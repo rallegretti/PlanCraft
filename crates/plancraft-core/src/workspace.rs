@@ -456,6 +456,9 @@ impl Workspace {
         if crate::mspdi::is_mspdi_path(path) {
             return self.import_mspdi(path);
         }
+        if crate::tabular::is_table_path(path) {
+            return self.import_spreadsheet(path, 0, None, true);
+        }
         let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
         if let Some(i) =
             self.docs.iter().position(|d| d.path.as_ref().is_some_and(|p| std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()) == abs))
@@ -489,15 +492,52 @@ impl Workspace {
             return Ok(doc.handle);
         }
         let (project, notes) = crate::mspdi::load(&abs)?;
+        Ok(self.add_imported(project, notes, abs))
+    }
+
+    /// Imports a task list from a spreadsheet (CSV or a workbook) as a new unsaved document.
+    /// `sheet` picks the worksheet (the first is 0); `options` says what the columns hold
+    /// (`None`: guessed from the headings). With `reuse`, a still-unsaved import of the same file
+    /// is activated instead of importing it again.
+    pub fn import_spreadsheet(
+        &mut self,
+        path: impl AsRef<Path>,
+        sheet: usize,
+        options: Option<crate::tabular::ImportOptions>,
+        reuse: bool,
+    ) -> FileResult<u64> {
+        let path = path.as_ref();
+        let abs = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+        if reuse
+            && let Some(i) = self.docs.iter().position(|d| d.path.is_none() && d.imported_from.as_ref() == Some(&abs))
+            && let Some(doc) = self.docs.get(i)
+        {
+            self.active = Some(i);
+            return Ok(doc.handle);
+        }
+        let import = |message: String| io::FileError::Import { path: path.into(), message };
+        let sheets = crate::tabular::read_path(&abs)?;
+        let (_, grid) = sheets.sheets.get(sheet).ok_or_else(|| import(format!("the file has no worksheet {}", sheet.saturating_add(1))))?;
+        let name = path.file_stem().map_or_else(|| "Imported plan".to_string(), |s| s.to_string_lossy().into_owned());
+        let options = options.unwrap_or_else(|| crate::tabular::ImportOptions::guess(grid, name));
+        let (project, mut notes) = crate::tabular::build(grid, &options).map_err(import)?;
+        let mut all = sheets.notes;
+        all.append(&mut notes);
+        Ok(self.add_imported(project, all, abs))
+    }
+
+    /// Adds a plan imported from another format (a spreadsheet, Microsoft Project XML) as a new,
+    /// unsaved document that remembers where it came from; makes it active.
+    pub fn add_imported(&mut self, project: Project, notes: Vec<String>, from: PathBuf) -> u64 {
         let handle = self.add(project, None);
         if let Some(doc) = self.active_doc_mut() {
             doc.load_notes = notes;
             doc.imported = true;
-            doc.imported_from = Some(abs);
+            doc.imported_from = Some(from);
             doc.dirty = true;
             doc.user_changes = true;
         }
-        Ok(handle)
+        handle
     }
 
     pub fn close(&mut self, handle: u64) -> bool {
