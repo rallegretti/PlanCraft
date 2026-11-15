@@ -12,7 +12,7 @@ use super::{Document, Item, LegendPlacement, Page, PageSetup, Pt, Rect, Rgb, Str
 use crate::calendar::shift;
 use crate::ids::TaskId;
 use crate::model::{LinkType, Project, ScheduleMode};
-use crate::schedule::{project_calendar, task_calendar};
+use crate::schedule::{TaskCalendars, project_calendar};
 use crate::timescale::{Unit, tiers};
 
 /// Most pages one print produces (hostile plans and settings can't make millions).
@@ -499,6 +499,8 @@ impl Chart<'_> {
         let first = rows.start;
         let y_of = |r: usize| body.y + (r as f32 - first as f32) * ROW_H + ROW_H / 2.0;
         let xs = |t: NaiveDateTime| self.x(body.x, off, t);
+        // Slack lines need each task's calendar: one per distinct calendar for the page.
+        let mut cals = o.slack.then(|| TaskCalendars::new(p));
 
         // Links that touch a row on this page (the other end may be off the page: clipped).
         if o.links && o.baselines == 0 {
@@ -700,8 +702,10 @@ impl Chart<'_> {
                         }
                     }
                 }
-                if o.slack && t.sched.total_slack > 0 {
-                    let lf = task_calendar(p, idx).add(f, t.sched.total_slack);
+                if t.sched.total_slack > 0
+                    && let Some(cal) = cals.as_mut().and_then(|c| c.of(idx))
+                {
+                    let lf = cal.add(f, t.sched.total_slack);
                     hline(out, x1, xs(lf), yc + BAR_H / 2.0 + 1.5, Stroke::new(1.0, pal.bar_slack));
                 }
                 if o.resource_names {

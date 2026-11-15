@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use chrono::{Duration, NaiveDateTime, NaiveTime};
 use egui::{Align2, Color32, CursorIcon, FontId, Painter, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, pos2, vec2};
 use plancraft_core::prelude::*;
-use plancraft_core::schedule::{project_calendar, task_calendar};
+use plancraft_core::schedule::{TaskCalendars, project_calendar, task_calendar};
 
 use crate::commands::Command;
 use crate::format;
@@ -175,6 +175,8 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
     let header = Rect::from_min_size(rect.min, vec2(rect.width() - 12.0, input.header_height));
     let body = Rect::from_min_max(pos2(rect.left(), header.bottom()), pos2(rect.right() - 12.0, rect.bottom() - 12.0));
     let chart_left = body.left();
+    // Slack lines need each task's calendar: one per distinct calendar for this frame.
+    let mut slack_cals = g.show_slack.then(|| TaskCalendars::new(p));
 
     // Initial positioning per project.
     if g.initialized_for != Some(p.id) {
@@ -521,13 +523,13 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
                     }
                 }
             }
-            if g.show_slack && t.sched.total_slack > 0 {
-                let cal = task_calendar(p, idx);
-                if let Some(f) = t.sched.finish {
-                    let lf = cal.add(f, t.sched.total_slack);
-                    let sx = g.x_of(chart_left, lf);
-                    bp.hline(x1..=sx, yc + BAR_H / 2.0 + 2.0, Stroke::new(1.5, theme::pal().BAR_SLACK));
-                }
+            if t.sched.total_slack > 0
+                && let Some(f) = t.sched.finish
+                && let Some(cal) = slack_cals.as_mut().and_then(|c| c.of(idx))
+            {
+                let lf = cal.add(f, t.sched.total_slack);
+                let sx = g.x_of(chart_left, lf);
+                bp.hline(x1..=sx, yc + BAR_H / 2.0 + 2.0, Stroke::new(1.5, theme::pal().BAR_SLACK));
             }
             if t.deadline.is_some_and(|dl| t.sched.finish.is_some_and(|f| f > dl)) {
                 bp.text(pos2(x1 + 3.0, yc - 8.0), Align2::LEFT_CENTER, "⚠", FontId::proportional(10.0), theme::pal().ERROR);
