@@ -63,6 +63,20 @@ mod tests {
     }
 
     #[test]
+    fn a_request_wakes_the_window() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let ctx = egui::Context::default();
+        let woken = Arc::new(AtomicBool::new(false));
+        let flag = woken.clone();
+        ctx.set_request_repaint_callback(move |_| flag.store(true, Ordering::SeqCst));
+        let inbox = Inbox::default();
+        inbox.wake_with(&ctx);
+        assert!(!woken.load(Ordering::SeqCst));
+        inbox.push([PathBuf::from("a.plancraft")]);
+        assert!(woken.load(Ordering::SeqCst));
+    }
+
+    #[test]
     fn a_flood_of_requests_is_capped() {
         let inbox = Inbox::default();
         inbox.push((0..MAX_PENDING + 50).map(|i| PathBuf::from(format!("{i}.plancraft"))));

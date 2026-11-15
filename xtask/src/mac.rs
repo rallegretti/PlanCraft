@@ -371,6 +371,12 @@ fn info_plist(version: &str) -> String {
             <key>LSHandlerRank</key><string>Owner</string>
             <key>LSItemContentTypes</key><array><string>{PLAN_TYPE}</string></array>
         </dict>
+        <dict>
+            <key>CFBundleTypeName</key><string>Microsoft Project XML</string>
+            <key>CFBundleTypeRole</key><string>Viewer</string>
+            <key>LSHandlerRank</key><string>Alternate</string>
+            <key>LSItemContentTypes</key><array><string>public.xml</string></array>
+        </dict>
     </array>
     <key>UTExportedTypeDeclarations</key>
     <array>
@@ -420,6 +426,8 @@ mod tests {
             "<key>CFBundleDocumentTypes</key>",
             "<key>UTExportedTypeDeclarations</key>",
             "<string>dev.plancraft.project</string>",
+            // Microsoft Project XML is imported: offered in Open With, never the default for XML.
+            "<key>LSHandlerRank</key><string>Alternate</string>",
             "<key>public.filename-extension</key><array><string>plancraft</string></array>",
             "<key>CFBundleShortVersionString</key><string>1.2.3</string>",
         ] {
@@ -428,6 +436,14 @@ mod tests {
         // Balanced tags (`plutil -lint` checks the real file during packaging on the Mac).
         for tag in ["dict", "array"] {
             assert_eq!(plist.matches(&format!("<{tag}>")).count(), plist.matches(&format!("</{tag}>")).count(), "{tag}");
+        }
+        // On a Mac, Apple's own checker reads it too.
+        if cfg!(target_os = "macos") {
+            let path = std::env::temp_dir().join(format!("plancraft-info-{}.plist", std::process::id()));
+            std::fs::write(&path, &plist).unwrap();
+            let lint = std::process::Command::new("plutil").arg("-lint").arg(&path).output().unwrap();
+            let _ = std::fs::remove_file(&path);
+            assert!(lint.status.success(), "{}", String::from_utf8_lossy(&lint.stdout));
         }
     }
 

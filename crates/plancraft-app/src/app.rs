@@ -83,6 +83,9 @@ enum CloseRequest {
     App,
 }
 
+/// Shown when an earlier session left unsaved work but the Start Page, which lists it, is not shown.
+const RECOVERY_FOUND: &str = "PlanCraft found unsaved work from an earlier session. Open the Start Page (File menu) to restore it.";
+
 impl PlanCraftApp {
     pub fn new(cc: &eframe::CreationContext<'_>, ws: SharedWorkspace) -> Self {
         let mut settings = AppSettings::load();
@@ -123,10 +126,7 @@ impl PlanCraftApp {
         app.inbox.wake_with(&cc.egui_ctx);
         recovery::spawn_background_writer(&app.recovery, &app.ws, cc.egui_ctx.clone());
         if !app.rec().found.is_empty() && !app.st.start_page {
-            app.st.toast(
-                ToastKind::Info,
-                "PlanCraft found unsaved work from an earlier session. Open the Start Page (File menu) to restore it.",
-            );
+            app.st.toast(ToastKind::Info, RECOVERY_FOUND);
         }
         if let Ok(v) = std::env::var("PLANCRAFT_TAB")
             && let Some(tab) = crate::state::MenuTab::ALL.into_iter().find(|t| t.label().eq_ignore_ascii_case(&v))
@@ -214,6 +214,27 @@ impl PlanCraftApp {
         let mut ws = lock(&ws);
         let doc = ws.active_doc_mut()?;
         Some(f(doc, &mut self.st))
+    }
+
+    /// Opens the files the system asked to open (macOS Finder and the Dock, `open_requests`) and
+    /// brings the window forward, out of the Dock if it was minimized.
+    fn open_requested_files(&mut self, ctx: &egui::Context) {
+        let paths = self.inbox.take();
+        if paths.is_empty() {
+            return;
+        }
+        let from_start_page = self.st.start_page;
+        for path in paths {
+            self.open_path(path);
+        }
+        // Launched from Finder, the file closes the Start Page before it is ever drawn, and the
+        // Start Page is where recovered work is listed: say it exists, as a launch with the file on
+        // the command line does.
+        if from_start_page && !self.st.start_page && !self.rec().found.is_empty() {
+            self.st.toast(ToastKind::Info, RECOVERY_FOUND);
+        }
+        ctx.send_viewport_cmd(egui::ViewportCommand::Minimized(false));
+        ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
     }
 
     fn open_path(&mut self, path: PathBuf) {
@@ -1690,9 +1711,7 @@ impl PlanCraftApp {
         if std::mem::take(&mut self.inject_panic) {
             injected_panic();
         }
-        for path in self.inbox.take() {
-            self.open_path(path);
-        }
+        self.open_requested_files(&ctx);
         let mut out: Vec<Command> = Vec::new();
 
         // Intercept window close when there are unsaved changes.
@@ -2860,8 +2879,7 @@ mod ui_tests {
     }
 
     /// macOS Finder hands files to the running app as events (`mac_open.rs`); the next frame opens
-    /// them like File ▸ Open, wakes the window to do so, and a file already open is only brought
-    /// to the front.
+    /// them like File ▸ Open, and a file already open is only brought to the front.
     #[test]
     fn files_the_system_asks_to_open_are_opened_on_the_next_frame() {
         let tmp = crate::recovery::tests::TempDir::new("open-requests");
@@ -2889,6 +2907,35 @@ mod ui_tests {
         let ws = h.state().ws.lock().unwrap();
         assert_eq!(ws.docs.len(), before + 1, "opening it again does not add a second copy");
         assert_eq!(ws.active_doc().unwrap().project.name, "From Finder");
+    }
+
+    /// Regression (review of the Finder support): launched by double-clicking a plan, the file
+    /// closed the Start Page before it was drawn, so unsaved work from an earlier session was never
+    /// mentioned.
+    #[test]
+    fn a_file_opened_at_launch_still_mentions_recovered_work() {
+        let tmp = crate::recovery::tests::TempDir::new("open-request-recovery");
+        let store = RecoveryStore::new(tmp.0.join("recovery"));
+        {
+            let mut ws = Workspace::default();
+            ws.add(Project::new("Crashed Plan", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+            ws.docs[0].edit("Add", |p| p.add_task("Recovered task", None)).unwrap();
+            Recovery::new(Some(store.clone())).write_dirty(&ws).unwrap();
+        }
+        let path = tmp.0.join("From Finder.plancraft");
+        plancraft_core::io::save(&Project::new("From Finder", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), &path).unwrap();
+        let shared = Workspace::default().shared();
+        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).build_eframe(move |cc| PlanCraftApp::new(cc, shared));
+        *h.state().rec() = Recovery::new(Some(store));
+        let inbox = Arc::new(crate::open_requests::Inbox::default());
+        h.state_mut().inbox = inbox.clone();
+        assert!(h.state().st.start_page);
+
+        inbox.push([path]);
+        h.run_steps(2);
+        assert!(!h.state().st.start_page);
+        assert_eq!(h.state().ws.lock().unwrap().active_doc().unwrap().project.name, "From Finder");
+        assert!(h.state().st.toasts.iter().any(|t| t.text == RECOVERY_FOUND), "recovered work is mentioned");
     }
 
     /// Regression: Save silently replaced a file another program had changed since it was opened.

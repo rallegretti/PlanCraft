@@ -58,8 +58,11 @@ define_class!(
         // reply descriptors, no result).
         #[unsafe(method(openDocuments:withReply:))]
         fn open_documents(&self, event: &NSAppleEventDescriptor, _reply: &NSAppleEventDescriptor) {
-            let paths = plancraft_core::guard::catch("reading files to open", || paths(event)).unwrap_or_default();
-            crate::open_requests::global().push(paths);
+            // A panic must not unwind into AppKit's event dispatch.
+            let queued = plancraft_core::guard::catch("reading files to open", || crate::open_requests::global().push(paths(event)));
+            if let Err(p) = queued {
+                eprintln!("plancraft: {p}");
+            }
         }
     }
 );
@@ -95,5 +98,60 @@ fn paths(event: &NSAppleEventDescriptor) -> Vec<PathBuf> {
         let last = count.min(crate::open_requests::MAX_PENDING as isize);
         (1..=last).filter_map(|i| direct.descriptorAtIndex(i)).collect()
     };
-    items.iter().filter_map(|item| item.fileURLValue()).filter_map(|url| url.path()).map(|path| PathBuf::from(path.to_string())).collect()
+    items
+        .iter()
+        .filter_map(|item| item.fileURLValue())
+        .filter(|url| url.isFileURL())
+        .filter_map(|url| url.path())
+        .map(|path| PathBuf::from(path.to_string()))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use objc2_foundation::{NSString, NSURL};
+
+    /// An open-documents event as Finder sends it, with `direct` as its list of files.
+    fn event(direct: Option<&NSAppleEventDescriptor>) -> Retained<NSAppleEventDescriptor> {
+        // Return ID -1 and transaction ID 0: Apple's "generate one" and "any transaction".
+        let event = NSAppleEventDescriptor::appleEventWithEventClass_eventID_targetDescriptor_returnID_transactionID(
+            CORE_EVENT_CLASS,
+            OPEN_DOCUMENTS,
+            None,
+            -1,
+            0,
+        );
+        if let Some(direct) = direct {
+            event.setParamDescriptor_forKeyword(direct, DIRECT_OBJECT);
+        }
+        event
+    }
+
+    fn file(path: &str) -> Retained<NSAppleEventDescriptor> {
+        NSAppleEventDescriptor::descriptorWithFileURL(&NSURL::fileURLWithPath(&NSString::from_str(path)))
+    }
+
+    #[test]
+    fn reads_every_file_in_the_list_in_order() {
+        let list = NSAppleEventDescriptor::listDescriptor();
+        list.insertDescriptor_atIndex(&file("/tmp/Plan A.plancraft"), 1);
+        list.insertDescriptor_atIndex(&file("/tmp/Projekt Ü.plancraft"), 2);
+        assert_eq!(paths(&event(Some(&list))), [PathBuf::from("/tmp/Plan A.plancraft"), PathBuf::from("/tmp/Projekt Ü.plancraft")]);
+    }
+
+    #[test]
+    fn reads_a_single_file_that_is_not_in_a_list() {
+        assert_eq!(paths(&event(Some(&file("/tmp/One.plancraft")))), [PathBuf::from("/tmp/One.plancraft")]);
+    }
+
+    #[test]
+    fn an_event_without_files_or_with_other_things_opens_nothing() {
+        assert!(paths(&event(None)).is_empty());
+        assert!(paths(&event(Some(&NSAppleEventDescriptor::listDescriptor()))).is_empty());
+        let list = NSAppleEventDescriptor::listDescriptor();
+        list.insertDescriptor_atIndex(&NSAppleEventDescriptor::descriptorWithString(&NSString::from_str("https://example.com/x")), 1);
+        list.insertDescriptor_atIndex(&file("/tmp/Real.plancraft"), 2);
+        assert_eq!(paths(&event(Some(&list))), [PathBuf::from("/tmp/Real.plancraft")]);
+    }
 }
