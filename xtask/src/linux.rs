@@ -1,15 +1,19 @@
 //! Linux packaging: a relocatable `.tar.gz` with an install script, desktop entry, icons and a
-//! MIME type for `.plancraft` files, and an AppImage (one file that runs without installing).
+//! MIME type for `.plancraft` files, and an AppImage (one file that runs without installing),
+//! each for x86_64 and for arm64 (aarch64).
 //!
 //! The binaries are built in an Ubuntu 22.04 container (`linux-build.Dockerfile`), so they need
 //! glibc 2.35 and run on Ubuntu 22.04 and newer; built on this machine they would need its own,
-//! newer glibc. Set `PLANCRAFT_NATIVE_LINUX=1` to build here anyway (for a quick local package).
+//! newer glibc. The container builds x86_64 natively and cross-compiles arm64, so the build host
+//! must be x86_64. Set `PLANCRAFT_NATIVE_LINUX=1` to build here anyway (for a quick local package
+//! of this machine's architecture only).
 //!
 //! Both packages carry the window-system libraries the app loads at startup that a fresh desktop
 //! may lack (`BUNDLED_LIBS`, each in its own folder under `lib/plancraft/`); the app uses only
 //! the ones the system lacks (`plancraft-app/src/bundled_libs.rs`). Before a package is finished,
 //! it is started in a clean Ubuntu 22.04 container (`linux-smoke.Dockerfile`) and must open its
-//! window there.
+//! window there; the arm64 packages run in an arm64 container under QEMU emulation, which the
+//! build host must have registered (`binfmt_misc`; `sudo apt install qemu-user-binfmt`).
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -27,19 +31,67 @@ use crate::util::{self, artifact, copy, fresh_dir, output, run, step};
 struct Image {
     tag: &'static str,
     dockerfile: &'static str,
+    /// Docker's name for the image's architecture (`linux/amd64`, `linux/arm64`).
+    platform: &'static str,
     about: &'static str,
 }
 
-/// The build image.
-const BUILD_IMAGE: Image =
-    Image { tag: "plancraft-build:ubuntu22.04-3", dockerfile: "linux-build.Dockerfile", about: "Ubuntu 22.04 with gcc and squashfs-tools" };
-
-/// A clean desktop system (display server and Mesa only) for testing the packages.
-const SMOKE_IMAGE: Image = Image {
-    tag: "plancraft-smoke:ubuntu22.04",
-    dockerfile: "linux-smoke.Dockerfile",
-    about: "a clean Ubuntu 22.04 desktop: Xvfb and Mesa only",
+/// The build image (x86_64; cross-compiles arm64).
+const BUILD_IMAGE: Image = Image {
+    tag: "plancraft-build:ubuntu22.04-4",
+    dockerfile: "linux-build.Dockerfile",
+    platform: "linux/amd64",
+    about: "Ubuntu 22.04 with gcc, the arm64 cross linker and squashfs-tools",
 };
+
+/// An architecture the Linux packages are made for.
+struct Arch {
+    /// The name in file names and `std::env::consts::ARCH`.
+    name: &'static str,
+    /// Rust's target triple.
+    triple: &'static str,
+    /// Where Ubuntu keeps this architecture's libraries (the bundled ones are copied from here).
+    lib_dir: &'static str,
+    /// The AppImage runtime for this architecture and the SHA-256 GitHub publishes for it.
+    runtime: &'static str,
+    runtime_sha256: &'static str,
+    /// A clean desktop system (display server and Mesa only) for testing the packages.
+    smoke_image: Image,
+    /// The `binfmt_misc` entry that runs this architecture's programs on an x86_64 machine
+    /// (`None`: runs natively).
+    emulator: Option<&'static str>,
+}
+
+const ARCHES: [Arch; 2] = [
+    Arch {
+        name: "x86_64",
+        triple: "x86_64-unknown-linux-gnu",
+        lib_dir: "/usr/lib/x86_64-linux-gnu",
+        runtime: "runtime-x86_64",
+        runtime_sha256: "2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d",
+        smoke_image: Image {
+            tag: "plancraft-smoke:ubuntu22.04",
+            dockerfile: "linux-smoke.Dockerfile",
+            platform: "linux/amd64",
+            about: "a clean Ubuntu 22.04 desktop: Xvfb and Mesa only",
+        },
+        emulator: None,
+    },
+    Arch {
+        name: "aarch64",
+        triple: "aarch64-unknown-linux-gnu",
+        lib_dir: "/usr/lib/aarch64-linux-gnu",
+        runtime: "runtime-aarch64",
+        runtime_sha256: "00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444",
+        smoke_image: Image {
+            tag: "plancraft-smoke:ubuntu22.04-arm64",
+            dockerfile: "linux-smoke.Dockerfile",
+            platform: "linux/arm64",
+            about: "a clean arm64 Ubuntu 22.04 desktop: Xvfb and Mesa only (runs under QEMU)",
+        },
+        emulator: Some("qemu-aarch64"),
+    },
+];
 
 /// Libraries winit and wgpu load at startup (keyboard maps, cursors, input devices, Wayland
 /// surfaces) that a fresh desktop install may not have; copied from the build image, each
@@ -60,9 +112,12 @@ const BUNDLED_LIBS: [&str; 7] = [
 
 /// Starts the AppImage, the tarball's binary and a copy installed with `install.sh` in the clean
 /// container: every bundled library must find what it needs there, and each must open its window
-/// (it saves a screenshot and quits).
+/// (it saves a screenshot and quits). Under emulation the AppImage is started through the
+/// emulator (`$5`): its header carries the AppImage mark in bytes the kernel's emulator entry
+/// requires to be zero, so the kernel would not hand it to QEMU (real ARM hardware runs it
+/// directly).
 const SMOKE_TEST: &str = r#"
-out=$1; image=$2; stage=$3
+out=$1; image=$2; stage=$3; limit=$4; emulator=$5
 fail=0
 bundled=$(printf '%s:' "$stage"/lib/plancraft/*); bundled=${bundled%:}
 for lib in "$stage"/lib/plancraft/*/* "$stage"/bin/plancraft; do
@@ -72,14 +127,14 @@ done
 start() {
   name=$1; shift
   rm -f "$out/$name.png"
-  PLANCRAFT_SCREENSHOT="$out/$name.png" APPIMAGE_EXTRACT_AND_RUN=1     timeout 180 xvfb-run -a -s "-screen 0 1440x900x24" "$@" --demo >"$out/$name.log" 2>&1
+  PLANCRAFT_SCREENSHOT="$out/$name.png" APPIMAGE_EXTRACT_AND_RUN=1 timeout "$limit" xvfb-run -a -s "-screen 0 1440x900x24" "$@" --demo >"$out/$name.log" 2>&1
   if [ -s "$out/$name.png" ]; then
     echo "    $name: opened its window"
   else
     echo "$name did not open its window on a clean system:"; cat "$out/$name.log"; fail=1
   fi
 }
-start appimage "$image"
+start appimage ${emulator:+"$emulator"} "$image"
 start tarball "$stage/bin/plancraft"
 prefix=$(mktemp -d)/prefix
 if "$stage/install.sh" "$prefix" >"$out/install.log" 2>&1; then
@@ -91,9 +146,8 @@ exit $fail
 "#;
 
 /// The AppImage runtime (the small launcher at the start of every AppImage), from the AppImage
-/// project's own releases, pinned by the SHA-256 GitHub publishes for it.
-const RUNTIME_URL: &str = "https://github.com/AppImage/type2-runtime/releases/download/20251108/runtime-x86_64";
-const RUNTIME_SHA256: &str = "2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d";
+/// project's own releases (`Arch::runtime`), pinned by the SHA-256 GitHub publishes for it.
+const RUNTIME_RELEASE: &str = "https://github.com/AppImage/type2-runtime/releases/download/20251108";
 
 const APPRUN: &str = r#"#!/bin/sh
 # Starts PlanCraft from inside the AppImage; arguments (a file to open, `mcp --attach`) pass on.
@@ -185,30 +239,52 @@ pub fn package() -> Result<Vec<PathBuf>> {
     }
     let root = util::root();
     let version = util::version()?;
-    let arch = std::env::consts::ARCH;
 
-    let release = build_binaries(&root)?;
+    let builds = build_binaries(&root)?;
+    // The icons are drawn by the app itself, so by the binary this machine can run.
+    let icons = root.join("dist/linux/icons");
+    fresh_dir(&icons)?;
+    let host = builds.iter().find(|(a, _)| a.name == std::env::consts::ARCH).context("no binary for this machine was built")?;
+    for size in ICON_SIZES {
+        util::render_icon(&host.1.join("plancraft"), &icons.join(format!("{size}.png")), size)?;
+    }
 
-    let name = format!("plancraft-{version}-linux-{arch}");
+    let mut results = Vec::new();
+    let mut tests = Vec::new();
+    for (arch, release) in &builds {
+        let (stage, image, files) = package_arch(&root, &version, arch, release, &icons)?;
+        tests.push((arch, stage, image));
+        results.extend(files);
+    }
+    for (arch, stage, image) in tests {
+        smoke_test(&root, arch, &stage, &image)?;
+    }
+    Ok(results)
+}
+
+/// Makes the tarball and the AppImage for one architecture; returns the staged tarball folder, the
+/// AppImage, and all the files made (tarball, AppImage, and their checksums).
+fn package_arch(root: &Path, version: &str, arch: &Arch, release: &Path, icons: &Path) -> Result<(PathBuf, PathBuf, Vec<PathBuf>)> {
+    let name = format!("plancraft-{version}-linux-{}", arch.name);
     let stage = root.join("dist/linux").join(&name);
     fresh_dir(&stage)?;
 
-    step("staging files");
+    step(format!("staging files ({})", arch.name));
     copy(&release.join("plancraft"), &stage.join("bin/plancraft"), true)?;
     copy(&release.join("plancraft-mcp"), &stage.join("bin/plancraft-mcp"), true)?;
-    bundle_libs(&root, &stage.join("lib/plancraft"))?;
+    bundle_libs(root, arch, &stage.join("lib/plancraft"))?;
     copy(&root.join("README.md"), &stage.join("README.md"), false)?;
     copy(&root.join("LICENSE"), &stage.join("LICENSE"), false)?;
     copy(&root.join("assets/logo.svg"), &stage.join("share/icons/hicolor/scalable/apps/plancraft.svg"), false)?;
     for size in ICON_SIZES {
         let out = stage.join(format!("share/icons/hicolor/{size}x{size}/apps/plancraft.png"));
-        util::render_icon(&stage.join("bin/plancraft"), &out, size)?;
+        copy(&icons.join(format!("{size}.png")), &out, false)?;
     }
     write(&stage.join("share/applications/plancraft.desktop"), DESKTOP_ENTRY, false)?;
     write(&stage.join("share/mime/packages/plancraft.xml"), MIME_XML, false)?;
     write(&stage.join("install.sh"), INSTALL_SH, true)?;
 
-    step("creating the tarball");
+    step(format!("creating the tarball ({})", arch.name));
     let tarball = root.join(format!("dist/{name}.tar.gz"));
     let encoder = GzEncoder::new(File::create(&tarball)?, Compression::best());
     let mut tar = tar::Builder::new(encoder);
@@ -221,23 +297,31 @@ pub fn package() -> Result<Vec<PathBuf>> {
     artifact(&tarball);
     artifact(&sum);
 
-    let (image, image_sum) = appimage(&root, &stage, &version, arch)?;
-    smoke_test(&root, &stage, &image)?;
-    Ok(vec![tarball, sum, image, image_sum])
+    let (image, image_sum) = appimage(root, &stage, version, arch)?;
+    Ok((stage, image.clone(), vec![tarball, sum, image, image_sum]))
 }
 
 fn hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Builds the release binaries; returns the directory they are in.
-fn build_binaries(root: &Path) -> Result<PathBuf> {
+/// Builds the release binaries; returns each architecture with the directory its binaries are in.
+fn build_binaries(root: &Path) -> Result<Vec<(&'static Arch, PathBuf)>> {
     if std::env::var_os("PLANCRAFT_NATIVE_LINUX").is_some() {
+        let arch = ARCHES.iter().find(|a| a.name == std::env::consts::ARCH).context("this machine's architecture is not packaged")?;
         step("building release binaries on this machine (PLANCRAFT_NATIVE_LINUX: they need this machine's glibc or newer)");
         util::build_release(None, &[])?;
-        return Ok(root.join("target/release"));
+        return Ok(vec![(arch, root.join("target/release"))]);
     }
-    step(format!("building release binaries in an Ubuntu 22.04 container ({})", BUILD_IMAGE.tag));
+    if std::env::consts::ARCH != "x86_64" {
+        bail!("the Linux packages are built on an x86_64 machine (the build container cross-compiles arm64)");
+    }
+    let installed = output(Command::new("rustup").args(["target", "list", "--installed"]))?;
+    let missing: Vec<&str> = ARCHES.iter().map(|a| a.triple).filter(|t| !installed.lines().any(|l| l.trim() == *t)).collect();
+    if !missing.is_empty() {
+        bail!("missing Rust targets; install them with: rustup target add {}", missing.join(" "));
+    }
+    step(format!("building release binaries for x86_64 and arm64 in an Ubuntu 22.04 container ({})", BUILD_IMAGE.tag));
     let target = root.join("target/ubuntu22.04");
     let cargo = PathBuf::from(output(Command::new("rustup").args(["which", "cargo"]))?.trim());
     let bin = cargo.parent().context("finding the toolchain")?.to_path_buf();
@@ -255,6 +339,7 @@ fn build_binaries(root: &Path) -> Result<PathBuf> {
         .arg(format!("RUSTC={}", bin.join("rustc").display()))
         .arg("-e")
         .arg(format!("PATH={}:/usr/bin:/bin", bin.display()))
+        .args(["-e", "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc"])
         .arg("-v")
         .arg(format!("{0}:{0}", cargo_home.display()))
         .arg("-v")
@@ -262,8 +347,11 @@ fn build_binaries(root: &Path) -> Result<PathBuf> {
         .arg(BUILD_IMAGE.tag)
         .arg(&cargo)
         .args(["build", "--release", "--locked", "-p", "plancraft-app", "-p", "plancraft-mcp"]);
+    for arch in &ARCHES {
+        c.args(["--target", arch.triple]);
+    }
     run(&mut c)?;
-    Ok(target.join("release"))
+    Ok(ARCHES.iter().map(|a| (a, target.join(a.triple).join("release"))).collect())
 }
 
 /// `docker run` as this user, with the repository mounted at its own path; the caller adds the
@@ -272,14 +360,14 @@ fn container(root: &Path, image: &Image) -> Result<Command> {
     if output(Command::new("docker").args(["image", "inspect", image.tag])).is_err() {
         step(format!("making the container image {} ({})", image.tag, image.about));
         run(Command::new("docker")
-            .args(["build", "-t", image.tag, "-f"])
+            .args(["build", "--platform", image.platform, "-t", image.tag, "-f"])
             .arg(root.join("xtask").join(image.dockerfile))
             .arg(root.join("xtask")))?;
     }
     let uid = output(Command::new("id").arg("-u"))?;
     let gid = output(Command::new("id").arg("-g"))?;
     let mut c = Command::new("docker");
-    c.args(["run", "--rm", "-u"])
+    c.args(["run", "--rm", "--platform", image.platform, "-u"])
         .arg(format!("{}:{}", uid.trim(), gid.trim()))
         .args(["-e", "HOME=/tmp", "-v"])
         .arg(format!("{0}:{0}", root.display()))
@@ -289,19 +377,19 @@ fn container(root: &Path, image: &Image) -> Result<Command> {
 }
 
 /// The AppImage runtime, downloaded once into `target/appimage` and checked against its SHA-256.
-fn runtime(root: &Path) -> Result<Vec<u8>> {
-    let path = root.join("target/appimage/runtime-x86_64-20251108");
+fn runtime(root: &Path, arch: &Arch) -> Result<Vec<u8>> {
+    let path = root.join(format!("target/appimage/{}-20251108", arch.runtime));
     if !path.exists() {
-        step("downloading the AppImage runtime");
+        step(format!("downloading the AppImage runtime ({})", arch.name));
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
         let part = path.with_extension("part");
-        run(Command::new("curl").args(["-fsSL", "--proto", "=https", "-o"]).arg(&part).arg(RUNTIME_URL))?;
+        run(Command::new("curl").args(["-fsSL", "--proto", "=https", "-o"]).arg(&part).arg(format!("{RUNTIME_RELEASE}/{}", arch.runtime)))?;
         std::fs::rename(&part, &path)?;
     }
     let bytes = std::fs::read(&path)?;
-    if hex(&bytes) != RUNTIME_SHA256 {
+    if hex(&bytes) != arch.runtime_sha256 {
         let _ = std::fs::remove_file(&path);
         bail!("the AppImage runtime's checksum is wrong; it was removed (run the command again to download it afresh)");
     }
@@ -309,13 +397,10 @@ fn runtime(root: &Path) -> Result<Vec<u8>> {
 }
 
 /// Builds `PlanCraft-<version>-<arch>.AppImage` from the staged tarball files.
-fn appimage(root: &Path, stage: &Path, version: &str, arch: &str) -> Result<(PathBuf, PathBuf)> {
-    if arch != "x86_64" {
-        bail!("the AppImage runtime pinned here is for x86_64");
-    }
-    let runtime = runtime(root)?;
-    step("staging the AppImage");
-    let appdir = root.join("dist/linux/PlanCraft.AppDir");
+fn appimage(root: &Path, stage: &Path, version: &str, arch: &Arch) -> Result<(PathBuf, PathBuf)> {
+    let runtime = runtime(root, arch)?;
+    step(format!("staging the AppImage ({})", arch.name));
+    let appdir = root.join(format!("dist/linux/PlanCraft-{}.AppDir", arch.name));
     fresh_dir(&appdir)?;
     for bin in ["plancraft", "plancraft-mcp"] {
         copy(&stage.join("bin").join(bin), &appdir.join("usr/bin").join(bin), true)?;
@@ -329,13 +414,13 @@ fn appimage(root: &Path, stage: &Path, version: &str, arch: &str) -> Result<(Pat
     copy(&icon, &appdir.join("plancraft.png"), false)?;
     copy(&icon, &appdir.join(".DirIcon"), false)?;
 
-    step("packing the AppImage");
-    let squashfs = root.join("dist/linux/PlanCraft.squashfs");
+    step(format!("packing the AppImage ({})", arch.name));
+    let squashfs = root.join(format!("dist/linux/PlanCraft-{}.squashfs", arch.name));
     let _ = std::fs::remove_file(&squashfs);
     let mut c = container(root, &BUILD_IMAGE)?;
     c.args([BUILD_IMAGE.tag, "mksquashfs"]).arg(&appdir).arg(&squashfs).args(["-root-owned", "-noappend", "-comp", "zstd", "-quiet"]);
     run(&mut c)?;
-    let image = root.join(format!("dist/PlanCraft-{version}-{arch}.AppImage"));
+    let image = root.join(format!("dist/PlanCraft-{version}-{}.AppImage", arch.name));
     let mut bytes = runtime;
     bytes.extend(std::fs::read(&squashfs)?);
     std::fs::write(&image, bytes)?;
@@ -355,17 +440,17 @@ fn lib_dir(soname: &str) -> &str {
     soname.split(".so").next().unwrap_or(soname)
 }
 
-/// Copies `BUNDLED_LIBS` out of the build image, each into `dest/<name>/` under its soname
-/// (symlinks resolved).
-fn bundle_libs(root: &Path, dest: &Path) -> Result<()> {
-    step("bundling the window-system libraries");
+/// Copies `BUNDLED_LIBS` for `arch` out of the build image, each into `dest/<name>/` under its
+/// soname (symlinks resolved).
+fn bundle_libs(root: &Path, arch: &Arch, dest: &Path) -> Result<()> {
+    step(format!("bundling the window-system libraries ({})", arch.name));
     fresh_dir(dest)?;
     for lib in BUNDLED_LIBS {
         std::fs::create_dir_all(dest.join(lib_dir(lib)))?;
     }
-    let script = r#"dest=$1; shift; for l in "$@"; do cp -L "/usr/lib/x86_64-linux-gnu/$l" "$dest/${l%%.so*}/" || exit 1; done"#;
+    let script = r#"from=$1; dest=$2; shift 2; for l in "$@"; do cp -L "$from/$l" "$dest/${l%%.so*}/" || exit 1; done"#;
     let mut c = container(root, &BUILD_IMAGE)?;
-    c.args([BUILD_IMAGE.tag, "sh", "-c", script, "sh"]).arg(dest).args(BUNDLED_LIBS);
+    c.args([BUILD_IMAGE.tag, "sh", "-c", script, "sh", arch.lib_dir]).arg(dest).args(BUNDLED_LIBS);
     run(&mut c)?;
     for lib in BUNDLED_LIBS {
         let path = dest.join(lib_dir(lib)).join(lib);
@@ -381,23 +466,61 @@ fn bundle_libs(root: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Starts both packages on a clean system (see `SMOKE_TEST`); fails the build if either does not
-/// open its window. `PLANCRAFT_SKIP_SMOKE_TEST=1` skips it (never for a release).
-fn smoke_test(root: &Path, stage: &Path, image: &Path) -> Result<()> {
+/// Starts both packages for `arch` on a clean system (see `SMOKE_TEST`); fails the build if
+/// either does not open its window. `PLANCRAFT_SKIP_SMOKE_TEST=1` skips it (never for a release).
+fn smoke_test(root: &Path, arch: &Arch, stage: &Path, image: &Path) -> Result<()> {
     if std::env::var_os("PLANCRAFT_SKIP_SMOKE_TEST").is_some() {
-        step("SKIPPING the clean-system test (PLANCRAFT_SKIP_SMOKE_TEST): do not release these packages");
+        step(format!("SKIPPING the clean-system test for {} (PLANCRAFT_SKIP_SMOKE_TEST): do not release these packages", arch.name));
         return Ok(());
     }
     if std::env::var_os("PLANCRAFT_NATIVE_LINUX").is_some() {
         step("skipping the clean-system test: PLANCRAFT_NATIVE_LINUX binaries need this machine's newer glibc");
         return Ok(());
     }
-    step("starting both packages on a clean Ubuntu 22.04 desktop");
-    let out = root.join("dist/linux/smoke");
+    // Emulated, starting takes a minute or two instead of seconds.
+    let (limit, emulator) = match arch.emulator {
+        None => (180, None),
+        Some(entry) => (900, Some(emulator(entry, arch)?)),
+    };
+    let how = if arch.emulator.is_some() { ", emulated" } else { "" };
+    step(format!("starting the {} packages on a clean Ubuntu 22.04 desktop{how}", arch.name));
+    let out = root.join("dist/linux/smoke").join(arch.name);
     fresh_dir(&out)?;
-    let mut c = container(root, &SMOKE_IMAGE)?;
-    c.args([SMOKE_IMAGE.tag, "sh", "-c", SMOKE_TEST, "sh"]).arg(&out).arg(image).arg(stage);
-    run(&mut c).context("a Linux package does not start on a clean system (the log is above; screenshots and logs in dist/linux/smoke)")
+    let mut c = container(root, &arch.smoke_image)?;
+    let inside = "/opt/plancraft-emulator";
+    if let Some(path) = &emulator {
+        c.arg("-v").arg(format!("{}:{inside}:ro", path.display()));
+    }
+    c.args([arch.smoke_image.tag, "sh", "-c", SMOKE_TEST, "sh"]).arg(&out).arg(image).arg(stage).arg(limit.to_string());
+    c.arg(if emulator.is_some() { inside } else { "" });
+    run(&mut c).with_context(|| {
+        format!(
+            "a {} Linux package does not start on a clean system (the log is above; screenshots and logs in {})",
+            arch.name,
+            out.display()
+        )
+    })
+}
+
+/// Checks that this machine runs `arch`'s programs through QEMU, in containers too (the `F`
+/// flag: the kernel opens the emulator when the entry is registered, so it works inside a
+/// container that lacks it); returns the emulator's path.
+fn emulator(entry: &str, arch: &Arch) -> Result<PathBuf> {
+    let path = Path::new("/proc/sys/fs/binfmt_misc").join(entry);
+    let status = std::fs::read_to_string(&path).unwrap_or_default();
+    let enabled = status.lines().next() == Some("enabled");
+    let fixed = status.lines().any(|l| l.strip_prefix("flags:").is_some_and(|f| f.contains('F')));
+    let interpreter = status.lines().find_map(|l| l.strip_prefix("interpreter ")).map(|p| PathBuf::from(p.trim()));
+    match interpreter {
+        Some(interpreter) if enabled && fixed && interpreter.is_file() => Ok(interpreter),
+        _ => bail!(
+            "the {} packages are tested under QEMU emulation, which this machine lacks ({} is not registered with the F flag); \
+             install it (Ubuntu or Debian: sudo apt install qemu-user-binfmt), or set PLANCRAFT_SKIP_SMOKE_TEST=1 for a package \
+             that is not a release",
+            arch.name,
+            path.display()
+        ),
+    }
 }
 
 /// Copies a directory tree (regular files only).
