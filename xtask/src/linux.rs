@@ -13,7 +13,7 @@
 //! the ones the system lacks (`plancraft-app/src/bundled_libs.rs`). Before a package is finished,
 //! it is started in a clean Ubuntu 22.04 container (`linux-smoke.Dockerfile`) and must open its
 //! window there; the arm64 packages run in an arm64 container under QEMU emulation, which the
-//! build host must have registered (`binfmt_misc`; `sudo apt install qemu-user-binfmt`).
+//! build host must have registered (`binfmt_misc` with the `F` flag; see `QEMU_ADVICE`).
 
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -240,6 +240,14 @@ pub fn package() -> Result<Vec<PathBuf>> {
     let root = util::root();
     let version = util::version()?;
 
+    // A missing emulator should stop the build now, not after the build and the packaging.
+    if !smoke_test_skipped() && std::env::var_os("PLANCRAFT_NATIVE_LINUX").is_none() {
+        for arch in &ARCHES {
+            if let Some(entry) = arch.emulator {
+                emulator(entry, arch)?;
+            }
+        }
+    }
     let builds = build_binaries(&root)?;
     // The icons are drawn by the app itself, so by the binary this machine can run.
     let icons = root.join("dist/linux/icons");
@@ -249,22 +257,44 @@ pub fn package() -> Result<Vec<PathBuf>> {
         util::render_icon(&host.1.join("plancraft"), &icons.join(format!("{size}.png")), size)?;
     }
 
-    let mut results = Vec::new();
-    let mut tests = Vec::new();
+    // Packages wait in `dist/linux/untested/` and reach `dist/` only once every one has passed
+    // the clean-system test, so a failed run leaves nothing in `dist/` that looks releasable.
+    let untested = root.join("dist/linux/untested");
+    fresh_dir(&untested)?;
+    let mut made = Vec::new();
     for (arch, release) in &builds {
-        let (stage, image, files) = package_arch(&root, &version, arch, release, &icons)?;
-        tests.push((arch, stage, image));
-        results.extend(files);
+        let (stage, tarball, image) = package_arch(&root, &untested, &version, arch, release, &icons)?;
+        for file in [&tarball, &image] {
+            let name = file.file_name().context("a package without a file name")?;
+            for stale in [root.join("dist").join(name), root.join("dist").join(format!("{}.sha256", name.to_string_lossy()))] {
+                if stale.exists() {
+                    std::fs::remove_file(&stale).with_context(|| format!("removing the older {}", stale.display()))?;
+                }
+            }
+        }
+        made.push((arch, stage, tarball, image));
     }
-    for (arch, stage, image) in tests {
-        smoke_test(&root, arch, &stage, &image)?;
+    for (arch, stage, _, image) in &made {
+        smoke_test(&root, arch, stage, image)?;
+    }
+    let mut results = Vec::new();
+    for (_, _, tarball, image) in made {
+        for file in [tarball, image] {
+            let name = file.file_name().context("a package without a file name")?;
+            let done = root.join("dist").join(name);
+            std::fs::rename(&file, &done).with_context(|| format!("moving {} into dist/", file.display()))?;
+            let sum = util::write_checksum(&done)?;
+            artifact(&done);
+            artifact(&sum);
+            results.extend([done, sum]);
+        }
     }
     Ok(results)
 }
 
-/// Makes the tarball and the AppImage for one architecture; returns the staged tarball folder, the
-/// AppImage, and all the files made (tarball, AppImage, and their checksums).
-fn package_arch(root: &Path, version: &str, arch: &Arch, release: &Path, icons: &Path) -> Result<(PathBuf, PathBuf, Vec<PathBuf>)> {
+/// Makes the tarball and the AppImage for one architecture in `out`; returns the staged tarball
+/// folder, the tarball and the AppImage.
+fn package_arch(root: &Path, out: &Path, version: &str, arch: &Arch, release: &Path, icons: &Path) -> Result<(PathBuf, PathBuf, PathBuf)> {
     let name = format!("plancraft-{version}-linux-{}", arch.name);
     let stage = root.join("dist/linux").join(&name);
     fresh_dir(&stage)?;
@@ -285,7 +315,7 @@ fn package_arch(root: &Path, version: &str, arch: &Arch, release: &Path, icons: 
     write(&stage.join("install.sh"), INSTALL_SH, true)?;
 
     step(format!("creating the tarball ({})", arch.name));
-    let tarball = root.join(format!("dist/{name}.tar.gz"));
+    let tarball = out.join(format!("{name}.tar.gz"));
     let encoder = GzEncoder::new(File::create(&tarball)?, Compression::best());
     let mut tar = tar::Builder::new(encoder);
     tar.mode(tar::HeaderMode::Deterministic);
@@ -293,12 +323,8 @@ fn package_arch(root: &Path, version: &str, arch: &Arch, release: &Path, icons: 
     tar.append_dir_all(&name, &stage)?;
     tar.into_inner()?.finish()?;
 
-    let sum = util::write_checksum(&tarball)?;
-    artifact(&tarball);
-    artifact(&sum);
-
-    let (image, image_sum) = appimage(root, &stage, version, arch)?;
-    Ok((stage, image.clone(), vec![tarball, sum, image, image_sum]))
+    let image = appimage(root, out, &stage, version, arch)?;
+    Ok((stage, tarball, image))
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -396,8 +422,8 @@ fn runtime(root: &Path, arch: &Arch) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
-/// Builds `PlanCraft-<version>-<arch>.AppImage` from the staged tarball files.
-fn appimage(root: &Path, stage: &Path, version: &str, arch: &Arch) -> Result<(PathBuf, PathBuf)> {
+/// Builds `PlanCraft-<version>-<arch>.AppImage` in `out` from the staged tarball files.
+fn appimage(root: &Path, out: &Path, stage: &Path, version: &str, arch: &Arch) -> Result<PathBuf> {
     let runtime = runtime(root, arch)?;
     step(format!("staging the AppImage ({})", arch.name));
     let appdir = root.join(format!("dist/linux/PlanCraft-{}.AppDir", arch.name));
@@ -420,7 +446,7 @@ fn appimage(root: &Path, stage: &Path, version: &str, arch: &Arch) -> Result<(Pa
     let mut c = container(root, &BUILD_IMAGE)?;
     c.args([BUILD_IMAGE.tag, "mksquashfs"]).arg(&appdir).arg(&squashfs).args(["-root-owned", "-noappend", "-comp", "zstd", "-quiet"]);
     run(&mut c)?;
-    let image = root.join(format!("dist/PlanCraft-{version}-{}.AppImage", arch.name));
+    let image = out.join(format!("PlanCraft-{version}-{}.AppImage", arch.name));
     let mut bytes = runtime;
     bytes.extend(std::fs::read(&squashfs)?);
     std::fs::write(&image, bytes)?;
@@ -429,10 +455,7 @@ fn appimage(root: &Path, stage: &Path, version: &str, arch: &Arch) -> Result<(Pa
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o755))?;
     }
-    let sum = util::write_checksum(&image)?;
-    artifact(&image);
-    artifact(&sum);
-    Ok((image, sum))
+    Ok(image)
 }
 
 /// The folder a bundled library goes in: its soname without the version (`libXi.so.6` → `libXi`).
@@ -469,7 +492,7 @@ fn bundle_libs(root: &Path, arch: &Arch, dest: &Path) -> Result<()> {
 /// Starts both packages for `arch` on a clean system (see `SMOKE_TEST`); fails the build if
 /// either does not open its window. `PLANCRAFT_SKIP_SMOKE_TEST=1` skips it (never for a release).
 fn smoke_test(root: &Path, arch: &Arch, stage: &Path, image: &Path) -> Result<()> {
-    if std::env::var_os("PLANCRAFT_SKIP_SMOKE_TEST").is_some() {
+    if smoke_test_skipped() {
         step(format!("SKIPPING the clean-system test for {} (PLANCRAFT_SKIP_SMOKE_TEST): do not release these packages", arch.name));
         return Ok(());
     }
@@ -502,6 +525,17 @@ fn smoke_test(root: &Path, arch: &Arch, stage: &Path, image: &Path) -> Result<()
     })
 }
 
+/// How to get an emulator registered the way the arm64 test needs it: with the `F` flag and a
+/// statically linked QEMU (it is also mounted into the test container). Older releases register
+/// their dynamically linked `qemu-user` without `F`; their static build is `qemu-user-static`.
+const QEMU_ADVICE: &str = "install it: sudo apt install qemu-user-static, or on newer releases where that package no longer \
+     exists (Ubuntu 26.04, for one), sudo apt install qemu-user-binfmt";
+
+/// `PLANCRAFT_SKIP_SMOKE_TEST=1`: package without the clean-system test (never for a release).
+fn smoke_test_skipped() -> bool {
+    std::env::var_os("PLANCRAFT_SKIP_SMOKE_TEST").is_some()
+}
+
 /// Checks that this machine runs `arch`'s programs through QEMU, in containers too (the `F`
 /// flag: the kernel opens the emulator when the entry is registered, so it works inside a
 /// container that lacks it); returns the emulator's path.
@@ -514,9 +548,9 @@ fn emulator(entry: &str, arch: &Arch) -> Result<PathBuf> {
     match interpreter {
         Some(interpreter) if enabled && fixed && interpreter.is_file() => Ok(interpreter),
         _ => bail!(
-            "the {} packages are tested under QEMU emulation, which this machine lacks ({} is not registered with the F flag); \
-             install it (Ubuntu or Debian: sudo apt install qemu-user-binfmt), or set PLANCRAFT_SKIP_SMOKE_TEST=1 for a package \
-             that is not a release",
+            "the {} packages are tested under QEMU emulation, which this machine lacks ({} must be enabled, with the F flag, \
+             and name an emulator that exists on this machine); \
+             {QEMU_ADVICE}, or set PLANCRAFT_SKIP_SMOKE_TEST=1 for a package that is not a release",
             arch.name,
             path.display()
         ),

@@ -64,8 +64,8 @@ PlanCraft is free. Get the latest version from the **[Releases page](https://git
 |---|---|---|
 | **Windows** 10 or 11 (64-bit) | `PlanCraft-<version>-windows-x64.zip` | A folder with PlanCraft in it, ready to run |
 | **Mac** with Apple Silicon or Intel, macOS 11 or newer | `PlanCraft-<version>-macos-universal.dmg` | The PlanCraft app, to drag into Applications |
-| **Linux** (64-bit), the easy way | `PlanCraft-<version>-x86_64.AppImage` | One file that runs PlanCraft, nothing to install |
-| **Linux** (64-bit), in your applications menu | `plancraft-<version>-linux-x86_64.tar.gz` | An installer that adds PlanCraft to your menu |
+| **Linux** on Intel or AMD (64-bit), the easy way | `PlanCraft-<version>-x86_64.AppImage` | One file that runs PlanCraft, nothing to install |
+| **Linux** on Intel or AMD (64-bit), in your applications menu | `plancraft-<version>-linux-x86_64.tar.gz` | An installer that adds PlanCraft to your menu |
 | **Linux on ARM** (64-bit: Raspberry Pi 4 or 5, ARM laptops and boards) | `PlanCraft-<version>-aarch64.AppImage` or `plancraft-<version>-linux-aarch64.tar.gz` | The same two choices, for ARM computers |
 
 Each file has a matching `.sha256` file. It's only for checking that a download arrived intact; you don't need it to install.
@@ -90,16 +90,16 @@ The same download runs natively on Apple Silicon and Intel Macs.
 
 ### Linux
 
-PlanCraft runs on Ubuntu 22.04 or newer, and on other 64-bit distributions from 2022 on. Most Linux computers need the `x86_64` files. ARM computers, such as a Raspberry Pi 4 or 5 running a 64-bit system, need the `aarch64` files instead; the steps are the same, with `aarch64` in place of `x86_64`. PlanCraft needs graphics with OpenGL ES 3.0 or Vulkan, so it doesn't run well on a Raspberry Pi 3 or older.
+PlanCraft runs on Ubuntu 22.04 or newer, and on other 64-bit distributions from 2022 on. Most Linux computers need the `x86_64` files. ARM computers, such as a Raspberry Pi 4 or 5 running a 64-bit system, need the `aarch64` files instead. Not sure which you have? Run `uname -m` in a terminal: it prints `x86_64` or `aarch64`. The steps below are the same for both. PlanCraft needs graphics with OpenGL ES 3.0 or Vulkan, so it doesn't run well on a Raspberry Pi 3 or older.
 
 **AppImage:** one file you can keep anywhere and run.
 
 1. Download the `.AppImage` file.
 2. Allow it to run as a program: right-click it, open **Properties ▸ Permissions** and tick **Allow executing file as program**. Or, in a terminal:
    ```bash
-   chmod +x PlanCraft-*-x86_64.AppImage
+   chmod +x PlanCraft-*.AppImage
    ```
-3. Double-click it, or run `./PlanCraft-*-x86_64.AppImage`.
+3. Double-click it, or run `./PlanCraft-*.AppImage`.
 
 If it reports that FUSE is missing or it can't mount the AppImage, start it with `--appimage-extract-and-run` added to the command.
 
@@ -107,11 +107,11 @@ If it reports that FUSE is missing or it can't mount the AppImage, start it with
 
 1. Download the `.tar.gz` file and extract it:
    ```bash
-   tar xzf plancraft-*-linux-x86_64.tar.gz
+   tar xzf plancraft-*-linux-*.tar.gz
    ```
 2. Run the installer. It installs for your user only, so no password is needed:
    ```bash
-   ./plancraft-*-linux-x86_64/install.sh
+   ./plancraft-*-linux-*/install.sh
    ```
 
 To remove it later, run `install.sh --uninstall` from the same folder.
