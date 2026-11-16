@@ -260,14 +260,14 @@ pub fn estimate() -> Value {
 pub fn task_field_props() -> Map<String, Value> {
     let v = json!({
         "name": string("Task name."),
-        "duration": duration("Planned duration (ignored for summary tasks)."),
+        "duration": duration("Planned duration. On a summary task it makes the summary manually scheduled (top-down planning), keeping its start."),
         "estimated": boolean("Mark the duration as a tentative estimate (shown with '?')."),
-        "mode": string_enum("Scheduling mode: 'auto' (engine computes dates) or 'manual' (uses start/finish as entered).", &["auto", "manual"]),
+        "mode": string_enum("Scheduling mode: 'auto' (engine computes dates) or 'manual' (uses start/finish as entered; switching keeps the current dates). A manual summary keeps its own dates: its subtasks don't move it, links into it stop at it, and its auto subtasks start no earlier than its start (subtasks_start/subtasks_finish report their span).", &["auto", "manual"]),
         "active": boolean("Inactive tasks stay in the plan but do not affect the schedule or workload."),
         "task_type": string_enum("Which of units/duration/work stays fixed when another changes.", &["fixed_units", "fixed_duration", "fixed_work"]),
         "effort_driven": boolean("When true, adding resources keeps total work constant and shortens the task."),
-        "start": date("Desired start. Auto tasks get a 'Start No Earlier Than' constraint; manual tasks get this as their manual start."),
-        "finish": date("Desired finish. Auto tasks get a 'Finish No Earlier Than' constraint; manual tasks get this as their manual finish."),
+        "start": date("Desired start. Auto tasks get a 'Start No Earlier Than' constraint; manual tasks get this as their manual start (keeping their length). On a summary task it makes the summary manually scheduled."),
+        "finish": date("Desired finish. Auto tasks get a 'Finish No Earlier Than' constraint; manual tasks get this as their manual finish. On a summary task it makes the summary manually scheduled."),
         "constraint_type": string_enum("Date constraint.", &["asap", "alap", "snet", "snlt", "fnet", "fnlt", "mso", "mfo"]),
         "constraint_date": date_or_null("Date for the constraint (required for all types except asap/alap)."),
         "deadline": date_or_null("Deadline (a warning is raised when the task finishes later; does not move the task)."),

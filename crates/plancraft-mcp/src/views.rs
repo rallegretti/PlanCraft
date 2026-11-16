@@ -159,6 +159,14 @@ pub fn task_row(p: &Project, idx: usize) -> Value {
     if t.mode == ScheduleMode::Manual {
         m.insert("mode".into(), json!("manual"));
     }
+    // A manually scheduled summary keeps its own dates; its subtasks' span is reported apart.
+    if let (Some(s), Some(f)) = (t.sched.rollup_start, t.sched.rollup_finish) {
+        m.insert("subtasks_start".into(), fmt_dt(Some(s)));
+        m.insert("subtasks_finish".into(), fmt_dt(Some(f)));
+        if t.sched.start.is_some_and(|start| s < start) || t.sched.finish.is_some_and(|finish| f > finish) {
+            m.insert("subtasks_outside".into(), json!(true));
+        }
+    }
     if !t.active {
         m.insert("active".into(), json!(false));
     }

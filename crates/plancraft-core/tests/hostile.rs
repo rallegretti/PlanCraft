@@ -282,6 +282,8 @@ enum Op {
     Resume(usize, Option<i64>),
     ActualDuration(usize, i64),
     RemainingDuration(usize, i64),
+    Mode(usize, bool),
+    ManualDate(usize, i64, bool),
 }
 
 fn edit_op() -> impl Strategy<Value = Op> {
@@ -361,6 +363,8 @@ fn edit_op() -> impl Strategy<Value = Op> {
         (i(), prop::option::of(big())).prop_map(|(a, m)| Op::Resume(a, m)),
         (i(), big()).prop_map(|(a, m)| Op::ActualDuration(a, m)),
         (i(), big()).prop_map(|(a, m)| Op::RemainingDuration(a, m)),
+        (i(), any::<bool>()).prop_map(|(a, m)| Op::Mode(a, m)),
+        (i(), big(), any::<bool>()).prop_map(|(a, m, f)| Op::ManualDate(a, m, f)),
     ]
 }
 
@@ -539,6 +543,8 @@ fn apply(p: &mut Project, op: &Op) -> PlanResult<()> {
         Op::Resume(i, m) => p.set_resume(task_at(p, i), m.map(|m| shift(p.start, m)))?,
         Op::ActualDuration(i, m) => p.set_actual_duration(task_at(p, i), m)?,
         Op::RemainingDuration(i, m) => p.set_remaining_duration(task_at(p, i), m)?,
+        Op::Mode(i, manual) => p.set_schedule_mode(&[task_at(p, i)], if manual { ScheduleMode::Manual } else { ScheduleMode::Auto })?,
+        Op::ManualDate(i, m, finish) => p.set_manual_date(task_at(p, i), shift(p.start, m), finish)?,
     }
     Ok(())
 }

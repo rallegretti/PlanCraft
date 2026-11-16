@@ -580,16 +580,70 @@ impl Project {
             .max()
     }
 
-    /// Sets a task's duration, adjusting assignments according to the task type.
+    /// Switches tasks between automatic and manual scheduling. A task switched to manual keeps
+    /// the dates it has as its typed ones; a summary keeps the span of its subtasks (top-down
+    /// planning: its subtasks then no longer move it).
+    pub fn set_schedule_mode(&mut self, ids: &[TaskId], mode: ScheduleMode) -> PlanResult<()> {
+        for &id in ids {
+            let idx = self.require_task(id)?;
+            let summary = self.has_children(idx);
+            let t = self.row_mut(idx)?;
+            if mode == ScheduleMode::Manual && t.mode == ScheduleMode::Auto {
+                t.manual_start = t.sched.start.or(t.manual_start);
+                t.manual_finish = t.sched.finish.or(t.manual_finish);
+                if summary {
+                    t.duration = t.sched.duration.clamp(0, MAX_MINUTES);
+                }
+            }
+            t.mode = mode;
+        }
+        Ok(())
+    }
+
+    /// Types a start (keeping the task's length) or a finish for a manually scheduled task. A
+    /// summary task becomes manually scheduled first, keeping its current dates, like typing dates
+    /// on a summary in Microsoft Project.
+    pub fn set_manual_date(&mut self, id: TaskId, date: NaiveDateTime, finish: bool) -> PlanResult<()> {
+        let idx = self.require_task(id)?;
+        let summary = self.has_children(idx);
+        let mode = self.row(idx)?.mode;
+        if mode == ScheduleMode::Auto {
+            if !summary {
+                return invalid("only manually scheduled tasks have typed dates");
+            }
+            self.set_schedule_mode(&[id], ScheduleMode::Manual)?;
+        }
+        let t = self.row_mut(idx)?;
+        if finish {
+            t.manual_finish = Some(date);
+            if t.manual_start.is_some_and(|s| s > date) {
+                // A finish before the start moves the start with it.
+                t.manual_start = Some(date);
+            }
+        } else {
+            let length = t.manual_finish.zip(t.manual_start).map(|(f, s)| f.signed_duration_since(s));
+            t.manual_start = Some(date);
+            t.manual_finish = length.and_then(|d| date.checked_add_signed(d));
+        }
+        Ok(())
+    }
+
+    /// Sets a task's duration, adjusting assignments according to the task type. A summary task
+    /// becomes manually scheduled, keeping its start (its finish follows the new duration).
     pub fn set_duration(&mut self, id: TaskId, minutes: Minutes, estimated: bool) -> PlanResult<()> {
         let idx = self.require_task(id)?;
-        if self.has_children(idx) {
-            return invalid("the duration of a summary task is calculated from its subtasks");
-        }
         if minutes > MAX_MINUTES {
             return invalid("durations can be at most 5 years");
         }
         let minutes = minutes.max(0);
+        if self.has_children(idx) {
+            self.set_schedule_mode(&[id], ScheduleMode::Manual)?;
+            let t = self.row_mut(idx)?;
+            t.duration = minutes;
+            t.estimated = estimated;
+            t.manual_finish = None;
+            return Ok(());
+        }
         let auto_milestone = self.settings.new_tasks_auto;
         let t = self.row_mut(idx)?;
         let task_type = t.task_type;

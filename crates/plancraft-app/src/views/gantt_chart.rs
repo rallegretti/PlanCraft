@@ -449,9 +449,30 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
                 bp.text(pos2(x0 - 10.0, yc), Align2::RIGHT_CENTER, "⚠", label_font.clone(), theme::pal().ERROR);
             }
         } else if summary {
-            let fill = if critical { theme::pal().BAR_CRITICAL_EDGE } else { theme::pal().BAR_SUMMARY };
+            // A manually scheduled summary is drawn in the manual-task colour.
+            let manual = t.sched.rollup_start.is_some();
+            let fill = if critical {
+                theme::pal().BAR_CRITICAL_EDGE
+            } else if manual {
+                theme::pal().BAR_MANUAL
+            } else {
+                theme::pal().BAR_SUMMARY
+            };
             let r = Rect::from_min_max(pos2(x0, yc - 4.0), pos2(x1, yc + 1.0));
             bp.rect_filled(r, 0.0, fill);
+            // Its subtasks' span as a thin bar below it, red where it lies outside the summary.
+            if let (Some(rs), Some(rf)) = (t.sched.rollup_start, t.sched.rollup_finish) {
+                let (rx0, rx1) = (g.x_of(chart_left, rs), g.x_of(chart_left, rf));
+                let yb = y + 8.0;
+                let line = |a: f32, b: f32, color: Color32| {
+                    if b > a {
+                        bp.rect_filled(Rect::from_min_max(pos2(a, yb), pos2(b, yb + 2.0)), 0.0, color);
+                    }
+                };
+                line(rx0, rx1.max(rx0 + 1.0), theme::pal().BAR_SUMMARY);
+                line(rx0, rx1.min(x0), theme::pal().ERROR);
+                line(rx0.max(x1), rx1, theme::pal().ERROR);
+            }
             for x in [x0, x1] {
                 bp.add(Shape::convex_polygon(
                     vec![pos2(x - 4.0, yc + 1.0), pos2(x + 4.0, yc + 1.0), pos2(x, yc + 6.0)],

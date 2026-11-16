@@ -10,6 +10,11 @@
 //! Links attached to summary tasks apply to all of the summary's children,
 //! like in Microsoft Project.
 //!
+//! A manually scheduled summary task (top-down planning) keeps the dates typed for it: its
+//! subtasks don't move it, links into it stop at it, its auto-scheduled subtasks start no
+//! earlier than its start, and its successors follow its own dates. The span of its subtasks is
+//! kept separately ([`TaskSchedule::rollup_start`]).
+//!
 //! The engine never indexes out of bounds and clamps date arithmetic; as a last resort
 //! [`recalculate`] runs behind [`crate::guard`], so a bug produces a warning instead of a crash.
 
@@ -324,6 +329,18 @@ pub fn project_calendar(p: &Project) -> WorkCal<'_> {
     WorkCal::single(p.base_calendar())
 }
 
+/// The dates of a manually scheduled summary task: its typed start, and its typed finish or
+/// (without one) its start plus its duration on the project calendar `cal`. `None` for any other
+/// task, and for a manual summary without a typed start (it is scheduled like an automatic one).
+pub fn manual_summary_dates(t: &Task, is_summary: bool, cal: &WorkCal) -> Option<(NaiveDateTime, NaiveDateTime)> {
+    if !is_summary || t.mode != ScheduleMode::Manual {
+        return None;
+    }
+    let start = t.manual_start?;
+    let finish = t.manual_finish.unwrap_or_else(|| if t.duration > 0 { cal.add(start, t.duration) } else { start });
+    Some((start, finish.max(start)))
+}
+
 fn percent_of(duration: Minutes, pct: i32) -> Minutes {
     duration.saturating_mul(Minutes::from(pct)) / 100
 }
@@ -394,6 +411,8 @@ struct Engine<'a> {
     /// Per task: the latest Start No Earlier Than date and the earliest deadline set on its
     /// ancestor summaries (both apply to every subtask).
     inherited: Vec<Inherited>,
+    /// The dates of each manually scheduled summary (see [`manual_summary_dates`]).
+    manual_summary: Vec<Option<(NaiveDateTime, NaiveDateTime)>>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -403,15 +422,24 @@ struct Inherited {
 }
 
 /// Constraints a summary passes to its subtasks: its Start No Earlier Than date drives their
-/// starts, and its deadline bounds their late finish (and so their slack).
-fn inherited_from_summaries(p: &Project, parent: &[Option<usize>]) -> Vec<Inherited> {
+/// starts, and its deadline bounds their late finish (and so their slack). A manually scheduled
+/// summary's start drives its subtasks' starts in the same way (its constraint is ignored, like
+/// any manual task's).
+fn inherited_from_summaries(
+    p: &Project,
+    parent: &[Option<usize>],
+    manual_summary: &[Option<(NaiveDateTime, NaiveDateTime)>],
+) -> Vec<Inherited> {
     let mut out = vec![Inherited::default(); p.tasks.len()];
     // Parents come before their children, so each parent's value is final when a child reads it.
     for i in 0..p.tasks.len() {
         let Some(pi) = parent.get(i).copied().flatten() else { continue };
         let (Some(par), Some(up)) = (p.tasks.get(pi), out.get(pi).copied()) else { continue };
         // An inactive summary passes on what its own summaries set, not its own date or deadline.
-        let own_snet = par.constraint.date.filter(|_| par.active && par.constraint.kind == ConstraintKind::Snet);
+        let own_snet = match manual_summary.get(pi).copied().flatten() {
+            Some((start, _)) => par.active.then_some(start),
+            None => par.constraint.date.filter(|_| par.active && par.constraint.kind == ConstraintKind::Snet),
+        };
         let own_deadline = par.deadline.filter(|_| par.active);
         let v = Inherited { snet: up.snet.max(own_snet), deadline: min_opt(up.deadline, own_deadline) };
         if let Some(slot) = out.get_mut(i) {
@@ -449,10 +477,13 @@ impl<'a> Engine<'a> {
             })
             .collect();
         let parent = parents(p);
-        let inherited = inherited_from_summaries(p, &parent);
+        let proj_cal = project_calendar(p);
+        let manual_summary: Vec<Option<(NaiveDateTime, NaiveDateTime)>> =
+            p.tasks.iter().zip(&is_leaf).map(|(t, leaf)| manual_summary_dates(t, !leaf, &proj_cal)).collect();
+        let inherited = inherited_from_summaries(p, &parent, &manual_summary);
         Self {
             p,
-            proj_cal: project_calendar(p),
+            proj_cal,
             cals,
             cal_of,
             leaves,
@@ -467,7 +498,12 @@ impl<'a> Engine<'a> {
             dates: vec![Dates::default(); n],
             segments: HashMap::new(),
             inherited,
+            manual_summary,
         }
+    }
+
+    fn manual_summary(&self, i: usize) -> Option<(NaiveDateTime, NaiveDateTime)> {
+        self.manual_summary.get(i).copied().flatten()
     }
 
     fn inherited(&self, i: usize) -> Inherited {
@@ -568,6 +604,10 @@ impl<'a> Engine<'a> {
                 if self.task(pi).is_none_or(|t| !t.active) {
                     return Vec::new();
                 }
+                // A manually scheduled summary's successors follow its own (typed) dates.
+                if let Some((start, finish)) = self.manual_summary(pi) {
+                    return vec![PredSource::Fixed { start, finish, duration: self.proj_cal.between(start, finish) }];
+                }
                 let leaves = self.leaf_descendants(pi);
                 let pred_is_start = matches!(kind, LinkType::SS | LinkType::SF);
                 if !self.leaf(pi) && pred_is_start {
@@ -601,8 +641,13 @@ impl<'a> Engine<'a> {
             let Some(task) = self.task(succ) else { continue };
             // Own links, links inherited from ancestor summaries, and milestone membership.
             let mut deps: Vec<Dependency> = task.predecessors.clone();
+            // Links into a manually scheduled summary stop at it (it doesn't move, and its
+            // subtasks follow its start instead), and so do links into the summaries around it.
             let mut anc = self.parent.get(succ).copied().flatten();
             while let Some(a) = anc {
+                if self.manual_summary(a).is_some() {
+                    break;
+                }
                 if let Some(t) = p.tasks.get(a) {
                     deps.extend(t.predecessors.iter().copied());
                 }
@@ -851,11 +896,13 @@ impl<'a> Engine<'a> {
         }
     }
 
+    /// The earliest start and latest finish of the active leaves and manually scheduled summaries.
     fn project_bounds(&self) -> (Option<NaiveDateTime>, Option<NaiveDateTime>) {
-        let active = self.leaves.iter().filter(|&&i| self.task(i).is_some_and(|t| t.active));
-        let start = active.clone().filter_map(|&i| self.date(i).es).min();
-        let finish = active.filter_map(|&i| self.date(i).ef).max();
-        (start, finish)
+        let active = |i: &usize| self.task(*i).is_some_and(|t| t.active);
+        let leaves = self.leaves.iter().copied().filter(active).filter_map(|i| self.date(i).es.zip(self.date(i).ef));
+        let manual = (0..self.manual_summary.len()).filter(active).filter_map(|i| self.manual_summary(i));
+        let dates: Vec<(NaiveDateTime, NaiveDateTime)> = leaves.chain(manual).collect();
+        (dates.iter().map(|d| d.0).min(), dates.iter().map(|d| d.1).max())
     }
 
     fn backward(&mut self) {
@@ -1092,6 +1139,8 @@ fn calculate(p: &mut Project) -> ScheduleReport {
         t.sched.total_slack = ts;
         t.sched.free_slack = free_slack.get(i).copied().unwrap_or(0);
         t.sched.duration = if t.is_milestone() { 0 } else { t.duration };
+        t.sched.rollup_start = None;
+        t.sched.rollup_finish = None;
         t.sched.critical = t.active && !t.is_complete() && t.mode == ScheduleMode::Auto && ts <= crit;
         if let (Some(dl), Some(f)) = (t.deadline, d.ef)
             && f > dl
@@ -1107,8 +1156,11 @@ fn calculate(p: &mut Project) -> ScheduleReport {
 
     // Project-level rollup.
     let leaves: Vec<&Task> = p.tasks.iter().filter(|t| !t.sched.is_summary && t.active).collect();
-    let start = leaves.iter().filter_map(|t| t.sched.start).min();
-    let finish = leaves.iter().filter_map(|t| t.sched.finish).max();
+    // The project spans its leaves and its manually scheduled summaries (whose dates are their own).
+    let manual = p.tasks.iter().filter(|t| t.active && t.sched.rollup_start.is_some());
+    let spans: Vec<&Task> = leaves.iter().copied().chain(manual).collect();
+    let start = spans.iter().filter_map(|t| t.sched.start).min();
+    let finish = spans.iter().filter_map(|t| t.sched.finish).max();
     let work = leaves.iter().fold(own.work, |acc: Minutes, t| acc.saturating_add(t.sched.work));
     let actual = leaves.iter().fold(own.actual, |acc: Minutes, t| acc.saturating_add(t.sched.actual_work));
     let cost: f64 = own.cost + leaves.iter().map(|t| t.sched.cost).sum::<f64>();
@@ -1251,17 +1303,33 @@ fn rollup_summaries(p: &mut Project) -> Own {
         if let Some(w) = weights.get_mut(i) {
             *w = r.weight;
         }
-        let duration = match (r.start, r.finish) {
+        // A manually scheduled summary keeps its own dates; its subtasks' span is kept apart.
+        let manual = manual_summary_dates(t, true, &pc);
+        let (start, finish) = match manual {
+            Some((s, f)) => (Some(s), Some(f)),
+            None => (r.start, r.finish),
+        };
+        let duration = match (start, finish) {
             (Some(s), Some(f)) => pc.between(s, f),
             _ => 0,
         };
         let Some(t) = p.tasks.get_mut(i) else { continue };
-        t.sched.start = r.start;
-        t.sched.finish = r.finish;
-        t.sched.early_start = r.es;
-        t.sched.early_finish = r.ef;
-        t.sched.late_start = r.ls;
-        t.sched.late_finish = r.lf;
+        t.sched.start = start;
+        t.sched.finish = finish;
+        if manual.is_some() {
+            // Its early and late dates are its own dates, like a manual task's.
+            (t.sched.early_start, t.sched.early_finish, t.sched.late_start, t.sched.late_finish) = (start, finish, start, finish);
+            // Never `None` for a manual summary, so the span always says it is one.
+            t.sched.rollup_start = r.start.or(start);
+            t.sched.rollup_finish = r.finish.or(finish);
+        } else {
+            t.sched.early_start = r.es;
+            t.sched.early_finish = r.ef;
+            t.sched.late_start = r.ls;
+            t.sched.late_finish = r.lf;
+            t.sched.rollup_start = None;
+            t.sched.rollup_finish = None;
+        }
         t.sched.work = r.work;
         t.sched.actual_work = r.actual;
         t.sched.cost = r.cost;
@@ -1274,7 +1342,7 @@ fn rollup_summaries(p: &mut Project) -> Own {
         t.sched.resume = None;
         t.sched.parts.clear();
         t.sched.warnings.clear();
-        if let (Some(dl), Some(f)) = (t.deadline, r.finish)
+        if let (Some(dl), Some(f)) = (t.deadline, finish)
             && f > dl
         {
             t.sched.warnings.push(format!("Finishes after its deadline ({})", dl.format("%Y-%m-%d")));
