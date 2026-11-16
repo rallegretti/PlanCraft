@@ -140,10 +140,18 @@ impl GridState {
         self.editing = Some(Edit { row, col, original: None, text, started: false });
     }
 
-    /// Stops following the cursor's row for one frame: the caller has just moved the rows itself
-    /// (it added the row typed into, say) and placed the cursor where it belongs.
-    pub fn forget_anchor(&mut self) {
-        self.anchor = None;
+    /// A blank row typed into became a new item (`key`), so the rows below it moved by one: the
+    /// cursor stays on the new item when it is still on that row, and on its blank row when it
+    /// moved down into the blank rows. On an existing item it follows that item as usual.
+    pub fn typed_row_added(&mut self, row: usize, key: u64, row_count: usize) {
+        match self.cursor {
+            Some((r, _)) if r == row => self.anchor = Some((r, RowKey::Item(key))),
+            // The new item is counted now: the blank rows start one lower.
+            Some((r, _)) if r > row && r >= row_count => {
+                self.anchor = Some((r, RowKey::Blank(r.saturating_sub(row_count.saturating_add(1)))));
+            }
+            _ => {}
+        }
     }
 
     /// Closes the editor without committing and forgets what the cursor was on (another
@@ -549,6 +557,7 @@ pub fn show(
         if body_resp.clicked() {
             if row >= cfg.row_count {
                 state.cursor = col.map(|c| (row, c));
+                state.whole_row = false;
                 events.push(GridEvent::ClickEmpty { row });
             } else {
                 match col {
@@ -662,9 +671,10 @@ pub fn show(
                 let resp = child.add(te);
                 body_painter.rect_stroke(r.shrink(0.5), 0.0, Stroke::new(1.5, theme::pal().ACCENT), StrokeKind::Inside);
                 if !edit.started {
-                    // A fresh editor: the text cursor goes to the end.
+                    // A fresh editor (fresh state, so Ctrl+Z can't bring back an earlier cell's text):
+                    // the text cursor goes to the end.
                     let len = edit.text.chars().count();
-                    let mut st = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
+                    let mut st = egui::text_edit::TextEditState::default();
                     st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(len))));
                     st.store(ui.ctx(), id);
                     resp.request_focus();
@@ -717,10 +727,15 @@ pub fn show(
             }
         }
         body_resp.request_focus();
+        // Tab and the arrows stay in the grid rather than moving the focus to another widget.
+        ui.memory_mut(|m| {
+            m.set_focus_lock_filter(body_resp.id, EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: false })
+        });
     }
 
     // ---- Keyboard (grid focused, not editing) ----
-    if body_resp.has_focus() && state.editing.is_none() {
+    // Not in the frame an edit ended: its Enter, Tab or arrow key already moved the cursor.
+    if body_resp.has_focus() && state.editing.is_none() && finished.is_none() {
         ui.memory_mut(|m| {
             m.set_focus_lock_filter(body_resp.id, EventFilter { tab: true, horizontal_arrows: true, vertical_arrows: true, escape: false })
         });

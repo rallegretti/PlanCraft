@@ -183,8 +183,7 @@ pub fn task_table(
                     match r {
                         Ok(id) => {
                             st.sel.select_task(id);
-                            // The new task takes the blank row typed into; the cursor stays where it is.
-                            st.task_grid.forget_anchor();
+                            st.task_grid.typed_row_added(row, u64::from(id.0), rows.len());
                         }
                         Err(e) => st.toast(ToastKind::Error, e),
                     }
@@ -247,8 +246,8 @@ fn clear_field(doc: &mut Document, st: &mut UiState, rows: &[Row], row: usize, f
     }
     let ids: Vec<TaskId> = if st.sel.tasks.contains(&at) { super::selected_in_order(&doc.project, &st.sel) } else { vec![at] };
     let r = doc.edit_msg(&format!("Clear {}", def.title), |p| ids.iter().try_for_each(|id| field.commit(p, *id, "")));
-    if r.is_err() {
-        st.toast(ToastKind::Info, format!("{} can't be left empty. {hint}", def.title));
+    if let Err(e) = r {
+        st.toast(ToastKind::Info, format!("{} can't be cleared: {e}. {hint}", def.title));
     }
 }
 

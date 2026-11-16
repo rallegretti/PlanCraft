@@ -206,8 +206,8 @@ fn clear_field(doc: &mut Document, st: &mut UiState, row: usize, column: Col, de
         vec![at]
     };
     let r = doc.edit_msg(&format!("Clear {}", def.title), |p| ids.iter().try_for_each(|id| commit(p, *id, column, "")));
-    if r.is_err() {
-        st.toast(ToastKind::Info, format!("{} can't be left empty. {hint}", def.title));
+    if let Err(e) = r {
+        st.toast(ToastKind::Info, format!("{} can't be cleared: {e}. {hint}", def.title));
     }
 }
 
@@ -330,8 +330,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                     match r {
                         Ok(id) => {
                             st.sel.select_resource(id);
-                            // The new resource takes the blank row typed into; the cursor stays where it is.
-                            st.resource_grid.forget_anchor();
+                            st.resource_grid.typed_row_added(row, u64::from(id.0), n);
                         }
                         Err(e) => st.toast(ToastKind::Error, e),
                     }

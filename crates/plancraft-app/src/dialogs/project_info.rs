@@ -130,7 +130,10 @@ impl ProjectInfo {
         if self.progress_from_time != o.progress_from_time {
             s.progress_from_time = self.progress_from_time;
         }
-        if self.critical_slack != o.critical_slack {
+        // Re-read with the new hours per day (or week, month), as typed: "1 day" stays one day.
+        let time_changed =
+            self.hours_per_day != o.hours_per_day || self.hours_per_week != o.hours_per_week || self.days_per_month != o.days_per_month;
+        if self.critical_slack != o.critical_slack || time_changed {
             let ts = s.time.clone();
             s.critical_slack =
                 parse_duration(&self.critical_slack, DurationUnit::Days, &ts).map(|(m, _)| m).ok_or("Invalid critical slack")?;

@@ -1789,6 +1789,7 @@ impl PlanCraftApp {
             // An open cell editor belongs to the plan it was opened in: never commit it to this one.
             self.st.task_grid.reset_editing();
             self.st.resource_grid.reset_editing();
+            self.st.misc_grid.reset_editing();
             // The Print window prints its plan as the view shows it; the view now shows another
             // plan, so it saves its Page Setup and closes.
             if let Some(mut b) = self.dialogs.print.take() {
@@ -3253,6 +3254,98 @@ mod ui_tests {
         let ws = h.state().ws.lock().unwrap();
         assert!(ws.docs[ws.index_of(b).unwrap()].history().is_empty(), "nothing typed into the other plan");
         assert!(ws.docs[ws.index_of(a).unwrap()].history().is_empty());
+    }
+
+    /// The task on the grid cursor's row.
+    fn task_at_cursor(h: &Harness<'static, PlanCraftApp>) -> Option<TaskId> {
+        let (row, _) = h.state().st.task_grid.cursor?;
+        let ws = h.state().ws.lock().unwrap();
+        let p = &ws.active_doc().unwrap().project;
+        views::task_at(p, &views::visible_rows(p, &h.state().st), row).map(|t| t.id)
+    }
+
+    /// Regression (review): every cell editor shares one widget id, and a new editor kept the last
+    /// one's undo history, so Ctrl+Z in it brought back another task's name.
+    #[test]
+    fn undo_in_a_new_cell_editor_never_brings_back_another_cells_text() {
+        let mut h = harness();
+        let col = column_of(&h, crate::columns::TaskCol::Name);
+        let (a, b) = (leaf(&h, 0), leaf(&h, 3));
+        let b_name = name_of(&h, b).unwrap();
+        h.state_mut().st.task_grid.cursor = Some((row_of(&h, a), col));
+        focus_task_grid(&mut h);
+        h.key_press(egui::Key::F2);
+        h.run_steps(2);
+        h.event(egui::Event::Text("zzz".into()));
+        h.run_steps(2);
+        h.key_press(egui::Key::Escape);
+        h.run_steps(2);
+        h.state_mut().st.task_grid.cursor = Some((row_of(&h, b), col));
+        focus_task_grid(&mut h);
+        h.key_press(egui::Key::F2);
+        h.run_steps(2);
+        h.key_press_modifiers(Modifiers::COMMAND, egui::Key::Z);
+        h.run_steps(2);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(3);
+        assert_eq!(name_of(&h, b), Some(b_name));
+    }
+
+    /// Regression (found in review, also on main): the key that ended an edit was handled twice,
+    /// so Enter moved two rows down and Tab two columns right.
+    #[test]
+    fn enter_and_tab_after_an_edit_move_one_cell() {
+        let mut h = harness();
+        let col = column_of(&h, crate::columns::TaskCol::Name);
+        h.state_mut().st.task_grid.cursor = Some((2, col));
+        focus_task_grid(&mut h);
+        h.key_press(egui::Key::F2);
+        h.run_steps(2);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(3);
+        assert_eq!(h.state().st.task_grid.cursor, Some((3, col)));
+        h.key_press(egui::Key::F2);
+        h.run_steps(2);
+        h.key_press(egui::Key::Tab);
+        h.run_steps(3);
+        assert_eq!(h.state().st.task_grid.cursor, Some((3, col + 1)));
+    }
+
+    /// Regression (review): in a sorted view, typing a new task into a blank row and leaving it
+    /// upwards put the cursor on whatever task sorted onto that row.
+    #[test]
+    fn leaving_a_typed_blank_row_keeps_the_cursor_on_the_right_task() {
+        let mut h = harness();
+        let ctx = h.ctx.clone();
+        h.state_mut().exec(&ctx, Command::SortBy(Some(("name".into(), false))));
+        h.run_steps(2);
+        let n = tasks(&h).len();
+        let col = column_of(&h, crate::columns::TaskCol::Name);
+
+        // Up: the cursor stays on the task that was above.
+        h.state_mut().st.task_grid.cursor = Some((n, col));
+        let above = {
+            let ws = h.state().ws.lock().unwrap();
+            let p = &ws.active_doc().unwrap().project;
+            views::task_at(p, &views::visible_rows(p, &h.state().st), n - 1).unwrap().id
+        };
+        focus_task_grid(&mut h);
+        h.event(egui::Event::Text("Aaa first".into()));
+        h.run_steps(2);
+        h.key_press(egui::Key::ArrowUp);
+        h.run_steps(3);
+        assert_eq!(tasks(&h).len(), n + 1);
+        assert_eq!(task_at_cursor(&h), Some(above));
+
+        // Tab: the cursor stays on the new task, wherever it sorts.
+        h.state_mut().st.task_grid.cursor = Some((n + 1, col));
+        focus_task_grid(&mut h);
+        h.event(egui::Event::Text("Aab second".into()));
+        h.run_steps(2);
+        h.key_press(egui::Key::Tab);
+        h.run_steps(3);
+        let added = task_at_cursor(&h).and_then(|id| name_of(&h, id));
+        assert_eq!(added.as_deref(), Some("Aab second"));
     }
 
     /// Regression: Delete in any cell deleted the whole task. Now it clears the cell; the row
