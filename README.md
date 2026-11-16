@@ -145,6 +145,7 @@ cargo run --release -p plancraft-app
 - Link tasks so one starts when another finishes, or overlap them with leads and lags. Dates update automatically when anything changes.
 - Mark the deadlines that matter and see the **critical path**, the chain of tasks that sets your finish date.
 - Add **recurring tasks**, such as a weekly stand-up or a monthly report, and **split** a task to pause its work and resume it later.
+- Give a task **elapsed time**, like `3ed` for concrete that cures over a weekend: it runs around the clock, nights and days off included, instead of in working hours.
 - **Plan top-down:** type dates or a duration on a summary task to schedule the phase before its details are known. The summary keeps those dates, its tasks start from it, and a thin bar under it shows where they actually fall (red where they run past it).
 
 ![Task Information collects every detail of a task in one place](docs/images/task-information.png)

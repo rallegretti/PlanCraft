@@ -350,12 +350,16 @@ pub struct Task {
     pub mode: ScheduleMode,
     #[serde(default = "yes", skip_serializing_if = "is_true")]
     pub active: bool,
-    /// Planned duration in working minutes.
+    /// Planned duration in working minutes, or in elapsed minutes when `elapsed` is set.
     #[serde(default)]
     pub duration: Minutes,
     /// Duration is a placeholder estimate (shown with a trailing `?`).
     #[serde(default, skip_serializing_if = "is_false")]
     pub estimated: bool,
+    /// The duration is elapsed time (`33ed`): it runs around the clock, nights, weekends and
+    /// holidays included, instead of in working time.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub elapsed: bool,
     #[serde(default)]
     pub task_type: TaskType,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -462,6 +466,7 @@ impl Task {
             active: true,
             duration: minutes_per_day,
             estimated: true,
+            elapsed: false,
             task_type: TaskType::FixedUnits,
             effort_driven: false,
             constraint: Constraint::default(),

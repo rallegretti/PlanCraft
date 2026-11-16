@@ -7,7 +7,7 @@ use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
 use super::{DateOrder, Field, Grid, ImportOptions};
 use crate::calendar::WorkCal;
 use crate::duration::Lag;
-use crate::duration::Minutes;
+use crate::duration::{Minutes, TypedDuration};
 use crate::ids::{ResourceId, TaskId};
 use crate::limits::{self, MAX_LINKS_PER_TASK, MAX_MINUTES, MAX_OUTLINE_LEVEL, MAX_RESOURCES, MAX_TASKS, MAX_UNITS};
 use crate::model::{
@@ -129,7 +129,7 @@ fn build_plan(grid: &Grid, options: &ImportOptions) -> Result<(Project, Vec<Stri
                 // working week; counting further would only take time.
                 (Some(s), Some(f)) if f >= s => {
                     let f = s.checked_add_signed(chrono::Duration::days(25 * 366)).map_or(f, |cap| f.min(cap));
-                    Some((cal.between(s, f), false))
+                    Some(TypedDuration { minutes: cal.between(s, f), estimated: false, elapsed: false })
                 }
                 _ => None,
             },
@@ -138,9 +138,10 @@ fn build_plan(grid: &Grid, options: &ImportOptions) -> Result<(Project, Vec<Stri
         // `set_duration` and `set_milestone` do, without looking each task up by its id.
         let auto_milestone = p.settings.new_tasks_auto;
         let Some(t) = p.tasks.get_mut(i).filter(|t| t.id == id) else { continue };
-        if let Some((m, estimated)) = minutes {
-            t.duration = m.clamp(0, MAX_MINUTES);
-            t.estimated = estimated;
+        if let Some(typed) = minutes {
+            t.duration = typed.minutes.clamp(0, MAX_MINUTES);
+            t.estimated = typed.estimated;
+            t.elapsed = typed.elapsed && t.duration > 0;
             if t.duration == 0 && auto_milestone {
                 t.kind = TaskKind::Milestone;
             }
@@ -152,6 +153,7 @@ fn build_plan(grid: &Grid, options: &ImportOptions) -> Result<(Project, Vec<Stri
             t.kind = TaskKind::Milestone;
             t.duration = 0;
             t.estimated = false;
+            t.elapsed = false;
         }
     }
 
@@ -569,11 +571,12 @@ fn parse_number(text: &str) -> Option<f64> {
     t.parse::<f64>().ok().filter(|v| v.is_finite())
 }
 
-/// A duration in the plan's units (`5`, `5d`, `3 days`, `2w`, `36h`, `2,5 days`).
-fn parse_duration(p: &Project, text: &str) -> Option<(Minutes, bool)> {
-    p.parse_duration(text).or_else(|| {
+/// A duration in the plan's units (`5`, `5d`, `3 days`, `2w`, `36h`, `2,5 days`), or elapsed time
+/// (`33ed`, `33 edays`).
+fn parse_duration(p: &Project, text: &str) -> Option<TypedDuration> {
+    p.parse_task_duration(text).or_else(|| {
         // A decimal comma.
-        (text.contains(',') && !text.contains('.')).then(|| p.parse_duration(&text.replace(',', "."))).flatten()
+        (text.contains(',') && !text.contains('.')).then(|| p.parse_task_duration(&text.replace(',', "."))).flatten()
     })
 }
 

@@ -272,7 +272,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
             let (left_w, right_x) = (inner * 0.6, inner * 0.62);
             let cells: [(&str, String, &str, String); 2] = [
                 ("Start", format::date(t.sched.start), "ID", id_text.clone()),
-                ("Finish", format::date(t.sched.finish), "Dur", p.format_duration(t.sched.duration, t.estimated)),
+                ("Finish", format::date(t.sched.finish), "Dur", p.format_task_duration(t)),
             ];
             for (row, (l1, v1, l2, v2)) in cells.iter().enumerate() {
                 let y = y0 + row_h * (row as f32 + 1.0);

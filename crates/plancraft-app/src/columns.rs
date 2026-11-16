@@ -345,7 +345,7 @@ pub fn cell(col: TaskCol, p: &Project, idx: usize, ctx: &CellCtx) -> Cell {
             let indent = (t.outline_level.saturating_sub(1)) as f32 * 16.0;
             Cell { text: t.name.clone(), bold: summary, indent, expander: if summary { Some(true) } else { None }, ..Default::default() }
         }
-        Duration => Cell::text(p.format_duration(s.duration, t.estimated && !summary)),
+        Duration => Cell::text(p.format_task_duration(t)),
         Start => Cell { text: format::date(s.start), edit_text: Some(format::iso_date(s.start)), ..Default::default() },
         Finish => Cell { text: format::date(s.finish), edit_text: Some(format::iso_date(s.finish)), ..Default::default() },
         Predecessors => Cell::text(p.format_predecessors(t.id)),
@@ -396,7 +396,7 @@ pub fn cell(col: TaskCol, p: &Project, idx: usize, ctx: &CellCtx) -> Cell {
         }
         ActualDuration | RemainingDuration => {
             let (done, left) = t.duration_progress();
-            Cell::text(p.format_duration(if col == ActualDuration { done } else { left }, false))
+            Cell::text(p.format_task_minutes(t, if col == ActualDuration { done } else { left }, false))
         }
         Stop => Cell::text(format::date(s.stop)),
         Resume => Cell { text: format::date(s.resume), edit_text: Some(format::iso_date(s.resume)), ..Default::default() },
@@ -499,8 +499,8 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
             p.set_schedule_mode(&[id], mode).map_err(err)?;
         }
         Duration => {
-            let (m, est) = p.parse_duration(text).ok_or_else(|| format!("'{text}' is not a valid duration"))?;
-            p.set_duration(id, m, est).map_err(err)?;
+            let typed = p.parse_task_duration(text).ok_or_else(|| format!("'{text}' is not a valid duration"))?;
+            p.set_typed_duration(id, typed).map_err(err)?;
         }
         Start | Finish => {
             let finish = col == Finish;
@@ -566,7 +566,7 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
         FixedCost => task_mut(p, id)?.fixed_cost = format::parse_money(text).ok_or("invalid amount")?,
         ActualStart => task_mut(p, id)?.actual_start = parse_date(p, text, false)?,
         ActualDuration | RemainingDuration => {
-            let (m, _) = p.parse_duration(text).ok_or_else(|| format!("'{text}' is not a valid duration"))?;
+            let m = p.parse_task_minutes(id, text).map_err(err)?;
             if col == ActualDuration { p.set_actual_duration(id, m) } else { p.set_remaining_duration(id, m) }.map_err(err)?;
         }
         Resume => {

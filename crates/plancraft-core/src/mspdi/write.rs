@@ -436,7 +436,7 @@ fn task(
     }
     let duration = if t.sched.is_summary { t.sched.duration } else { t.duration };
     w.leaf("Duration", codes::duration_text(duration));
-    w.leaf("DurationFormat", codes::format_code(s.duration_unit, false, t.estimated));
+    w.leaf("DurationFormat", codes::format_code(s.duration_unit, t.elapsed && !t.sched.is_summary, t.estimated));
     w.leaf("Work", codes::duration_text(t.sched.work));
     if let Some(v) = t.sched.stop {
         w.leaf("Stop", codes::datetime_text(v));

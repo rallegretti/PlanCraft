@@ -1204,7 +1204,7 @@ pub fn task_sheet(p: &Project, with_chart: bool) -> Sheet {
             let mut cells = vec![
                 PrintCell::text((i + 1).to_string()),
                 PrintCell { text: t.name.clone(), bold: summary, color: None, indent: f32::from(t.outline_level.saturating_sub(1)) * 10.0 },
-                PrintCell::text(p.format_duration(t.sched.duration, t.estimated && !summary)),
+                PrintCell::text(p.format_task_duration(t)),
                 PrintCell::text(day(t.sched.start)),
                 PrintCell::text(day(t.sched.finish)),
             ];

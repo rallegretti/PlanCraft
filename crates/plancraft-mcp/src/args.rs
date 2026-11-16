@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use chrono::{NaiveDate, NaiveDateTime};
 use plancraft_core::calendar::TimeRange;
-use plancraft_core::duration::{Lag, Minutes, parse_work};
+use plancraft_core::duration::{Lag, Minutes, TypedDuration, parse_work};
 use plancraft_core::ids::*;
 use plancraft_core::model::*;
 use serde_json::{Map, Value};
@@ -307,6 +307,39 @@ pub fn parse_duration_value(p: &Project, v: &Value, key: &str) -> ToolResult<(Mi
                 return err(format!("'{key}' must not be negative"));
             }
             Ok((m, est))
+        }
+        other => err(format!("'{key}' must be a duration string like \"3d\" or a number of days, got {other}")),
+    }
+}
+
+/// Parses a task duration: anything [`parse_duration_value`] reads, or elapsed time such as
+/// `"33ed"` (calendar time, nights and weekends included).
+pub fn parse_task_duration_value(p: &Project, v: &Value, key: &str) -> ToolResult<TypedDuration> {
+    if let Value::String(s) = v
+        && let Some(typed) = p.parse_task_duration(s)
+    {
+        if typed.minutes < 0 {
+            return err(format!("'{key}' must not be negative"));
+        }
+        return Ok(typed);
+    }
+    let (minutes, estimated) = parse_duration_value(p, v, key).map_err(|_| {
+        ToolError(format!(
+            "'{key}': cannot parse duration {v}; use e.g. \"3d\", \"4h\", \"2w\", \"1.5 days\", \"3d?\" or elapsed time like \"33ed\""
+        ))
+    })?;
+    Ok(TypedDuration { minutes, estimated, elapsed: false })
+}
+
+/// Parses an amount of a task's own kind of time (actual or remaining duration): a number is
+/// days (elapsed days for an elapsed task), text is read by [`Project::parse_task_minutes`].
+pub fn parse_task_minutes_value(p: &Project, id: TaskId, v: &Value, key: &str) -> ToolResult<Minutes> {
+    match v {
+        Value::String(s) => p.parse_task_minutes(id, s).map_err(|e| ToolError(format!("'{key}': {e}"))),
+        Value::Number(n) => {
+            let d = n.as_f64().filter(|d| d.is_finite() && *d >= 0.0).ok_or_else(|| ToolError(format!("'{key}' must not be negative")))?;
+            let per = if p.task(id).is_some_and(|t| t.elapsed) { 24 * 60 } else { p.settings.time.minutes_per_day };
+            Ok(plancraft_core::limits::clamp_minutes((d * per as f64).round() as Minutes))
         }
         other => err(format!("'{key}' must be a duration string like \"3d\" or a number of days, got {other}")),
     }

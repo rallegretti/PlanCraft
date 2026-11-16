@@ -16,7 +16,7 @@ use crate::duration::Minutes;
 use crate::ids::*;
 use crate::model::*;
 use crate::schedule::{recalculate, task_calendar};
-use crate::workload::{capacity_on, distribute_spans, resource_calendar};
+use crate::workload::{capacity_on, distribute_task, resource_calendar};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
@@ -60,6 +60,8 @@ struct TaskPlan<'a> {
     cal: WorkCal<'a>,
     start: Option<NaiveDateTime>,
     duration: Minutes,
+    /// The duration is elapsed time: it runs (and works) around the clock.
+    elapsed: bool,
     /// Working parts of a split task as scheduled.
     parts: Vec<(NaiveDateTime, NaiveDateTime)>,
     /// Splits planned in the task: they move with it when it is delayed.
@@ -82,6 +84,7 @@ impl<'a> TaskPlan<'a> {
             cal: task_calendar(p, idx),
             start: if has_dates { t.sched.start } else { None },
             duration: t.duration,
+            elapsed: t.elapsed,
             parts: t.sched.parts.clone(),
             gaps: crate::schedule::planned_gaps(&t.gaps, t.duration),
             assignments,
@@ -99,7 +102,7 @@ impl<'a> TaskPlan<'a> {
         let spans: &[(NaiveDateTime, NaiveDateTime)] = if delay == 0 && !self.parts.is_empty() { &self.parts } else { &moved };
         for (rid, work, contour) in &self.assignments {
             let e = out.entry(*rid).or_default();
-            for (d, w) in distribute_spans(&self.cal, spans, *work, *contour) {
+            for (d, w) in distribute_task(&self.cal, self.elapsed, spans, *work, *contour) {
                 *e.entry(d).or_default() += w;
             }
         }
@@ -108,6 +111,9 @@ impl<'a> TaskPlan<'a> {
 
     /// The working parts of the task when it starts at `start`: its planned splits move with it.
     fn spans_from(&self, start: NaiveDateTime) -> Vec<(NaiveDateTime, NaiveDateTime)> {
+        if self.elapsed {
+            return vec![(start, crate::calendar::shift(start, self.duration))];
+        }
         crate::schedule::segments_of(start, &[], &self.gaps, &self.cal, self.duration).into_iter().map(|(s, f, _)| (s, f)).collect()
     }
 

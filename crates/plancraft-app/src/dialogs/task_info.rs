@@ -128,7 +128,7 @@ impl TaskInfo {
             id,
             tab: if notes_tab { Tab::Notes } else { Tab::General },
             name: t.name.clone(),
-            duration: p.format_duration(t.sched.duration, t.estimated),
+            duration: p.format_task_minutes(t, t.sched.duration, t.estimated),
             estimated: t.estimated,
             percent: format!("{}", t.percent_complete),
             priority: t.priority.to_string(),
@@ -249,10 +249,11 @@ impl TaskInfo {
         if !self.summary {
             p.set_milestone(id, self.milestone).map_err(err)?;
             if !self.milestone {
-                let (mins, est) = p.parse_duration(&self.duration).ok_or_else(|| format!("'{}' is not a valid duration", self.duration))?;
+                let typed = p.parse_task_duration(&self.duration).ok_or_else(|| format!("'{}' is not a valid duration", self.duration))?;
+                let typed = TypedDuration { estimated: typed.estimated || self.estimated, ..typed };
                 let cur = p.task(id).ok_or("task was deleted")?;
-                if mins != cur.duration || (est || self.estimated) != cur.estimated {
-                    p.set_duration(id, mins, est || self.estimated).map_err(err)?;
+                if typed.minutes != cur.duration || typed.estimated != cur.estimated || typed.elapsed != cur.elapsed {
+                    p.set_typed_duration(id, typed).map_err(err)?;
                 }
             }
         }

@@ -38,7 +38,7 @@ pub fn to_csv(p: &Project) -> String {
             t.outline_level,
             quote(&t.name),
             t.is_milestone(),
-            quote(&p.format_duration(t.sched.duration, t.estimated)),
+            quote(&p.format_task_duration(t)),
             iso(t.sched.start),
             iso(t.sched.finish),
             t.sched.percent_complete,
