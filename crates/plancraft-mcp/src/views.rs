@@ -276,7 +276,7 @@ fn variance_json(p: &Project, t: &Task) -> Value {
     json!({
         "baseline_start": fmt_dt(Some(b.start)),
         "baseline_finish": fmt_dt(Some(b.finish)),
-        "baseline_duration": dur(p, b.duration),
+        "baseline_duration": p.format_task_minutes(t, b.duration, false),
         "baseline_work": format_work(b.work),
         "baseline_cost": round2(b.cost),
         "saved": fmt_dt(Some(b.saved)),
@@ -385,7 +385,7 @@ pub fn task_detail(p: &Project, id: TaskId) -> Value {
             .iter()
             .map(|(n, b)| {
                 let v = json!({
-                    "start": fmt_dt(Some(b.start)), "finish": fmt_dt(Some(b.finish)), "duration": dur(p, b.duration),
+                    "start": fmt_dt(Some(b.start)), "finish": fmt_dt(Some(b.finish)), "duration": p.format_task_minutes(t, b.duration, false),
                     "work": format_work(b.work), "cost": round2(b.cost), "saved": fmt_dt(Some(b.saved)),
                 });
                 (plancraft_core::baseline::PlanSlot::Baseline(*n).key(), v)

@@ -362,7 +362,7 @@ pub fn cell(col: TaskCol, p: &Project, idx: usize, ctx: &CellCtx) -> Cell {
         Baseline(n, f) => Cell::text(match (t.baseline_in(n), f) {
             (Some(b), BlField::Start) => format::date(Some(b.start)),
             (Some(b), BlField::Finish) => format::date(Some(b.finish)),
-            (Some(b), BlField::Duration) => p.format_duration(b.duration, false),
+            (Some(b), BlField::Duration) => p.format_task_minutes(t, b.duration, false),
             (Some(b), BlField::Work) => format_work(b.work),
             (Some(b), BlField::Cost) => format::money(p, b.cost),
             (None, BlField::Start | BlField::Finish) => "NA".into(),
