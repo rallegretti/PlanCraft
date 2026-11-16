@@ -9,7 +9,11 @@ use crate::edit::EditExt;
 use crate::format;
 use crate::theme;
 
+#[derive(Clone)]
 pub struct ProjectInfo {
+    /// The fields as the dialog opened: OK writes only what was changed since, so changes an
+    /// agent made meanwhile are kept.
+    orig: Option<Box<ProjectInfo>>,
     name: String,
     manager: String,
     company: String,
@@ -35,7 +39,8 @@ pub struct ProjectInfo {
 impl ProjectInfo {
     pub fn new(p: &Project) -> Self {
         let s = &p.settings;
-        Self {
+        let mut info = Self {
+            orig: None,
             name: p.name.clone(),
             manager: p.manager.clone(),
             company: p.company.clone(),
@@ -56,40 +61,84 @@ impl ProjectInfo {
             critical_slack: p.format_duration(s.critical_slack, false),
             ev_baseline: s.earned_value_baseline,
             error: None,
-        }
+        };
+        info.orig = Some(Box::new(info.clone()));
+        info
     }
 
+    /// Writes the fields changed since the dialog opened, in one edit.
     fn apply(&self, p: &mut Project) -> Result<(), String> {
+        let Some(o) = self.orig.as_deref() else { return Ok(()) };
         let num = |s: &str, what: &str| s.trim().parse::<f64>().map_err(|_| format!("{what} must be a number"));
-        p.name = self.name.trim().to_string();
-        p.manager = self.manager.clone();
-        p.company = self.company.clone();
-        p.author = self.author.clone();
-        p.notes = self.notes.clone();
-        p.start = p.parse_datetime(&self.start, false).ok_or("Start date must look like YYYY-MM-DD")?;
-        // "NA" (or nothing) means no status date: progress is reported as of today.
-        p.status_date = if self.status_date.trim().is_empty() || self.status_date.trim().eq_ignore_ascii_case("na") {
-            None
-        } else {
-            Some(NaiveDate::parse_from_str(self.status_date.trim(), "%Y-%m-%d").map_err(|_| "Status date must look like YYYY-MM-DD")?)
-        };
-        p.calendar = self.calendar;
-        let s = &mut p.settings;
-        s.currency = self.currency.clone();
-        s.time.minutes_per_day = (num(&self.hours_per_day, "Hours per day")? * 60.0).round() as i64;
-        s.time.minutes_per_week = (num(&self.hours_per_week, "Hours per week")? * 60.0).round() as i64;
-        s.time.days_per_month = num(&self.days_per_month, "Days per month")?.round() as i64;
-        s.minutes_per_point = (num(&self.hours_per_point, "Hours per point")? * 60.0).round() as i64;
-        s.duration_unit = self.unit;
-        s.new_tasks_auto = self.new_auto;
-        s.use_resource_calendars = self.use_res_cal;
-        s.progress_from_time = self.progress_from_time;
-        let ts = s.time.clone();
-        s.critical_slack = parse_duration(&self.critical_slack, DurationUnit::Days, &ts).map(|(m, _)| m).ok_or("Invalid critical slack")?;
-        if s.time.minutes_per_day <= 0 {
-            return Err("Hours per day must be positive".into());
+        if self.name != o.name {
+            p.name = self.name.trim().to_string();
         }
-        p.set_earned_value_baseline(self.ev_baseline).map_err(|e| e.to_string())
+        if self.manager != o.manager {
+            p.manager = self.manager.clone();
+        }
+        if self.company != o.company {
+            p.company = self.company.clone();
+        }
+        if self.author != o.author {
+            p.author = self.author.clone();
+        }
+        if self.notes != o.notes {
+            p.notes = self.notes.clone();
+        }
+        if self.start != o.start {
+            p.start = p.parse_datetime(&self.start, false).ok_or("Start date must look like YYYY-MM-DD")?;
+        }
+        if self.status_date != o.status_date {
+            // "NA" (or nothing) means no status date: progress is reported as of today.
+            p.status_date = if self.status_date.trim().is_empty() || self.status_date.trim().eq_ignore_ascii_case("na") {
+                None
+            } else {
+                Some(NaiveDate::parse_from_str(self.status_date.trim(), "%Y-%m-%d").map_err(|_| "Status date must look like YYYY-MM-DD")?)
+            };
+        }
+        if self.calendar != o.calendar {
+            p.calendar = self.calendar;
+        }
+        let s = &mut p.settings;
+        if self.currency != o.currency {
+            s.currency = self.currency.clone();
+        }
+        if self.hours_per_day != o.hours_per_day {
+            s.time.minutes_per_day = (num(&self.hours_per_day, "Hours per day")? * 60.0).round() as i64;
+            if s.time.minutes_per_day <= 0 {
+                return Err("Hours per day must be positive".into());
+            }
+        }
+        if self.hours_per_week != o.hours_per_week {
+            s.time.minutes_per_week = (num(&self.hours_per_week, "Hours per week")? * 60.0).round() as i64;
+        }
+        if self.days_per_month != o.days_per_month {
+            s.time.days_per_month = num(&self.days_per_month, "Days per month")?.round() as i64;
+        }
+        if self.hours_per_point != o.hours_per_point {
+            s.minutes_per_point = (num(&self.hours_per_point, "Hours per point")? * 60.0).round() as i64;
+        }
+        if self.unit != o.unit {
+            s.duration_unit = self.unit;
+        }
+        if self.new_auto != o.new_auto {
+            s.new_tasks_auto = self.new_auto;
+        }
+        if self.use_res_cal != o.use_res_cal {
+            s.use_resource_calendars = self.use_res_cal;
+        }
+        if self.progress_from_time != o.progress_from_time {
+            s.progress_from_time = self.progress_from_time;
+        }
+        if self.critical_slack != o.critical_slack {
+            let ts = s.time.clone();
+            s.critical_slack =
+                parse_duration(&self.critical_slack, DurationUnit::Days, &ts).map(|(m, _)| m).ok_or("Invalid critical slack")?;
+        }
+        if self.ev_baseline != o.ev_baseline {
+            p.set_earned_value_baseline(self.ev_baseline).map_err(|e| e.to_string())?;
+        }
+        Ok(())
     }
 
     pub fn show(&mut self, ctx: &Context, doc: &mut Document) -> bool {
@@ -196,5 +245,24 @@ impl ProjectInfo {
                 });
             });
         open && !close
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: OK wrote every field back as the dialog opened, undoing an agent's changes.
+    #[test]
+    fn ok_keeps_what_an_agent_changed_while_the_dialog_was_open() {
+        let mut p = Project::new("Plan", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let mut info = ProjectInfo::new(&p);
+        p.status_date = NaiveDate::from_ymd_opt(2026, 11, 2);
+        p.manager = "Set by the agent".into();
+        info.company = "Acme".into();
+        info.apply(&mut p).unwrap();
+        assert_eq!(p.company, "Acme");
+        assert_eq!(p.manager, "Set by the agent");
+        assert_eq!(p.status_date, NaiveDate::from_ymd_opt(2026, 11, 2));
     }
 }

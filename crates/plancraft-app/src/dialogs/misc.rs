@@ -229,9 +229,25 @@ pub struct ExternalLinks {
     loaded_for: Option<Uuid>,
     error: Option<String>,
     filter: String,
+    /// "Add Project File…" was clicked: the app shows the file picker once the workspace is
+    /// unlocked, then calls [`ExternalLinks::add_file`].
+    pub pick_requested: bool,
 }
 
 impl ExternalLinks {
+    /// Links the project file picked for "Add Project File…".
+    pub fn add_file(&mut self, doc: &mut Document, path: &std::path::Path) {
+        let doc_path = doc.path.clone();
+        match doc.edit_msg("Add External Project", |p| io::add_external_project(p, doc_path.as_deref(), path).map_err(|e| e.to_string())) {
+            Ok(id) => {
+                self.selected = Some(id);
+                self.loaded_for = None;
+                self.error = None;
+            }
+            Err(e) => self.error = Some(e.to_string()),
+        }
+    }
+
     pub fn show(&mut self, ctx: &Context, doc: &mut Document, st: &mut UiState) -> bool {
         let mut open = true;
         egui::Window::new("Links Between Projects").id(egui::Id::new("external_links"))
@@ -242,17 +258,8 @@ impl ExternalLinks {
                 ui.colored_label(theme::pal().WARN, "Save this project first so links can be stored relative to its location.");
             }
             ui.horizontal(|ui| {
-                if ui.button("➕ Add Project File…").clicked()
-                    && let Some(path) = rfd::FileDialog::new().add_filter("PlanCraft project", &["plancraft"]).pick_file()
-                {
-                    let doc_path = doc.path.clone();
-                    match doc.edit_msg("Add External Project", |p| io::add_external_project(p, doc_path.as_deref(), &path).map_err(|e| e.to_string())) {
-                        Ok(id) => {
-                            self.selected = Some(id);
-                            self.loaded_for = None;
-                        }
-                        Err(e) => self.error = Some(e.to_string()),
-                    }
+                if ui.button("➕ Add Project File…").clicked() {
+                    self.pick_requested = true;
                 }
                 if ui.button("⟳ Refresh All").clicked() {
                     let w = doc.refresh_external();
@@ -452,5 +459,27 @@ mod tests {
         let (ws, _, _, toasts) = h.state();
         assert_eq!(ws.docs[0].project.assignments.len(), assignments, "the assignment is kept");
         assert!(toasts.iter().any(|(k, m)| *k == ToastKind::Error && m.contains("abc")), "{toasts:?}");
+    }
+
+    /// Regression: "Add Project File…" opened the file picker while the app held the workspace
+    /// lock, so every agent call waited until the picker closed. The dialog now only asks; the
+    /// app shows the picker after unlocking.
+    #[test]
+    fn add_project_file_asks_the_app_for_the_picker() {
+        let mut ws = Workspace::default();
+        ws.add(plancraft_core::sample::demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+        let state = (ws, ExternalLinks::default(), UiState::default());
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1000.0, 800.0)).build_ui_state(
+            |ui, (ws, dialog, st): &mut (Workspace, ExternalLinks, UiState)| {
+                dialog.show(ui.ctx(), &mut ws.docs[0], st);
+            },
+            state,
+        );
+        h.run();
+        h.get_by_label_contains("Add Project File").click();
+        h.run();
+        let (ws, dialog, _) = h.state();
+        assert!(dialog.pick_requested);
+        assert!(ws.docs[0].history().is_empty());
     }
 }

@@ -276,13 +276,13 @@ impl PlanCraftApp {
     }
 
     fn save(&mut self, save_as: bool) -> bool {
-        let ws = self.ws.clone();
-        let mut ws = lock(&ws);
-        let Some(doc) = ws.active_doc_mut() else {
+        let Some((handle, name, ask)) =
+            lock(&self.ws).active_doc().map(|d| (d.handle, format!("{}.{}", d.project.name, FILE_EXTENSION), save_as || d.path.is_none()))
+        else {
             return false;
         };
-        let path = if save_as || doc.path.is_none() {
-            let name = format!("{}.{}", doc.project.name, FILE_EXTENSION);
+        // The file dialog is open without the workspace lock, so agents keep working meanwhile.
+        let path = if ask {
             match rfd::FileDialog::new().add_filter("PlanCraft project", &[FILE_EXTENSION]).set_file_name(name).save_file() {
                 Some(mut p) => {
                     if p.extension().is_none() {
@@ -291,7 +291,6 @@ impl PlanCraftApp {
                         if p.exists() {
                             let msg =
                                 format!("{} already exists. Choose it in the dialog to replace it, or pick another name.", p.display());
-                            drop(ws);
                             self.st.toast(ToastKind::Warning, msg);
                             return false;
                         }
@@ -303,7 +302,14 @@ impl PlanCraftApp {
         } else {
             None
         };
-        let handle = doc.handle;
+        let ws = self.ws.clone();
+        let mut ws = lock(&ws);
+        // The plan the dialog was for, even if another became active or it was closed meanwhile.
+        let Some(doc) = ws.index_of(handle).and_then(|i| ws.docs.get_mut(i)) else {
+            drop(ws);
+            self.st.toast(ToastKind::Warning, "The plan was closed before it could be saved.");
+            return false;
+        };
         let r = match path {
             Some(p) => doc.save_as(&p).map(|_| p),
             None => doc.save().map(|_| doc.path.clone().unwrap_or_default()),
@@ -384,6 +390,18 @@ impl PlanCraftApp {
                 );
             }
             Err(e) => self.st.toast(ToastKind::Error, format!("Could not export the plan: {e}")),
+        }
+    }
+
+    /// Shows the file picker for Links Between Projects ▸ Add Project File… (without the workspace
+    /// lock, so agents keep working while it is open) and links the file picked.
+    fn pick_external_project(&mut self) {
+        let Some(b) = self.dialogs.external.as_mut().filter(|b| b.dialog.pick_requested) else { return };
+        b.dialog.pick_requested = false;
+        let Some(path) = rfd::FileDialog::new().add_filter("PlanCraft project", &[FILE_EXTENSION]).pick_file() else { return };
+        let mut ws = lock(&self.ws);
+        if let Some(doc) = ws.index_of(b.doc).and_then(|i| ws.docs.get_mut(i)) {
+            b.dialog.add_file(doc, &path);
         }
     }
 
@@ -635,7 +653,6 @@ impl PlanCraftApp {
                             .unwrap_or(0);
                         st.task_grid.begin_edit(row, name_col, String::new());
                         st.task_grid.scroll_to = Some(row);
-                        st.cursor_task = Some((row, id));
                     }
                 }
             }
@@ -1769,7 +1786,9 @@ impl PlanCraftApp {
             self.st.gantt.split_mode = false;
             // The board's column window and drag belong to the plan they started in.
             self.st.board = Default::default();
-            self.st.cursor_task = None;
+            // An open cell editor belongs to the plan it was opened in: never commit it to this one.
+            self.st.task_grid.reset_editing();
+            self.st.resource_grid.reset_editing();
             // The Print window prints its plan as the view shows it; the view now shows another
             // plan, so it saves its Page Setup and closes.
             if let Some(mut b) = self.dialogs.print.take() {
@@ -1858,7 +1877,8 @@ impl PlanCraftApp {
                 if show_timeline {
                     let tl = Rect::from_min_size(rect.min, vec2(rect.width(), views::timeline::HEIGHT));
                     let chart_w = (rect.width() - st.table_width - 16.0).max(100.0);
-                    views::timeline::show(ui, tl, &doc.project, &mut st.gantt, chart_w);
+                    let shown: Vec<bool> = doc.project.tasks.iter().map(|t| views::task_matches(&doc.project, st, t)).collect();
+                    views::timeline::show(ui, tl, &doc.project, &shown, &mut st.gantt, chart_w);
                     rect = Rect::from_min_max(pos2(rect.left(), tl.bottom()), rect.max);
                 }
                 match st.view {
@@ -1969,6 +1989,7 @@ impl PlanCraftApp {
         if let Some(pdf) = self.dialogs.print.as_mut().and_then(|b| b.dialog.pending_pdf.take()) {
             self.save_pdf(pdf);
         }
+        self.pick_external_project();
         self.confirm_dialog(&ctx);
         self.overwrite_dialog(&ctx);
         self.toasts(&ctx);
@@ -3099,6 +3120,181 @@ mod ui_tests {
         for (a, b) in before.iter().zip(&doc.project.tasks) {
             assert_eq!((a.duration, a.constraint, a.manual_start), (b.duration, b.constraint, b.manual_start), "{}", a.name);
         }
+    }
+
+    /// The Entry table's column for a field.
+    fn column_of(h: &Harness<'static, PlanCraftApp>, col: crate::columns::TaskCol) -> usize {
+        let ws = h.state().ws.lock().unwrap();
+        crate::fields::table_fields(&ws.active_doc().unwrap().project, crate::columns::TaskTable::Entry)
+            .iter()
+            .position(|f| *f == crate::fields::Field::Builtin(col))
+            .unwrap()
+    }
+
+    /// The display row of a task (the demo plan opens unsorted and expanded).
+    fn row_of(h: &Harness<'static, PlanCraftApp>, id: TaskId) -> usize {
+        let ws = h.state().ws.lock().unwrap();
+        let p = &ws.active_doc().unwrap().project;
+        views::row_of_task(&views::visible_rows(p, &h.state().st), p.task_index(id).unwrap()).unwrap()
+    }
+
+    fn agent_edit<T>(h: &Harness<'static, PlanCraftApp>, f: impl FnOnce(&mut Project) -> PlanResult<T>) -> T {
+        let mut ws = h.state().ws.lock().unwrap();
+        ws.active_doc_mut().unwrap().try_edit("Agent", ChangeSource::Agent, f).unwrap()
+    }
+
+    fn leaf(h: &Harness<'static, PlanCraftApp>, n: usize) -> TaskId {
+        let ws = h.state().ws.lock().unwrap();
+        ws.active_doc().unwrap().project.tasks.iter().filter(|t| !t.sched.is_summary && !t.is_milestone()).nth(n).unwrap().id
+    }
+
+    fn name_of(h: &Harness<'static, PlanCraftApp>, id: TaskId) -> Option<String> {
+        h.state().ws.lock().unwrap().active_doc().unwrap().project.task(id).map(|t| t.name.clone())
+    }
+
+    /// Regression: an open cell editor kept its row number, so when an agent added a task above
+    /// it, the typing was saved into the task that moved onto that row.
+    #[test]
+    fn an_open_cell_edit_follows_its_task_when_an_agent_adds_a_row_above() {
+        let mut h = harness();
+        let id = leaf(&h, 3);
+        let name = name_of(&h, id).unwrap();
+        let col = column_of(&h, crate::columns::TaskCol::Name);
+        let row = row_of(&h, id);
+        h.state_mut().st.task_grid.cursor = Some((row, col));
+        focus_task_grid(&mut h);
+        h.key_press(egui::Key::F2);
+        h.run_steps(2);
+        let added = agent_edit(&h, |p| Ok(p.add_task("Added by the agent", Some(0))));
+        h.run_steps(2);
+        assert_eq!(h.state().st.task_grid.editing.as_ref().map(|e| e.row), Some(row + 1), "the editor moved with its task");
+        h.event(egui::Event::Text(" (checked)".into()));
+        h.run_steps(2);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(3);
+        assert_eq!(name_of(&h, id), Some(format!("{name} (checked)")));
+        assert_eq!(name_of(&h, added).as_deref(), Some("Added by the agent"));
+    }
+
+    /// When the task being edited is deleted meanwhile, the edit is dropped (with a message)
+    /// instead of landing on the next task.
+    #[test]
+    fn an_edit_of_a_task_an_agent_deletes_is_dropped() {
+        let mut h = harness();
+        let id = leaf(&h, 3);
+        let next = leaf(&h, 4);
+        let next_name = name_of(&h, next).unwrap();
+        let col = column_of(&h, crate::columns::TaskCol::Name);
+        h.state_mut().st.task_grid.cursor = Some((row_of(&h, id), col));
+        focus_task_grid(&mut h);
+        h.key_press(egui::Key::F2);
+        h.run_steps(2);
+        h.event(egui::Event::Text("X".into()));
+        h.run_steps(2);
+        agent_edit(&h, |p| p.delete_tasks(&[id]));
+        h.run_steps(2);
+        assert!(h.state().st.task_grid.editing.is_none());
+        assert!(h.state().st.toasts.iter().any(|t| t.text.contains("was deleted")));
+        h.key_press(egui::Key::Enter);
+        h.run_steps(3);
+        assert_eq!(name_of(&h, next), Some(next_name));
+    }
+
+    /// Typing into a blank row stays a new task when an agent adds a task at the end meanwhile.
+    #[test]
+    fn typing_into_a_blank_row_stays_new_when_an_agent_adds_a_task() {
+        let mut h = harness();
+        let n = tasks(&h).len();
+        let col = column_of(&h, crate::columns::TaskCol::Name);
+        h.state_mut().st.task_grid.cursor = Some((n, col));
+        focus_task_grid(&mut h);
+        h.event(egui::Event::Text("Typed by the user".into()));
+        h.run_steps(2);
+        let added = agent_edit(&h, |p| Ok(p.add_task("Added by the agent", None)));
+        h.run_steps(2);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(3);
+        let names = tasks(&h);
+        assert_eq!(names.len(), n + 2, "{names:?}");
+        assert_eq!(name_of(&h, added).as_deref(), Some("Added by the agent"));
+        assert_eq!(names.last().map(String::as_str), Some("Typed by the user"));
+    }
+
+    /// An agent switching the active plan closes an open cell editor instead of saving it into
+    /// the other plan.
+    #[test]
+    fn switching_plans_drops_an_open_cell_edit() {
+        let mut ws = Workspace::default();
+        let a = ws.add(plancraft_core::sample::demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+        let mut other = Project::new("Other plan", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        for k in 0..30 {
+            other.add_task(format!("Other {k}"), None);
+        }
+        let b = ws.add(other, None);
+        ws.active = ws.index_of(a);
+        let shared = ws.shared();
+        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).build_eframe(move |cc| PlanCraftApp::new(cc, shared));
+        h.run_steps(3);
+        let col = column_of(&h, crate::columns::TaskCol::Name);
+        h.state_mut().st.task_grid.cursor = Some((3, col));
+        focus_task_grid(&mut h);
+        h.key_press(egui::Key::F2);
+        h.run_steps(2);
+        h.event(egui::Event::Text("X".into()));
+        h.run_steps(1);
+        {
+            let state = h.state_mut();
+            let mut ws = state.ws.lock().unwrap();
+            ws.active = ws.index_of(b);
+        }
+        h.run_steps(2);
+        h.key_press(egui::Key::Enter);
+        h.run_steps(3);
+        let ws = h.state().ws.lock().unwrap();
+        assert!(ws.docs[ws.index_of(b).unwrap()].history().is_empty(), "nothing typed into the other plan");
+        assert!(ws.docs[ws.index_of(a).unwrap()].history().is_empty());
+    }
+
+    /// Regression: Delete in any cell deleted the whole task. Now it clears the cell; the row
+    /// number or the Task Name column deletes the task.
+    #[test]
+    fn delete_clears_a_cell_and_deletes_the_task_from_its_row_number() {
+        let mut h = harness();
+        let n = tasks(&h).len();
+        let linked = {
+            let ws = h.state().ws.lock().unwrap();
+            ws.active_doc().unwrap().project.tasks.iter().find(|t| !t.predecessors.is_empty()).unwrap().id
+        };
+        let preds = column_of(&h, crate::columns::TaskCol::Predecessors);
+        let duration = column_of(&h, crate::columns::TaskCol::Duration);
+        let row = row_of(&h, linked);
+        h.state_mut().st.sel.select_task(linked);
+
+        h.state_mut().st.task_grid.cursor = Some((row, preds));
+        focus_task_grid(&mut h);
+        h.key_press(egui::Key::Delete);
+        h.run_steps(3);
+        assert_eq!(tasks(&h).len(), n, "a cell's Delete keeps the task");
+        {
+            let ws = h.state().ws.lock().unwrap();
+            assert!(ws.active_doc().unwrap().project.task(linked).unwrap().predecessors.is_empty(), "Predecessors cleared");
+        }
+
+        // A duration can't be empty: a hint, nothing deleted.
+        h.state_mut().st.task_grid.cursor = Some((row, duration));
+        focus_task_grid(&mut h);
+        h.key_press(egui::Key::Delete);
+        h.run_steps(3);
+        assert_eq!(tasks(&h).len(), n);
+        assert!(h.state().st.toasts.iter().any(|t| t.text.contains("row number")));
+
+        // The row number selects the whole row: Delete removes the task.
+        h.state_mut().st.task_grid.whole_row = true;
+        focus_task_grid(&mut h);
+        h.key_press(egui::Key::Delete);
+        h.run_steps(3);
+        assert_eq!(tasks(&h).len(), n - 1);
+        assert!(name_of(&h, linked).is_none());
     }
 
     /// Regression: the desktop backend delivers Ctrl+C/X/V as `Event::Copy/Cut/Paste` (no key

@@ -11,7 +11,8 @@ use crate::theme;
 
 pub const HEIGHT: f32 = 78.0;
 
-pub fn show(ui: &mut Ui, rect: Rect, p: &Project, g: &mut GanttState, chart_width: f32) {
+/// Shows the Timeline. `shown` tells, by task index, which tasks pass the view's filter and search.
+pub fn show(ui: &mut Ui, rect: Rect, p: &Project, shown: &[bool], g: &mut GanttState, chart_width: f32) {
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, theme::pal().PANEL_BG);
     painter.hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0, theme::pal().GRID_LINE_STRONG));
@@ -99,7 +100,7 @@ pub fn show(ui: &mut Ui, rect: Rect, p: &Project, g: &mut GanttState, chart_widt
     // Tasks marked for the timeline as bars inside the band, milestones as diamonds below.
     let font = FontId::proportional(11.0);
     let mut ms_slots: Vec<f32> = Vec::new();
-    for t in p.tasks.iter().filter(|t| t.show_on_timeline) {
+    for (_, t) in p.tasks.iter().enumerate().filter(|(i, t)| t.show_on_timeline && shown.get(*i).copied().unwrap_or(true)) {
         let (Some(s), Some(f)) = (t.sched.start, t.sched.finish) else {
             continue;
         };

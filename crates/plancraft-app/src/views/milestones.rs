@@ -22,22 +22,33 @@ fn progress_bar(ui: &mut Ui, frac: f32, width: f32, color: Color32) {
     ui.painter().rect_filled(Rect::from_min_size(r.min, vec2(r.width() * frac.clamp(0.0, 1.0), r.height())), 4.0, color);
 }
 
+/// The milestones the view lists (those passing its filter and search, as in the Gantt Chart),
+/// and how many the plan has.
+pub(crate) fn shown(p: &Project, st: &UiState, at: chrono::NaiveDateTime) -> (Vec<report::MilestoneStatus>, usize) {
+    let all = report::milestone_status(p, at);
+    let total = all.len();
+    (all.into_iter().filter(|ms| p.task(ms.id).is_some_and(|t| super::task_matches(p, st, t))).collect(), total)
+}
+
 pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: &mut Vec<Command>) {
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink(12.0)));
     let ui = &mut child;
     let at = report::status_moment(&doc.project);
-    let statuses = report::milestone_status(&doc.project, at);
+    let (statuses, total) = shown(&doc.project, st, at);
+    let count = if statuses.len() == total { format!("{total} milestones") } else { format!("{} of {total} milestones", statuses.len()) };
     ui.horizontal(|ui| {
         ui.heading("Milestones");
         ui.add_space(12.0);
         if ui.button("♦ New Milestone").clicked() {
             out.push(Command::InsertMilestone);
         }
-        ui.label(
-            RichText::new(format!("{} milestones · status as of {}", statuses.len(), format::date(Some(at)))).color(theme::pal().TEXT_WEAK),
-        );
+        ui.label(RichText::new(format!("{count} · status as of {}", format::date(Some(at)))).color(theme::pal().TEXT_WEAK));
     });
     ui.add_space(6.0);
+    if statuses.is_empty() && total > 0 {
+        ui.label(RichText::new("No milestones match the filter or search.").color(theme::pal().TEXT_WEAK));
+        return;
+    }
     if statuses.is_empty() {
         ui.label(
             RichText::new(

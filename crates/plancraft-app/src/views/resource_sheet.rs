@@ -191,6 +191,26 @@ fn commit(p: &mut Project, id: ResourceId, col: Col, text: &str) -> Result<(), S
     Ok(())
 }
 
+/// The Delete key on a cell other than the name: clears that field of the selected resources
+/// (the one under the cursor when it isn't selected), in one undo step.
+fn clear_field(doc: &mut Document, st: &mut UiState, row: usize, column: Col, def: &ColumnDef) {
+    let Some(at) = doc.project.resources.get(row).map(|r| r.id) else { return };
+    let hint = "To delete a resource, press Delete on its row number or in the Resource Name column.";
+    if def.editor != grid::Editor::Text {
+        st.toast(ToastKind::Info, format!("{} can't be cleared. {hint}", def.title));
+        return;
+    }
+    let ids: Vec<ResourceId> = if st.sel.resources.contains(&at) {
+        doc.project.resources.iter().map(|r| r.id).filter(|id| st.sel.resources.contains(id)).collect()
+    } else {
+        vec![at]
+    };
+    let r = doc.edit_msg(&format!("Clear {}", def.title), |p| ids.iter().try_for_each(|id| commit(p, *id, column, "")));
+    if r.is_err() {
+        st.toast(ToastKind::Info, format!("{} can't be left empty. {hint}", def.title));
+    }
+}
+
 /// Work and cost per resource over all its assignments.
 fn totals(p: &Project) -> HashMap<ResourceId, (Minutes, f64)> {
     let mut work: HashMap<ResourceId, (Minutes, f64)> = HashMap::new();
@@ -243,6 +263,8 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     let over: HashSet<ResourceId> = plancraft_core::workload::overallocations(&doc.project).into_iter().map(|(r, _)| r).collect();
     let work = totals(&doc.project);
     let n = doc.project.resources.len();
+    // The cursor and an open editor follow their resource when an agent adds or deletes one.
+    let row_key = |r: usize| doc.project.resources.get(r).map(|res| u64::from(res.id.0));
     let cfg = GridConfig {
         id: egui::Id::new("resource_sheet"),
         columns: &defs,
@@ -253,6 +275,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
         show_vscroll: true,
         header_height: 30.0,
         row_height: theme::ROW_HEIGHT,
+        row_key: Some(&row_key),
     };
     let output = {
         let p = &doc.project;
@@ -305,12 +328,23 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                         Ok::<_, String>(id)
                     });
                     match r {
-                        Ok(id) => st.sel.select_resource(id),
+                        Ok(id) => {
+                            st.sel.select_resource(id);
+                            // The new resource takes the blank row typed into; the cursor stays where it is.
+                            st.resource_grid.forget_anchor();
+                        }
                         Err(e) => st.toast(ToastKind::Error, e),
                     }
                 }
             }
-            GridEvent::DeleteKey => out.push(Command::DeleteResources),
+            GridEvent::DeleteKey { row, col } => match col.and_then(|c| COLS.get(c).copied().zip(defs.get(c))) {
+                _ if row >= n => {}
+                // The row number or the name: delete the selected resources.
+                None | Some((Col::Name, _)) => out.push(Command::DeleteResources),
+                // Any other cell: clear that field.
+                Some((column, def)) => clear_field(doc, st, row, column, def),
+            },
+            GridEvent::EditLost => st.toast(ToastKind::Warning, "The resource you were editing was deleted, so your typing was not saved."),
             GridEvent::InsertKey => out.push(Command::InsertResource),
             GridEvent::ContextMenu { row, .. } => {
                 if let Some(id) = resource_at(doc, row) {

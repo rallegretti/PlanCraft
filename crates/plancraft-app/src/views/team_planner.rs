@@ -52,16 +52,14 @@ fn pack(p: &Project, mut idxs: Vec<usize>) -> (Vec<(usize, usize)>, usize) {
     (out, n)
 }
 
-pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: &mut Vec<Command>) {
-    let p = &doc.project;
-    if st.gantt.initialized_for != Some(p.id) {
-        st.gantt.initialized_for = Some(p.id);
-        st.gantt.scroll_to(p.sched.start.unwrap_or(p.start));
-    }
+/// One lane per work resource and one for unassigned tasks. Every resource keeps its lane; the
+/// view's filter and search pick the tasks shown in them, and inactive tasks are left out.
+fn lanes(p: &Project, st: &UiState) -> Vec<Lane> {
     let over: std::collections::HashSet<ResourceId> = plancraft_core::workload::overallocations(p).into_iter().map(|(r, _)| r).collect();
     let mut lanes: Vec<Lane> = Vec::new();
+    let shown = |i: &usize| p.tasks.get(*i).is_some_and(|t| t.active && super::task_matches(p, st, t));
     for r in p.resources.iter().filter(|r| r.kind == ResourceType::Work) {
-        let idxs: Vec<usize> = p.assignments_for_resource(r.id).filter_map(|a| p.task_index(a.task)).collect();
+        let idxs: Vec<usize> = p.assignments_for_resource(r.id).filter_map(|a| p.task_index(a.task)).filter(shown).collect();
         let (bars, sublanes) = pack(p, idxs);
         lanes.push(Lane { resource: Some(r.id), name: r.name.clone(), over: over.contains(&r.id), bars, sublanes });
     }
@@ -75,9 +73,20 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                 && !p.assignments_for_task(t.id).any(|a| p.resource(a.resource).is_some_and(|r| r.kind == ResourceType::Work))
         })
         .map(|(i, _)| i)
+        .filter(shown)
         .collect();
     let (bars, sublanes) = pack(p, unassigned);
     lanes.push(Lane { resource: None, name: "Unassigned Tasks".into(), over: false, bars, sublanes });
+    lanes
+}
+
+pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: &mut Vec<Command>) {
+    let p = &doc.project;
+    if st.gantt.initialized_for != Some(p.id) {
+        st.gantt.initialized_for = Some(p.id);
+        st.gantt.scroll_to(p.sched.start.unwrap_or(p.start));
+    }
+    let lanes = lanes(p, st);
 
     let header = Rect::from_min_size(rect.min, vec2(rect.width() - 12.0, theme::HEADER_HEIGHT));
     let body = Rect::from_min_max(pos2(rect.left(), header.bottom()), pos2(rect.right() - 12.0, rect.bottom()));
@@ -274,4 +283,28 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     let vs = Rect::from_min_max(pos2(rect.right() - 12.0, body.top()), pos2(rect.right(), body.bottom()));
     st.misc_grid.scroll_y = scrollbar(ui, egui::Id::new("tp_vs"), vs, true, st.misc_grid.scroll_y, total_h + 20.0, body.height());
     painter.hline(header.x_range(), header.bottom() - 0.5, Stroke::new(1.0, theme::pal().GRID_LINE_STRONG));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: the Team Planner ignored the filter and search, so it showed every task while
+    /// the status bar said "Filter: …".
+    #[test]
+    fn lanes_show_only_tasks_that_pass_the_filter() {
+        let p = plancraft_core::sample::demo_project(chrono::NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let mut st = UiState::default();
+        let bars =
+            |lanes: &[Lane]| -> Vec<String> { lanes.iter().flat_map(|l| l.bars.iter().map(|(i, _)| p.tasks[*i].name.clone())).collect() };
+        let all = lanes(&p, &st);
+        let every = bars(&all);
+        let name = every.first().unwrap().clone();
+        st.search = name.clone();
+        let filtered = lanes(&p, &st);
+        assert_eq!(filtered.len(), all.len(), "every resource keeps its lane");
+        let shown = bars(&filtered);
+        assert!(!shown.is_empty() && shown.len() < every.len(), "{shown:?}");
+        assert!(shown.iter().all(|n| n.to_lowercase().contains(&name.to_lowercase())), "{shown:?}");
+    }
 }

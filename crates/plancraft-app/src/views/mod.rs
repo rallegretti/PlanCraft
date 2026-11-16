@@ -349,4 +349,36 @@ mod tests {
         commit(TaskCol::Predecessors, &mut p, event, "14FS+1d").unwrap();
         assert_eq!(p.format_predecessors(event), "14FS+1 day");
     }
+
+    /// Regression: the Calendar and Milestones views ignored the filter and search (the status bar
+    /// still said "Filter: …"), and the Calendar showed inactive tasks.
+    #[test]
+    fn calendar_and_milestones_follow_the_filter_and_search() {
+        let mut p = demo();
+        let mut st = UiState::default();
+        let on_calendar = |p: &Project, st: &UiState| -> Vec<String> {
+            p.tasks.iter().filter(|t| calendar::shows(p, st, t)).map(|t| t.name.clone()).collect()
+        };
+        let all = on_calendar(&p, &st);
+        assert_eq!(all.len(), p.tasks.iter().filter(|t| !t.sched.is_summary).count());
+
+        st.filter = TaskFilter::Milestones;
+        assert_eq!(on_calendar(&p, &st).len(), 4);
+        st.filter = TaskFilter::All;
+        st.search = "beta".into();
+        let found = on_calendar(&p, &st);
+        assert!(!found.is_empty() && found.len() < all.len(), "{found:?}");
+        assert!(found.iter().all(|n| n.to_lowercase().contains("beta")), "{found:?}");
+        let at = plancraft_core::report::status_moment(&p);
+        let (listed, total) = milestones::shown(&p, &st, at);
+        assert_eq!(total, 4);
+        assert_eq!(listed.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["Beta ready"]);
+
+        // An inactive task leaves the calendar.
+        st.search.clear();
+        let leaf = p.tasks.iter().find(|t| !t.sched.is_summary && !t.is_milestone()).unwrap().id;
+        p.task_mut(leaf).unwrap().active = false;
+        plancraft_core::schedule::recalculate(&mut p);
+        assert_eq!(on_calendar(&p, &st).len(), all.len() - 1);
+    }
 }

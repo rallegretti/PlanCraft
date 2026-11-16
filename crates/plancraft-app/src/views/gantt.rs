@@ -72,26 +72,13 @@ pub fn task_table(
     let over_res: HashSet<ResourceId> = plancraft_core::workload::overallocations(&doc.project).into_iter().map(|(r, _)| r).collect();
     let over_tasks = super::overallocated_tasks(&doc.project, &over_res);
     let blank = blank_rows(st);
-    // The cursor and an open editor follow their task when the rows re-sort or regroup (after
-    // an edit, or an agent's change), so typing never lands on another task.
-    if let Some((was, id)) = st.cursor_task
-        && let Some((row, col)) = st.task_grid.cursor
-        && row == was
-        && super::task_at(&doc.project, rows, row).is_none_or(|t| t.id != id)
-        && let Some(now) = doc.project.task_index(id).and_then(|i| super::row_of_task(rows, i))
-    {
-        st.task_grid.cursor = Some((now, col));
-        if let Some(e) = st.task_grid.editing.as_mut()
-            && e.row == was
-        {
-            e.row = now;
-        }
-        st.task_grid.scroll_to = Some(now);
-    }
     let output = {
         let p = &doc.project;
         // Rows show the task's row number (what predecessors refer to), also when sorted or grouped.
         let row_label = |r: usize| rows.get(r).and_then(Row::task).map_or_else(String::new, |i| (i + 1).to_string());
+        // The cursor and an open editor follow their task when the rows re-sort or regroup (after
+        // an edit, or an agent's change), so typing never lands on another task.
+        let row_key = |r: usize| super::task_at(p, rows, r).map(|t| u64::from(t.id.0));
         let cfg = GridConfig {
             id: egui::Id::new(("task_grid", st.table.label())),
             columns: &defs,
@@ -102,6 +89,7 @@ pub fn task_table(
             show_vscroll,
             header_height: theme::HEADER_HEIGHT,
             row_height: theme::ROW_HEIGHT,
+            row_key: Some(&row_key),
         };
         let sel = &st.sel;
         let collapsed = &st.collapsed;
@@ -193,13 +181,31 @@ pub fn task_table(
                         Ok::<TaskId, String>(id)
                     });
                     match r {
-                        Ok(id) => st.sel.select_task(id),
+                        Ok(id) => {
+                            st.sel.select_task(id);
+                            // The new task takes the blank row typed into; the cursor stays where it is.
+                            st.task_grid.forget_anchor();
+                        }
                         Err(e) => st.toast(ToastKind::Error, e),
                     }
                 }
             }
             GridEvent::ContextMenu { pos, .. } => st_context_menu(ui, pos),
-            GridEvent::DeleteKey => out.push(Command::DeleteSelection),
+            GridEvent::DeleteKey { row, col } => {
+                let field = col.and_then(|c| fields.get(c).copied().zip(defs.get(c)));
+                match field {
+                    // Blank rows have nothing to delete.
+                    _ if row >= rows.len() => {}
+                    // The row number, the task name or a group header: delete the selected tasks.
+                    None | Some((Field::Builtin(TaskCol::Name), _)) => out.push(Command::DeleteSelection),
+                    _ if !matches!(rows.get(row), Some(Row::Task(_))) => out.push(Command::DeleteSelection),
+                    // Any other cell: clear that field of the selected tasks.
+                    Some((field, def)) => clear_field(doc, st, rows, row, field, def),
+                }
+            }
+            GridEvent::EditLost => {
+                st.toast(ToastKind::Warning, "The task you were editing was deleted or is no longer shown, so your typing was not saved.")
+            }
             GridEvent::InsertKey => out.push(Command::InsertTask),
             GridEvent::ClickEmpty { .. } => {
                 st.sel.tasks.clear();
@@ -219,8 +225,31 @@ pub fn task_table(
             }
         }
     }
-    st.cursor_task = st.task_grid.cursor.and_then(|(r, _)| super::task_at(&doc.project, rows, r).map(|t| (r, t.id)));
     output
+}
+
+/// The Delete key on a cell other than the name: clears that field of the selected tasks (the
+/// task under the cursor when it isn't selected), in one undo step.
+fn clear_field(doc: &mut Document, st: &mut UiState, rows: &[Row], row: usize, field: Field, def: &grid::ColumnDef) {
+    let Some(at) = super::task_at(&doc.project, rows, row).map(|t| t.id) else { return };
+    let hint = "To delete a task, press Delete on its row number or in the Task Name column.";
+    match &def.editor {
+        grid::Editor::None => {
+            st.toast(ToastKind::Info, format!("{} is calculated, so it can't be cleared. {hint}", def.title));
+            return;
+        }
+        // A list without an empty choice (Mode, Type, Constraint…) has no "cleared" value.
+        grid::Editor::Choice(options) if !options.iter().any(|o| o == fields::NO_VALUE) => {
+            st.toast(ToastKind::Info, format!("{} can't be left empty; pick another value instead. {hint}", def.title));
+            return;
+        }
+        _ => {}
+    }
+    let ids: Vec<TaskId> = if st.sel.tasks.contains(&at) { super::selected_in_order(&doc.project, &st.sel) } else { vec![at] };
+    let r = doc.edit_msg(&format!("Clear {}", def.title), |p| ids.iter().try_for_each(|id| field.commit(p, *id, "")));
+    if r.is_err() {
+        st.toast(ToastKind::Info, format!("{} can't be left empty. {hint}", def.title));
+    }
 }
 
 fn st_context_menu(ui: &Ui, pos: egui::Pos2) {
@@ -418,7 +447,7 @@ pub fn apply_chart_actions(doc: &mut Document, st: &mut UiState, rows: &[Row], a
                 if let Some(r) = doc.project.task_index(task).and_then(|i| super::row_of_task(rows, i)) {
                     super::select_row(&mut st.sel, &doc.project, rows, r, shift, ctrl);
                     st.task_grid.cursor = Some((r, st.task_grid.cursor.map(|c| c.1).unwrap_or(2)));
-                    st.cursor_task = Some((r, task));
+                    st.task_grid.whole_row = false;
                 } else {
                     st.sel.select_task(task);
                 }
@@ -431,9 +460,8 @@ pub fn apply_chart_actions(doc: &mut Document, st: &mut UiState, rows: &[Row], a
                 let r = doc.edit_msg("Move Task", |p| {
                     let t = p.task_mut(task).ok_or("task not found")?;
                     if t.mode == ScheduleMode::Manual {
-                        let dur = t.sched.finish.zip(t.sched.start).map(|(f, s)| f - s).unwrap_or_default();
-                        t.manual_start = Some(start);
-                        t.manual_finish = Some(start + dur);
+                        // Keeps the task's length.
+                        return p.set_manual_date(task, start, false).map_err(|e| e.to_string());
                     } else if t.actual_start.is_some() {
                         return Err("tasks that have started cannot be moved; change the actual start instead".to_string());
                     } else {

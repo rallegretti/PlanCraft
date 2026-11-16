@@ -20,6 +20,10 @@ enum Tab {
 pub struct ResourceInfo {
     id: ResourceId,
     tab: Tab,
+    /// The resource as the dialog opened, and the number fields' text then: OK writes only the
+    /// fields changed since, so changes an agent made meanwhile are kept.
+    orig: Resource,
+    orig_numbers: [String; 4],
     draft: Resource,
     max_units: String,
     rate: String,
@@ -38,13 +42,22 @@ pub struct ResourceInfo {
 impl ResourceInfo {
     pub fn new(p: &Project, id: ResourceId) -> Option<Self> {
         let r = p.resource(id)?.clone();
+        let numbers = [
+            format::units(r.max_units),
+            format!("{:.2}", r.standard_rate),
+            format!("{:.2}", r.overtime_rate),
+            format!("{:.2}", r.cost_per_use),
+        ];
+        let [max_units, rate, ovt, per_use] = numbers.clone();
         Some(Self {
             id,
             tab: Tab::General,
-            max_units: format::units(r.max_units),
-            rate: format!("{:.2}", r.standard_rate),
-            ovt: format!("{:.2}", r.overtime_rate),
-            per_use: format!("{:.2}", r.cost_per_use),
+            max_units,
+            rate,
+            ovt,
+            per_use,
+            orig_numbers: numbers,
+            orig: r.clone(),
             draft: r,
             new_off_name: "Vacation".into(),
             new_off_start: String::new(),
@@ -231,10 +244,20 @@ impl ResourceInfo {
                     if ui.add(egui::Button::new(RichText::new("  OK  ").color(egui::Color32::WHITE)).fill(theme::pal().ACCENT)).clicked() {
                         let mut draft = self.draft.clone();
                         let parsed = (|| -> Result<(), String> {
-                            draft.max_units = format::parse_units(&self.max_units).ok_or("Max. units must look like 100%")?;
-                            draft.standard_rate = format::parse_money(&self.rate).ok_or("Invalid standard rate")?;
-                            draft.overtime_rate = format::parse_money(&self.ovt).ok_or("Invalid overtime rate")?;
-                            draft.cost_per_use = format::parse_money(&self.per_use).ok_or("Invalid cost/use")?;
+                            // Only numbers typed here: re-reading the shown text would round them.
+                            let [units0, rate0, ovt0, per_use0] = &self.orig_numbers;
+                            if self.max_units.trim() != units0.trim() {
+                                draft.max_units = format::parse_units(&self.max_units).ok_or("Max. units must look like 100%")?;
+                            }
+                            if self.rate.trim() != rate0.trim() {
+                                draft.standard_rate = format::parse_money(&self.rate).ok_or("Invalid standard rate")?;
+                            }
+                            if self.ovt.trim() != ovt0.trim() {
+                                draft.overtime_rate = format::parse_money(&self.ovt).ok_or("Invalid overtime rate")?;
+                            }
+                            if self.per_use.trim() != per_use0.trim() {
+                                draft.cost_per_use = format::parse_money(&self.per_use).ok_or("Invalid cost/use")?;
+                            }
                             if draft.name.trim().is_empty() {
                                 return Err("The resource name cannot be empty".into());
                             }
@@ -244,9 +267,10 @@ impl ResourceInfo {
                             Err(e) => self.error = Some(e),
                             Ok(()) => {
                                 let id = self.id;
+                                let orig = &self.orig;
                                 let r = doc.edit_msg(&format!("Resource Information: {}", draft.name), |p| {
                                     let slot = p.resource_mut(id).ok_or("resource was deleted")?;
-                                    *slot = draft;
+                                    *slot = merge_changes(orig, &draft, slot)?;
                                     Ok::<(), String>(())
                                 });
                                 match r {
@@ -259,5 +283,53 @@ impl ResourceInfo {
                 });
             });
         open && !close
+    }
+}
+
+/// `current` with the fields that differ between `orig` and `draft` taken from `draft`: the
+/// dialog's changes on top of whatever else changed meanwhile. Fields are compared whole (a
+/// changed time-off list replaces the list).
+fn merge_changes(orig: &Resource, draft: &Resource, current: &Resource) -> Result<Resource, String> {
+    let fail = |e: serde_json::Error| format!("could not apply the changes: {e}");
+    let (serde_json::Value::Object(before), serde_json::Value::Object(after), serde_json::Value::Object(mut now)) = (
+        serde_json::to_value(orig).map_err(fail)?,
+        serde_json::to_value(draft).map_err(fail)?,
+        serde_json::to_value(current).map_err(fail)?,
+    ) else {
+        return Err("could not apply the changes".into());
+    };
+    let keys: std::collections::BTreeSet<&String> = before.keys().chain(after.keys()).collect();
+    for k in keys {
+        if before.get(k) != after.get(k) {
+            match after.get(k) {
+                Some(v) => now.insert(k.clone(), v.clone()),
+                // Skipped when serialized: back to its default.
+                None => now.remove(k),
+            };
+        }
+    }
+    serde_json::from_value(serde_json::Value::Object(now)).map_err(fail)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression: OK replaced the whole resource with the copy made when the dialog opened,
+    /// undoing an agent's changes.
+    #[test]
+    fn ok_keeps_what_an_agent_changed_while_the_dialog_was_open() {
+        let mut p = Project::new("Plan", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let id = p.add_resource("Ana");
+        p.resource_mut(id).unwrap().standard_rate = 12.345;
+        let info = ResourceInfo::new(&p, id).unwrap();
+        p.resource_mut(id).unwrap().email = "agent@example.com".into();
+        let mut draft = info.draft.clone();
+        draft.group = "Design".into();
+        let current = p.resource(id).unwrap().clone();
+        let merged = merge_changes(&info.orig, &draft, &current).unwrap();
+        assert_eq!(merged.group, "Design");
+        assert_eq!(merged.email, "agent@example.com");
+        assert_eq!(merged.standard_rate, 12.345);
     }
 }

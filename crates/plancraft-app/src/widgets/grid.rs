@@ -99,6 +99,14 @@ impl Edit {
     }
 }
 
+/// What the cursor's row showed at the end of the last frame: an item (by its key), or a blank
+/// row (by how far below the last item it was).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowKey {
+    Item(u64),
+    Blank(usize),
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct GridState {
     pub scroll_y: f32,
@@ -108,18 +116,72 @@ pub struct GridState {
     pub widths: Vec<f32>,
     /// Row that should be scrolled into view on the next frame.
     pub scroll_to: Option<usize>,
+    /// The whole row is selected (its row number was clicked), not the cursor's cell.
+    pub whole_row: bool,
+    /// The cursor's row at the end of the last frame and what it showed. When rows move (an
+    /// agent's change, a re-sort), the cursor and an open editor follow it, so typing never lands
+    /// on another row's item.
+    anchor: Option<(usize, RowKey)>,
 }
 
 impl GridState {
     pub fn begin_edit(&mut self, row: usize, col: usize, text: String) {
         self.cursor = Some((row, col));
+        self.whole_row = false;
+        self.anchor = None;
         self.editing = Some(Edit { row, col, original: Some(text.clone()), text, started: false });
     }
 
     /// Starts editing with typed text that replaces the cell's value (always committed).
     pub fn begin_typed_edit(&mut self, row: usize, col: usize, text: String) {
         self.cursor = Some((row, col));
+        self.whole_row = false;
+        self.anchor = None;
         self.editing = Some(Edit { row, col, original: None, text, started: false });
+    }
+
+    /// Stops following the cursor's row for one frame: the caller has just moved the rows itself
+    /// (it added the row typed into, say) and placed the cursor where it belongs.
+    pub fn forget_anchor(&mut self) {
+        self.anchor = None;
+    }
+
+    /// Closes the editor without committing and forgets what the cursor was on (another
+    /// document is now shown).
+    pub fn reset_editing(&mut self) {
+        self.editing = None;
+        self.anchor = None;
+    }
+
+    /// Moves the cursor and an open editor after their row when the rows changed since the last
+    /// frame. Returns true when the editor was closed because its item is gone or hidden.
+    fn follow_anchor(&mut self, cfg: &GridConfig) -> bool {
+        let (Some(key_of), Some((was, key)), Some((row, col))) = (cfg.row_key, self.anchor, self.cursor) else { return false };
+        if row != was {
+            // Moved on purpose since the last frame.
+            return false;
+        }
+        let total = cfg.row_count.saturating_add(cfg.blank_rows);
+        let now = match key {
+            RowKey::Item(k) if row < cfg.row_count && key_of(row) == Some(k) => Some(row),
+            RowKey::Item(k) => (0..cfg.row_count).find(|&r| key_of(r) == Some(k)),
+            RowKey::Blank(off) => Some(cfg.row_count.saturating_add(off)).filter(|r| *r < total),
+        };
+        match now {
+            Some(now) if now == row => false,
+            Some(now) => {
+                self.cursor = Some((now, col));
+                if let Some(e) = self.editing.as_mut().filter(|e| e.row == was) {
+                    e.row = now;
+                }
+                self.scroll_to = Some(now);
+                false
+            }
+            None => {
+                self.anchor = None;
+                self.editing.take_if(|e| e.row == was).is_some()
+            }
+        }
     }
 }
 
@@ -151,7 +213,6 @@ pub enum GridEvent {
         row: usize,
         shift: bool,
     },
-    DeleteKey,
     InsertKey,
     /// Click on empty space below the last row.
     ClickEmpty {
@@ -166,6 +227,14 @@ pub enum GridEvent {
         col: usize,
         pos: Pos2,
     },
+    /// The Delete key: on the cursor's cell (`col`), or on the whole row when its row number was
+    /// clicked (`col: None`).
+    DeleteKey {
+        row: usize,
+        col: Option<usize>,
+    },
+    /// The row being edited was deleted or hidden by someone else, so the edit was dropped.
+    EditLost,
 }
 
 pub struct GridConfig<'a> {
@@ -180,6 +249,9 @@ pub struct GridConfig<'a> {
     pub show_vscroll: bool,
     pub header_height: f32,
     pub row_height: f32,
+    /// A stable key for the item on each data row (`None` for rows that are not items, like
+    /// group headers). With it the cursor and an open editor follow their item when rows move.
+    pub row_key: Option<&'a dyn Fn(usize) -> Option<u64>>,
 }
 
 pub struct GridOutput {
@@ -245,6 +317,9 @@ pub fn show(
     let cols_view_w = (body.width() - rn_w).max(0.0);
     let total_rows = cfg.row_count + cfg.blank_rows;
     let content_h = total_rows as f32 * cfg.row_height;
+    if state.follow_anchor(cfg) {
+        events.push(GridEvent::EditLost);
+    }
 
     // Scrolling.
     let body_resp = ui.interact(body, cfg.id.with("body"), Sense::click_and_drag());
@@ -365,7 +440,7 @@ pub fn show(
             }
             let clip = r.intersect(Rect::from_min_max(pos2(body.left() + rn_w, body.top()), body.max));
             let cp = body_painter.with_clip_rect(clip);
-            let cursor_here = state.cursor == Some((row, c));
+            let cursor_here = !state.whole_row && state.cursor == Some((row, c));
             let content = if data_row { cell(row, c) } else { Cell::default() };
             if let Some(bg) = content.bg {
                 cp.rect_filled(r, 0.0, bg);
@@ -476,8 +551,16 @@ pub fn show(
                 state.cursor = col.map(|c| (row, c));
                 events.push(GridEvent::ClickEmpty { row });
             } else {
-                if let Some(c) = col {
-                    state.cursor = Some((row, c));
+                match col {
+                    Some(c) => {
+                        state.cursor = Some((row, c));
+                        state.whole_row = false;
+                    }
+                    None => {
+                        // The row number: the whole row.
+                        state.cursor = Some((row, state.cursor.map_or(0, |(_, c)| c)));
+                        state.whole_row = true;
+                    }
                 }
                 // Clicking another cell commits the current edit (handled below via focus loss).
                 events.push(GridEvent::Select { row, shift, ctrl });
@@ -502,8 +585,15 @@ pub fn show(
             if !is_selected(row) {
                 events.push(GridEvent::Select { row, shift: false, ctrl: false });
             }
-            if let Some(c) = col {
-                state.cursor = Some((row, c));
+            match col {
+                Some(c) => {
+                    state.cursor = Some((row, c));
+                    state.whole_row = false;
+                }
+                None => {
+                    state.cursor = Some((row, state.cursor.map_or(0, |(_, c)| c)));
+                    state.whole_row = true;
+                }
             }
             events.push(GridEvent::ContextMenu { row, pos: p });
         }
@@ -511,7 +601,7 @@ pub fn show(
 
     // ---- Editing ----
     let mut finished: Option<(bool, Option<(isize, isize)>)> = None; // (commit, move)
-    if let Some((r, row, c)) = edit_rect
+    if let Some((r, _, c)) = edit_rect
         && let Some(def) = cfg.columns.get(c)
         && let Some(edit) = state.editing.as_mut()
     {
@@ -557,7 +647,8 @@ pub fn show(
                 edit.started = true;
             }
             _ => {
-                let id = cfg.id.with(("edit", row, c));
+                // One editor at a time: its id doesn't change when its row moves, so it keeps the focus.
+                let id = cfg.id.with("edit");
                 let mut child = ui.new_child(egui::UiBuilder::new().max_rect(r).layout(egui::Layout::left_to_right(Align::Center)));
                 child.set_clip_rect(clip);
                 body_painter.rect_filled(r, 0.0, theme::pal().BG);
@@ -571,6 +662,11 @@ pub fn show(
                 let resp = child.add(te);
                 body_painter.rect_stroke(r.shrink(0.5), 0.0, Stroke::new(1.5, theme::pal().ACCENT), StrokeKind::Inside);
                 if !edit.started {
+                    // A fresh editor: the text cursor goes to the end.
+                    let len = edit.text.chars().count();
+                    let mut st = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
+                    st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(len))));
+                    st.store(ui.ctx(), id);
                     resp.request_focus();
                     edit.started = true;
                 } else {
@@ -658,13 +754,16 @@ pub fn show(
             let nr = (row as isize + dr).clamp(0, total_rows.saturating_sub(1) as isize) as usize;
             let nc = (col as isize + dc).clamp(0, ncols as isize - 1) as usize;
             state.cursor = Some((nr, nc));
+            if dc != 0 {
+                state.whole_row = false;
+            }
             state.scroll_to = Some(nr);
             if nr != row && nr < cfg.row_count {
                 events.push(GridEvent::CursorRow { row: nr, shift });
             }
         }
-        if del {
-            events.push(GridEvent::DeleteKey);
+        if del && let Some((r, c)) = state.cursor.filter(|(r, _)| *r < total_rows) {
+            events.push(GridEvent::DeleteKey { row: r, col: (!state.whole_row).then_some(c) });
         }
         if ins {
             events.push(GridEvent::InsertKey);
@@ -677,14 +776,6 @@ pub fn show(
             if let Some(t) = typed.filter(|t| !t.trim().is_empty()) {
                 if matches!(def.editor, Editor::Text) {
                     state.begin_typed_edit(r, c, t);
-                    if let Some(e) = state.editing.as_mut() {
-                        // Place cursor at end of the typed text.
-                        let id = cfg.id.with(("edit", r, c));
-                        let len = e.text.chars().count();
-                        let mut st = egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
-                        st.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(len))));
-                        st.store(ui.ctx(), id);
-                    }
                 }
             } else if start_edit {
                 let text = if r < cfg.row_count {
@@ -718,5 +809,10 @@ pub fn show(
         );
     }
 
+    state.anchor = match (cfg.row_key, state.cursor) {
+        (Some(key_of), Some((r, _))) if r < cfg.row_count => key_of(r).map(|k| (r, RowKey::Item(k))),
+        (Some(_), Some((r, _))) => Some((r, RowKey::Blank(r.saturating_sub(cfg.row_count)))),
+        _ => None,
+    };
     GridOutput { events }
 }

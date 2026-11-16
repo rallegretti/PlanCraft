@@ -29,14 +29,14 @@ struct CustomRow {
     text: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct PredRow {
     pred: TaskRef,
     kind: LinkType,
     lag: String,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct ResRow {
     resource: ResourceId,
     units: String,
@@ -51,7 +51,11 @@ enum EstKind {
     Work,
 }
 
+#[derive(Clone)]
 pub struct TaskInfo {
+    /// The fields as the dialog opened: OK writes only what was changed since, so changes an
+    /// agent (or the table) made meanwhile are kept.
+    orig: Option<Box<TaskInfo>>,
     id: TaskId,
     tab: Tab,
     name: String,
@@ -124,7 +128,8 @@ impl TaskInfo {
                 (EstKind::Work, String::new(), String::new(), String::new(), String::new(), format_work(minutes))
             }
         };
-        Some(Self {
+        let mut info = Self {
+            orig: None,
             id,
             tab: if notes_tab { Tab::Notes } else { Tab::General },
             name: t.name.clone(),
@@ -178,14 +183,19 @@ impl TaskInfo {
                 .collect(),
             error: None,
             summary: t.sched.is_summary,
-        })
+        };
+        info.orig = Some(Box::new(info.clone()));
+        Some(info)
     }
 
+    /// Writes the fields changed since the dialog opened, in one edit.
     fn apply(&self, p: &mut Project) -> Result<(), String> {
         let id = self.id;
         if p.task(id).is_none() {
             return Err("task was deleted".into());
         }
+        // Nothing to compare with means nothing was changed here.
+        let Some(o) = self.orig.as_deref() else { return Ok(()) };
         let err = |e: PlanError| e.to_string();
         let opt_date = |p: &Project, s: &str, finish: bool| -> Result<Option<chrono::NaiveDateTime>, String> {
             if s.trim().is_empty() || s.trim().eq_ignore_ascii_case("na") {
@@ -194,114 +204,133 @@ impl TaskInfo {
                 p.parse_datetime(s, finish).map(Some).ok_or_else(|| format!("'{s}' is not a valid date"))
             }
         };
-        if self.name.trim().is_empty() {
+        if self.name != o.name && self.name.trim().is_empty() {
             return Err("The task name cannot be empty.".into());
         }
+        let priority = if self.priority != o.priority {
+            Some(self.priority.trim().parse::<u16>().map_err(|_| "Priority must be a number from 0 to 1000")?.min(1000))
+        } else {
+            None
+        };
+        let fixed_cost = if self.fixed_cost.trim() != o.fixed_cost.trim() {
+            Some(format::parse_money(&self.fixed_cost).ok_or_else(|| format!("'{}' is not a valid fixed cost", self.fixed_cost))?)
+        } else {
+            None
+        };
+        if self.mode != o.mode {
+            p.set_schedule_mode(&[id], self.mode).map_err(err)?;
+        }
         {
             let t = p.task_mut(id).ok_or("task was deleted")?;
-            t.name = self.name.trim().to_string();
-            t.mode = self.mode;
-            t.active = self.active;
-            t.priority = self.priority.trim().parse::<u16>().map_err(|_| "Priority must be a number from 0 to 1000")?.min(1000);
-            t.task_type = self.task_type;
-            t.effort_driven = self.effort_driven;
-            t.calendar = self.calendar;
-            t.ignore_resource_calendars = self.ignore_res_cal;
-            t.show_on_timeline = self.on_timeline;
-            t.notes = self.notes.clone();
-            t.deliverable = self.deliverable.clone();
-            t.fixed_cost = format::parse_money(&self.fixed_cost).unwrap_or(0.0);
-        }
-        let cdate = opt_date(p, &self.constraint_date, !self.constraint.is_start_constraint())?;
-        if self.constraint.needs_date() && cdate.is_none() {
-            return Err(format!("'{}' needs a constraint date.", self.constraint.label()));
-        }
-        let deadline = opt_date(p, &self.deadline, true)?;
-        let astart = opt_date(p, &self.actual_start, false)?;
-        let afinish = opt_date(p, &self.actual_finish, true)?;
-        let manual_start = opt_date(p, &self.start, false)?;
-        let manual_finish = opt_date(p, &self.finish, true)?;
-        let estimate = match self.est_kind {
-            EstKind::None => None,
-            EstKind::Complexity => {
-                Some(Estimate::Complexity { points: self.points.trim().parse().map_err(|_| "Complexity points must be a number")? })
+            if self.name != o.name {
+                t.name = self.name.trim().to_string();
             }
-            EstKind::ThreePoint => {
-                let w = |s: &str| parse_work(s, &p.settings.time).ok_or_else(|| format!("'{s}' is not a valid amount of work"));
-                Some(Estimate::ThreePoint {
-                    optimistic: w(&self.optimistic)?,
-                    most_likely: w(&self.most_likely)?,
-                    pessimistic: w(&self.pessimistic)?,
-                })
+            if self.active != o.active {
+                t.active = self.active;
             }
-            EstKind::Work => Some(Estimate::Work { minutes: parse_work(&self.est_work, &p.settings.time).ok_or("Invalid work estimate")? }),
-        };
-        {
+            if let Some(v) = priority {
+                t.priority = v;
+            }
+            if self.task_type != o.task_type {
+                t.task_type = self.task_type;
+            }
+            if self.effort_driven != o.effort_driven {
+                t.effort_driven = self.effort_driven;
+            }
+            if self.calendar != o.calendar {
+                t.calendar = self.calendar;
+            }
+            if self.ignore_res_cal != o.ignore_res_cal {
+                t.ignore_resource_calendars = self.ignore_res_cal;
+            }
+            if self.on_timeline != o.on_timeline {
+                t.show_on_timeline = self.on_timeline;
+            }
+            if self.notes != o.notes {
+                t.notes = self.notes.clone();
+            }
+            if self.deliverable != o.deliverable {
+                t.deliverable = self.deliverable.clone();
+            }
+            if let Some(v) = fixed_cost {
+                t.fixed_cost = v;
+            }
+        }
+        if self.constraint != o.constraint || self.constraint_date != o.constraint_date {
+            let cdate = opt_date(p, &self.constraint_date, !self.constraint.is_start_constraint())?;
+            if self.constraint.needs_date() && cdate.is_none() {
+                return Err(format!("'{}' needs a constraint date.", self.constraint.label()));
+            }
             let t = p.task_mut(id).ok_or("task was deleted")?;
             t.constraint = Constraint { kind: self.constraint, date: if self.constraint.needs_date() { cdate } else { None } };
-            t.deadline = deadline;
-            if self.mode == ScheduleMode::Manual {
-                t.manual_start = manual_start;
-                t.manual_finish = manual_finish;
+        }
+        if self.deadline != o.deadline {
+            let deadline = opt_date(p, &self.deadline, true)?;
+            p.task_mut(id).ok_or("task was deleted")?.deadline = deadline;
+        }
+        if self.mode == ScheduleMode::Manual && (self.start != o.start || self.finish != o.finish) {
+            let start = opt_date(p, &self.start, false)?;
+            let finish = opt_date(p, &self.finish, true)?;
+            let t = p.task_mut(id).ok_or("task was deleted")?;
+            if self.start != o.start {
+                t.manual_start = start;
             }
-            t.estimate = estimate;
+            if self.finish != o.finish {
+                t.manual_finish = finish;
+            }
+        }
+        let estimate_changed = self.est_kind != o.est_kind
+            || self.points != o.points
+            || self.optimistic != o.optimistic
+            || self.most_likely != o.most_likely
+            || self.pessimistic != o.pessimistic
+            || self.est_work != o.est_work;
+        if estimate_changed {
+            let estimate = match self.est_kind {
+                EstKind::None => None,
+                EstKind::Complexity => {
+                    Some(Estimate::Complexity { points: self.points.trim().parse().map_err(|_| "Complexity points must be a number")? })
+                }
+                EstKind::ThreePoint => {
+                    let w = |s: &str| parse_work(s, &p.settings.time).ok_or_else(|| format!("'{s}' is not a valid amount of work"));
+                    Some(Estimate::ThreePoint {
+                        optimistic: w(&self.optimistic)?,
+                        most_likely: w(&self.most_likely)?,
+                        pessimistic: w(&self.pessimistic)?,
+                    })
+                }
+                EstKind::Work => {
+                    Some(Estimate::Work { minutes: parse_work(&self.est_work, &p.settings.time).ok_or("Invalid work estimate")? })
+                }
+            };
+            p.task_mut(id).ok_or("task was deleted")?.estimate = estimate;
         }
         if !self.summary {
-            p.set_milestone(id, self.milestone).map_err(err)?;
-            if !self.milestone {
+            if self.milestone != o.milestone {
+                p.set_milestone(id, self.milestone).map_err(err)?;
+            }
+            if !self.milestone && (self.duration != o.duration || self.estimated != o.estimated) {
                 let typed = p.parse_task_duration(&self.duration).ok_or_else(|| format!("'{}' is not a valid duration", self.duration))?;
                 let typed = TypedDuration { estimated: typed.estimated || self.estimated, ..typed };
-                let cur = p.task(id).ok_or("task was deleted")?;
-                if typed.minutes != cur.duration || typed.estimated != cur.estimated || typed.elapsed != cur.elapsed {
-                    p.set_typed_duration(id, typed).map_err(err)?;
-                }
+                p.set_typed_duration(id, typed).map_err(err)?;
             }
         }
-        // Predecessors.
-        let mut deps = Vec::new();
-        for r in &self.preds {
-            let lag = Lag::parse(&r.lag, &p.settings.time).ok_or_else(|| format!("'{}' is not a valid lag", r.lag))?;
-            deps.push(Dependency { predecessor: r.pred, kind: r.kind, lag });
+        if self.preds != o.preds {
+            let mut deps = Vec::new();
+            for r in &self.preds {
+                let lag = Lag::parse(&r.lag, &p.settings.time).ok_or_else(|| format!("'{}' is not a valid lag", r.lag))?;
+                deps.push(Dependency { predecessor: r.pred, kind: r.kind, lag });
+            }
+            p.set_predecessors(id, deps).map_err(err)?;
         }
-        p.set_predecessors(id, deps).map_err(err)?;
-        // Milestone members.
-        if self.milestone {
+        if self.milestone && self.members != o.members {
             if let Some(t) = p.task_mut(id) {
                 t.members.clear();
             }
             p.add_milestone_members(id, &self.members).map_err(err)?;
         }
-        // Resources.
-        if !self.summary {
-            let keep: Vec<ResourceId> = self.resources.iter().map(|r| r.resource).collect();
-            let remove: Vec<AssignmentId> = p.assignments_for_task(id).filter(|a| !keep.contains(&a.resource)).map(|a| a.id).collect();
-            for a in remove {
-                p.unassign(a).map_err(err)?;
-            }
-            for r in &self.resources {
-                let units = format::parse_units(&r.units).ok_or_else(|| format!("'{}' is not valid units", r.units))?;
-                let work = if r.work.trim().is_empty() {
-                    None
-                } else {
-                    Some(parse_work(&r.work, &p.settings.time).ok_or_else(|| format!("'{}' is not valid work", r.work))?)
-                };
-                let existing = p.assignments.iter().find(|a| a.task == id && a.resource == r.resource).map(|a| (a.id, a.work, a.units));
-                match existing {
-                    Some((aid, old_work, old_units)) => {
-                        if (old_units - units).abs() > 1e-6 {
-                            p.set_assignment_units(aid, units).map_err(err)?;
-                        }
-                        if let Some(w) = work
-                            && w != old_work
-                        {
-                            p.set_assignment_work(aid, w).map_err(err)?;
-                        }
-                    }
-                    None => {
-                        p.assign(id, r.resource, Some(units), work).map_err(err)?;
-                    }
-                }
-            }
+        if !self.summary && self.resources != o.resources {
+            self.apply_resources(p, &o.resources)?;
         }
         // Custom fields: only the ones edited here, so values changed meanwhile are kept.
         for row in self.custom.iter().filter(|r| r.text.trim() != r.original.trim()) {
@@ -312,22 +341,70 @@ impl TaskInfo {
         }
         // Progress last so actual dates use the new schedule.
         plancraft_core::schedule::recalculate(p);
-        let pct: u8 =
-            self.percent.trim().trim_end_matches('%').parse::<f64>().map_err(|_| "% complete must be a number")?.clamp(0.0, 100.0) as u8;
-        if pct != p.task(id).ok_or("task was deleted")?.percent_complete {
+        if self.percent.trim() != o.percent.trim() {
+            let pct: u8 =
+                self.percent.trim().trim_end_matches('%').parse::<f64>().map_err(|_| "% complete must be a number")?.clamp(0.0, 100.0)
+                    as u8;
             p.set_percent_complete(id, pct).map_err(err)?;
         }
-        let t = p.task_mut(id).ok_or("task was deleted")?;
-        if astart != t.actual_start && astart.is_some() {
-            t.actual_start = astart;
+        if self.actual_start != o.actual_start
+            && let Some(d) = opt_date(p, &self.actual_start, false)?
+        {
+            p.task_mut(id).ok_or("task was deleted")?.actual_start = Some(d);
         }
-        if afinish != t.actual_finish && afinish.is_some() {
-            t.actual_finish = afinish;
+        if self.actual_finish != o.actual_finish
+            && let Some(d) = opt_date(p, &self.actual_finish, true)?
+        {
+            let t = p.task_mut(id).ok_or("task was deleted")?;
+            t.actual_finish = Some(d);
             t.percent_complete = 100;
         }
         if self.resume.trim() != self.resume_orig.trim() {
             let resume = opt_date(p, &self.resume, false)?;
             p.set_resume(id, resume).map_err(err)?;
+        }
+        Ok(())
+    }
+
+    /// Writes the Resources tab's changes since the dialog opened (`orig`): resources removed
+    /// there are unassigned, added ones assigned, and edited units or work set. Assignments an
+    /// agent made meanwhile are kept.
+    fn apply_resources(&self, p: &mut Project, orig: &[ResRow]) -> Result<(), String> {
+        let id = self.id;
+        let err = |e: PlanError| e.to_string();
+        for gone in orig.iter().filter(|o| !self.resources.iter().any(|r| r.resource == o.resource)) {
+            let found: Vec<AssignmentId> = p.assignments_for_task(id).filter(|a| a.resource == gone.resource).map(|a| a.id).collect();
+            for a in found {
+                p.unassign(a).map_err(err)?;
+            }
+        }
+        for r in &self.resources {
+            let before = orig.iter().find(|o| o.resource == r.resource);
+            if before == Some(r) {
+                continue;
+            }
+            let units = format::parse_units(&r.units).ok_or_else(|| format!("'{}' is not valid units", r.units))?;
+            let work = if r.work.trim().is_empty() {
+                None
+            } else {
+                Some(parse_work(&r.work, &p.settings.time).ok_or_else(|| format!("'{}' is not valid work", r.work))?)
+            };
+            let existing = p.assignments.iter().find(|a| a.task == id && a.resource == r.resource).map(|a| a.id);
+            match (existing, before) {
+                (Some(aid), Some(b)) => {
+                    if r.units.trim() != b.units.trim() {
+                        p.set_assignment_units(aid, units).map_err(err)?;
+                    }
+                    if let Some(w) = work.filter(|_| r.work.trim() != b.work.trim()) {
+                        p.set_assignment_work(aid, w).map_err(err)?;
+                    }
+                }
+                // Already assigned meanwhile (by an agent): keep that assignment.
+                (Some(_), None) => {}
+                (None, _) => {
+                    p.assign(id, r.resource, Some(units), work).map_err(err)?;
+                }
+            }
         }
         Ok(())
     }
@@ -782,5 +859,86 @@ impl TaskInfo {
                 }
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn demo() -> Project {
+        plancraft_core::sample::demo_project(chrono::NaiveDate::from_ymd_opt(2026, 10, 19).unwrap())
+    }
+
+    /// Regression: OK wrote every field back as the dialog opened, undoing what an agent changed
+    /// while it was open.
+    #[test]
+    fn ok_keeps_what_an_agent_changed_while_the_dialog_was_open() {
+        let mut p = demo();
+        let t = p.tasks.iter().find(|t| !t.sched.is_summary && !t.is_milestone() && !t.predecessors.is_empty()).unwrap();
+        let (id, pred) = (t.id, t.predecessors[0].predecessor);
+        let mut info = TaskInfo::new(&p, id, false).unwrap();
+
+        // Meanwhile an agent renames it, lengthens it, marks progress, unlinks it and adds a note.
+        p.task_mut(id).unwrap().name = "Renamed by the agent".into();
+        p.set_duration(id, 9 * 480, false).unwrap();
+        p.set_percent_complete(id, 30).unwrap();
+        p.set_predecessors(id, Vec::new()).unwrap();
+        p.task_mut(id).unwrap().priority = 900;
+        plancraft_core::schedule::recalculate(&mut p);
+
+        // The user changes only the notes and the deadline.
+        info.notes = "Checked with the vendor".into();
+        info.deadline = "2027-03-01".into();
+        info.apply(&mut p).unwrap();
+
+        let t = p.task(id).unwrap();
+        assert_eq!(t.notes, "Checked with the vendor");
+        assert!(t.deadline.is_some());
+        assert_eq!(t.name, "Renamed by the agent");
+        assert_eq!(t.duration, 9 * 480);
+        assert_eq!(t.percent_complete, 30);
+        assert!(t.predecessors.is_empty(), "the agent's unlink stays, not {pred:?}");
+        assert_eq!(t.priority, 900);
+    }
+
+    #[test]
+    fn ok_writes_the_fields_changed_in_the_dialog() {
+        let mut p = demo();
+        let id = p.tasks.iter().find(|t| !t.sched.is_summary && !t.is_milestone()).unwrap().id;
+        let mut info = TaskInfo::new(&p, id, false).unwrap();
+        info.name = "  New name ".into();
+        info.duration = "3d".into();
+        info.percent = "50".into();
+        info.priority = "700".into();
+        info.apply(&mut p).unwrap();
+        let t = p.task(id).unwrap();
+        assert_eq!((t.name.as_str(), t.duration, t.percent_complete, t.priority), ("New name", 3 * 480, 50, 700));
+    }
+
+    /// Resources removed or added in the dialog change only those assignments.
+    #[test]
+    fn resources_tab_keeps_assignments_an_agent_added() {
+        let mut p = demo();
+        let id = p.tasks.iter().find(|t| !t.sched.is_summary && p.assignments_for_task(t.id).count() == 2).unwrap().id;
+        let first = p.assignments_for_task(id).next().unwrap().resource;
+        let mut info = TaskInfo::new(&p, id, false).unwrap();
+        let extra = p.add_resource("Agent's pick");
+        p.assign(id, extra, None, None).unwrap();
+        info.resources.retain(|r| r.resource != first);
+        info.apply(&mut p).unwrap();
+        let now: Vec<ResourceId> = p.assignments_for_task(id).map(|a| a.resource).collect();
+        assert!(!now.contains(&first), "removed in the dialog");
+        assert!(now.contains(&extra), "the agent's assignment stays: {now:?}");
+        assert_eq!(now.len(), 2);
+    }
+
+    #[test]
+    fn an_invalid_fixed_cost_is_refused() {
+        let mut p = demo();
+        let id = p.tasks.iter().find(|t| !t.sched.is_summary).unwrap().id;
+        let mut info = TaskInfo::new(&p, id, false).unwrap();
+        info.fixed_cost = "lots".into();
+        assert!(info.apply(&mut p).is_err());
     }
 }
