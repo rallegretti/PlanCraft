@@ -10,6 +10,12 @@ use crate::commands::Command;
 use crate::state::UiState;
 use crate::theme;
 
+/// Whether the calendar shows a task: subtasks and milestones that are active (an inactive task
+/// keeps no dates) and pass the view's filter and search, as in the Gantt Chart.
+pub(crate) fn shows(p: &Project, st: &UiState, t: &Task) -> bool {
+    !t.sched.is_summary && t.active && super::task_matches(p, st, t)
+}
+
 pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: &mut Vec<Command>) {
     let p = &doc.project;
     let month = st.calendar_month.with_day(1).unwrap_or(st.calendar_month);
@@ -69,7 +75,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
         let mut lane = 0usize;
         let max_lanes = ((cell_h - 24.0) / 18.0).floor().max(0.0) as usize;
         let mut hidden = 0;
-        for t in p.tasks.iter().filter(|t| !t.sched.is_summary) {
+        for t in p.tasks.iter().filter(|t| shows(p, st, t)) {
             let (Some(s), Some(f)) = (t.sched.start, t.sched.finish) else {
                 continue;
             };

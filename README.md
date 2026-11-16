@@ -238,7 +238,8 @@ Started your plan in a spreadsheet? Open it with **File ▸ Open** (or **File �
 
 | Shortcut | Does |
 |---|---|
-| `Insert` / `Delete` | Add / remove a task |
+| `Insert` | Add a task |
+| `Delete` | Clear the selected cell; on a row number or in the Task Name column, remove the task |
 | `F2`, or just start typing | Edit the selected cell |
 | `Alt+Shift+→` / `Alt+Shift+←` | Indent / outdent |
 | `Alt+Shift+↑` / `Alt+Shift+↓` | Move a task up / down |
