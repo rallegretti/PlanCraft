@@ -98,7 +98,7 @@ pub fn tools() -> Vec<Tool> {
         Tool::new(
             "update_task",
             "Update a task",
-            "Change any editable field of a task; only the given fields change. 'start'/'finish' create SNET/FNET constraints for auto-scheduled tasks. Returns the updated task.",
+            "Change any editable field of a task; only the given fields change. 'start'/'finish' create SNET/FNET constraints for auto-scheduled tasks. Returns the updated task. 'start', 'finish' or 'duration' on a summary schedules it manually (top-down planning); a manual summary reports its subtasks' span as subtasks_start/subtasks_finish (subtasks_outside when they run past it).",
             schema(Value::Object(update_props), &["task"]),
             update_task,
         ),
@@ -298,13 +298,8 @@ pub fn apply_task_fields(p: &mut Project, id: TaskId, a: &Args) -> ToolResult<()
     }
     if let Some(v) = a.get("mode") {
         let mode: ScheduleMode = parse_enum(v, "mode", &["auto", "manual"])?;
-        let i = idx_of(p, id)?;
-        let t = row_mut(p, i)?;
-        if mode == ScheduleMode::Manual && t.mode == ScheduleMode::Auto {
-            // Freeze the current dates as the manual dates.
-            t.manual_start = t.manual_start.or(t.sched.start);
-        }
-        t.mode = mode;
+        // Switching to manual freezes the current dates as the typed ones.
+        p.set_schedule_mode(&[id], mode)?;
     }
     if let Some(v) = a.get("task_type") {
         let tt: TaskType = parse_enum(v, "task_type", &["fixed_units", "fixed_duration", "fixed_work"])?;
@@ -407,12 +402,13 @@ pub fn apply_task_fields(p: &mut Project, id: TaskId, a: &Args) -> ToolResult<()
         let i = idx_of(p, id)?;
         row_mut(p, i)?.constraint.date = Some(date);
     }
-    let manual = p.task(id).is_some_and(|t| t.mode == ScheduleMode::Manual);
+    // Dates typed on a summary make it manually scheduled (top-down planning).
+    let manual = p.task(id).is_some_and(|t| t.mode == ScheduleMode::Manual) || idx_of(p, id).is_ok_and(|i| p.has_children(i));
     if let Some(v) = a.get("start") {
         let d = parse_dt(p, v, false, "start")?;
         let i = idx_of(p, id)?;
         if manual {
-            row_mut(p, i)?.manual_start = Some(d);
+            p.set_manual_date(id, d, false)?;
         } else {
             row_mut(p, i)?.constraint = Constraint { kind: ConstraintKind::Snet, date: Some(d) };
         }
@@ -421,7 +417,7 @@ pub fn apply_task_fields(p: &mut Project, id: TaskId, a: &Args) -> ToolResult<()
         let d = parse_dt(p, v, true, "finish")?;
         let i = idx_of(p, id)?;
         if manual {
-            row_mut(p, i)?.manual_finish = Some(d);
+            p.set_manual_date(id, d, true)?;
         } else {
             row_mut(p, i)?.constraint = Constraint { kind: ConstraintKind::Fnet, date: Some(d) };
         }

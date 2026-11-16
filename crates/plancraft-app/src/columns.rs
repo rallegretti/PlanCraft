@@ -495,12 +495,8 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
             task_mut(p, id)?.name = text.trim().to_string();
         }
         Mode => {
-            let t = task_mut(p, id)?;
-            t.mode = if text.starts_with('M') { ScheduleMode::Manual } else { ScheduleMode::Auto };
-            if t.mode == ScheduleMode::Manual {
-                t.manual_start = t.sched.start;
-                t.manual_finish = t.sched.finish;
-            }
+            let mode = if text.starts_with('M') { ScheduleMode::Manual } else { ScheduleMode::Auto };
+            p.set_schedule_mode(&[id], mode).map_err(err)?;
         }
         Duration => {
             let (m, est) = p.parse_duration(text).ok_or_else(|| format!("'{text}' is not a valid duration"))?;
@@ -509,18 +505,10 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
         Start | Finish => {
             let finish = col == Finish;
             let date = parse_date(p, text, finish)?.ok_or("a date is required")?;
-            if summary {
-                return Err("summary task dates are calculated from their subtasks".into());
-            }
             let t = task_mut(p, id)?;
-            if t.mode == ScheduleMode::Manual {
-                if finish {
-                    t.manual_finish = Some(date);
-                } else {
-                    let dur = t.manual_finish.zip(t.manual_start).map(|(f, s)| f - s);
-                    t.manual_start = Some(date);
-                    t.manual_finish = dur.map(|d| date + d);
-                }
+            // A date typed on a summary makes it manually scheduled (top-down planning).
+            if summary || t.mode == ScheduleMode::Manual {
+                p.set_manual_date(id, date, finish).map_err(err)?;
             } else {
                 t.constraint = Constraint { kind: if finish { ConstraintKind::Fnet } else { ConstraintKind::Snet }, date: Some(date) };
             }

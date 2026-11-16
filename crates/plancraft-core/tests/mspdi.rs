@@ -451,3 +451,26 @@ fn imports_are_saved_as_plans_and_not_imported_twice() {
     assert_ne!(ws.open(&xml).unwrap(), a);
     assert_eq!(ws.docs.len(), 2);
 }
+
+#[test]
+fn manual_summaries_survive_a_round_trip() {
+    let mut p = Project::new("Top-down", d(2026, 10, 19));
+    let s = p.add_task("Phase", None);
+    let a = p.add_task("A", None);
+    p.set_duration(a, 2 * 480, false).unwrap();
+    p.indent(a).unwrap();
+    recalculate(&mut p);
+    p.set_manual_date(s, dt(2026, 11, 2, 8), false).unwrap();
+    p.set_manual_date(s, dt(2026, 11, 6, 17), true).unwrap();
+    recalculate(&mut p);
+    let (q, _, _, in_notes) = round_trip(&p);
+    assert!(in_notes.is_empty(), "{in_notes:?}");
+    assert_eq!(q.tasks[0].mode, ScheduleMode::Manual);
+    assert_eq!((q.tasks[0].sched.start, q.tasks[0].sched.finish), (Some(dt(2026, 11, 2, 8)), Some(dt(2026, 11, 6, 17))));
+    assert_eq!(q.tasks[1].sched.start, Some(dt(2026, 11, 2, 8)));
+    // And through a PlanCraft file.
+    let json = serde_json::to_string(&p).unwrap();
+    let mut r: Project = serde_json::from_str(&json).unwrap();
+    recalculate(&mut r);
+    assert_eq!(r.tasks[0].sched, p.tasks[0].sched.clone());
+}

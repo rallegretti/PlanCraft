@@ -506,3 +506,163 @@ fn inactive_subtasks_do_not_take_a_link_from_their_summarys_start() {
     assert_eq!(start(&p, c), dt(2026, 10, 21, 8), "C follows the active subtask's start");
     assert_eq!(p.task(b).unwrap().sched.total_slack, 0, "B's start drives C, which drives the finish");
 }
+
+// ---------------------------------------------------------------------------
+// Manually scheduled summary tasks
+// ---------------------------------------------------------------------------
+
+/// `level`-1 task added at the end (outdented out of any summary above it).
+fn top(p: &mut Project, name: &str, days: i64) -> TaskId {
+    let id = task(p, name, days);
+    while p.task(id).unwrap().outline_level > 1 {
+        p.outdent(id).unwrap();
+    }
+    id
+}
+
+/// "Phase" (made manual over 2026-11-02 to 2026-11-06) with subtask A (2 days).
+fn manual_phase(p: &mut Project) -> (TaskId, TaskId) {
+    let s = top(p, "Phase", 1);
+    let a = task(p, "A", 2);
+    p.indent(a).unwrap();
+    recalculate(p);
+    p.set_manual_date(s, dt(2026, 11, 2, 8), false).unwrap();
+    p.set_manual_date(s, dt(2026, 11, 6, 17), true).unwrap();
+    recalculate(p);
+    (s, a)
+}
+
+#[test]
+fn successors_of_a_manual_summary_follow_its_own_dates() {
+    let mut p = project();
+    let (s, a) = manual_phase(&mut p);
+    let next = top(&mut p, "Next", 1);
+    p.link(s.into(), next, LinkType::FS, Lag::None).unwrap();
+    recalculate(&mut p);
+    // A finishes on 11-03, but the summary's own finish (11-06) drives the successor.
+    assert_eq!(finish(&p, a), dt(2026, 11, 3, 17));
+    assert_eq!(start(&p, next), dt(2026, 11, 9, 8));
+    // Its dates are its own early and late dates, like a manual task's.
+    let sched = &p.task(s).unwrap().sched;
+    assert_eq!((sched.early_start, sched.late_finish), (Some(dt(2026, 11, 2, 8)), Some(dt(2026, 11, 6, 17))));
+}
+
+#[test]
+fn links_into_summaries_around_a_manual_summary_stop_at_it() {
+    let mut p = project();
+    let driver = top(&mut p, "Driver", 10);
+    let outer = top(&mut p, "Outer", 1);
+    let (s, a) = manual_phase(&mut p);
+    p.indent(s).unwrap();
+    let auto = task(&mut p, "Auto", 1);
+    while p.task(auto).unwrap().outline_level > 2 {
+        p.outdent(auto).unwrap();
+    }
+    p.link(driver.into(), outer, LinkType::FS, Lag::None).unwrap();
+    recalculate(&mut p);
+    assert_eq!(p.task(a).unwrap().outline_level, 3);
+    // Driver finishes 10-30: it pushes Outer's other subtask, not the manual summary's.
+    assert_eq!(start(&p, auto), dt(2026, 11, 2, 8));
+    assert_eq!(start(&p, a), dt(2026, 11, 2, 8));
+    p.set_duration(driver, 20 * DAY, false).unwrap();
+    recalculate(&mut p);
+    assert_eq!(start(&p, auto), dt(2026, 11, 16, 8));
+    assert_eq!(start(&p, a), dt(2026, 11, 2, 8));
+    // The outer summary spans its subtasks, taking the manual summary's own dates.
+    assert_eq!(start(&p, outer), dt(2026, 11, 2, 8));
+    assert_eq!(finish(&p, outer), dt(2026, 11, 16, 17));
+}
+
+#[test]
+fn the_project_spans_manual_summaries() {
+    let mut p = project();
+    let (s, _) = manual_phase(&mut p);
+    p.set_manual_date(s, dt(2026, 12, 18, 17), true).unwrap();
+    recalculate(&mut p);
+    assert_eq!(p.sched.start, Some(dt(2026, 11, 2, 8)));
+    assert_eq!(p.sched.finish, Some(dt(2026, 12, 18, 17)));
+}
+
+#[test]
+fn a_manual_summary_without_a_typed_start_is_scheduled_like_an_automatic_one() {
+    let mut p = project();
+    let (s, a) = manual_phase(&mut p);
+    let t = p.task_mut(s).unwrap();
+    (t.manual_start, t.manual_finish) = (None, None);
+    recalculate(&mut p);
+    assert_eq!((start(&p, s), finish(&p, s)), (start(&p, a), finish(&p, a)));
+    assert_eq!(start(&p, a), dt(2026, 10, 19, 8));
+    assert_eq!(p.task(s).unwrap().sched.rollup_start, None);
+}
+
+#[test]
+fn switching_a_summary_to_manual_keeps_its_dates_and_back_to_auto_rolls_up_again() {
+    let mut p = project();
+    let s = top(&mut p, "Phase", 1);
+    let a = task(&mut p, "A", 3);
+    p.indent(a).unwrap();
+    recalculate(&mut p);
+    p.set_schedule_mode(&[s], ScheduleMode::Manual).unwrap();
+    recalculate(&mut p);
+    assert_eq!((start(&p, s), finish(&p, s)), (dt(2026, 10, 19, 8), dt(2026, 10, 21, 17)));
+    assert_eq!(p.task(s).unwrap().duration, 3 * DAY);
+    p.set_duration(a, 5 * DAY, false).unwrap();
+    recalculate(&mut p);
+    assert_eq!(finish(&p, s), dt(2026, 10, 21, 17));
+    assert_eq!(p.task(s).unwrap().sched.rollup_finish, Some(dt(2026, 10, 23, 17)));
+    p.set_schedule_mode(&[s], ScheduleMode::Auto).unwrap();
+    recalculate(&mut p);
+    assert_eq!(finish(&p, s), dt(2026, 10, 23, 17));
+    assert_eq!(p.task(s).unwrap().sched.rollup_finish, None);
+}
+
+#[test]
+fn typed_dates_on_tasks() {
+    let mut p = project();
+    let a = task(&mut p, "A", 2);
+    // Only manual tasks (and summaries) take typed dates.
+    assert!(p.set_manual_date(a, dt(2026, 10, 21, 8), false).is_err());
+    p.set_schedule_mode(&[a], ScheduleMode::Manual).unwrap();
+    p.set_manual_date(a, dt(2026, 10, 19, 8), false).unwrap();
+    p.set_manual_date(a, dt(2026, 10, 20, 17), true).unwrap();
+    // A new start keeps the length; a finish before the start moves the start too.
+    p.set_manual_date(a, dt(2026, 10, 26, 8), false).unwrap();
+    assert_eq!(p.task(a).unwrap().manual_finish, Some(dt(2026, 10, 27, 17)));
+    p.set_manual_date(a, dt(2026, 10, 22, 17), true).unwrap();
+    assert_eq!(p.task(a).unwrap().manual_start, Some(dt(2026, 10, 22, 17)));
+    recalculate(&mut p);
+}
+
+/// Issue 21: a plan from Microsoft Project with manually scheduled summaries (one linked from a
+/// longer task, one unlinked) keeps their dates, and their subtasks follow them.
+#[test]
+fn manual_summaries_from_a_project_xml_file_keep_their_dates() {
+    let task = |uid: u32, name: &str, level: u32, hours: u32, inner: &str| {
+        format!(
+            "<Task><UID>{uid}</UID><Name>{name}</Name><OutlineLevel>{level}</OutlineLevel><Duration>PT{hours}H0M0S</Duration>{inner}</Task>"
+        )
+    };
+    let link = |pred: u32| format!("<PredecessorLink><PredecessorUID>{pred}</PredecessorUID><Type>1</Type></PredecessorLink>");
+    let manual =
+        |s: &str, f: &str| format!("<Summary>1</Summary><Manual>1</Manual><Start>{s}T08:00:00</Start><Finish>{f}T17:00:00</Finish>");
+    let tasks = [
+        task(1, "Driver", 1, 160, ""),
+        task(2, "Linked phase", 1, 40, &(manual("2026-03-09", "2026-03-13") + &link(1))),
+        task(3, "Work A", 2, 40, ""),
+        task(4, "Unlinked phase", 1, 16, &manual("2026-04-13", "2026-04-14")),
+        task(5, "Work B", 2, 16, ""),
+    ]
+    .concat();
+    let xml = format!("<Project><StartDate>2026-03-02T08:00:00</StartDate><Tasks>{tasks}</Tasks></Project>");
+    let (mut p, notes) = plancraft_core::mspdi::from_xml(&xml, "x").unwrap();
+    assert!(notes.is_empty(), "{notes:?}");
+    recalculate(&mut p);
+    let dates = |i: usize| (p.tasks[i].sched.start.unwrap(), p.tasks[i].sched.finish.unwrap());
+    assert_eq!(dates(0), (dt(2026, 3, 2, 8), dt(2026, 3, 27, 17)));
+    for i in [1, 2] {
+        assert_eq!(dates(i), (dt(2026, 3, 9, 8), dt(2026, 3, 13, 17)), "{}", p.tasks[i].name);
+    }
+    for i in [3, 4] {
+        assert_eq!(dates(i), (dt(2026, 4, 13, 8), dt(2026, 4, 14, 17)), "{}", p.tasks[i].name);
+    }
+}

@@ -632,8 +632,28 @@ impl Chart<'_> {
                 diamond(out, pt(x0, yc), 4.5, fill);
                 out.push(text(pt(x0 + 7.0, yc + 2.5), SMALL, pal.text, false, f.format("%-m/%-d").to_string()));
             } else if t.sched.is_summary {
-                let fill = if critical { pal.bar_critical_edge } else { pal.bar_summary };
+                // A manually scheduled summary: the manual-task colour, its subtasks' span below
+                // it (red where it lies outside the summary).
+                let fill = if critical {
+                    pal.bar_critical_edge
+                } else if t.sched.rollup_start.is_some() {
+                    pal.bar_manual
+                } else {
+                    pal.bar_summary
+                };
                 out.push(Item::Rect { rect: Rect::new(x0, yc - 2.5, (x1 - x0).max(1.0), 3.0), fill: Some(fill), stroke: None });
+                if let (Some(rs), Some(rf)) = (t.sched.rollup_start, t.sched.rollup_finish) {
+                    let (rx0, rx1) = (xs(rs), xs(rf));
+                    let yb = yc + if with_baseline { 7.0 } else { 5.0 };
+                    let mut line = |a: f32, b: f32, color: Rgb| {
+                        if b > a {
+                            out.push(Item::Rect { rect: Rect::new(a, yb, b - a, 1.2), fill: Some(color), stroke: None });
+                        }
+                    };
+                    line(rx0, rx1.max(rx0 + 1.0), pal.bar_summary);
+                    line(rx0, rx1.min(x0), pal.error);
+                    line(rx0.max(x1), rx1, pal.error);
+                }
                 for x in [x0, x1] {
                     out.push(Item::Polygon { points: vec![pt(x - 3.0, yc + 0.5), pt(x + 3.0, yc + 0.5), pt(x, yc + 4.0)], fill });
                 }

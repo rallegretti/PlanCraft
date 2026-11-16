@@ -1574,3 +1574,108 @@ fn mspdi_custom_fields_by_field_id() {
     assert_eq!(p.tasks[0].custom.get(&field("Phase").id), Some(&CustomValue::Text("Design".into())));
     assert_eq!(p.tasks[0].custom.get(&field("Risk").id), Some(&CustomValue::Number(4.5)));
 }
+
+// ===========================================================================
+// Manually scheduled summary tasks (top-down planning)
+// ===========================================================================
+
+/// A summary "Phase" over A (3 days) and B (2 days, after A), recalculated.
+fn phase() -> (Project, TaskId, TaskId, TaskId) {
+    let mut p = project();
+    let s = p.add_task("Phase", None);
+    let a = task(&mut p, "A", 3 * DAY);
+    let b = task(&mut p, "B", 2 * DAY);
+    p.indent(a).unwrap();
+    p.indent(b).unwrap();
+    p.link(a.into(), b, LinkType::FS, Lag::None).unwrap();
+    recalculate(&mut p);
+    (p, s, a, b)
+}
+
+// Source: https://support.microsoft.com/en-us/office/top-down-planning-0818cb34-eddc-4c9f-a5e8-172f0776a64f — "Top-down planning"
+// A summary given its own dates keeps them: the subtasks are not summed into it, they line up
+// with the summary's start, and the summary's bar shows the subtasks' span as a lower bar.
+#[test]
+fn a_manual_summary_keeps_its_dates_and_its_subtasks_follow_its_start() {
+    let (mut p, s, a, b) = phase();
+    p.set_manual_date(s, dt(2026, 11, 2, 8), false).unwrap();
+    p.set_manual_date(s, dt(2026, 11, 13, 17), true).unwrap();
+    recalculate(&mut p);
+    assert_eq!(p.task(s).unwrap().mode, ScheduleMode::Manual);
+    assert_eq!((start(&p, s), finish(&p, s)), (dt(2026, 11, 2, 8), dt(2026, 11, 13, 17)));
+    assert_eq!(start(&p, a), dt(2026, 11, 2, 8));
+    assert_eq!((start(&p, b), finish(&p, b)), (dt(2026, 11, 5, 8), dt(2026, 11, 6, 17)));
+    let sched = &p.task(s).unwrap().sched;
+    assert_eq!((sched.rollup_start, sched.rollup_finish), (Some(dt(2026, 11, 2, 8)), Some(dt(2026, 11, 6, 17))));
+}
+
+// Source: https://support.microsoft.com/en-us/office/create-a-new-task-in-project-online-99b036ba-8207-4702-a3fc-14c49f913683 — "Use top-down summary tasks for high-level planning"
+// Entering a duration on a summary task schedules it manually, so its subtasks' dates and
+// durations no longer roll up into it.
+#[test]
+fn a_duration_typed_on_a_summary_schedules_it_manually() {
+    let (mut p, s, a, _) = phase();
+    p.set_duration(s, 10 * DAY, false).unwrap();
+    recalculate(&mut p);
+    assert_eq!(p.task(s).unwrap().mode, ScheduleMode::Manual);
+    assert_eq!((start(&p, s), finish(&p, s)), (dt(2026, 10, 19, 8), dt(2026, 10, 30, 17)));
+    // A longer subtask no longer moves the summary.
+    p.set_duration(a, 12 * DAY, false).unwrap();
+    recalculate(&mut p);
+    assert_eq!(finish(&p, s), dt(2026, 10, 30, 17));
+}
+
+// Source: https://support.microsoft.com/en-us/office/top-down-planning-0818cb34-eddc-4c9f-a5e8-172f0776a64f — "Top-down planning"
+// When a subtask falls outside the summary's start or finish, the summary flags it (Project
+// draws a red bar under the summary).
+#[test]
+fn subtasks_outside_a_manual_summary_are_flagged() {
+    let (mut p, s, _, b) = phase();
+    p.set_manual_date(s, dt(2026, 10, 19, 8), false).unwrap();
+    p.set_manual_date(s, dt(2026, 10, 21, 17), true).unwrap();
+    recalculate(&mut p);
+    let sched = &p.task(s).unwrap().sched;
+    assert_eq!(finish(&p, s), dt(2026, 10, 21, 17));
+    assert_eq!(sched.rollup_finish, Some(finish(&p, b)));
+    assert!(sched.rollup_finish > sched.finish, "B finishes after the summary");
+}
+
+// Source: https://support.microsoft.com/en-us/project/how-project-schedules-tasks-behind-the-scenes — "How do task links affect the schedule?"
+// A manually scheduled task stays where it is when its predecessor's dates change; so does a
+// manual summary, and its subtasks keep following its start rather than the link.
+#[test]
+fn a_link_into_a_manual_summary_moves_neither_it_nor_its_subtasks() {
+    let (mut p, s, a, _) = phase();
+    let driver = task(&mut p, "Driver", 5 * DAY);
+    // Added under the summary's last subtask; outdented to stand on its own.
+    while p.task(driver).unwrap().outline_level > 1 {
+        p.outdent(driver).unwrap();
+    }
+    p.link(driver.into(), s, LinkType::FS, Lag::None).unwrap();
+    recalculate(&mut p);
+    // Automatic: the link pushes the summary's subtasks after Driver.
+    assert_eq!(start(&p, a), dt(2026, 10, 26, 8));
+    p.set_manual_date(s, dt(2026, 10, 20, 8), false).unwrap();
+    p.set_manual_date(s, dt(2026, 10, 23, 17), true).unwrap();
+    recalculate(&mut p);
+    assert_eq!(start(&p, s), dt(2026, 10, 20, 8));
+    assert_eq!(start(&p, a), dt(2026, 10, 20, 8));
+    p.set_duration(driver, 10 * DAY, false).unwrap();
+    recalculate(&mut p);
+    assert_eq!((start(&p, s), start(&p, a)), (dt(2026, 10, 20, 8), dt(2026, 10, 20, 8)));
+}
+
+// Source: https://support.microsoft.com/en-us/office/start-fields-65b22c0b-8580-4352-994b-b491049cfbd2 — "Start (task field)"
+// A manually scheduled task keeps the start entered for it. A manual summary read from a file
+// keeps its own Start and Finish instead of its subtasks' span.
+#[test]
+fn mspdi_manual_summary_keeps_its_start_and_finish() {
+    let summary = "<Task><UID>1</UID><Name>Phase</Name><OutlineLevel>1</OutlineLevel><Summary>1</Summary><Manual>1</Manual>\
+        <Start>2026-11-02T08:00:00</Start><Finish>2026-11-06T17:00:00</Finish><Duration>PT40H0M0S</Duration></Task>";
+    let sub = "<Task><UID>2</UID><Name>A</Name><OutlineLevel>2</OutlineLevel><Duration>PT16H0M0S</Duration></Task>";
+    let p = mspdi(&format!("{summary}{sub}"), "");
+    assert_eq!(p.tasks[0].mode, ScheduleMode::Manual);
+    assert_eq!((p.tasks[0].sched.start, p.tasks[0].sched.finish), (Some(dt(2026, 11, 2, 8)), Some(dt(2026, 11, 6, 17))));
+    assert_eq!(p.tasks[1].sched.start, Some(dt(2026, 11, 2, 8)));
+    assert_eq!(p.tasks[0].sched.rollup_finish, Some(dt(2026, 11, 3, 17)));
+}

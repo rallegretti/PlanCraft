@@ -198,8 +198,15 @@ fn full_project_workflow() {
     let bulk = c.call("update_tasks", json!({ "updates": [{ "task": fe, "notes": "React" }, { "task": "QA", "duration": "3d" }] }));
     assert_eq!(bulk["updated"], 2);
     assert_eq!(c.call("get_task", json!({ "task": "QA" }))["duration_minutes"], 1440);
-    let e = c.call_err("update_task", json!({ "task": design, "duration": "4d" }));
-    assert!(e.contains("summary"), "{e}");
+    // A duration typed on a summary schedules it manually (top-down planning): it keeps its
+    // start, its subtasks' span is reported apart, and switching back rolls them up again.
+    let top_down = c.call("update_task", json!({ "task": design, "duration": "4d" }));
+    assert_eq!((top_down["mode"].as_str(), top_down["duration_minutes"].as_i64()), (Some("manual"), Some(1920)));
+    assert_eq!(top_down["finish"], "2026-10-22 17:00");
+    assert_eq!(top_down["subtasks_outside"], true, "{top_down}");
+    let back = c.call("update_task", json!({ "task": design, "mode": "auto" }));
+    assert_eq!(back["finish"], top_down["subtasks_finish"]);
+    assert!(back.get("subtasks_finish").is_none());
     let e = c.call_err("update_tasks", json!({ "updates": [{ "task": fe, "notes": "ok" }, { "task": 4242, "notes": "bad" }] }));
     assert!(e.contains("4242"), "{e}");
     assert_eq!(c.call("get_task", json!({ "task": fe }))["notes"], "React");

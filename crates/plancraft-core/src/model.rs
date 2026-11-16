@@ -327,6 +327,12 @@ pub struct TaskSchedule {
     /// The working parts (start, finish) of a split task, in order; empty when it is not split.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub parts: Vec<(NaiveDateTime, NaiveDateTime)>,
+    /// The span of a manually scheduled summary's subtasks (its own dates are `start` and
+    /// `finish`); `None` for every other task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollup_start: Option<NaiveDateTime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rollup_finish: Option<NaiveDateTime>,
     /// Human-readable scheduling problems (constraint conflicts, missed deadlines...).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,

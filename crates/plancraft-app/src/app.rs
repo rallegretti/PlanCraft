@@ -741,17 +741,11 @@ impl PlanCraftApp {
             }
             Command::SetMode(mode) => {
                 if !sel.is_empty() {
-                    let r = doc.edit(if mode == ScheduleMode::Manual { "Manually Schedule" } else { "Auto Schedule" }, |p| {
-                        for id in &sel {
-                            if let Some(t) = p.task_mut(*id) {
-                                if mode == ScheduleMode::Manual && t.mode == ScheduleMode::Auto {
-                                    t.manual_start = t.sched.start;
-                                    t.manual_finish = t.sched.finish;
-                                }
-                                t.mode = mode;
-                            }
-                        }
-                    });
+                    let r = doc.try_edit(
+                        if mode == ScheduleMode::Manual { "Manually Schedule" } else { "Auto Schedule" },
+                        ChangeSource::User,
+                        |p| p.set_schedule_mode(&sel, mode),
+                    );
                     report(st, r);
                 }
             }

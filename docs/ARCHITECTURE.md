@@ -69,12 +69,12 @@ So a vacation of any assigned person pauses the task. Lags and summary durations
    - Applies constraints: SNET/FNET push the task later; MSO/MFO pin it; SNLT/FNLT are honored and flagged when violated. A Start No Earlier Than date on a summary drives all of its subtasks.
    - Adds leveling delays.
    - Uses actual start and finish when they are set.
-   - Manual tasks keep their entered dates.
+   - Manual tasks keep their entered dates. A manually scheduled summary keeps its own dates too: links into it (and into the summaries around it) stop at it, its auto-scheduled subtasks start no earlier than its start, and its successors follow its own dates.
 6. **Backward pass.** It computes late dates, limited by the project finish, deadlines (a task's own and its summaries') and constraints. Inactive successors are skipped. A link from a summary's start binds only the subtask that sets that start.
 7. **ALAP pass.** As-late-as-possible tasks are pinned to their late start, and the passes run again so successors stay consistent.
 8. **Slack.** Total and free slack are computed per leaf. A task is critical when total slack ≤ the threshold.
 9. **Roll up summaries and the project:**
-   - Dates, work and cost. A summary's own fixed cost and assignments are added on top of its subtasks'.
+   - Dates, work and cost. A summary's own fixed cost and assignments are added on top of its subtasks'. A manually scheduled summary keeps its own dates; its subtasks' span goes to `rollup_start`/`rollup_finish`.
    - % complete, weighted by the durations of all subtasks below. Nested summaries and the project agree.
    - A missed summary deadline is flagged.
 
