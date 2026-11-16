@@ -46,7 +46,10 @@ pub mod prelude {
     pub use crate::baseline::{PlanSlot, Scope};
     pub use crate::calendar::{Calendar, CalendarException, TimeRange, WorkCal, WorkWeek};
     pub use crate::custom::{CustomFieldDef, CustomFieldKind, CustomValue, TableLayout};
-    pub use crate::duration::{DurationUnit, Lag, Minutes, TimeSettings, format_duration, format_work, parse_duration, parse_work};
+    pub use crate::duration::{
+        DurationUnit, Lag, Minutes, TimeSettings, TypedDuration, format_duration, format_elapsed, format_work, parse_duration,
+        parse_task_duration, parse_work,
+    };
     pub use crate::ids::*;
     pub use crate::model::*;
     pub use crate::ops::{PlanError, PlanResult, ProgressUpdate, TrackingReport};

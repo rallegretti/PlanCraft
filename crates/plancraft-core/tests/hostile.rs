@@ -284,6 +284,7 @@ enum Op {
     RemainingDuration(usize, i64),
     Mode(usize, bool),
     ManualDate(usize, i64, bool),
+    ElapsedDuration(usize, i64, bool),
 }
 
 fn edit_op() -> impl Strategy<Value = Op> {
@@ -365,6 +366,7 @@ fn edit_op() -> impl Strategy<Value = Op> {
         (i(), big()).prop_map(|(a, m)| Op::RemainingDuration(a, m)),
         (i(), any::<bool>()).prop_map(|(a, m)| Op::Mode(a, m)),
         (i(), big(), any::<bool>()).prop_map(|(a, m, f)| Op::ManualDate(a, m, f)),
+        (i(), big(), any::<bool>()).prop_map(|(a, m, e)| Op::ElapsedDuration(a, m, e)),
     ]
 }
 
@@ -545,6 +547,9 @@ fn apply(p: &mut Project, op: &Op) -> PlanResult<()> {
         Op::RemainingDuration(i, m) => p.set_remaining_duration(task_at(p, i), m)?,
         Op::Mode(i, manual) => p.set_schedule_mode(&[task_at(p, i)], if manual { ScheduleMode::Manual } else { ScheduleMode::Auto })?,
         Op::ManualDate(i, m, finish) => p.set_manual_date(task_at(p, i), shift(p.start, m), finish)?,
+        Op::ElapsedDuration(i, minutes, elapsed) => {
+            p.set_typed_duration(task_at(p, i), TypedDuration { minutes, estimated: false, elapsed })?;
+        }
     }
     Ok(())
 }

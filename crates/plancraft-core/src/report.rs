@@ -81,12 +81,17 @@ pub fn status_moment(p: &Project) -> NaiveDateTime {
 
 /// Fraction of the baseline (or current) span that should be complete at `at`, in the project
 /// calendar `wc`.
-fn planned_fraction(start: NaiveDateTime, finish: NaiveDateTime, at: NaiveDateTime, wc: &WorkCal) -> f64 {
+fn planned_fraction(start: NaiveDateTime, finish: NaiveDateTime, at: NaiveDateTime, wc: &WorkCal, elapsed: bool) -> f64 {
     if at <= start {
         return 0.0;
     }
     if at >= finish {
         return 1.0;
+    }
+    if elapsed {
+        // Elapsed time runs around the clock.
+        let total = finish.signed_duration_since(start).num_minutes();
+        return if total <= 0 { 1.0 } else { at.signed_duration_since(start).num_minutes() as f64 / total as f64 };
     }
     let total = wc.between(start, finish);
     if total <= 0 { 1.0 } else { wc.between(start, at) as f64 / total as f64 }
@@ -111,7 +116,7 @@ pub fn is_late_in(t: &Task, at: NaiveDateTime, wc: &WorkCal) -> bool {
     {
         return true;
     }
-    let expected = planned_fraction(s, f, at, wc) * 100.0;
+    let expected = planned_fraction(s, f, at, wc, t.elapsed) * 100.0;
     (t.sched.percent_complete as f64) + 0.5 < expected
 }
 
@@ -170,7 +175,7 @@ pub fn earned_value(p: &Project, at: NaiveDateTime) -> Option<EarnedValue> {
     for t in leaves {
         let Some(b) = t.baseline_in(slot) else { continue };
         any_baseline = true;
-        ev.bcws += b.cost * planned_fraction(b.start, b.finish, at, &wc);
+        ev.bcws += b.cost * planned_fraction(b.start, b.finish, at, &wc, t.elapsed);
         ev.bcwp += b.cost * t.sched.percent_complete as f64 / 100.0;
         // Actual cost (ACWP): the cost of the work done so far. Progress entered as actual work
         // (tracked time) counts as that work; progress entered as % complete counts as that share

@@ -125,7 +125,7 @@ pub fn task_row(p: &Project, idx: usize) -> Value {
         "name": t.name,
         "level": t.outline_level,
         "kind": kind_str(t),
-        "duration": p.format_duration(t.sched.duration, t.estimated && !t.sched.is_summary),
+        "duration": p.format_task_duration(t),
         "duration_minutes": t.sched.duration,
         "start": fmt_dt(t.sched.start),
         "finish": fmt_dt(t.sched.finish),
@@ -158,6 +158,9 @@ pub fn task_row(p: &Project, idx: usize) -> Value {
     }
     if t.mode == ScheduleMode::Manual {
         m.insert("mode".into(), json!("manual"));
+    }
+    if t.elapsed && !t.sched.is_summary {
+        m.insert("elapsed".into(), json!(true));
     }
     // A manually scheduled summary keeps its own dates; its subtasks' span is reported apart.
     if let (Some(s), Some(f)) = (t.sched.rollup_start, t.sched.rollup_finish) {
@@ -273,7 +276,7 @@ fn variance_json(p: &Project, t: &Task) -> Value {
     json!({
         "baseline_start": fmt_dt(Some(b.start)),
         "baseline_finish": fmt_dt(Some(b.finish)),
-        "baseline_duration": dur(p, b.duration),
+        "baseline_duration": p.format_task_minutes(t, b.duration, false),
         "baseline_work": format_work(b.work),
         "baseline_cost": round2(b.cost),
         "saved": fmt_dt(Some(b.saved)),
@@ -323,6 +326,7 @@ pub fn task_detail(p: &Project, id: TaskId) -> Value {
         "mode": enum_str(&t.mode),
         "active": t.active,
         "estimated": t.estimated,
+        "elapsed": t.elapsed && !t.sched.is_summary,
         "task_type": enum_str(&t.task_type),
         "effort_driven": t.effort_driven,
         "priority": t.priority,
@@ -381,7 +385,7 @@ pub fn task_detail(p: &Project, id: TaskId) -> Value {
             .iter()
             .map(|(n, b)| {
                 let v = json!({
-                    "start": fmt_dt(Some(b.start)), "finish": fmt_dt(Some(b.finish)), "duration": dur(p, b.duration),
+                    "start": fmt_dt(Some(b.start)), "finish": fmt_dt(Some(b.finish)), "duration": p.format_task_minutes(t, b.duration, false),
                     "work": format_work(b.work), "cost": round2(b.cost), "saved": fmt_dt(Some(b.saved)),
                 });
                 (plancraft_core::baseline::PlanSlot::Baseline(*n).key(), v)
@@ -682,7 +686,7 @@ pub fn schedule_table(p: &Project, rows: &[usize]) -> String {
             p.wbs(i),
             indent,
             t.name,
-            p.format_duration(t.sched.duration, t.estimated && !t.sched.is_summary),
+            p.format_task_duration(t),
             short(t.sched.start),
             short(t.sched.finish),
             t.sched.percent_complete.round(),

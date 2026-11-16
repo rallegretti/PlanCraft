@@ -7,7 +7,7 @@
 use chrono::{NaiveDate, NaiveDateTime};
 use std::collections::{HashMap, HashSet};
 
-use crate::duration::{DurationUnit, Lag, Minutes, parse_duration};
+use crate::duration::{DurationUnit, Lag, Minutes, TypedDuration, parse_duration};
 use crate::ids::*;
 use crate::limits::{
     MAX_ASSIGNMENTS, MAX_LINKS_PER_TASK, MAX_MINUTES, MAX_OUTLINE_LEVEL, MAX_RESOURCES, MAX_UNITS, clamp_f64, clamp_minutes,
@@ -628,8 +628,29 @@ impl Project {
         Ok(())
     }
 
-    /// Sets a task's duration, adjusting assignments according to the task type. A summary task
-    /// becomes manually scheduled, keeping its start (its finish follows the new duration).
+    /// Sets a task's duration as typed: working or elapsed time (see [`TypedDuration`]). A
+    /// summary task takes working time only.
+    pub fn set_typed_duration(&mut self, id: TaskId, typed: TypedDuration) -> PlanResult<()> {
+        let idx = self.require_task(id)?;
+        if typed.elapsed && self.has_children(idx) {
+            return invalid("a summary task's duration is working time; give its subtasks elapsed durations instead");
+        }
+        if typed.elapsed && !self.row(idx)?.gaps.is_empty() {
+            return invalid("a split task cannot have an elapsed duration; remove its splits first");
+        }
+        let elapsed = typed.elapsed && typed.minutes > 0;
+        let was = self.row(idx)?.elapsed;
+        self.row_mut(idx)?.elapsed = elapsed;
+        if let Err(e) = self.set_duration(id, typed.minutes, typed.estimated) {
+            self.row_mut(idx)?.elapsed = was;
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    /// Sets a task's duration, adjusting assignments according to the task type. The minutes are
+    /// in the task's own kind of time (elapsed for an elapsed task). A summary task becomes
+    /// manually scheduled, keeping its start (its finish follows the new duration).
     pub fn set_duration(&mut self, id: TaskId, minutes: Minutes, estimated: bool) -> PlanResult<()> {
         let idx = self.require_task(id)?;
         if minutes > MAX_MINUTES {
@@ -1040,8 +1061,10 @@ impl Project {
             } else {
                 let cal = crate::schedule::task_calendar(self, idx);
                 let upto = through.min(finish);
-                // A split task does no work during its pauses.
-                let done = if t.sched.parts.is_empty() {
+                // A split task does no work during its pauses; elapsed time runs around the clock.
+                let done = if t.elapsed {
+                    upto.signed_duration_since(start).num_minutes().max(0)
+                } else if t.sched.parts.is_empty() {
                     cal.between(start, upto).max(0)
                 } else {
                     crate::schedule::work_done_by(&t.sched.parts, &cal, upto)
@@ -1095,6 +1118,10 @@ impl Project {
                 }
                 continue;
             }
+            if t.elapsed && t.percent_complete > 0 && t.sched.start.is_some_and(|s| s < after) {
+                report.skipped.push((id, "it has an elapsed duration, which runs without pauses".into()));
+                continue;
+            }
             if t.percent_complete == 0 && t.actual_start.is_none() {
                 not_started.push(idx);
                 continue;
@@ -1137,6 +1164,9 @@ impl Project {
     /// any pause still ahead of it (earlier pauses, in work already done, stay).
     fn pause_at_stop(&mut self, idx: usize, resume: NaiveDateTime) -> PlanResult<()> {
         let t = self.row_mut(idx)?;
+        if t.elapsed {
+            return invalid(format!("'{}' has an elapsed duration, which runs without pauses", t.name));
+        }
         let done = t.actual_duration();
         t.splits.retain(|s| s.work < done);
         if t.splits.len() >= crate::schedule::MAX_SPLITS {
@@ -1389,6 +1419,44 @@ impl Project {
     /// Parses a duration with the project's default unit.
     pub fn parse_duration(&self, text: &str) -> Option<(Minutes, bool)> {
         parse_duration(text, self.settings.duration_unit, &self.settings.time)
+    }
+
+    /// Parses a task duration with the project's default unit: working time, or elapsed time such
+    /// as `33ed`.
+    pub fn parse_task_duration(&self, text: &str) -> Option<TypedDuration> {
+        crate::duration::parse_task_duration(text, self.settings.duration_unit, &self.settings.time)
+    }
+
+    /// Parses an amount of a task's own kind of time (its actual or remaining duration): elapsed
+    /// time for an elapsed task (`3ed`, or a bare number of elapsed days), working time otherwise.
+    pub fn parse_task_minutes(&self, id: TaskId, text: &str) -> PlanResult<Minutes> {
+        let elapsed = self.task(id).ok_or(PlanError::TaskNotFound(id))?.elapsed;
+        let Some(typed) = self.parse_task_duration(text) else {
+            return invalid(format!("'{}' is not a valid duration", text.trim()));
+        };
+        match (elapsed, typed.elapsed) {
+            (true, false) => match text.trim().parse::<f64>() {
+                Ok(v) if v.is_finite() => Ok(clamp_minutes((v * self.settings.duration_unit.elapsed_minutes() as f64).round() as Minutes)),
+                _ => invalid("this task's duration is elapsed time: give it in elapsed units, like 3ed"),
+            },
+            (false, true) => invalid("this task's duration is working time: give it in working units, like 3d"),
+            _ => Ok(typed.minutes),
+        }
+    }
+
+    /// A task's duration as shown: a summary's span, an elapsed duration in elapsed units
+    /// (`33 edays`), and a `?` on an estimate.
+    pub fn format_task_duration(&self, t: &Task) -> String {
+        self.format_task_minutes(t, t.sched.duration, t.estimated && !t.sched.is_summary)
+    }
+
+    /// `minutes` of a task's own kind of time (elapsed for an elapsed task), as shown.
+    pub fn format_task_minutes(&self, t: &Task, minutes: Minutes, estimated: bool) -> String {
+        if t.elapsed && !t.sched.is_summary {
+            crate::duration::format_elapsed(minutes, self.settings.duration_unit, estimated)
+        } else {
+            self.format_duration(minutes, estimated)
+        }
     }
 
     pub fn format_duration(&self, minutes: Minutes, estimated: bool) -> String {

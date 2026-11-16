@@ -207,6 +207,15 @@ fn full_project_workflow() {
     let back = c.call("update_task", json!({ "task": design, "mode": "auto" }));
     assert_eq!(back["finish"], top_down["subtasks_finish"]);
     assert!(back.get("subtasks_finish").is_none());
+    // Elapsed time runs around the clock: 3 elapsed days from Monday 08:00 end Thursday 08:00.
+    let cure = c.call("create_task", json!({ "name": "Cure", "duration": "3ed", "start": "2026-10-19" }));
+    assert_eq!((cure["elapsed"].as_bool(), cure["duration"].as_str()), (Some(true), Some("3 edays")), "{cure}");
+    assert_eq!(cure["finish"], "2026-10-22 08:00");
+    let cure = c.call("update_task", json!({ "task": cure["id"], "remaining_duration": "2ed", "percent_complete": 50 }));
+    assert_eq!(cure["duration"], "3.5 edays");
+    let e = c.call_err("update_task", json!({ "task": cure["id"], "remaining_duration": "2d" }));
+    assert!(e.contains("elapsed"), "{e}");
+    c.call("delete_tasks", json!({ "tasks": [cure["id"]] }));
     let e = c.call_err("update_tasks", json!({ "updates": [{ "task": fe, "notes": "ok" }, { "task": 4242, "notes": "bad" }] }));
     assert!(e.contains("4242"), "{e}");
     assert_eq!(c.call("get_task", json!({ "task": fe }))["notes"], "React");

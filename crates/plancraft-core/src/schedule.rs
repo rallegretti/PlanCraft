@@ -166,6 +166,11 @@ pub fn parts_of(t: &Task, cal: &WorkCal, dur: Minutes) -> Option<Parts> {
     }
     let done = dur.saturating_mul(pct) / 100;
     let remaining = dur.saturating_sub(done);
+    if t.elapsed {
+        // Elapsed time runs on without pauses (an elapsed task cannot be split).
+        let stop = shift(start, done);
+        return Some(Parts { stop, resume: stop, remaining, finish: shift(start, dur), last: (start, dur), split: false });
+    }
     if t.splits.is_empty() && planned_gaps(&t.gaps, dur).is_empty() {
         let stop = cal.add(start, done);
         return Some(Parts {
@@ -767,13 +772,26 @@ impl<'a> Engine<'a> {
             let Some(t) = self.task(i) else { continue };
             let cal = self.cal(i);
             let dur = self.duration_of(i);
+            // An elapsed duration runs around the clock, ignoring working time altogether: it starts
+            // as soon as it may (a cure starts when the pour ends, at 17:00 on a Friday) and
+            // finishes the elapsed time later (see `along`).
+            let elapsed = t.elapsed && dur > 0;
             // Working time from start to finish: the duration plus any planned splits.
-            let span = if t.mode == ScheduleMode::Auto { span_of(t, dur) } else { dur };
+            let span = if t.mode == ScheduleMode::Auto && !elapsed { span_of(t, dur) } else { dur };
+            // `from` moved by the task's span: forward (finish from start), or back (start from finish).
+            let along = |from: NaiveDateTime, forward: bool| match (elapsed, forward) {
+                (true, true) => shift(from, span),
+                (true, false) => shift(from, span.saturating_neg()),
+                (false, true) => cal.add(from, span),
+                (false, false) => cal.sub(from, span),
+            };
 
             let place = |start: NaiveDateTime| -> (NaiveDateTime, NaiveDateTime) {
-                if dur > 0 {
+                if elapsed {
+                    (start, along(start, true))
+                } else if dur > 0 {
                     let s = cal.snap_forward(start);
-                    (s, cal.add(s, span))
+                    (s, along(s, true))
                 } else {
                     let s = cal.snap_event(start);
                     (s, s)
@@ -782,7 +800,7 @@ impl<'a> Engine<'a> {
 
             if t.mode == ScheduleMode::Manual {
                 let start = t.manual_start.or(t.actual_start).unwrap_or(project_start);
-                let finish = t.actual_finish.or(t.manual_finish).unwrap_or_else(|| if dur > 0 { cal.add(start, dur) } else { start });
+                let finish = t.actual_finish.or(t.manual_finish).unwrap_or_else(|| if dur > 0 { along(start, true) } else { start });
                 self.set_early(i, start, finish.max(start));
                 continue;
             }
@@ -797,8 +815,8 @@ impl<'a> Engine<'a> {
                 let cand_start = match edge.kind {
                     LinkType::FS => apply_lag(&self.proj_cal, pf, edge.lag, pdur),
                     LinkType::SS => apply_lag(&self.proj_cal, ps, edge.lag, pdur),
-                    LinkType::FF => cal.sub(apply_lag(&self.proj_cal, pf, edge.lag, pdur), span),
-                    LinkType::SF => cal.sub(apply_lag(&self.proj_cal, ps, edge.lag, pdur), span),
+                    LinkType::FF => along(apply_lag(&self.proj_cal, pf, edge.lag, pdur), false),
+                    LinkType::SF => along(apply_lag(&self.proj_cal, ps, edge.lag, pdur), false),
                 };
                 if cand_start > es {
                     es = cand_start;
@@ -816,7 +834,7 @@ impl<'a> Engine<'a> {
                 let finish_of = |s: NaiveDateTime| place(s).1;
                 match t.constraint.kind {
                     ConstraintKind::Snet => es = es.max(date),
-                    ConstraintKind::Fnet => es = es.max(cal.sub(date, span)),
+                    ConstraintKind::Fnet => es = es.max(along(date, false)),
                     ConstraintKind::Mso => {
                         if warn && driven_by_link && place(es).0 > place(date).0 {
                             warnings.push(format!("'{}': links require a later start than its Must Start On date", t.name));
@@ -824,7 +842,7 @@ impl<'a> Engine<'a> {
                         es = date;
                     }
                     ConstraintKind::Mfo => {
-                        let s = if dur > 0 { cal.sub(date, span) } else { date };
+                        let s = if dur > 0 { along(date, false) } else { date };
                         if warn && driven_by_link && place(es).0 > place(s).0 {
                             warnings.push(format!("'{}': links require a later finish than its Must Finish On date", t.name));
                         }
@@ -843,7 +861,7 @@ impl<'a> Engine<'a> {
                             if warn {
                                 warnings.push(format!("'{}' cannot finish by its Finish No Later Than date", t.name));
                             }
-                            es = if dur > 0 { cal.sub(date, span) } else { date };
+                            es = if dur > 0 { along(date, false) } else { date };
                         }
                     }
                     ConstraintKind::Asap | ConstraintKind::Alap => {}
@@ -864,13 +882,13 @@ impl<'a> Engine<'a> {
                 s = a;
                 f = match parts {
                     Some(pt) => pt.finish,
-                    None if dur > 0 => cal.add(a, span),
+                    None if dur > 0 => along(a, true),
                     None => a,
                 };
             }
             if let Some(af) = t.actual_finish {
                 if t.actual_start.is_none() {
-                    s = if dur > 0 { cal.sub(af, span) } else { af };
+                    s = if dur > 0 { along(af, false) } else { af };
                 }
                 f = af.max(s);
             }
@@ -914,7 +932,14 @@ impl<'a> Engine<'a> {
             let Some(t) = self.task(i) else { continue };
             let cal = self.cal(i);
             let dur = self.duration_of(i);
-            let span = if t.mode == ScheduleMode::Auto { span_of(t, dur) } else { dur };
+            let elapsed = t.elapsed && dur > 0;
+            let span = if t.mode == ScheduleMode::Auto && !elapsed { span_of(t, dur) } else { dur };
+            let along = |from: NaiveDateTime, forward: bool| match (elapsed, forward) {
+                (true, true) => shift(from, span),
+                (true, false) => shift(from, span.saturating_neg()),
+                (false, true) => cal.add(from, span),
+                (false, false) => cal.sub(from, span),
+            };
             let (Some(es), Some(ef)) = (self.date(i).es, self.date(i).ef) else {
                 continue;
             };
@@ -941,24 +966,25 @@ impl<'a> Engine<'a> {
                 let cand_lf = match edge.kind {
                     LinkType::FS => unapply_lag(&self.proj_cal, sls, edge.lag, dur),
                     LinkType::FF => unapply_lag(&self.proj_cal, slf, edge.lag, dur),
-                    LinkType::SS => cal.add(unapply_lag(&self.proj_cal, sls, edge.lag, dur), span),
-                    LinkType::SF => cal.add(unapply_lag(&self.proj_cal, slf, edge.lag, dur), span),
+                    LinkType::SS => along(unapply_lag(&self.proj_cal, sls, edge.lag, dur), true),
+                    LinkType::SF => along(unapply_lag(&self.proj_cal, slf, edge.lag, dur), true),
                 };
                 lf = lf.min(cand_lf);
             }
             if let Some(date) = t.constraint.date.filter(|_| t.constraint.kind.needs_date()) {
                 match t.constraint.kind {
-                    ConstraintKind::Snlt => lf = lf.min(if dur > 0 { cal.add(date, span) } else { date }),
+                    ConstraintKind::Snlt => lf = lf.min(if dur > 0 { along(date, true) } else { date }),
                     ConstraintKind::Fnlt => lf = lf.min(date),
                     ConstraintKind::Mso | ConstraintKind::Mfo => lf = ef,
                     _ => {}
                 }
             }
-            let lf = cal.snap_backward(lf);
+            // Elapsed time may end outside working time (a Saturday morning, say).
+            let lf = if elapsed { lf } else { cal.snap_backward(lf) };
             // A split task's last part is what can still move: its Late Start is that part's.
             let ls = match self.date(i).parts {
                 Some(pt) if pt.split => cal.sub(lf, pt.last.1),
-                _ if dur > 0 => cal.sub(lf, span),
+                _ if dur > 0 => along(lf, false),
                 _ => lf,
             };
             self.set_late(i, ls, lf);

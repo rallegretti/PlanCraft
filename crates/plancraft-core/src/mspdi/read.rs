@@ -737,11 +737,10 @@ fn tasks(p: &mut Project, records: &[Element], cals: &Calendars, mut fields: Fie
         task.outline_level = level;
         prev_level = level;
 
+        // An elapsed format (ed, eh...) makes Duration elapsed time, which runs around the clock.
         let format = int(t, "DurationFormat").and_then(codes::format_of);
-        if format.is_some_and(|f| f.elapsed) {
-            notes.add("elapsed durations were imported as working time");
-        }
         task.duration = span(t, "Duration").unwrap_or(0).max(0);
+        task.elapsed = format.is_some_and(|f| f.elapsed) && task.duration > 0;
         task.estimated = flag(t, "Estimated").unwrap_or(false) || format.is_some_and(|f| f.estimated);
         if flag(t, "Milestone") == Some(true) {
             if task.duration == 0 {

@@ -5,7 +5,8 @@
 - **Core model:** tasks, summaries, milestones with deliverables and member tasks, resources (work, material and cost; people, teams, partners, vendors, …) and assignments
 - **Scheduling engine:**
   - calendar-aware CPM with FS, SS, FF and SF links and working, elapsed or percent lags
-  - constraints, deadlines and manual tasks
+  - constraints, deadlines and manual tasks, including manually scheduled summary tasks (top-down planning)
+  - working or elapsed task durations (`33ed` runs around the clock)
   - ALAP, inactive tasks, actuals, slack and the critical path
 - **Calendars:** project, task and resource calendars, exceptions (including yearly ones), resource time off and availability periods
 - **Cross-file dependencies:** links to tasks in other documents, with cached snapshots and refresh

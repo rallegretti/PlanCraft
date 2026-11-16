@@ -666,3 +666,155 @@ fn manual_summaries_from_a_project_xml_file_keep_their_dates() {
         assert_eq!(dates(i), (dt(2026, 4, 13, 8), dt(2026, 4, 14, 17)), "{}", p.tasks[i].name);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Elapsed durations
+// ---------------------------------------------------------------------------
+
+fn elapsed_task(p: &mut Project, name: &str, text: &str) -> TaskId {
+    let id = top(p, name, 1);
+    let typed = p.parse_task_duration(text).unwrap();
+    p.set_typed_duration(id, typed).unwrap();
+    id
+}
+
+#[test]
+fn an_elapsed_task_ending_on_a_weekend_is_critical_and_its_successor_starts_on_monday() {
+    let mut p = project();
+    // 5 elapsed days from Monday 08:00 end Saturday 08:00.
+    let cure = elapsed_task(&mut p, "Cure", "5ed");
+    let next = top(&mut p, "Next", 2);
+    p.link(cure.into(), next, LinkType::FS, Lag::None).unwrap();
+    recalculate(&mut p);
+    assert_eq!(finish(&p, cure), dt(2026, 10, 24, 8));
+    assert_eq!(start(&p, next), dt(2026, 10, 26, 8));
+    let t = p.task(cure).unwrap();
+    assert_eq!(t.sched.total_slack, 0);
+    assert!(t.sched.critical);
+    assert_eq!(t.sched.late_start, Some(dt(2026, 10, 21, 8)), "late finish Monday 08:00, less 5 elapsed days");
+}
+
+#[test]
+fn elapsed_tasks_take_links_constraints_and_actual_dates() {
+    let mut p = project();
+    let a = top(&mut p, "A", 3);
+    // Finish-to-finish: finishes with A (Wednesday 17:00), starting 36 elapsed hours earlier.
+    let ff = elapsed_task(&mut p, "FF", "36eh");
+    p.link(a.into(), ff, LinkType::FF, Lag::None).unwrap();
+    // Finish No Earlier Than Sunday noon: starts 2 elapsed days before.
+    let fnet = elapsed_task(&mut p, "FNET", "2ed");
+    p.task_mut(fnet).unwrap().constraint = Constraint { kind: ConstraintKind::Fnet, date: Some(dt(2026, 11, 1, 12)) };
+    // Started on Tuesday 10:00: finishes 3 elapsed days later, whatever the calendar.
+    let started = elapsed_task(&mut p, "Started", "3ed");
+    p.task_mut(started).unwrap().actual_start = Some(dt(2026, 10, 20, 10));
+    recalculate(&mut p);
+    assert_eq!(finish(&p, ff), dt(2026, 10, 21, 17));
+    assert_eq!(start(&p, ff), dt(2026, 10, 20, 5));
+    assert_eq!((start(&p, fnet), finish(&p, fnet)), (dt(2026, 10, 30, 12), dt(2026, 11, 1, 12)));
+    assert_eq!(finish(&p, started), dt(2026, 10, 23, 10));
+}
+
+#[test]
+fn elapsed_progress_runs_around_the_clock() {
+    let mut p = project();
+    let t = elapsed_task(&mut p, "Soak", "4ed");
+    recalculate(&mut p);
+    // Through Wednesday 08:00, two of the four elapsed days have passed.
+    p.update_progress_through(&[t], dt(2026, 10, 21, 8), plancraft_core::ops::ProgressUpdate::Scheduled).unwrap();
+    recalculate(&mut p);
+    let task = p.task(t).unwrap();
+    assert_eq!(task.percent_complete, 50);
+    assert_eq!(task.sched.stop, Some(dt(2026, 10, 21, 8)));
+    assert_eq!(task.sched.resume, task.sched.stop);
+    assert_eq!(finish(&p, t), dt(2026, 10, 23, 8));
+    // Remaining duration is elapsed time too, and so is the text for it.
+    assert_eq!(p.parse_task_minutes(t, "3ed").unwrap(), 3 * 1440);
+    assert_eq!(p.parse_task_minutes(t, "3").unwrap(), 3 * 1440);
+    assert!(p.parse_task_minutes(t, "3d").is_err());
+    p.set_remaining_duration(t, 3 * 1440).unwrap();
+    recalculate(&mut p);
+    assert_eq!(finish(&p, t), dt(2026, 10, 24, 8));
+}
+
+#[test]
+fn elapsed_work_spreads_over_every_hour() {
+    let mut p = project();
+    let t = elapsed_task(&mut p, "Watch", "1ed");
+    let r = p.add_resource("Guard");
+    p.assign(t, r, None, None).unwrap();
+    recalculate(&mut p);
+    // One elapsed day at 100% is 24 hours of work: 16 on Monday from 08:00, 8 on Tuesday.
+    assert_eq!(p.task(t).unwrap().sched.work, 24 * 60);
+    let a = p.assignments_for_task(t).next().unwrap().clone();
+    let daily = plancraft_core::workload::assignment_daily_work(&p, &a);
+    assert_eq!(daily.get(&d(2026, 10, 19)).copied().map(f64::round), Some(16.0 * 60.0));
+    assert_eq!(daily.get(&d(2026, 10, 20)).copied().map(f64::round), Some(8.0 * 60.0));
+}
+
+#[test]
+fn what_takes_an_elapsed_duration() {
+    let mut p = project();
+    let t = elapsed_task(&mut p, "Cure", "2ed");
+    recalculate(&mut p);
+    // Elapsed time runs without pauses.
+    assert!(p.split_task(t, dt(2026, 10, 19, 12), dt(2026, 10, 22, 8)).is_err());
+    // A summary's duration is working time.
+    let s = top(&mut p, "Phase", 1);
+    let sub = task(&mut p, "Sub", 1);
+    p.indent(sub).unwrap();
+    let typed = p.parse_task_duration("3ed").unwrap();
+    assert!(p.set_typed_duration(s, typed).is_err());
+    // Typing working time makes it working time again; a plain set keeps the kind.
+    p.set_duration(t, 3 * 1440, false).unwrap();
+    assert!(p.task(t).unwrap().elapsed);
+    p.set_typed_duration(t, p.parse_task_duration("3d").unwrap()).unwrap();
+    assert!(!p.task(t).unwrap().elapsed);
+    assert_eq!(p.task(t).unwrap().duration, 3 * DAY);
+    // A split task takes no elapsed duration.
+    recalculate(&mut p);
+    p.split_task(t, dt(2026, 10, 19, 12), dt(2026, 10, 22, 8)).unwrap();
+    assert!(p.set_typed_duration(t, typed).is_err());
+}
+
+#[test]
+fn elapsed_durations_survive_files() {
+    let mut p = project();
+    let t = elapsed_task(&mut p, "Cure", "33ed");
+    p.task_mut(t).unwrap().estimated = true;
+    recalculate(&mut p);
+    // Microsoft Project XML.
+    let (xml, _) = plancraft_core::mspdi::to_xml(&p);
+    let (mut q, notes) = plancraft_core::mspdi::from_xml(&xml, "x").unwrap();
+    assert!(notes.is_empty(), "{notes:?}");
+    recalculate(&mut q);
+    assert!(q.tasks[0].elapsed && q.tasks[0].estimated);
+    assert_eq!((q.tasks[0].duration, q.tasks[0].sched.finish), (33 * 1440, p.tasks[0].sched.finish));
+    // CSV.
+    let csv = plancraft_core::tabular::to_csv(&p);
+    assert!(csv.contains("33 edays?"), "{csv}");
+    let sheets = plancraft_core::tabular::read_bytes(csv.as_bytes(), "plan.csv").unwrap();
+    let grid = &sheets.sheets[0].1;
+    let (r, _) = plancraft_core::tabular::build(grid, &plancraft_core::tabular::ImportOptions::guess(grid, "x")).unwrap();
+    assert!(r.tasks[0].elapsed);
+    assert_eq!(r.tasks[0].duration, 33 * 1440);
+    // A PlanCraft file.
+    let back: Project = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+    assert!(back.tasks[0].elapsed);
+}
+
+#[test]
+fn an_elapsed_task_starts_when_its_predecessor_ends_even_after_hours() {
+    let mut p = project();
+    // Friday's pour ends at 17:00; the 3-day cure runs through the weekend to Monday 17:00.
+    let prep = top(&mut p, "Prep", 4);
+    let pour = top(&mut p, "Pour", 1);
+    let cure = elapsed_task(&mut p, "Cure", "3ed");
+    let strip = top(&mut p, "Strip forms", 1);
+    p.link(prep.into(), pour, LinkType::FS, Lag::None).unwrap();
+    p.link(pour.into(), cure, LinkType::FS, Lag::None).unwrap();
+    p.link(cure.into(), strip, LinkType::FS, Lag::None).unwrap();
+    recalculate(&mut p);
+    assert_eq!((start(&p, cure), finish(&p, cure)), (dt(2026, 10, 23, 17), dt(2026, 10, 26, 17)));
+    assert_eq!(start(&p, strip), dt(2026, 10, 27, 8));
+    assert!(p.task(cure).unwrap().sched.critical);
+}

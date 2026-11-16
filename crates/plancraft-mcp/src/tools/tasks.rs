@@ -319,11 +319,11 @@ pub fn apply_task_fields(p: &mut Project, id: TaskId, a: &Args) -> ToolResult<()
         row_mut(p, i)?.estimate = est;
     }
     if let Some(v) = a.get("duration") {
-        let (m, mut est) = parse_duration_value(p, v, "duration")?;
+        let mut typed = parse_task_duration_value(p, v, "duration")?;
         if let Some(e) = a.bool("estimated")? {
-            est = e;
+            typed.estimated = e;
         }
-        p.set_duration(id, m, est)?;
+        p.set_typed_duration(id, typed)?;
     } else if let Some(e) = a.bool("estimated")? {
         let i = idx_of(p, id)?;
         row_mut(p, i)?.estimated = e;
@@ -497,11 +497,11 @@ pub fn apply_task_progress(p: &mut Project, id: TaskId, a: &Args) -> ToolResult<
         p.set_percent_complete(id, pct.round() as u8)?;
     }
     if let Some(v) = a.get("actual_duration") {
-        let (m, _) = parse_duration_value(p, v, "actual_duration")?;
+        let m = parse_task_minutes_value(p, id, v, "actual_duration")?;
         p.set_actual_duration(id, m)?;
     }
     if let Some(v) = a.get("remaining_duration") {
-        let (m, _) = parse_duration_value(p, v, "remaining_duration")?;
+        let m = parse_task_minutes_value(p, id, v, "remaining_duration")?;
         p.set_remaining_duration(id, m)?;
     }
     if let Some(resume) = opt_dt(p, a, "resume", false)? {
@@ -711,7 +711,7 @@ fn create_tasks(ctx: &Ctx, a: &Args) -> ToolResult {
                     let t = p.tasks.get(i)?;
                     let mut v = json!({
                         "id": id.0, "row": i + 1, "wbs": p.wbs(i), "name": t.name, "level": t.outline_level,
-                        "duration": p.format_duration(t.sched.duration, t.estimated && !t.sched.is_summary),
+                        "duration": p.format_task_duration(t),
                         "start": fmt_dt(t.sched.start), "finish": fmt_dt(t.sched.finish),
                     });
                     if let Some((_, k)) = keyed.iter().find(|(tid, _)| tid == id) {

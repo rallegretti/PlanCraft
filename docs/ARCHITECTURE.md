@@ -69,6 +69,7 @@ So a vacation of any assigned person pauses the task. Lags and summary durations
    - Applies constraints: SNET/FNET push the task later; MSO/MFO pin it; SNLT/FNLT are honored and flagged when violated. A Start No Earlier Than date on a summary drives all of its subtasks.
    - Adds leveling delays.
    - Uses actual start and finish when they are set.
+   - A task with an elapsed duration (`33ed`) runs around the clock: it starts as soon as it may, even outside working time, and finishes the elapsed time later; its work is spread over every hour of that time.
    - Manual tasks keep their entered dates. A manually scheduled summary keeps its own dates too: links into it (and into the summaries around it) stop at it, its auto-scheduled subtasks start no earlier than its start, and its successors follow its own dates.
 6. **Backward pass.** It computes late dates, limited by the project finish, deadlines (a task's own and its summaries') and constraints. Inactive successors are skipped. A link from a summary's start binds only the subtask that sets that start.
 7. **ALAP pass.** As-late-as-possible tasks are pinned to their late start, and the passes run again so successors stay consistent.

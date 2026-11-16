@@ -132,7 +132,7 @@ pub fn items(p: &Project, d: &Diagram, opts: NetPrintOptions, pal: &Palette) -> 
             let (left_w, right_x) = (inner * 0.6, inner * 0.62);
             let cells = [
                 (format!("Start: {}", date(t.sched.start)), format!("ID: {id}")),
-                (format!("Finish: {}", date(t.sched.finish)), format!("Dur: {}", p.format_duration(t.sched.duration, t.estimated))),
+                (format!("Finish: {}", date(t.sched.finish)), format!("Dur: {}", p.format_task_duration(t))),
             ];
             for (row, (left, right)) in cells.iter().enumerate() {
                 let y = y0 + row_h * (row as f32 + 1.0);

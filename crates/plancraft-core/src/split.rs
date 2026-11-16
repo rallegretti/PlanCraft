@@ -47,6 +47,9 @@ impl Project {
         if t.mode == ScheduleMode::Manual {
             return invalid(format!("'{}' is manually scheduled; split it after switching it to auto scheduling", t.name));
         }
+        if t.elapsed {
+            return invalid(format!("'{}' has an elapsed duration, which runs without pauses", t.name));
+        }
         if t.actual_finish.is_some() || t.percent_complete >= 100 {
             return invalid(format!("'{}' is complete", t.name));
         }

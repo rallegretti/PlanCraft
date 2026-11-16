@@ -502,6 +502,16 @@ pub fn apply_chart_actions(doc: &mut Document, st: &mut UiState, rows: &[Row], a
                 let r = doc.edit_msg("Change Duration", |p| {
                     let idx = p.task_index(task).ok_or("task not found")?;
                     let start = p.task(task).and_then(|t| t.sched.start).ok_or("task has no start")?;
+                    // An elapsed duration is the time between start and finish, to the hour.
+                    if p.task(task).is_some_and(|t| t.elapsed) {
+                        let mins = finish.signed_duration_since(start).num_minutes().max(0).saturating_add(30) / 60 * 60;
+                        if let Some(t) = p.task_mut(task)
+                            && t.mode == ScheduleMode::Manual
+                        {
+                            t.manual_finish = Some(plancraft_core::calendar::shift(start, mins));
+                        }
+                        return p.set_duration(task, mins, false).map_err(|e| e.to_string());
+                    }
                     let cal = task_calendar(p, idx);
                     let mut mins = cal.between(start, finish).max(0);
                     // A split task does no work during its pauses.

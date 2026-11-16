@@ -260,7 +260,7 @@ pub fn estimate() -> Value {
 pub fn task_field_props() -> Map<String, Value> {
     let v = json!({
         "name": string("Task name."),
-        "duration": duration("Planned duration. On a summary task it makes the summary manually scheduled (top-down planning), keeping its start."),
+        "duration": duration("Planned duration: working time like \"3d\", or elapsed time like \"33ed\" (calendar time: nights, weekends and holidays count). On a summary task (working time only) it makes the summary manually scheduled (top-down planning), keeping its start."),
         "estimated": boolean("Mark the duration as a tentative estimate (shown with '?')."),
         "mode": string_enum("Scheduling mode: 'auto' (engine computes dates) or 'manual' (uses start/finish as entered; switching keeps the current dates). A manual summary keeps its own dates: its subtasks don't move it, links into it stop at it, and its auto subtasks start no earlier than its start (subtasks_start/subtasks_finish report their span).", &["auto", "manual"]),
         "active": boolean("Inactive tasks stay in the plan but do not affect the schedule or workload."),
@@ -275,8 +275,8 @@ pub fn task_field_props() -> Map<String, Value> {
         "percent_complete": number("Progress 0-100. Sets actual start/finish automatically."),
         "actual_start": date_or_null("Actual start date."),
         "actual_finish": date_or_null("Actual finish date."),
-        "actual_duration": duration("Progress as working time done so far; sets % complete. Past the planned duration, it stretches the duration and completes the task."),
-        "remaining_duration": duration("Progress as working time still needed; the duration becomes time done + this, and % complete follows."),
+        "actual_duration": duration("Progress as time done so far (elapsed time for an elapsed task); sets % complete. Past the planned duration, it stretches the duration and completes the task."),
+        "remaining_duration": duration("Progress as time still needed (elapsed time for an elapsed task); the duration becomes time done + this, and % complete follows."),
         "resume": date_or_null("For a task in progress (1-99%): when its remaining work restarts. A date later than its stop pauses the task there until then (a split); a date before the stop is refused; null removes a pause still ahead."),
         "manual_start": date_or_null("Manually entered start (used by manual tasks)."),
         "manual_finish": date_or_null("Manually entered finish (used by manual tasks)."),

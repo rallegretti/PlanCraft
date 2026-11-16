@@ -852,7 +852,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
                 t.name,
                 format::date_long(t.sched.start),
                 format::date_long(t.sched.finish),
-                p.format_duration(t.sched.duration, t.estimated)
+                p.format_task_duration(t)
             );
             if t.sched.percent_complete > 0.0 {
                 text += &format!("\nComplete: {}", format::percent(t.sched.percent_complete));

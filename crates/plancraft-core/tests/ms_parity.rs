@@ -1679,3 +1679,53 @@ fn mspdi_manual_summary_keeps_its_start_and_finish() {
     assert_eq!(p.tasks[1].sched.start, Some(dt(2026, 11, 2, 8)));
     assert_eq!(p.tasks[0].sched.rollup_finish, Some(dt(2026, 11, 3, 17)));
 }
+
+// ===========================================================================
+// Elapsed durations
+// ===========================================================================
+
+/// A task with a typed duration such as "7ed".
+fn typed_task(p: &mut Project, name: &str, text: &str) -> TaskId {
+    let id = p.add_task(name, None);
+    let typed = p.parse_task_duration(text).unwrap();
+    p.set_typed_duration(id, typed).unwrap();
+    id
+}
+
+// Source: https://learn.microsoft.com/en-us/office-project/xml-data-interchange/durationformat-element?view=project-client-2016 — "Text Value" (note)
+// Elapsed time counts all time, non-working time included: on a Monday-to-Friday calendar 7d is
+// seven working days (Monday to the next Tuesday), while 7ed is seven elapsed days (Monday to
+// Sunday).
+#[test]
+fn seven_elapsed_days_are_a_calendar_week() {
+    let mut p = project();
+    let working = typed_task(&mut p, "7d", "7d");
+    let elapsed = typed_task(&mut p, "7ed", "7ed");
+    recalculate(&mut p);
+    assert_eq!(finish(&p, working), dt(2026, 10, 27, 17));
+    assert!(p.task(elapsed).unwrap().elapsed);
+    assert_eq!(start(&p, elapsed), dt(2026, 10, 19, 8));
+    // Seven 24-hour days from Monday 08:00 run through the weekend: the seventh ends Monday 08:00.
+    assert_eq!(finish(&p, elapsed), dt(2026, 10, 26, 8));
+    assert_eq!(p.format_task_duration(p.task(elapsed).unwrap()), "7 edays");
+}
+
+// Source: https://learn.microsoft.com/en-us/office-project/xml-data-interchange/durationformat-element?view=project-client-2016 — "DurationFormat Element"
+// The duration format, paired with the duration value, gives the actual duration: 792 hours with
+// format 8 (ed) are 33 elapsed days, not 99 working days.
+#[test]
+fn mspdi_elapsed_duration_formats_are_elapsed_time() {
+    let tasks = xml_task(1, "Wafers", "PT792H0M0S", "<DurationFormat>8</DurationFormat>")
+        + &xml_task(2, "After", "PT40H0M0S", &format!("<DurationFormat>7</DurationFormat>{}", link_xml(1, 1, 0, 7)))
+        + &xml_task(3, "Hours", "PT36H0M0S", "<DurationFormat>6</DurationFormat>")
+        + &xml_task(4, "Estimated", "PT48H0M0S", "<DurationFormat>40</DurationFormat>");
+    let p = mspdi(&tasks, "");
+    assert!(p.tasks[0].elapsed && !p.tasks[1].elapsed);
+    assert_eq!(p.tasks[0].duration, 33 * 24 * HOUR);
+    // Monday 2026-10-19 08:00 + 33 days is Saturday 11-21 08:00; the next task starts Monday.
+    assert_eq!(p.tasks[0].sched.finish, Some(dt(2026, 11, 21, 8)));
+    assert_eq!(p.tasks[1].sched.start, Some(dt(2026, 11, 23, 8)));
+    assert_eq!(p.tasks[2].sched.finish, Some(dt(2026, 10, 20, 20)));
+    assert!(p.tasks[3].elapsed && p.tasks[3].estimated);
+    assert_eq!(p.tasks[3].sched.finish, Some(dt(2026, 10, 21, 8)));
+}

@@ -183,7 +183,7 @@ fn get_schedule(ctx: &Ctx, a: &Args) -> ToolResult {
             .map(|(i, t)| {
                 json!({
                     "row": i + 1, "id": t.id.0, "wbs": p.wbs(i), "name": t.name, "level": t.outline_level,
-                    "duration": p.format_duration(t.sched.duration, t.estimated && !t.sched.is_summary),
+                    "duration": p.format_task_duration(t),
                     "start": fmt_dt(t.sched.start), "finish": fmt_dt(t.sched.finish),
                     "percent_complete": round2(t.sched.percent_complete as f64),
                     "predecessors": p.format_predecessors(t.id), "resources": p.format_resource_names(t.id),
@@ -225,7 +225,7 @@ fn critical_path(ctx: &Ctx, a: &Args) -> ToolResult {
             let Some(t) = p.tasks.get(*i) else { return Value::Null };
             json!({
                 "id": t.id.0, "row": i + 1, "name": t.name,
-                "duration": p.format_duration(t.sched.duration, t.estimated),
+                "duration": p.format_task_duration(t),
                 "start": fmt_dt(t.sched.start), "finish": fmt_dt(t.sched.finish),
                 "total_slack": views::dur(p, t.sched.total_slack), "percent_complete": round2(t.sched.percent_complete as f64),
                 "resources": p.format_resource_names(t.id),
