@@ -248,8 +248,13 @@ fn list_dependencies(ctx: &Ctx, a: &Args) -> ToolResult {
     })
 }
 
-/// The documents of linked projects, read without holding the workspace lock.
-pub(crate) type LinkedDocs = HashMap<Uuid, io::FileResult<Project>>;
+/// The documents of linked projects, read without holding the workspace lock, for the document
+/// with `handle` (edits that use them go to that document, even if another one became active
+/// meanwhile).
+pub(crate) struct LinkedDocs {
+    pub handle: Option<u64>,
+    docs: HashMap<Uuid, (PathBuf, io::FileResult<Project>)>,
+}
 
 /// Reads the documents of the external projects that `refs` (values of `external_project`
 /// arguments) name in the selected document. Only the link paths are looked up under the
@@ -258,26 +263,37 @@ pub(crate) type LinkedDocs = HashMap<Uuid, io::FileResult<Project>>;
 /// to report.
 pub(crate) fn read_linked_docs(ctx: &Ctx, a: &Args, refs: &[&Value]) -> ToolResult<LinkedDocs> {
     if refs.is_empty() {
-        return Ok(LinkedDocs::new());
+        return Ok(LinkedDocs { handle: None, docs: HashMap::new() });
     }
-    let targets: Vec<(Uuid, PathBuf)> = ctx.with_doc(a, |doc| {
+    let (handle, targets): (u64, Vec<(Uuid, PathBuf)>) = ctx.with_doc(a, |doc| {
         let p = &doc.project;
-        Ok(refs
+        let targets = refs
             .iter()
             .filter_map(|v| resolve_external(p, v).ok())
             .filter_map(|id| io::external_path(p, doc.path.as_deref(), id).map(|path| (id, path)))
-            .collect())
+            .collect();
+        Ok((doc.handle, targets))
     })?;
-    Ok(targets.into_iter().map(|(id, path)| (id, io::load_external(&path, id))).collect())
+    let docs = targets
+        .into_iter()
+        .map(|(id, path)| {
+            let loaded = io::load_external(&path, id);
+            (id, (path, loaded))
+        })
+        .collect();
+    Ok(LinkedDocs { handle: Some(handle), docs })
 }
 
-/// The document read for the linked project `id` (see [`read_linked_docs`]).
-pub(crate) fn linked_doc(docs: &LinkedDocs, id: Uuid) -> ToolResult<&Project> {
-    match docs.get(&id) {
-        Some(Ok(p)) => Ok(p),
-        Some(Err(e)) => Err(ToolError(e.to_string())),
-        None => err("the external projects of this document changed while its files were being read; try again"),
+/// The document read for the linked project `id` (see [`read_linked_docs`]), checked against
+/// the link as it is now in `p` (stored at `doc_path`): if the link moved to another file while
+/// the files were being read, the read is stale and the call is refused.
+pub(crate) fn linked_doc<'d>(docs: &'d LinkedDocs, p: &Project, doc_path: Option<&std::path::Path>, id: Uuid) -> ToolResult<&'d Project> {
+    let changed = || ToolError("the external project's link changed while its file was being read; try again".into());
+    let (path, loaded) = docs.docs.get(&id).ok_or_else(changed)?;
+    if io::external_path(p, doc_path, id).as_ref() != Some(path) {
+        return Err(changed());
     }
+    loaded.as_ref().map_err(|e| ToolError(e.to_string()))
 }
 
 fn add_external_project(ctx: &Ctx, a: &Args) -> ToolResult {
@@ -361,7 +377,7 @@ fn list_external_tasks(ctx: &Ctx, a: &Args) -> ToolResult {
         let p = &doc.project;
         let ext = resolve_external(p, which)?;
         let search = a.str("search")?.map(|s| s.to_lowercase());
-        let tasks = io::external_tasks_of(linked_doc(&docs, ext)?);
+        let tasks = io::external_tasks_of(linked_doc(&docs, p, doc.path.as_deref(), ext)?);
         let list: Vec<Value> = tasks
             .iter()
             .filter(|s| search.as_ref().is_none_or(|q| s.name.to_lowercase().contains(q)))
@@ -379,12 +395,13 @@ fn list_external_tasks(ctx: &Ctx, a: &Args) -> ToolResult {
 fn link_external_task(ctx: &Ctx, a: &Args) -> ToolResult {
     let which = a.get("external_project").unwrap_or(&Value::Null);
     let docs = read_linked_docs(ctx, a, &[which])?;
-    ctx.edit(
+    ctx.edit_doc(
         a,
+        docs.handle,
         "Link external task",
-        |p, _| {
+        |p, doc_path| {
             let ext = resolve_external(p, which)?;
-            let other = linked_doc(&docs, ext)?;
+            let other = linked_doc(&docs, p, doc_path, ext)?;
             let task_v = a.get("task").ok_or_else(|| ToolError("missing 'task'".into()))?;
             let number = task_v.as_u64().or_else(|| task_v.as_str().and_then(|s| s.trim().parse::<u64>().ok()));
             let task = match number {

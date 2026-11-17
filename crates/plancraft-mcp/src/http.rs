@@ -11,7 +11,10 @@
 //! server's per-session token (see [`crate::session`]); others get `401 Unauthorized`.
 //!
 //! The server is written to hold up against a hostile local client:
-//! * at most [`MAX_CONNECTIONS`] connections are served at once (others get `503` at once);
+//! * at most [`MAX_CONNECTIONS`] connections may be sending their request line and headers at
+//!   once, before the token is checked (others get `503` at once), so clients without the token
+//!   can't tie up the server; requests that passed the token check have their own, larger limit
+//!   ([`MAX_REQUESTS`]), so parallel tool calls from several agents aren't refused;
 //! * the request line and headers are checked (origin, host, token) *before* the body is read,
 //!   so an unauthenticated client can't make the server read a large body;
 //! * each read waits at most [`READ_TIMEOUT`], and the whole request (headers and body) must
@@ -38,8 +41,15 @@ pub const MAX_BODY: usize = 32 * 1024 * 1024;
 pub const MAX_HEAD: usize = 64 * 1024;
 /// Maximum number of header lines.
 const MAX_HEADERS: usize = 100;
-/// Connections served at the same time; more get `503 Service Unavailable`.
+/// Connections whose headers are still being read and checked (before the token is accepted);
+/// more get `503 Service Unavailable`.
 pub const MAX_CONNECTIONS: usize = 32;
+/// Requests that passed the token check being served at the same time; more get `503`.
+pub const MAX_REQUESTS: usize = 256;
+/// After a reply, how long (and how much) the server reads what the client still sends before
+/// closing, so the client sees the reply instead of a reset connection.
+const DRAIN_TIME: Duration = Duration::from_secs(1);
+const DRAIN_BYTES: u64 = 64 * 1024;
 /// Longest wait for any one read from a client.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// Time a client has to send the whole request (headers and body).
@@ -122,8 +132,10 @@ fn wake_addr(addr: SocketAddr) -> SocketAddr {
 /// gives the documented ones; tests use shorter times).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct HttpLimits {
-    /// Connections served at the same time; more get `503 Service Unavailable`.
+    /// Connections still sending headers (not yet past the token check); more get `503`.
     pub max_connections: usize,
+    /// Authenticated requests served at the same time; more get `503`.
+    pub max_requests: usize,
     /// Longest wait for any one read from a client.
     pub read_timeout: Duration,
     /// Time a client has to send the whole request (headers and body).
@@ -132,12 +144,28 @@ pub struct HttpLimits {
 
 impl Default for HttpLimits {
     fn default() -> Self {
-        Self { max_connections: MAX_CONNECTIONS, read_timeout: READ_TIMEOUT, request_deadline: REQUEST_DEADLINE }
+        Self {
+            max_connections: MAX_CONNECTIONS,
+            max_requests: MAX_REQUESTS,
+            read_timeout: READ_TIMEOUT,
+            request_deadline: REQUEST_DEADLINE,
+        }
     }
 }
 
-/// Counts a connection as active until dropped.
+/// Counts a connection (or an authenticated request) as active until dropped.
 struct Active(Arc<AtomicUsize>);
+
+impl Active {
+    /// Takes a slot of `counter` unless `max` are taken already.
+    fn take(counter: &Arc<AtomicUsize>, max: usize) -> Option<Active> {
+        if counter.fetch_add(1, Ordering::SeqCst) >= max {
+            counter.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        Some(Active(Arc::clone(counter)))
+    }
+}
 
 impl Drop for Active {
     fn drop(&mut self) {
@@ -166,7 +194,8 @@ pub fn serve_http_with(server: Arc<McpServer>, addr: &str, token: &str, limits: 
     let thread = {
         let stop = Arc::clone(&stop);
         let token = Arc::clone(&token);
-        let active = Arc::new(AtomicUsize::new(0));
+        let pending = Arc::new(AtomicUsize::new(0));
+        let busy = Arc::new(AtomicUsize::new(0));
         std::thread::Builder::new().name("plancraft-mcp-http".into()).spawn(move || {
             for conn in listener.incoming() {
                 if stop.load(Ordering::SeqCst) {
@@ -180,18 +209,17 @@ pub fn serve_http_with(server: Arc<McpServer>, addr: &str, token: &str, limits: 
                         continue;
                     }
                 };
-                if active.fetch_add(1, Ordering::SeqCst) >= limits.max_connections {
-                    active.fetch_sub(1, Ordering::SeqCst);
+                let Some(guard) = Active::take(&pending, limits.max_connections) else {
                     refuse_busy(stream);
                     continue;
-                }
-                let guard = Active(Arc::clone(&active));
+                };
                 let server = Arc::clone(&server);
                 let token = Arc::clone(&token);
+                let busy = Arc::clone(&busy);
                 // If the thread can't start, the closure (and the guard with it) is dropped.
                 let spawned = std::thread::Builder::new().name("plancraft-mcp-request".into()).spawn(move || {
-                    let _guard = guard;
-                    serve_connection(&server, stream, loopback, &token, limits);
+                    let slots = Slots { pending: Some(guard), busy, request: None };
+                    serve_connection(&server, stream, loopback, &token, limits, slots);
                 });
                 if let Err(e) = spawned {
                     eprintln!("plancraft-mcp: cannot start a request thread: {e}");
@@ -274,14 +302,22 @@ fn reason(status: u16) -> &'static str {
     }
 }
 
+/// The connection's place in the server's limits: a pre-authentication slot until the token is
+/// accepted, then a request slot.
+struct Slots {
+    pending: Option<Active>,
+    busy: Arc<AtomicUsize>,
+    request: Option<Active>,
+}
+
 /// Serves one request on `stream` and closes it.
-fn serve_connection(server: &McpServer, mut stream: TcpStream, loopback: bool, token: &str, limits: HttpLimits) {
+fn serve_connection(server: &McpServer, mut stream: TcpStream, loopback: bool, token: &str, limits: HttpLimits, mut slots: Slots) {
     let _ = stream.set_nodelay(true);
     let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
     let reply = {
         let deadline = Instant::now().checked_add(limits.request_deadline).unwrap_or_else(Instant::now);
         let mut conn = Conn { stream: &mut stream, buf: Vec::new(), deadline, read_timeout: limits.read_timeout };
-        match read_and_route(server, &mut conn, loopback, token) {
+        match read_and_route(server, &mut conn, loopback, token, limits, &mut slots) {
             Ok(r) | Err(r) => r,
         }
     };
@@ -292,10 +328,23 @@ fn serve_connection(server: &McpServer, mut stream: TcpStream, loopback: bool, t
         return;
     }
     // A request refused before its body was read leaves the body unread; closing with unread
-    // data can reset the connection before the client sees the reply, so drain a little first.
+    // data can reset the connection before the client sees the reply, so drain a little first,
+    // for at most DRAIN_TIME in all (a client dripping bytes can't keep its slot).
     let _ = stream.shutdown(Shutdown::Write);
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-    let _ = io::copy(&mut (&mut stream).take(1024 * 1024), &mut io::sink());
+    let until = Instant::now() + DRAIN_TIME;
+    let mut left = DRAIN_BYTES;
+    let mut chunk = [0u8; 8 * 1024];
+    while left > 0 {
+        let Some(wait) = until.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()) else { break };
+        if stream.set_read_timeout(Some(wait)).is_err() {
+            break;
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => left = left.saturating_sub(u64::try_from(n).unwrap_or(u64::MAX)),
+        }
+    }
+    drop(slots);
 }
 
 /// A client connection being read, with everything received so far in `buf`.
@@ -516,7 +565,14 @@ fn authorized(head: &Head, token: &str) -> bool {
         .is_some_and(|(scheme, value)| scheme.eq_ignore_ascii_case("bearer") && crate::session::tokens_match(value.trim(), token))
 }
 
-fn read_and_route(server: &McpServer, conn: &mut Conn<'_>, loopback: bool, token: &str) -> Result<Reply, Reply> {
+fn read_and_route(
+    server: &McpServer,
+    conn: &mut Conn<'_>,
+    loopback: bool,
+    token: &str,
+    limits: HttpLimits,
+    slots: &mut Slots,
+) -> Result<Reply, Reply> {
     let body_start = conn.read_head()?;
     let head = parse_head(conn.buf.get(..body_start.saturating_sub(4)).unwrap_or_default())?;
 
@@ -532,6 +588,12 @@ fn read_and_route(server: &McpServer, conn: &mut Conn<'_>, loopback: bool, token
     if !authorized(&head, token) {
         return Ok(Reply::text(401, "Unauthorized: send the PlanCraft session token as 'Authorization: Bearer <token>'")
             .header("WWW-Authenticate", "Bearer realm=\"plancraft\""));
+    }
+    // Past the token check: free the pre-authentication slot and take a request slot.
+    slots.pending = None;
+    match Active::take(&slots.busy, limits.max_requests) {
+        Some(slot) => slots.request = Some(slot),
+        None => return Ok(Reply::text(503, "Service Unavailable: too many requests at once").header("Retry-After", "1")),
     }
     if !(head.path.is_empty() || head.path == "/mcp") {
         return Ok(Reply::text(404, "Not found: the MCP endpoint is /mcp"));

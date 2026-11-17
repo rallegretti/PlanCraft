@@ -272,6 +272,13 @@ fn batches_follow_the_negotiated_protocol_version() {
             .to_string()
     };
     let batch = json!([{ "jsonrpc": "2.0", "id": 1, "method": "ping" }]).to_string();
+    // `initialize` inside a batch (allowed before a revision is agreed) still sets the revision.
+    let server = plancraft_mcp::McpServer::new(plancraft_core::workspace::Workspace::default().shared());
+    let input = format!("[{}]\n{batch}\n", init("2025-06-18"));
+    let mut out = Vec::new();
+    plancraft_mcp::run_stdio_with(&server, std::io::Cursor::new(input), &mut out).unwrap();
+    let replies: Vec<Value> = String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(replies[1]["error"]["code"], -32600, "{}", replies[1]);
     for (version, allowed) in [("2025-03-26", true), ("2025-06-18", false), ("2025-11-25", false)] {
         let server = plancraft_mcp::McpServer::new(plancraft_core::workspace::Workspace::default().shared());
         let input = format!("{}\n{batch}\n", init(version));

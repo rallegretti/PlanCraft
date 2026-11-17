@@ -426,6 +426,12 @@ fn cross_document_external_links() {
     let ms =
         c.call("create_milestone", json!({ "name": "Platform done", "members": [{ "external_project": "Platform", "task": api_id }] }));
     assert_eq!(ms["finish"], "2026-10-30 17:00");
+    // Regression (review): members written with the `project` alias failed with a misleading
+    // "try again" after the linked files moved out of the workspace lock.
+    let alias =
+        c.call("create_milestone", json!({ "name": "Platform done (alias)", "members": [{ "project": "Platform", "task": api_id }] }));
+    assert_eq!(alias["finish"], "2026-10-30 17:00");
+    c.call("delete_tasks", json!({ "tasks": ["Platform done (alias)"] }));
     c.call_err("link_external_task", json!({ "external_project": "Platform", "task": 999, "successor": "Integrate" }));
     c.call_err("link_external_task", json!({ "external_project": "Nope", "task": 1, "successor": "Integrate" }));
     c.call("save_project", json!({}));
@@ -449,6 +455,19 @@ fn cross_document_external_links() {
     c.call("undo", json!({ "document": "App" }));
     assert_eq!(c.call("get_task", json!({ "document": "App", "task": "Integrate" }))["start"], "2026-11-02 08:00");
     c.call("redo", json!({ "document": "App" }));
+    // Regression (review): a refresh that finds nothing new is no edit: no undo step, and a saved
+    // plan stays saved.
+    c.call("save_project", json!({ "document": "App" }));
+    let steps = |c: &Client| {
+        let ws = c.server.workspace().lock().unwrap();
+        let doc = ws.docs.iter().find(|d| d.project.name == "App").unwrap();
+        (doc.history().len(), doc.dirty)
+    };
+    let (before, _) = steps(&c);
+    c.call("refresh_external_links", json!({ "document": "App" }));
+    let (after, dirty) = steps(&c);
+    assert!(!dirty, "a refresh with nothing new leaves the plan saved");
+    assert_eq!(after, before, "no undo step for a refresh with nothing new");
 
     // Reopen the dependent document from disk.
     c.call("save_project", json!({ "document": "App" }));

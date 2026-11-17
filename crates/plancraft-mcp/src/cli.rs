@@ -131,10 +131,11 @@ pub fn run(args: Vec<String>) -> ExitCode {
                     };
                     eprintln!("plancraft-mcp {}: serving MCP at {}", env!("CARGO_PKG_VERSION"), handle.url());
                     eprintln!("this session's bearer token is in {} (readable only by you)", token_file.display());
+                    // The path isn't pasted into a shell command: a quote in it would break (or
+                    // change) the command.
                     eprintln!(
-                        "connect with: claude mcp add --transport http plancraft {} --header \"Authorization: Bearer $(cat '{}')\"",
-                        handle.url(),
-                        token_file.display()
+                        "connect with: claude mcp add --transport http plancraft {} --header \"Authorization: Bearer <the token in that file>\"",
+                        handle.url()
                     );
                     while handle.is_running() {
                         std::thread::sleep(std::time::Duration::from_millis(500));

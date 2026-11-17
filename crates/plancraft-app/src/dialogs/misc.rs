@@ -232,10 +232,17 @@ pub struct ExternalLinks {
     /// "Add Project File…" was clicked: the app shows the file picker once the workspace is
     /// unlocked, then calls [`ExternalLinks::add_file`].
     pub pick_requested: bool,
+    /// "Refresh All" was clicked: the app reads the linked files once the workspace is unlocked.
+    pub refresh_requested: bool,
 }
 
 impl ExternalLinks {
     /// Links the project file picked for "Add Project File…".
+    /// The linked files were refreshed: show their tasks afresh.
+    pub fn refreshed(&mut self) {
+        self.loaded_for = None;
+    }
+
     pub fn add_file(&mut self, doc: &mut Document, path: &std::path::Path) {
         let doc_path = doc.path.clone();
         match doc.edit_msg("Add External Project", |p| io::add_external_project(p, doc_path.as_deref(), path).map_err(|e| e.to_string())) {
@@ -262,15 +269,7 @@ impl ExternalLinks {
                     self.pick_requested = true;
                 }
                 if ui.button("⟳ Refresh All").clicked() {
-                    let w = doc.refresh_external();
-                    if w.is_empty() {
-                        st.toast(ToastKind::Success, "External links refreshed");
-                    } else {
-                        for m in w {
-                            st.toast(ToastKind::Warning, m);
-                        }
-                    }
-                    self.loaded_for = None;
+                    self.refresh_requested = true;
                 }
             });
             ui.separator();
