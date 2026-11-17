@@ -1771,3 +1771,28 @@ fn mspdi_elapsed_duration_formats_are_elapsed_time() {
     assert!(p.tasks[3].elapsed && p.tasks[3].estimated);
     assert_eq!(p.tasks[3].sched.finish, Some(dt(2026, 10, 21, 8)));
 }
+
+// Source: https://support.microsoft.com/en-us/office/add-a-milestone-583be27b-1659-4a7a-a047-e9b9cb6a4834 — "Create a milestone with zero duration"
+// Entering a duration of 0 on a task makes it a milestone, shown with the milestone symbol. The
+// page names no exception for manually scheduled tasks, so this holds whatever mode new tasks get.
+#[test]
+fn a_zero_duration_makes_a_milestone() {
+    for new_tasks_auto in [true, false] {
+        let mut p = project();
+        p.settings.new_tasks_auto = new_tasks_auto;
+        let a = task(&mut p, "Review", 2 * DAY);
+        assert!(!p.task(a).unwrap().is_milestone());
+        p.set_duration(a, 0, false).unwrap();
+        assert!(p.task(a).unwrap().is_milestone(), "new tasks auto-scheduled: {new_tasks_auto}");
+        // Giving it a duration again makes it a task.
+        p.set_duration(a, DAY, false).unwrap();
+        assert!(!p.task(a).unwrap().is_milestone());
+
+        // A summary task never becomes a milestone.
+        let s = task(&mut p, "Phase", DAY);
+        let c = task(&mut p, "Work", DAY);
+        p.indent(c).unwrap();
+        p.set_duration(s, 0, false).unwrap();
+        assert!(!p.task(s).unwrap().is_milestone());
+    }
+}

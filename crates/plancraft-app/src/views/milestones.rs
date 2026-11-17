@@ -75,11 +75,11 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                         ui.label(RichText::new(&ms.name).size(16.0).strong());
                         ui.add_space(8.0);
                         if ms.complete {
-                            chip(ui, "Complete", Color32::WHITE, theme::pal().OK);
+                            chip(ui, "Complete", theme::pal().CHIP_TEXT, theme::pal().CHIP_OK);
                         } else if ms.late {
-                            chip(ui, "Late", Color32::WHITE, theme::pal().ERROR);
+                            chip(ui, "Late", theme::pal().CHIP_TEXT, theme::pal().CHIP_ERROR);
                         } else if ms.baseline.zip(ms.date).is_some_and(|(b, d)| d > b) {
-                            chip(ui, "Slipping", Color32::WHITE, theme::pal().WARN);
+                            chip(ui, "Slipping", theme::pal().CHIP_TEXT, theme::pal().CHIP_WARN);
                         } else {
                             chip(ui, "On track", theme::pal().ACCENT_DARK, theme::pal().ACCENT_LIGHT);
                         }

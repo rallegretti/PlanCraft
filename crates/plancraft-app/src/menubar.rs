@@ -36,6 +36,8 @@ pub struct MenuInfo {
     pub resource_selected: bool,
     pub mcp_running: bool,
     pub mcp_url: Option<String>,
+    /// Whether the Undo History window is open (the History button shows as pressed).
+    pub history_open: bool,
     /// Fields offered for sorting and grouping: (key, title), the table's columns first.
     pub fields: Vec<(String, String)>,
 }
@@ -86,11 +88,7 @@ pub fn title_bar(ui: &mut Ui, info: &MenuInfo, out: &mut Vec<Command>) {
     let title = if info.has_doc { format!("{} - PlanCraft", info.title) } else { "PlanCraft".into() };
     ui2.painter().text(rect.center(), Align2::CENTER_CENTER, title, FontId::proportional(13.0), Color32::WHITE);
     ui2.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        let (txt, color) = if info.mcp_running {
-            ("⚡ MCP live", Color32::from_rgb(0x8E, 0xF0, 0xB0))
-        } else {
-            ("○ MCP off", Color32::from_white_alpha(150))
-        };
+        let (txt, color) = if info.mcp_running { ("⚡ MCP live", theme::pal().MCP_LIVE) } else { ("○ MCP off", theme::pal().MCP_OFF) };
         let resp = ui.add(egui::Label::new(egui::RichText::new(txt).color(color).size(12.0)).sense(Sense::click()));
         let tip = match &info.mcp_url {
             Some(u) => format!("AI agents can control this window via MCP at {u}\nClick to manage."),
@@ -519,7 +517,7 @@ fn toolbar(ui: &mut Ui, st: &mut UiState, info: &MenuInfo, settings: &AppSetting
             if button(ui, "📅", Some("Timeline"), "Show the timeline strip", doc, st.timeline_visible).clicked() {
                 st.timeline_visible = !st.timeline_visible;
             }
-            if button(ui, "🕘", Some("History"), "Undo history", doc, st.show_history).clicked() {
+            if button(ui, "🕘", Some("History"), "Undo history", doc, info.history_open).clicked() {
                 push(Command::History);
             }
             sep(ui);

@@ -221,3 +221,43 @@ fn summary_actual_and_remaining_duration_roll_up() {
     recalculate(&mut p);
     assert_eq!(p.task(s).unwrap().duration_progress(), (4 * DAY, 4 * DAY));
 }
+
+/// Regression: time logged on a Saturday for a task on a 24-hour calendar set its actual start
+/// to Monday 08:00 (the start of the next working day on the project calendar).
+#[test]
+fn logged_time_starts_on_the_tasks_own_calendar() {
+    let mut p = project();
+    let a = task(&mut p, "Cure", 2 * DAY);
+    let b = task(&mut p, "Office", 2 * DAY);
+    let cal = p.add_calendar("Around the clock", None).unwrap();
+    let id = p.calendars.iter().position(|c| c.id == cal).unwrap();
+    p.calendars[id] = plancraft_core::calendar::Calendar::twenty_four_hours(cal);
+    p.task_mut(a).unwrap().calendar = Some(cal);
+    let r = p.add_resource("Ana");
+    let saturday = d(10, 24);
+    p.log_time(a, r, saturday, 60, "").unwrap();
+    assert_eq!(p.task(a).unwrap().actual_start, Some(dt(10, 24, 0)), "Saturday is a working day for this task");
+    // A task on the project calendar still starts at the next working day's start.
+    p.log_time(b, r, saturday, 60, "").unwrap();
+    assert_eq!(p.task(b).unwrap().actual_start, Some(dt(10, 26, 8)));
+}
+
+/// Regression (review): the actual start came from the calendar of all the task's resources
+/// together, so time Ben logged on a Saturday he works started the task on Monday because Ana
+/// doesn't work Saturdays. It follows the calendar of the one who logged the time.
+#[test]
+fn logged_time_starts_on_the_workers_calendar() {
+    let mut p = project();
+    let a = task(&mut p, "Install", 2 * DAY);
+    let cal = p.add_calendar("Around the clock", None).unwrap();
+    let id = p.calendars.iter().position(|c| c.id == cal).unwrap();
+    p.calendars[id] = plancraft_core::calendar::Calendar::twenty_four_hours(cal);
+    let ana = p.add_resource("Ana");
+    let ben = p.add_resource("Ben");
+    p.resource_mut(ben).unwrap().calendar = Some(cal);
+    p.assign(a, ana, Some(1.0), None).unwrap();
+    p.assign(a, ben, Some(1.0), None).unwrap();
+    recalculate(&mut p);
+    p.log_time(a, ben, d(10, 24), 60, "").unwrap();
+    assert_eq!(p.task(a).unwrap().actual_start, Some(dt(10, 24, 0)), "Ben works Saturdays");
+}

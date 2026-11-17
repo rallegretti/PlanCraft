@@ -30,8 +30,40 @@ fn set_day(p: &mut Project, task: TaskId, resource: ResourceId, date: Date, minu
     Ok(())
 }
 
+/// The seven days of the week starting on `monday`.
+fn week_days(monday: Date) -> [Date; 7] {
+    std::array::from_fn(|i| plancraft_core::dates::add_days(monday, i64::try_from(i).unwrap_or(0)).unwrap_or(monday))
+}
+
+/// The timesheet's lines for a week: work assignments active that week or with time logged in
+/// it (of `resource` only, when given), by resource name and then task order.
+fn week_lines(p: &Project, days: &[Date; 7], resource: Option<ResourceId>) -> Vec<Line> {
+    let (first, last) = (days[0], days[6]);
+    let mut lines: Vec<Line> = Vec::new();
+    for a in &p.assignments {
+        if resource.is_some_and(|r| r != a.resource) {
+            continue;
+        }
+        let (Some(t), Some(r)) = (p.task(a.task), p.resource(a.resource)) else {
+            continue;
+        };
+        if r.kind != ResourceType::Work {
+            continue;
+        }
+        // Show assignments active this week, or with time logged this week.
+        let active = t.sched.start.zip(t.sched.finish).is_some_and(|(s, f)| s.date() <= last && f.date() >= first);
+        let logged = p.time_entries.iter().any(|e| e.task == a.task && e.resource == a.resource && days.contains(&e.date));
+        if active || logged {
+            lines.push(Line { task: t.id, resource: r.id, label: t.name.clone(), resource_name: r.name.clone() });
+        }
+    }
+    lines.sort_by(|a, b| a.resource_name.cmp(&b.resource_name).then(p.task_index(a.task).cmp(&p.task_index(b.task))));
+    lines
+}
+
 pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
-    let week = st.timesheet_week - plancraft_core::dates::days(st.timesheet_week.weekday().num_days_from_monday() as i64);
+    let back = i64::from(st.timesheet_week.weekday().num_days_from_monday());
+    let week = plancraft_core::dates::add_days(st.timesheet_week, -back).unwrap_or(st.timesheet_week);
     st.timesheet_week = week;
     let mut bar =
         ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(rect.min + vec2(8.0, 4.0), vec2(rect.width() - 16.0, 26.0))));
@@ -39,11 +71,11 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
         ui.label(egui::RichText::new("Timesheet").strong().size(15.0));
         ui.separator();
         if ui.button("⏴").on_hover_text("Previous week").clicked() {
-            st.timesheet_week = week - plancraft_core::dates::days(7);
+            st.timesheet_week = plancraft_core::dates::add_days(week, -7).unwrap_or(week);
         }
         ui.label(format!("Week of {}", week.format("%b %-d, %Y")));
         if ui.button("⏵").on_hover_text("Next week").clicked() {
-            st.timesheet_week = week + plancraft_core::dates::days(7);
+            st.timesheet_week = plancraft_core::dates::add_days(week, 7).unwrap_or(week);
         }
         if ui.button("This Week").clicked() {
             let today = plancraft_core::dates::today();
@@ -75,26 +107,8 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
     let rect = Rect::from_min_max(pos2(rect.left(), rect.top() + 34.0), rect.max);
 
     let p = &doc.project;
-    let days: [Date; 7] = std::array::from_fn(|i| week + plancraft_core::dates::days(i as i64));
-    let mut lines: Vec<Line> = Vec::new();
-    for a in &p.assignments {
-        if st.timesheet_resource.is_some_and(|r| r != a.resource) {
-            continue;
-        }
-        let (Some(t), Some(r)) = (p.task(a.task), p.resource(a.resource)) else {
-            continue;
-        };
-        if r.kind != ResourceType::Work {
-            continue;
-        }
-        // Show assignments active this week, or with time logged this week.
-        let active = t.sched.start.zip(t.sched.finish).is_some_and(|(s, f)| s.date() <= days[6] && f.date() >= days[0]);
-        let logged = p.time_entries.iter().any(|e| e.task == a.task && e.resource == a.resource && days.contains(&e.date));
-        if active || logged {
-            lines.push(Line { task: t.id, resource: r.id, label: t.name.clone(), resource_name: r.name.clone() });
-        }
-    }
-    lines.sort_by(|a, b| a.resource_name.cmp(&b.resource_name).then(p.task_index(a.task).cmp(&p.task_index(b.task))));
+    let days = week_days(week);
+    let lines = week_lines(p, &days, st.timesheet_resource);
 
     let mut defs = vec![ColumnDef::new("Resource", 150.0).read_only(), ColumnDef::new("Task", 230.0).read_only()];
     for d in &days {
@@ -122,8 +136,8 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
         let lines = &lines;
         let mut cell = |r: usize, c: usize| -> Cell {
             if r == lines.len() {
-                // Totals row.
-                return match c {
+                // Totals row: sums, so no cell of it can be edited.
+                let sum = match c {
                     1 => Cell { text: "Total".into(), bold: true, ..Default::default() },
                     2..=8 => {
                         let Some(&d) = days.get(c - 2) else { return Cell::default() };
@@ -142,6 +156,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
                     }
                     _ => Cell::default(),
                 };
+                return Cell { read_only: true, ..sum };
             }
             let Some(l) = lines.get(r) else { return Cell::default() };
             match c {
@@ -202,5 +217,48 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
             egui::FontId::proportional(13.0),
             theme::pal().TEXT_WEAK,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui_kittest::Harness;
+
+    /// Regression: the Totals row's day cells opened an editor, and what was typed there was
+    /// accepted and then silently dropped.
+    #[test]
+    fn the_totals_row_cannot_be_edited() {
+        let monday = plancraft_core::dates::ymd(2026, 10, 19).unwrap();
+        let p = plancraft_core::sample::demo_project(monday);
+        let lines = week_lines(&p, &week_days(monday), None).len();
+        assert!(lines > 0, "the demo plan has work this week");
+        let entries = p.time_entries.len();
+        let st = UiState { timesheet_week: monday, ..UiState::default() };
+        let mut h = Harness::builder().with_size(egui::vec2(1400.0, 700.0)).build_ui_state(
+            |ui, state: &mut (Document, UiState)| {
+                let (doc, st) = state;
+                show(ui, ui.max_rect(), doc, st);
+            },
+            (Document::new(1, p, None), st),
+        );
+        h.run_steps(2);
+        // Column 3 is Tuesday: a line's cell edits, the totals row's doesn't.
+        for (row, editable) in [(0, true), (lines, false)] {
+            h.state_mut().1.misc_grid.cursor = Some((row, 3));
+            h.ctx.memory_mut(|m| m.request_focus(egui::Id::new("timesheet").with("body")));
+            h.run_steps(2);
+            h.key_press(egui::Key::F2);
+            h.run_steps(2);
+            assert_eq!(h.state().1.misc_grid.editing.is_some(), editable, "F2 on row {row}");
+            h.key_press(egui::Key::Escape);
+            h.run_steps(2);
+            h.event(egui::Event::Text("5".into()));
+            h.run_steps(2);
+            assert_eq!(h.state().1.misc_grid.editing.is_some(), editable, "typing on row {row}");
+            h.key_press(egui::Key::Escape);
+            h.run_steps(2);
+        }
+        assert_eq!(h.state().0.project.time_entries.len(), entries, "nothing was logged");
     }
 }

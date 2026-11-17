@@ -256,7 +256,11 @@ impl Lag {
         }
     }
 
-    /// Parses lag text such as `"2d"`, `"-1d"`, `"+50%"`, `"3ed"` (elapsed days).
+    /// Parses lag text such as `"2d"`, `"-1d"`, `"3 minutes"`, `"+50%"`, or elapsed time with an
+    /// `e` before the unit: `"3ed"`, `"3e"` (elapsed days), `"12eh"`, `"2ew"`, `"1emo"`, `"30em"`.
+    ///
+    /// Working units are tried first, so a unit that merely ends in `e` (`"3 minute"`) is working
+    /// time; only a unit that starts with `e` is elapsed.
     pub fn parse(text: &str, s: &TimeSettings) -> Option<Lag> {
         let t = text.trim().to_ascii_lowercase().replace(' ', "");
         if t.is_empty() {
@@ -266,13 +270,8 @@ impl Lag {
             let max = crate::limits::MAX_LAG_PERCENT;
             return p.parse::<i32>().ok().filter(|p| (-max..=max).contains(p)).map(Lag::Percent);
         }
-        for suffix in ["edays", "eday", "ed", "e"] {
-            if let Some(n) = t.strip_suffix(suffix) {
-                let v: f64 = n.parse().ok()?;
-                return to_minutes(v * 24.0 * 60.0).map(Lag::Elapsed);
-            }
-        }
-        parse_duration(&t, DurationUnit::Days, s).map(|(m, _)| Lag::Working(m))
+        let typed = parse_task_duration(&t, DurationUnit::Days, s)?;
+        Some(if typed.elapsed { Lag::Elapsed(typed.minutes) } else { Lag::Working(typed.minutes) })
     }
 }
 
@@ -347,5 +346,47 @@ mod tests {
         assert_eq!(Lag::parse("3ed", &s), Some(Lag::Elapsed(3 * 1440)));
         assert_eq!(Lag::Working(960).format(&s), "+2 days");
         assert_eq!(Lag::Percent(-25).format(&s), "-25%");
+    }
+
+    /// Regression: "3 minute" (any unit word ending in `e`) was read as an elapsed lag with the
+    /// number "3minut" and refused; only units that start with `e` are elapsed.
+    #[test]
+    fn lag_units_ending_in_e_are_working_time() {
+        let s = TimeSettings::default();
+        let day = 24 * 60;
+        for (text, lag) in [
+            ("3 minute", Some(Lag::Working(3))),
+            ("1 minute", Some(Lag::Working(1))),
+            ("3 minutes", Some(Lag::Working(3))),
+            ("-1 minute", Some(Lag::Working(-1))),
+            ("2 hours", Some(Lag::Working(120))),
+            ("1 week", Some(Lag::Working(2400))),
+            ("2", Some(Lag::Working(960))),
+            ("2d?", Some(Lag::Working(960))),
+            ("3e", Some(Lag::Elapsed(3 * day))),
+            ("3ed", Some(Lag::Elapsed(3 * day))),
+            ("-3ed", Some(Lag::Elapsed(-3 * day))),
+            ("1 eday", Some(Lag::Elapsed(day))),
+            ("+2 edays", Some(Lag::Elapsed(2 * day))),
+            ("1.5edays", Some(Lag::Elapsed(day + day / 2))),
+            ("30em", Some(Lag::Elapsed(30))),
+            ("3 eminute", Some(Lag::Elapsed(3))),
+            ("12eh", Some(Lag::Elapsed(12 * 60))),
+            ("2ew", Some(Lag::Elapsed(14 * day))),
+            ("1emo", Some(Lag::Elapsed(30 * day))),
+            ("", Some(Lag::None)),
+            ("50%", Some(Lag::Percent(50))),
+            ("3minutx", None),
+            ("3ex", None),
+            ("e", None),
+            ("abc", None),
+            ("100000000ed", None),
+        ] {
+            assert_eq!(Lag::parse(text, &s), lag, "{text:?}");
+        }
+        // Formatting and parsing agree.
+        for lag in [Lag::Working(3), Lag::Working(-960), Lag::Elapsed(3 * day), Lag::Elapsed(-day / 2), Lag::Percent(-25)] {
+            assert_eq!(Lag::parse(&lag.format(&s), &s), Some(lag), "{}", lag.format(&s));
+        }
     }
 }

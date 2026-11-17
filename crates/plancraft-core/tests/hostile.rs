@@ -69,6 +69,15 @@ proptest! {
         prop_assert_eq!(Lag::parse(&lag.format(&s), &s), Some(lag));
     }
 
+    /// Elapsed lags in whole days, written and read back (units such as "minute" that end in
+    /// `e` are working time; only a unit that starts with `e` is elapsed).
+    #[test]
+    fn elapsed_lags_round_trip(days in -1830i64..=1830) {
+        let s = TimeSettings::default();
+        let lag = if days == 0 { Lag::None } else { Lag::Elapsed(days * 1440) };
+        prop_assert_eq!(Lag::parse(&lag.format(&s), &s), Some(lag));
+    }
+
     #[test]
     fn predecessor_text_never_panics(text in cell_text()) {
         let p = demo_project(start());
@@ -119,6 +128,8 @@ proptest! {
         Just(serde_json::json!(-1)),
         Just(serde_json::json!(i64::MAX)),
         Just(serde_json::json!(u64::MAX)),
+        // An id no task, resource or calendar has (a link or member that points nowhere).
+        Just(serde_json::json!(999)),
         Just(serde_json::json!(1e308)),
         Just(serde_json::json!("+262143-12-31T23:59:59")),
         Just(serde_json::json!("-262143-01-01")),
@@ -138,6 +149,16 @@ proptest! {
         let n = leaves.len();
         *leaves.swap_remove(path % n) = junk;
         if let Ok((mut q, _)) = from_json_with_notes(&json.to_string(), Path::new("junk.plancraft")) {
+            // Every link and milestone member names a task (or linked project) that exists, so a
+            // new task can never take a dangling id and silently become a predecessor.
+            for t in &q.tasks {
+                for r in t.predecessors.iter().map(|d| &d.predecessor).chain(&t.members) {
+                    match r {
+                        TaskRef::Local(id) => prop_assert!(q.task(*id).is_some(), "dangling link to {id:?}"),
+                        TaskRef::External { project, .. } => prop_assert!(q.external(*project).is_some(), "dangling link to {project}"),
+                    }
+                }
+            }
             let report = recalculate(&mut q);
             prop_assert!(!report.warnings.iter().any(|w| w.contains("internal error")), "{:?}", report.warnings);
         }

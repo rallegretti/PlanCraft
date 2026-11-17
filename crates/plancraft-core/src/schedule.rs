@@ -228,7 +228,7 @@ pub fn task_calendar(p: &Project, idx: usize) -> WorkCal<'_> {
 }
 
 /// [`task_calendar`] with the task's assigned resources already looked up.
-fn calendar_for<'a>(p: &'a Project, task: &Task, resources: &[&'a Resource]) -> WorkCal<'a> {
+pub(crate) fn calendar_for<'a>(p: &'a Project, task: &Task, resources: &[&'a Resource]) -> WorkCal<'a> {
     let base = task.calendar.and_then(|c| p.calendar(c)).unwrap_or_else(|| p.base_calendar());
     let mut layers = Vec::new();
     if task.calendar.is_some() {
@@ -807,8 +807,27 @@ impl<'a> Engine<'a> {
             };
 
             if t.mode == ScheduleMode::Manual {
-                let start = t.manual_start.or(t.actual_start).unwrap_or(project_start);
-                let finish = t.actual_finish.or(t.manual_finish).unwrap_or_else(|| if dur > 0 { along(start, true) } else { start });
+                // Actual dates win over typed ones, at both ends. A task that started on another
+                // day than typed (and hasn't finished) keeps its length from its actual start: its
+                // typed finish moves with it instead of squeezing or stretching the task. The
+                // length is that of its typed dates when both were typed (typing a date doesn't
+                // change the Duration field), else its duration.
+                let start = t.actual_start.or(t.manual_start).unwrap_or(project_start);
+                let from_start = || if dur > 0 { along(start, true) } else { start };
+                let finish = match (t.actual_finish, t.actual_start) {
+                    (Some(f), _) => f,
+                    (None, Some(a)) if Some(a) != t.manual_start => match (t.manual_start, t.manual_finish) {
+                        (Some(ms), Some(mf)) if mf > ms => {
+                            if t.elapsed {
+                                shift(start, crate::dates::minutes_between(ms, mf))
+                            } else {
+                                cal.add(start, cal.between(ms, mf))
+                            }
+                        }
+                        _ => from_start(),
+                    },
+                    _ => t.manual_finish.unwrap_or_else(from_start),
+                };
                 self.set_early(i, start, finish.max(start));
                 continue;
             }

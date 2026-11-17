@@ -188,6 +188,32 @@ pub fn sanitize(p: &mut Project) -> Vec<String> {
         s.notes(&mut e.note);
     }
 
+    // Two links to the same project (by id) would make every lookup ambiguous: the first is kept.
+    let mut seen = HashSet::new();
+    let before = p.external_projects.len();
+    p.external_projects.retain(|e| seen.insert(e.id));
+    if p.external_projects.len() != before {
+        s.note("a linked project was listed twice");
+    }
+    // A link or milestone member pointing at a task (or linked project) that does not exist is
+    // dropped: a new task could later take the missing id and silently become a predecessor.
+    let externals: HashSet<_> = p.external_projects.iter().map(|e| e.id).collect();
+    let exists = |r: &TaskRef| match r {
+        TaskRef::Local(id) => tasks.contains(id),
+        TaskRef::External { project, .. } => externals.contains(project),
+    };
+    for t in &mut p.tasks {
+        let before = (t.predecessors.len(), t.members.len());
+        t.predecessors.retain(|d| exists(&d.predecessor));
+        t.members.retain(exists);
+        if t.predecessors.len() != before.0 {
+            s.note("a link pointed at a task or linked project that does not exist");
+        }
+        if t.members.len() != before.1 {
+            s.note("a milestone member was a task or linked project that does not exist");
+        }
+    }
+
     for e in &mut p.external_projects {
         s.name(&mut e.name);
         s.notes(&mut e.path);
@@ -613,13 +639,14 @@ mod tests {
     fn sanitize_clamps_and_reports() {
         let mut p = project();
         let a = p.add_task("A", None);
+        let b = p.add_task("B", None);
         let t = p.task_mut(a).unwrap();
         t.duration = Minutes::MAX;
         t.percent_complete = 250;
         t.outline_level = 9;
         t.deadline = crate::dates::ymd(9999, 1, 1).and_then(|d| d.and_hms_opt(0, 0, 0));
         t.name = "x".repeat(5000);
-        t.predecessors.push(crate::model::Dependency { predecessor: TaskId(99).into(), kind: LinkType::FS, lag: Lag::Percent(i32::MIN) });
+        t.predecessors.push(crate::model::Dependency { predecessor: b.into(), kind: LinkType::FS, lag: Lag::Percent(i32::MIN) });
         p.settings.time.minutes_per_day = 0;
         let notes = sanitize(&mut p);
         let t = p.task(a).unwrap();
@@ -632,6 +659,56 @@ mod tests {
         assert_eq!(p.settings.time.minutes_per_day, 1);
         assert!(notes.len() >= 5, "{notes:?}");
         assert!(sanitize(&mut p).is_empty(), "sanitizing twice changes nothing");
+    }
+
+    /// Regression: links and milestone members pointing at tasks (or linked projects) that don't
+    /// exist were kept when a file was opened, and the next new task took the missing id and
+    /// silently became a predecessor. A linked project listed twice was accepted as well.
+    #[test]
+    fn dangling_links_and_repeated_linked_projects_are_dropped_on_open() {
+        use crate::model::{Dependency, ExternalProject};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("crafted.plancraft");
+        let mut p = project();
+        let a = p.add_task("A", None);
+        let b = p.add_task("B", None);
+        let m = p.add_milestone("M", None);
+        let real = uuid::Uuid::new_v4();
+        let gone = uuid::Uuid::new_v4();
+        let link = |name: &str| ExternalProject {
+            id: real,
+            name: name.into(),
+            path: format!("{name}.plancraft"),
+            tasks: Vec::new(),
+            last_sync: None,
+        };
+        p.external_projects = vec![link("First"), link("Second")];
+        let missing = TaskId(p.ids.task + 1);
+        let dep = |predecessor: TaskRef| Dependency { predecessor, kind: LinkType::FS, lag: Lag::None };
+        p.task_mut(b).unwrap().predecessors = vec![
+            dep(TaskRef::Local(a)),
+            dep(TaskRef::Local(missing)),
+            dep(TaskRef::External { project: real, task: TaskId(5) }),
+            dep(TaskRef::External { project: gone, task: TaskId(5) }),
+        ];
+        p.task_mut(m).unwrap().members =
+            vec![TaskRef::Local(a), TaskRef::Local(TaskId(4242)), TaskRef::External { project: gone, task: TaskId(1) }];
+        crate::io::save(&p, &path).unwrap();
+
+        let (mut q, notes) = crate::io::load_with_notes(&path).unwrap();
+        let preds: Vec<_> = q.task(b).unwrap().predecessors.iter().map(|d| d.predecessor).collect();
+        assert_eq!(preds, vec![TaskRef::Local(a), TaskRef::External { project: real, task: TaskId(5) }]);
+        assert_eq!(q.task(m).unwrap().members, vec![TaskRef::Local(a)]);
+        assert_eq!(q.external_projects.len(), 1);
+        assert_eq!(q.external_projects[0].name, "First", "the first of the repeated links is kept");
+        for expected in ["a link pointed at", "a milestone member", "listed twice"] {
+            assert!(notes.iter().any(|n| n.contains(expected)), "{expected}: {notes:?}");
+        }
+        // The next task takes the id the dangling link named, and is nobody's predecessor.
+        let new = q.add_task("New", None);
+        assert_eq!(new, missing);
+        assert!(q.successors(new).is_empty());
+        assert!(sanitize(&mut q).is_empty(), "sanitizing again changes nothing");
     }
 
     #[test]

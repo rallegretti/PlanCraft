@@ -137,7 +137,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                 }
             }
         };
-        grid::show(ui, left, &mut st.usage_grid, &cfg, &is_sel, &mut cell)
+        grid::show(ui, left, &mut st.task_usage_grid, &cfg, &is_sel, &mut cell)
     };
     for ev in output.events {
         match ev {
@@ -185,7 +185,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     painter.hline(header.x_range(), header.bottom() - 0.5, Stroke::new(1.0, theme::pal().GRID_LINE_STRONG));
     let rh = theme::ROW_HEIGHT;
     for (r, row) in rows.iter().enumerate() {
-        let y = body.top() + r as f32 * rh - st.usage_grid.scroll_y;
+        let y = body.top() + r as f32 * rh - st.task_usage_grid.scroll_y;
         if y + rh < body.top() || y > body.bottom() {
             continue;
         }
@@ -211,10 +211,11 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
         bp.hline(body.x_range(), y + rh - 0.5, Stroke::new(1.0, theme::pal().GRID_LINE));
     }
     let vs = Rect::from_min_max(pos2(right.right() - 12.0, body.top()), pos2(right.right(), body.bottom()));
-    st.usage_grid.scroll_y =
-        scrollbar(ui, egui::Id::new("tu_vs"), vs, true, st.usage_grid.scroll_y, rows.len() as f32 * rh + rh, body.height());
+    st.task_usage_grid.scroll_y =
+        scrollbar(ui, egui::Id::new("tu_vs"), vs, true, st.task_usage_grid.scroll_y, rows.len() as f32 * rh + rh, body.height());
     if ui.rect_contains_pointer(body) {
         let dlt = ui.input(|i| i.smooth_scroll_delta.y);
-        st.usage_grid.scroll_y = (st.usage_grid.scroll_y - dlt).clamp(0.0, (rows.len() as f32 * rh - body.height() + rh).max(0.0));
+        st.task_usage_grid.scroll_y =
+            (st.task_usage_grid.scroll_y - dlt).clamp(0.0, (rows.len() as f32 * rh - body.height() + rh).max(0.0));
     }
 }

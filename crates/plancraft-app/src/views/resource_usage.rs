@@ -101,7 +101,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     // Left grid.
     let defs = vec![ColumnDef::new("Resource Name", 220.0).read_only(), ColumnDef::new("Work", 80.0).right().read_only()];
     let cfg = GridConfig {
-        id: egui::Id::new("usage_grid"),
+        id: egui::Id::new("resource_usage_grid"),
         columns: &defs,
         row_count: rows.len(),
         blank_rows: 0,
@@ -154,7 +154,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                 }
             }
         };
-        grid::show(ui, left, &mut st.usage_grid, &cfg, &is_sel, &mut cell)
+        grid::show(ui, left, &mut st.resource_usage_grid, &cfg, &is_sel, &mut cell)
     };
     for ev in output.events {
         match ev {
@@ -210,7 +210,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     let rh = theme::ROW_HEIGHT;
     let font = FontId::proportional(12.0);
     for (r, row) in rows.iter().enumerate() {
-        let y = body.top() + r as f32 * rh - st.usage_grid.scroll_y;
+        let y = body.top() + r as f32 * rh - st.resource_usage_grid.scroll_y;
         if y + rh < body.top() || y > body.bottom() {
             continue;
         }
@@ -241,11 +241,12 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     }
     // Shared vertical scrollbar.
     let vs = Rect::from_min_max(pos2(right.right() - 12.0, body.top()), pos2(right.right(), body.bottom()));
-    st.usage_grid.scroll_y =
-        scrollbar(ui, egui::Id::new("usage_vs"), vs, true, st.usage_grid.scroll_y, rows.len() as f32 * rh + rh, body.height());
+    st.resource_usage_grid.scroll_y =
+        scrollbar(ui, egui::Id::new("usage_vs"), vs, true, st.resource_usage_grid.scroll_y, rows.len() as f32 * rh + rh, body.height());
     if ui.rect_contains_pointer(body) {
         let d = ui.input(|i| i.smooth_scroll_delta);
-        st.usage_grid.scroll_y = (st.usage_grid.scroll_y - d.y).clamp(0.0, (rows.len() as f32 * rh - body.height() + rh).max(0.0));
+        st.resource_usage_grid.scroll_y =
+            (st.resource_usage_grid.scroll_y - d.y).clamp(0.0, (rows.len() as f32 * rh - body.height() + rh).max(0.0));
         if d.x.abs() > 20.0 {
             st.usage_from = Some(step(st.granularity, from, if d.x < 0.0 { 1 } else { -1 }));
         }

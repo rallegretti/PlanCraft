@@ -413,7 +413,8 @@ pub struct UiState {
     pub sel: Selection,
     pub task_grid: GridState,
     pub resource_grid: GridState,
-    pub usage_grid: GridState,
+    pub task_usage_grid: GridState,
+    pub resource_usage_grid: GridState,
     pub misc_grid: GridState,
     pub collapsed: HashSet<TaskId>,
     pub collapsed_resources: HashSet<ResourceId>,
@@ -443,7 +444,6 @@ pub struct UiState {
     pub calendar_month: Date,
     pub toasts: Vec<Toast>,
     pub clipboard: Vec<Task>,
-    pub show_history: bool,
 }
 
 impl Default for UiState {
@@ -457,7 +457,8 @@ impl Default for UiState {
             sel: Selection::default(),
             task_grid: GridState::default(),
             resource_grid: GridState::default(),
-            usage_grid: GridState::default(),
+            task_usage_grid: GridState::default(),
+            resource_usage_grid: GridState::default(),
             misc_grid: GridState::default(),
             collapsed: HashSet::new(),
             collapsed_resources: HashSet::new(),
@@ -481,7 +482,6 @@ impl Default for UiState {
             calendar_month: today.with_day(1).unwrap_or(today),
             toasts: Vec::new(),
             clipboard: Vec::new(),
-            show_history: false,
         }
     }
 }

@@ -59,6 +59,8 @@ pub struct PlanCraftApp {
     /// Refresh Links was chosen for this document: the files are read once the workspace is
     /// unlocked (see [`PlanCraftApp::refresh_links`]).
     refresh_links: Option<u64>,
+    /// What the last Copy or Cut noted about its plan besides the tasks (`UiState::clipboard`).
+    clip_source: Option<ClipSource>,
 }
 
 /// Locks the shared workspace. A panic caught while it was held must not lock the user out of
@@ -77,6 +79,203 @@ fn has_selected_ancestor(p: &Project, i: usize, sel: &[TaskId]) -> bool {
         a = p.parent_index(ai);
     }
     false
+}
+
+/// What a Copy or Cut takes from its plan besides the tasks, so a paste can match calendars,
+/// custom fields and resources by name in whichever plan it lands in (ids differ between plans).
+#[derive(Clone, Default)]
+struct ClipSource {
+    /// The plan the tasks were copied from: pasted back into it, calendars, fields and resources
+    /// keep their ids (also when renamed since the copy).
+    project: uuid::Uuid,
+    /// The copied tasks' ids: this belongs to the clipboard only while it holds those tasks.
+    tasks: Vec<TaskId>,
+    calendars: HashMap<CalendarId, String>,
+    fields: HashMap<CustomFieldId, (String, CustomFieldKind)>,
+    /// The copied tasks' assignments, each with its resource's name and type.
+    assignments: Vec<(Assignment, String, ResourceType)>,
+}
+
+impl ClipSource {
+    fn capture(p: &Project, copied: &[Task]) -> Self {
+        let ids: HashSet<TaskId> = copied.iter().map(|t| t.id).collect();
+        let used_calendars: HashSet<CalendarId> =
+            copied.iter().flat_map(|t| [t.calendar, t.recurrence.as_ref().and_then(|r| r.calendar)]).flatten().collect();
+        let used_fields: HashSet<CustomFieldId> = copied.iter().flat_map(|t| t.custom.keys().copied()).collect();
+        Self {
+            project: p.id,
+            tasks: copied.iter().map(|t| t.id).collect(),
+            calendars: p.calendars.iter().filter(|c| used_calendars.contains(&c.id)).map(|c| (c.id, c.name.clone())).collect(),
+            fields: p.custom_fields.iter().filter(|f| used_fields.contains(&f.id)).map(|f| (f.id, (f.name.clone(), f.kind))).collect(),
+            assignments: p
+                .assignments
+                .iter()
+                .filter(|a| ids.contains(&a.task))
+                .filter_map(|a| p.resource(a.resource).map(|r| (a.clone(), r.name.clone(), r.kind)))
+                .collect(),
+        }
+    }
+
+    /// Whether `clip` is still the copy this was taken with.
+    fn holds(&self, clip: &[Task]) -> bool {
+        self.tasks.len() == clip.len() && self.tasks.iter().zip(clip).all(|(id, t)| *id == t.id)
+    }
+}
+
+/// The item of a plan matching one from another plan (or the same plan): the same id under the
+/// same name first, otherwise the first of that name (ignoring case).
+fn match_by_name<I: Copy + PartialEq>(items: impl Iterator<Item = (I, String)> + Clone, id: I, name: &str, same_plan: bool) -> Option<I> {
+    if same_plan && items.clone().any(|(i, _)| i == id) {
+        return Some(id);
+    }
+    let key = name.to_lowercase();
+    let same = |n: &String| n.to_lowercase() == key;
+    items.clone().find(|(i, n)| *i == id && same(n)).or_else(|| items.into_iter().find(|(_, n)| same(n))).map(|(i, _)| i)
+}
+
+/// Names for a paste note: 'A', 'B'.
+fn quoted(names: std::collections::BTreeSet<String>) -> String {
+    names.into_iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(", ")
+}
+
+/// Pastes copied tasks before row `at` with fresh ids. Links and milestone members among the
+/// pasted tasks follow them to their new ids (others are left out); calendars, custom field
+/// values and assignments are matched by name in this plan (`source` says what they were called
+/// where they were copied), and what has no match is left out. Returns the new ids and notes on
+/// what was left out.
+fn paste_tasks(p: &mut Project, clip: &[Task], source: Option<&ClipSource>, at: usize) -> (Vec<TaskId>, Vec<String>) {
+    use std::collections::BTreeSet;
+    let base = clip.iter().map(|t| t.outline_level).min().unwrap_or(1);
+    let target_level = p.tasks.get(at).map_or(1, |t| t.outline_level);
+    let at = at.min(p.tasks.len());
+    let recurring_in_clip = clip.iter().any(|t| t.recurrence.is_some());
+    let same_plan = source.is_some_and(|s| s.project == p.id);
+    let ids: Vec<TaskId> = clip.iter().map(|_| p.ids.next_task()).collect();
+    let mut new_id: HashMap<TaskId, TaskId> = HashMap::new();
+    for (t, id) in clip.iter().zip(&ids) {
+        new_id.entry(t.id).or_insert(*id);
+    }
+    let (mut lost_calendars, mut lost_fields, mut lost_resources) = (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
+    let mut lost_external = false;
+    // Links and milestone members are added after the tasks are in place, through the same
+    // operations as by hand, so the pasted outline can't hold a link those would refuse (a loop,
+    // a link between a summary and its own subtask, a finish link into a summary).
+    let mut links: Vec<(TaskId, Vec<Dependency>, Vec<TaskRef>)> = Vec::new();
+
+    for (k, (t, id)) in clip.iter().zip(&ids).enumerate() {
+        let mut nt = t.clone();
+        nt.id = *id;
+        let mut remap = |r: TaskRef| match r {
+            TaskRef::Local(old) => new_id.get(&old).map(|n| TaskRef::Local(*n)),
+            TaskRef::External { project, .. } if p.external(project).is_some() => Some(r),
+            TaskRef::External { .. } => {
+                lost_external = true;
+                None
+            }
+        };
+        let deps: Vec<Dependency> =
+            t.predecessors.iter().filter_map(|d| remap(d.predecessor).map(|predecessor| Dependency { predecessor, ..*d })).collect();
+        let members: Vec<TaskRef> = t.members.iter().filter_map(|m| remap(*m)).collect();
+        links.push((*id, deps, members));
+        nt.predecessors.clear();
+        nt.members.clear();
+        nt.baseline = None;
+        nt.baselines.clear();
+        nt.interim.clear();
+        // A pasted occurrence is an ordinary task unless its recurring task comes too.
+        nt.occurrence &= recurring_in_clip;
+        // Board columns belong to their plan: a column this plan lacks means none.
+        if nt.board_status.is_some_and(|s| p.board_column(s).is_none()) {
+            nt.board_status = None;
+        }
+        // Calendars by name; none (the project calendar) when this plan has no such calendar.
+        let mut calendar = |c: CalendarId| match source.and_then(|s| s.calendars.get(&c)) {
+            Some(name) => {
+                let found = match_by_name(p.calendars.iter().map(|k| (k.id, k.name.clone())), c, name, same_plan);
+                if found.is_none() {
+                    lost_calendars.insert(name.clone());
+                }
+                found
+            }
+            // Nothing known about where it came from: keep a calendar this plan has.
+            None => p.calendar(c).map(|k| k.id),
+        };
+        nt.calendar = t.calendar.and_then(&mut calendar);
+        if let Some(r) = &mut nt.recurrence {
+            r.calendar = r.calendar.and_then(&mut calendar);
+        }
+        // Custom field values by field name and kind.
+        nt.custom = t
+            .custom
+            .iter()
+            .filter_map(|(f, v)| {
+                let target = match source.and_then(|s| s.fields.get(f)) {
+                    Some((name, kind)) => {
+                        let same_kind = p.custom_fields.iter().filter(|d| d.kind == *kind).map(|d| (d.id, d.name.clone()));
+                        let found = match_by_name(same_kind, *f, name, same_plan);
+                        if found.is_none() {
+                            lost_fields.insert(name.clone());
+                        }
+                        found
+                    }
+                    None => Some(*f),
+                };
+                // Only into a field of this plan that holds this kind of value.
+                target.filter(|f| p.custom_fields.iter().any(|d| d.id == *f && v.fits(d.kind))).map(|f| (f, v.clone()))
+            })
+            .collect();
+        nt.outline_level = target_level.saturating_add(t.outline_level.saturating_sub(base));
+        p.tasks.insert(at.saturating_add(k).min(p.tasks.len()), nt);
+    }
+    p.normalize_outline();
+    let mut lost_links = false;
+    for (id, deps, members) in links {
+        for d in deps {
+            lost_links |= p.link(d.predecessor, id, d.kind, d.lag).is_err();
+        }
+        for m in members {
+            lost_links |= p.add_milestone_members(id, &[m]).is_err();
+        }
+    }
+
+    // Assignments, to the resource of the same name and type in this plan.
+    for (a, name, kind) in source.map(|s| s.assignments.as_slice()).unwrap_or_default() {
+        let Some(task) = new_id.get(&a.task).copied() else { continue };
+        let same_kind = p.resources.iter().filter(|r| r.kind == *kind).map(|r| (r.id, r.name.clone()));
+        let Some(resource) = match_by_name(same_kind, a.resource, name, same_plan) else {
+            lost_resources.insert(name.clone());
+            continue;
+        };
+        // Two copied resources can match one here ("Ana" and "ana"): one assignment per pair.
+        if p.assignments.iter().any(|x| x.task == task && x.resource == resource) {
+            continue;
+        }
+        let id = p.ids.next_assignment();
+        p.assignments.push(Assignment { id, task, resource, ..a.clone() });
+    }
+
+    let mut notes = Vec::new();
+    if !lost_calendars.is_empty() {
+        notes.push(format!("This plan has no calendar {}, so those tasks use the project calendar.", quoted(lost_calendars)));
+    }
+    if !lost_fields.is_empty() {
+        notes.push(format!("This plan has no custom field {}, so those values were left out.", quoted(lost_fields)));
+    }
+    if !lost_resources.is_empty() {
+        notes.push(format!("This plan has no resource {}, so those assignments were left out.", quoted(lost_resources)));
+    }
+    if lost_links {
+        notes.push("Some links and milestone members can't exist in the pasted outline (a loop, or a link between a summary and its own subtasks), so they were left out.".to_string());
+    }
+    if lost_external {
+        notes.push("Links to projects this plan is not linked with were left out.".to_string());
+    }
+    (ids, notes)
+}
+
+/// Whether two paths name the same file (also through a different spelling or a link).
+fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
+    a == b || matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y)
 }
 
 /// Longest panic message shown to the user.
@@ -121,6 +320,7 @@ impl PlanCraftApp {
             confirm_overwrite: None,
             close_after_save: None,
             refresh_links: None,
+            clip_source: None,
             allow_exit: false,
             last_title: String::new(),
             shot: std::env::var_os("PLANCRAFT_SCREENSHOT").map(|p| (PathBuf::from(p), 0)),
@@ -174,6 +374,9 @@ impl PlanCraftApp {
     fn shortcuts(&mut self, ctx: &egui::Context, out: &mut Vec<Command>) {
         // Only a focused text field should swallow shortcuts (the task grid holds focus too).
         let typing = ctx.text_edit_focused();
+        // The Start Page or a save prompt covers the plan: shortcuts that act on it would change
+        // (or save, or print) a document the user cannot see. New and Open still work.
+        let covered = self.document_covered();
         let cmd = Modifiers::COMMAND;
         let map: Vec<(KeyboardShortcut, Command, bool)> = vec![
             (KeyboardShortcut::new(cmd, Key::N), Command::NewProject, true),
@@ -199,6 +402,11 @@ impl PlanCraftApp {
             (KeyboardShortcut::new(cmd, Key::V), Command::Paste, false),
         ];
         for (sc, c, global) in map {
+            // New and Open belong on the Start Page; behind a save prompt nothing may act.
+            let prompt_open = self.confirm_close.is_some() || self.confirm_overwrite.is_some();
+            if covered && (prompt_open || !matches!(c, Command::NewProject | Command::Open)) {
+                continue;
+            }
             if (global || !typing) && ctx.input_mut(|i| i.consume_shortcut(&sc)) {
                 out.push(c);
             }
@@ -206,7 +414,7 @@ impl PlanCraftApp {
         // The desktop backend turns Ctrl+C/X/V into clipboard events rather than key presses, so
         // outside a text field they are task clipboard commands. (Paste only arrives when the
         // system clipboard holds text; Copy and Cut put the task names there for that reason.)
-        if !typing {
+        if !typing && !covered {
             ctx.input_mut(|i| {
                 i.events.retain(|e| {
                     let c = match e {
@@ -220,6 +428,12 @@ impl PlanCraftApp {
                 });
             });
         }
+    }
+
+    /// Whether the plan is hidden behind the Start Page or a save prompt ("Save changes?", "File
+    /// changed on disk"), so keyboard shortcuts must leave it alone.
+    fn document_covered(&self) -> bool {
+        self.st.start_page || self.confirm_close.is_some() || self.confirm_overwrite.is_some()
     }
 
     fn with_doc<R>(&mut self, f: impl FnOnce(&mut Document, &mut UiState) -> R) -> Option<R> {
@@ -403,10 +617,67 @@ impl PlanCraftApp {
         let Some(b) = self.dialogs.external.as_mut().filter(|b| b.dialog.pick_requested) else { return };
         b.dialog.pick_requested = false;
         let Some(path) = rfd::FileDialog::new().add_filter("PlanCraft project", &[FILE_EXTENSION]).pick_file() else { return };
+        self.add_external_project(&path);
+    }
+
+    /// Links a project file to the plan of the Links Between Projects window. The file is read
+    /// without the workspace lock, so a slow disk or network share never stalls agents.
+    fn add_external_project(&mut self, path: &std::path::Path) {
+        let abs = plancraft_core::io::absolute_path(path);
+        let read = plancraft_core::io::load(&abs);
+        let Some(b) = self.dialogs.external.as_mut() else { return };
         let mut ws = lock(&self.ws);
-        if let Some(doc) = ws.index_of(b.doc).and_then(|i| ws.docs.get_mut(i)) {
-            b.dialog.add_file(doc, &path);
+        match ws.index_of(b.doc).and_then(|i| ws.docs.get_mut(i)) {
+            Some(doc) => b.dialog.add_loaded(doc, &abs, read),
+            None => {
+                drop(ws);
+                self.st.toast(ToastKind::Warning, "The plan was closed before the project file could be linked.");
+            }
         }
+    }
+
+    /// Links Between Projects asked for a linked project's task list or for a link to one of its
+    /// tasks: reads the linked file without the workspace lock, then hands it to the window.
+    fn external_links_reads(&mut self, ctx: &egui::Context) {
+        let Some(b) = self.dialogs.external.as_mut() else { return };
+        let (list, link) = (b.dialog.list_requested, b.dialog.link_requested.take());
+        if list.is_none() && link.is_none() {
+            return;
+        }
+        let handle = b.doc;
+        // Where the files are, looked up under the lock; read after it is released.
+        let paths = {
+            let ws = lock(&self.ws);
+            ws.index_of(handle).and_then(|i| ws.docs.get(i)).map(|d| {
+                let path = |project| plancraft_core::io::external_path(&d.project, d.path.as_deref(), project);
+                (list.map(|e| (e, path(e))), link.map(|r| (r, path(r.project))))
+            })
+        };
+        // The plan was closed: its window closes on the next frame.
+        let Some((list, link)) = paths else { return };
+        let list = list.map(|(e, path)| {
+            let tasks = match path {
+                Some(path) => plancraft_core::io::load_external(&path, e).map(|o| plancraft_core::io::external_tasks_of(&o)),
+                None => Ok(Vec::new()),
+            };
+            (e, tasks)
+        });
+        let link = link.map(|(r, path)| (r, path.map(|path| plancraft_core::io::load_external(&path, r.project))));
+        let Some(b) = self.dialogs.external.as_mut().filter(|b| b.doc == handle) else { return };
+        if let Some((e, tasks)) = list {
+            b.dialog.tasks_loaded(e, tasks);
+        }
+        if let Some((req, read)) = link {
+            let mut ws = lock(&self.ws);
+            match ws.index_of(handle).and_then(|i| ws.docs.get_mut(i)) {
+                Some(doc) => b.dialog.link_loaded(doc, req, read, &mut self.st),
+                None => {
+                    drop(ws);
+                    self.st.toast(ToastKind::Warning, "The plan was closed before the task could be linked.");
+                }
+            }
+        }
+        ctx.request_repaint();
     }
 
     /// Refresh Links (the command, or Refresh All in Links Between Projects): reads the linked files
@@ -598,9 +869,22 @@ impl PlanCraftApp {
         let Some(item) = self.rec().find(stem).cloned() else { return };
         let Some(store) = self.rec().store().cloned() else { return };
         match store.load(&item) {
-            Ok((project, notes)) => {
+            Ok((mut project, notes)) => {
+                // Two documents bound to one file would overwrite each other's saves: when the
+                // file is open already, the copy comes back as an unsaved plan of its own.
+                let open_paths: Vec<PathBuf> = lock(&self.ws).docs.iter().filter_map(|d| d.path.clone()).collect();
+                let already_open = item.original_path.as_deref().is_some_and(|o| open_paths.iter().any(|p| same_file(p, o)));
+                let path = if already_open { None } else { item.original_path.clone() };
+                // Links to other projects are stored relative to the plan's folder: unsaved, the
+                // copy has none, so they become absolute (from the original file's folder).
+                if already_open {
+                    for e in &mut project.external_projects {
+                        let abs = plancraft_core::io::resolve_external_path(&e.path, item.original_path.as_deref());
+                        e.path = abs.to_string_lossy().replace('\\', "/");
+                    }
+                }
                 let mut ws = lock(&self.ws);
-                ws.add(project, item.original_path.clone());
+                ws.add(project, path);
                 if let Some(doc) = ws.active_doc_mut() {
                     // Restored work is the user's: an agent must not be able to discard it.
                     doc.dirty = true;
@@ -623,10 +907,21 @@ impl PlanCraftApp {
                 self.st.gantt.initialized_for = None;
                 self.st.view = ViewKind::Gantt;
                 let target = match &item.original_path {
+                    Some(_) if already_open => "Save it to keep it".to_string(),
                     Some(p) => format!("Save writes it back to {}", p.display()),
                     None => "Save it to keep it".to_string(),
                 };
                 self.set_status(format!("Restored {} from a recovery copy. {target}.", item.name));
+                if already_open {
+                    let file = item.original_path.as_deref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned());
+                    self.st.toast(
+                        ToastKind::Warning,
+                        format!(
+                            "{} is already open; the recovered copy opened as an unsaved plan. Save it under another name or copy what you need.",
+                            file.unwrap_or_else(|| item.name.clone())
+                        ),
+                    );
+                }
             }
             Err(e) => self.st.toast(ToastKind::Error, format!("Could not restore {}: {e}", item.name)),
         }
@@ -738,9 +1033,26 @@ impl PlanCraftApp {
                 report(st, r);
             }
             Command::MoveUp | Command::MoveDown => {
-                if let Some(id) = sel.first().copied() {
-                    let up = cmd == Command::MoveUp;
-                    let r = doc.try_edit(if up { "Move Up" } else { "Move Down" }, ChangeSource::User, |p| p.shift_task(id, up));
+                let up = cmd == Command::MoveUp;
+                // Every selected block moves one step (subtasks travel with their summary). Up
+                // goes top to bottom and down bottom to top, so neighbouring selected tasks move
+                // together and keep their order. One at the edge of its group stops the whole move,
+                // as it does for a single task.
+                let mut tops: Vec<TaskId> = sel
+                    .iter()
+                    .copied()
+                    .filter(|id| doc.project.task_index(*id).is_some_and(|i| !has_selected_ancestor(&doc.project, i, &sel)))
+                    .collect();
+                if !up {
+                    tops.reverse();
+                }
+                if !tops.is_empty() {
+                    let r = doc.try_edit(if up { "Move Up" } else { "Move Down" }, ChangeSource::User, |p| {
+                        for id in &tops {
+                            p.shift_task(*id, up)?;
+                        }
+                        Ok(())
+                    });
                     report(st, r);
                 }
             }
@@ -891,6 +1203,7 @@ impl PlanCraftApp {
                     // Task names on the system clipboard, so they paste into other programs and
                     // so the backend reports the next Ctrl+V as a paste.
                     ctx.copy_text(copied.iter().map(|t| t.name.as_str()).collect::<Vec<_>>().join("\n"));
+                    self.clip_source = Some(ClipSource::capture(&doc.project, &copied));
                     st.clipboard = copied;
                     if cmd == Command::Cut {
                         let r = doc.try_edit("Cut Tasks", ChangeSource::User, |p| p.delete_tasks(&sel).map(|_| ()));
@@ -902,36 +1215,17 @@ impl PlanCraftApp {
             Command::Paste => {
                 if !st.clipboard.is_empty() {
                     let clip = st.clipboard.clone();
+                    // What the copy noted about its plan, while the clipboard still holds that copy.
+                    let source = self.clip_source.as_ref().filter(|s| s.holds(&clip)).cloned();
                     let at = first_sel_index.unwrap_or(doc.project.tasks.len());
-                    let r = doc.edit("Paste Tasks", |p| {
-                        let base = clip.iter().map(|t| t.outline_level).min().unwrap_or(1);
-                        let target_level = p.tasks.get(at).map_or(1, |t| t.outline_level);
-                        let at = at.min(p.tasks.len());
-                        let mut ids = Vec::new();
-                        let recurring_in_clip = clip.iter().any(|t| t.recurrence.is_some());
-                        for (k, t) in clip.iter().enumerate() {
-                            let mut nt = t.clone();
-                            nt.id = p.ids.next_task();
-                            nt.predecessors.clear();
-                            nt.members.clear();
-                            nt.baseline = None;
-                            nt.baselines.clear();
-                            nt.interim.clear();
-                            // A pasted occurrence is an ordinary task unless its recurring task comes too.
-                            nt.occurrence &= recurring_in_clip;
-                            // Board columns belong to their plan: a column this plan lacks means none.
-                            if nt.board_status.is_some_and(|s| p.board_column(s).is_none()) {
-                                nt.board_status = None;
-                            }
-                            nt.outline_level = target_level.saturating_add(t.outline_level.saturating_sub(base));
-                            ids.push(nt.id);
-                            p.tasks.insert(at + k, nt);
-                        }
-                        p.normalize_outline();
-                        ids
-                    });
+                    let r = doc.edit("Paste Tasks", |p| paste_tasks(p, &clip, source.as_ref(), at));
                     match r {
-                        Ok(ids) => st.sel.tasks = ids.into_iter().collect(),
+                        Ok((ids, notes)) => {
+                            st.sel.tasks = ids.into_iter().collect();
+                            if !notes.is_empty() {
+                                st.toast(ToastKind::Info, format!("Pasted the tasks. {}", notes.join(" ")));
+                            }
+                        }
                         Err(e) => st.toast(ToastKind::Warning, e.to_string()),
                     }
                 }
@@ -1129,6 +1423,7 @@ impl PlanCraftApp {
             resource_selected: !self.st.sel.resources.is_empty(),
             mcp_running: self.mcp.running(),
             mcp_url: self.mcp.url(),
+            history_open: self.dialogs.history,
             fields,
         }
     }
@@ -2021,6 +2316,7 @@ impl PlanCraftApp {
             self.save_pdf(pdf);
         }
         self.pick_external_project();
+        self.external_links_reads(&ctx);
         self.refresh_links();
         self.confirm_dialog(&ctx);
         self.overwrite_dialog(&ctx);
@@ -3529,5 +3825,498 @@ mod ui_tests {
         }
         h.state_mut().st.start_page = true;
         h.run_steps(2);
+    }
+
+    fn harness_with(ws: Workspace) -> Harness<'static, PlanCraftApp> {
+        let shared = ws.shared();
+        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).build_eframe(move |cc| PlanCraftApp::new(cc, shared));
+        h.run_steps(3);
+        h
+    }
+
+    fn day() -> Date {
+        plancraft_core::dates::ymd(2026, 10, 19).unwrap()
+    }
+
+    /// Regression: the History button read a flag nothing ever set, so it never showed as pressed
+    /// while the Undo History window was open.
+    #[test]
+    fn the_history_button_shows_whether_the_history_window_is_open() {
+        let mut h = harness();
+        let ctx = h.ctx.clone();
+        let open = |h: &Harness<'static, PlanCraftApp>| {
+            let ws = h.state().ws.clone();
+            let ws = lock(&ws);
+            h.state().menu_info(&ws).history_open
+        };
+        h.state_mut().st.menu_tab = crate::state::MenuTab::View;
+        assert!(!open(&h));
+        h.state_mut().exec(&ctx, Command::History);
+        h.run_steps(2);
+        assert!(h.state().dialogs.history && open(&h), "the button shows the window is open");
+        h.state_mut().exec(&ctx, Command::History);
+        h.run_steps(2);
+        assert!(!open(&h));
+    }
+
+    /// Regression: Move Up/Down moved only the first selected task.
+    #[test]
+    fn move_up_and_down_move_every_selected_task() {
+        let mut p = Project::new("Order", day());
+        let ids: Vec<TaskId> = ["A", "B", "C", "D", "E"].into_iter().map(|n| p.add_task(n, None)).collect();
+        let mut ws = Workspace::default();
+        ws.add(p, None);
+        let mut h = harness_with(ws);
+        let ctx = h.ctx.clone();
+        let select = |h: &mut Harness<'static, PlanCraftApp>, names: &[usize]| {
+            h.state_mut().st.sel.tasks = names.iter().map(|&i| ids[i]).collect();
+        };
+        let order = |h: &Harness<'static, PlanCraftApp>| tasks(h).concat();
+
+        select(&mut h, &[1, 3]);
+        h.state_mut().exec(&ctx, Command::MoveUp);
+        assert_eq!(order(&h), "BADCE");
+        assert_eq!(h.state().st.sel.tasks, [ids[1], ids[3]].into_iter().collect(), "the selection stays on the moved tasks");
+        h.state_mut().exec(&ctx, Command::MoveDown);
+        assert_eq!(order(&h), "ABCDE");
+
+        // Neighbours move together and keep their order.
+        select(&mut h, &[1, 2]);
+        h.state_mut().exec(&ctx, Command::MoveUp);
+        assert_eq!(order(&h), "BCADE");
+        h.state_mut().exec(&ctx, Command::MoveDown);
+        h.state_mut().exec(&ctx, Command::MoveDown);
+        assert_eq!(order(&h), "ADBCE");
+
+        // A task at the edge of its group stops the whole move.
+        select(&mut h, &[0, 2]);
+        h.state_mut().exec(&ctx, Command::MoveUp);
+        assert_eq!(order(&h), "ADBCE");
+        assert!(h.state().st.toasts.iter().any(|t| t.text.contains("first")), "the edge is reported");
+    }
+
+    /// Regression: shortcuts acted on the plan hidden behind the Start Page or a save prompt.
+    #[test]
+    fn shortcuts_leave_a_plan_behind_the_start_page_or_a_save_prompt_alone() {
+        let mut h = harness();
+        let ctx = h.ctx.clone();
+        h.state().ws.lock().unwrap().active_doc_mut().unwrap().edit("Add", |p| p.add_task("Mine", None)).unwrap();
+        let id = leaf(&h, 2);
+        h.state_mut().st.sel.select_task(id);
+        h.state_mut().exec(&ctx, Command::Copy);
+        let before = tasks(&h);
+        let press = |h: &mut Harness<'static, PlanCraftApp>| {
+            h.key_press_modifiers(Modifiers::COMMAND, Key::Z);
+            h.run_steps(1);
+            h.key_press_modifiers(Modifiers::COMMAND, Key::V);
+            h.run_steps(1);
+            h.event(egui::Event::Paste("x".into()));
+            h.run_steps(1);
+            h.key_press_modifiers(Modifiers::ALT | Modifiers::SHIFT, Key::ArrowUp);
+            h.run_steps(2);
+        };
+
+        h.state_mut().st.start_page = true;
+        h.run_steps(2);
+        press(&mut h);
+        assert_eq!(tasks(&h), before, "the plan behind the Start Page is unchanged");
+
+        h.state_mut().st.start_page = false;
+        h.state_mut().confirm_close = Some(CloseRequest::App);
+        h.run_steps(1);
+        press(&mut h);
+        assert_eq!(tasks(&h), before, "the plan behind the save prompt is unchanged");
+        // Regression (review): New still worked behind the save prompt (while quitting, say).
+        let docs = h.state().ws.lock().unwrap().docs.len();
+        h.key_press_modifiers(Modifiers::COMMAND, Key::N);
+        h.run_steps(2);
+        assert_eq!(h.state().ws.lock().unwrap().docs.len(), docs, "no new plan behind the save prompt");
+        h.state_mut().confirm_close = None;
+
+        // New still works from the Start Page.
+        h.state_mut().st.start_page = true;
+        h.run_steps(1);
+        let docs = h.state().ws.lock().unwrap().docs.len();
+        h.key_press_modifiers(Modifiers::COMMAND, Key::N);
+        h.run_steps(2);
+        assert_eq!(h.state().ws.lock().unwrap().docs.len(), docs + 1);
+    }
+
+    /// Regression (review): pasting X and Y (Y one level deeper, its own summary not copied) made
+    /// Y a subtask of X but kept the X → Y link, which can't be made by hand; and two copied
+    /// resources matching one in this plan gave a task two assignments to it.
+    #[test]
+    fn pasting_leaves_out_summary_to_subtask_links_and_duplicate_assignments() {
+        let mut src = Project::new("Source", day());
+        let x = src.add_task("X", None);
+        let s = src.add_task("S", None);
+        let y = src.add_task("Y", None);
+        src.indent(y).unwrap();
+        src.link(x.into(), y, LinkType::FS, Lag::None).unwrap();
+        let ana = src.add_resource("Ana");
+        let ana2 = src.add_resource("ana");
+        src.assign(y, ana, Some(1.0), None).unwrap();
+        src.assign(y, ana2, Some(1.0), None).unwrap();
+        plancraft_core::schedule::recalculate(&mut src);
+        let _ = s;
+        let clip: Vec<Task> = [x, y].iter().map(|id| src.task(*id).unwrap().clone()).collect();
+        let source = ClipSource::capture(&src, &clip);
+
+        let mut dst = Project::new("Target", day());
+        dst.add_resource("Ana");
+        let (ids, notes) = super::paste_tasks(&mut dst, &clip, Some(&source), 0);
+        let (nx, ny) = (ids[0], ids[1]);
+        assert_eq!(dst.task(ny).unwrap().outline_level, 2, "Y is pasted under X");
+        assert!(dst.task(ny).unwrap().predecessors.iter().all(|d| d.predecessor != TaskRef::Local(nx)), "no link from X to Y");
+        assert!(notes.iter().any(|n| n.contains("own subtasks")), "{notes:?}");
+        assert_eq!(dst.assignments.iter().filter(|a| a.task == ny).count(), 1, "one assignment to Ana");
+        assert!(plancraft_core::limits::check_edit(&mut dst).is_ok());
+    }
+
+    /// Regression (second review): pasting back into the plan it came from lost a calendar or
+    /// resource renamed since the copy (matched by name only). The same plan keeps them by id.
+    #[test]
+    fn pasting_into_the_same_plan_keeps_renamed_calendars_and_resources() {
+        let mut p = Project::new("Plan", day());
+        let t = p.add_task("T", None);
+        let cal = p.add_calendar("Late crew", None).unwrap();
+        p.task_mut(t).unwrap().calendar = Some(cal);
+        let ana = p.add_resource("Ana");
+        p.assign(t, ana, Some(1.0), None).unwrap();
+        plancraft_core::schedule::recalculate(&mut p);
+        let clip = vec![p.task(t).unwrap().clone()];
+        let source = ClipSource::capture(&p, &clip);
+        p.calendars.iter_mut().find(|c| c.id == cal).unwrap().name = "Night crew".into();
+        p.resource_mut(ana).unwrap().name = "Ana Lima".into();
+        let at = p.tasks.len();
+        let (ids, notes) = super::paste_tasks(&mut p, &clip, Some(&source), at);
+        assert_eq!(p.task(ids[0]).unwrap().calendar, Some(cal), "{notes:?}");
+        assert!(p.assignments.iter().any(|a| a.task == ids[0] && a.resource == ana), "{notes:?}");
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    /// Regression (second review): a loop through a pasted summary survived the paste (only a
+    /// warning on recalculation), though linking it by hand is refused.
+    #[test]
+    fn pasting_leaves_out_a_loop_through_the_new_outline() {
+        let mut src = Project::new("Source", day());
+        let x = src.add_task("X", None);
+        let _s = src.add_task("S", None);
+        let y = src.add_task("Y", None);
+        src.indent(y).unwrap();
+        let z = src.add_task("Z", None);
+        src.outdent(z).ok();
+        src.link(y.into(), z, LinkType::FS, Lag::None).unwrap();
+        src.link(z.into(), x, LinkType::FS, Lag::None).unwrap();
+        plancraft_core::schedule::recalculate(&mut src);
+        let clip: Vec<Task> = [x, y, z].iter().map(|id| src.task(*id).unwrap().clone()).collect();
+        let source = ClipSource::capture(&src, &clip);
+        let mut dst = Project::new("Target", day());
+        let (ids, notes) = super::paste_tasks(&mut dst, &clip, Some(&source), 0);
+        assert_eq!(dst.task(ids[1]).unwrap().outline_level, 2, "Y is pasted under X");
+        let report = plancraft_core::schedule::recalculate(&mut dst);
+        assert!(!report.warnings.iter().any(|w| w.contains("ircular")), "{:?}", report.warnings);
+        assert!(notes.iter().any(|n| n.contains("left out")), "{notes:?}");
+    }
+
+    /// Regression: pasted tasks lost their links and milestone memberships, even to each other,
+    /// and their resource assignments.
+    #[test]
+    fn pasting_keeps_links_members_and_assignments_among_the_pasted_tasks() {
+        let mut p = Project::new("Plan", day());
+        let before = p.add_task("Before", None);
+        let a = p.add_task("A", None);
+        let b = p.add_task("B", None);
+        let m = p.add_milestone("M", None);
+        p.link(before.into(), a, LinkType::FS, Lag::None).unwrap();
+        p.link(a.into(), b, LinkType::SS, Lag::None).unwrap();
+        p.add_milestone_members(m, &[TaskRef::Local(a), TaskRef::Local(before)]).unwrap();
+        let ana = p.add_resource("Ana");
+        p.assign(b, ana, Some(0.5), None).unwrap();
+        recalculate(&mut p);
+        let mut ws = Workspace::default();
+        ws.add(p, None);
+        let mut h = harness_with(ws);
+        let ctx = h.ctx.clone();
+        h.state_mut().st.sel.tasks = [a, b, m].into_iter().collect();
+        h.state_mut().exec(&ctx, Command::Copy);
+        h.state_mut().st.sel = Default::default();
+        h.state_mut().exec(&ctx, Command::Paste);
+        h.run_steps(2);
+
+        let ws = h.state().ws.lock().unwrap();
+        let p = &ws.active_doc().unwrap().project;
+        let [na, nb, nm] = [-3, -2, -1].map(|k: isize| &p.tasks[(p.tasks.len() as isize + k) as usize]);
+        assert_eq!((na.name.as_str(), nb.name.as_str(), nm.name.as_str()), ("A", "B", "M"));
+        assert!(na.predecessors.is_empty(), "the link from a task left behind is not pasted");
+        assert_eq!(nb.predecessors.len(), 1);
+        assert_eq!(nb.predecessors[0].predecessor, TaskRef::Local(na.id), "the copy of B follows the copy of A");
+        assert_eq!(nb.predecessors[0].kind, LinkType::SS);
+        assert_eq!(nm.members, vec![TaskRef::Local(na.id)]);
+        let pasted: Vec<&Assignment> = p.assignments_for_task(nb.id).collect();
+        assert_eq!(pasted.len(), 1, "{:?}", p.assignments);
+        assert_eq!((pasted[0].resource, pasted[0].units), (ana, 0.5));
+        assert_eq!(p.assignments.len(), 2, "the original assignment stays");
+        assert_eq!(p.task(b).unwrap().predecessors[0].predecessor, TaskRef::Local(a), "the originals are untouched");
+    }
+
+    /// Regression: pasting into another plan kept the copied calendar and custom field ids, which
+    /// mean something else there (or nothing, and then the paste was refused).
+    #[test]
+    fn pasting_into_another_plan_matches_calendars_fields_and_resources_by_name() {
+        let mut src = Project::new("Source", day());
+        let late = src.add_calendar("Late crew", None).unwrap();
+        let only_here = src.add_calendar("Only here", None).unwrap();
+        let risk = src.add_custom_field("Risk", CustomFieldKind::Text, &[]).unwrap();
+        let code = src.add_custom_field("Cost code", CustomFieldKind::Number, &[]).unwrap();
+        let (ana, ben) = (src.add_resource("Ana"), src.add_resource("Ben"));
+        let t1 = src.add_task("T1", None);
+        let t2 = src.add_task("T2", None);
+        src.task_mut(t1).unwrap().calendar = Some(late);
+        src.task_mut(t2).unwrap().calendar = Some(only_here);
+        src.set_custom_value(t1, risk, Some(CustomValue::Text("High".into()))).unwrap();
+        src.set_custom_value(t1, code, Some(CustomValue::Number(3.0))).unwrap();
+        src.assign(t1, ana, None, None).unwrap();
+        src.assign(t2, ben, None, None).unwrap();
+        recalculate(&mut src);
+
+        // The same names under other ids, and some missing.
+        let mut dst = Project::new("Target", day());
+        dst.add_calendar("Filler", None).unwrap();
+        let dst_late = dst.add_calendar("Late crew", None).unwrap();
+        dst.add_custom_field("Filler", CustomFieldKind::Text, &[]).unwrap();
+        let dst_risk = dst.add_custom_field("risk", CustomFieldKind::Text, &[]).unwrap();
+        dst.add_resource("Filler");
+        let dst_ana = dst.add_resource("Ana");
+        recalculate(&mut dst);
+        assert_eq!(dst_late, only_here, "the copied id names another calendar in the target");
+
+        let mut ws = Workspace::default();
+        let a = ws.add(src, None);
+        let b = ws.add(dst, None);
+        ws.active = ws.index_of(a);
+        let mut h = harness_with(ws);
+        let ctx = h.ctx.clone();
+        h.state_mut().st.sel.tasks = [t1, t2].into_iter().collect();
+        h.state_mut().exec(&ctx, Command::Copy);
+        {
+            let mut ws = h.state().ws.lock().unwrap();
+            ws.active = ws.index_of(b);
+        }
+        h.run_steps(2);
+        h.state_mut().exec(&ctx, Command::Paste);
+        h.run_steps(2);
+
+        let ws = h.state().ws.lock().unwrap();
+        let p = &ws.active_doc().unwrap().project;
+        assert_eq!(p.name, "Target");
+        let n1 = p.tasks.iter().find(|t| t.name == "T1").expect("pasted");
+        let n2 = p.tasks.iter().find(|t| t.name == "T2").expect("pasted");
+        assert_eq!(n1.calendar, Some(dst_late), "the calendar of the same name");
+        assert_eq!(n2.calendar, None, "no calendar of that name: the project calendar");
+        assert_eq!(n1.custom.len(), 1, "{:?}", n1.custom);
+        assert_eq!(n1.custom.get(&dst_risk), Some(&CustomValue::Text("High".into())), "the field of the same name");
+        let r: Vec<ResourceId> = p.assignments_for_task(n1.id).map(|a| a.resource).collect();
+        assert_eq!(r, vec![dst_ana], "the resource of the same name");
+        assert_eq!(p.assignments_for_task(n2.id).count(), 0, "no resource of that name");
+        let note = h.state().st.toasts.iter().map(|t| t.text.clone()).collect::<Vec<_>>().join("\n");
+        for left_out in ["Only here", "Cost code", "Ben"] {
+            assert!(note.contains(left_out), "{left_out} is mentioned: {note}");
+        }
+    }
+
+    /// Regression: restoring a recovery copy of a file that was open bound two documents to that
+    /// file, so each save overwrote the other's.
+    #[test]
+    fn a_recovery_copy_of_a_file_already_open_restores_as_an_unsaved_plan() {
+        let tmp = crate::recovery::tests::TempDir::new("restore-open");
+        let path = tmp.0.join("plan.plancraft");
+        plancraft_core::io::save(&Project::new("Plan", day()), &path).unwrap();
+        let store = RecoveryStore::new(tmp.0.join("recovery"));
+        {
+            let mut ws = Workspace::default();
+            ws.add(Project::new("Plan", day()), Some(path.clone()));
+            ws.docs[0]
+                .edit("Add", |p| {
+                    p.add_task("Recovered task", None);
+                    p.external_projects.push(plancraft_core::model::ExternalProject {
+                        id: uuid::Uuid::new_v4(),
+                        name: "Other".into(),
+                        path: "other.plancraft".into(),
+                        tasks: Vec::new(),
+                        last_sync: None,
+                    });
+                })
+                .unwrap();
+            Recovery::new(Some(store.clone())).write_dirty(&ws).unwrap();
+        }
+        let mut ws = Workspace::default();
+        ws.open(&path).unwrap();
+        let mut h = harness_with(ws);
+        *h.state().rec() = Recovery::new(Some(store));
+        let stem = h.state().rec().found.first().unwrap().stem.clone();
+        let ctx = h.ctx.clone();
+        h.state_mut().exec(&ctx, Command::RestoreRecovered(stem));
+        h.run_steps(2);
+        let ws = h.state().ws.lock().unwrap();
+        assert_eq!(ws.docs.len(), 2);
+        assert_eq!(ws.docs.iter().filter(|d| d.path.is_some()).count(), 1, "only the open document is bound to the file");
+        let doc = ws.active_doc().unwrap();
+        assert!(doc.path.is_none() && doc.dirty);
+        assert!(doc.project.tasks.iter().any(|t| t.name == "Recovered task"));
+        // Regression (second review): the copy has no folder of its own, so its relative link
+        // to another plan would have pointed at the working directory.
+        let link = std::path::PathBuf::from(&doc.project.external_projects[0].path);
+        assert!(link.is_absolute() && link.ends_with("other.plancraft"), "{link:?}");
+        assert_eq!(link.parent(), path.parent());
+        assert!(h.state().st.toasts.iter().any(|t| t.text.contains("plan.plancraft is already open")), "the user is told");
+    }
+
+    /// Links Between Projects reads linked files in the app, after the workspace is unlocked:
+    /// adding a file, listing its tasks and linking to one still work that way.
+    #[test]
+    fn links_between_projects_add_list_and_link_through_the_app() {
+        use egui_kittest::kittest::Queryable;
+        let tmp = crate::recovery::tests::TempDir::new("external-links");
+        let other_path = tmp.0.join("Other.plancraft");
+        let mut other = Project::new("Other", day());
+        let delivery = other.add_task("Supplier delivery", None);
+        recalculate(&mut other);
+        plancraft_core::io::save(&other, &other_path).unwrap();
+
+        let mut h = harness();
+        let ctx = h.ctx.clone();
+        let target = leaf(&h, 1);
+        h.state_mut().st.sel.select_task(target);
+        h.state_mut().exec(&ctx, Command::ExternalLinks);
+        h.run_steps(1);
+        h.state_mut().add_external_project(&other_path);
+        h.run_steps(3);
+        assert!(h.state().dialogs.external.as_ref().is_some_and(|b| b.dialog.list_requested.is_none()), "the list was read");
+        h.get_by_label("Supplier delivery");
+        h.query_all_by_label("Predecessor").next().unwrap().click();
+        h.run_steps(3);
+        {
+            let ws = h.state().ws.lock().unwrap();
+            let p = &ws.active_doc().unwrap().project;
+            let ext = p.external_projects.iter().find(|e| e.name == "Other").expect("linked");
+            assert!(ext.task(delivery).is_some(), "the task's dates are cached");
+            let link = TaskRef::External { project: other.id, task: delivery };
+            assert!(p.task(target).unwrap().predecessors.iter().any(|d| d.predecessor == link));
+        }
+        assert!(h.state().st.toasts.iter().any(|t| t.text == "Linked to external task"));
+
+        // The plan closed while the file was being read: nothing is linked anywhere.
+        let handle = h.state().dialogs.external.as_ref().unwrap().doc;
+        h.state().ws.lock().unwrap().close(handle);
+        h.state_mut().add_external_project(&other_path);
+        assert!(h.state().st.toasts.iter().any(|t| t.text.contains("closed")));
+    }
+
+    /// The start of the first leaf task and a bar drag of it in progress.
+    fn start_bar_drag(h: &mut Harness<'static, PlanCraftApp>) -> (TaskId, Option<plancraft_core::dates::DateTime>) {
+        let (id, start) = {
+            let ws = h.state().ws.lock().unwrap();
+            let t = ws.active_doc().unwrap().project.tasks.iter().find(|t| !t.sched.is_summary && !t.is_milestone()).unwrap();
+            (t.id, t.sched.start)
+        };
+        let origin_start = start.unwrap();
+        h.state_mut().st.gantt.drag = Some(crate::state::BarDrag::Move { task: id, grab_dx: -400.0, origin_start });
+        (id, start)
+    }
+
+    fn start_of(h: &Harness<'static, PlanCraftApp>, id: TaskId) -> Option<plancraft_core::dates::DateTime> {
+        h.state().ws.lock().unwrap().active_doc().unwrap().project.task(id).unwrap().sched.start
+    }
+
+    /// Regression: a bar drag whose mouse button was released outside the window never ended:
+    /// the drag only reset when the chart saw the drag stop, with the pointer over the window.
+    #[test]
+    fn a_gantt_bar_drag_ends_when_the_button_is_released_elsewhere() {
+        let mut h = harness();
+        // The button came up outside the window and the pointer is back: no drag stop arrives.
+        let (id, start) = start_bar_drag(&mut h);
+        h.event(egui::Event::PointerMoved(egui::pos2(1100.0, 400.0)));
+        h.run_steps(3);
+        assert!(h.state().st.gantt.drag.is_none(), "the drag ended");
+        assert_eq!(start_of(&h, id), start, "without moving the task");
+
+        // The pointer left the window with no button down.
+        let (id, start) = start_bar_drag(&mut h);
+        h.event(egui::Event::PointerGone);
+        h.run_steps(3);
+        assert!(h.state().st.gantt.drag.is_none(), "pointer gone");
+        assert_eq!(start_of(&h, id), start);
+
+        // Regression (review): with the button still held, leaving the window for a moment (to
+        // drag a bar towards the edge) cancelled the drag. It goes on.
+        let at = egui::pos2(1100.0, 400.0);
+        h.event(egui::Event::PointerMoved(at));
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+        h.run_steps(1);
+        let (_, _) = start_bar_drag(&mut h);
+        h.run_steps(1);
+        h.event(egui::Event::PointerGone);
+        h.run_steps(2);
+        assert!(h.state().st.gantt.drag.is_some(), "the drag survives the pointer leaving while the button is held");
+
+        // Regression (second review): the release outside the window never arrived (egui still
+        // thinks the button is down); the next click must cancel the drag, not drop the bar there.
+        let (id, start) = (id, start_of(&h, id));
+        let back = egui::pos2(1200.0, 300.0);
+        h.event(egui::Event::PointerMoved(back));
+        h.event(egui::Event::PointerButton { pos: back, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+        h.run_steps(1);
+        assert!(h.state().st.gantt.drag.is_none(), "a new press ends the lost drag");
+        h.event(egui::Event::PointerButton { pos: back, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+        h.run_steps(2);
+        assert_eq!(start_of(&h, id), start, "nothing moved");
+    }
+
+    /// Escape cancels a bar drag with the button still down, and the release then changes nothing.
+    #[test]
+    fn escape_cancels_a_gantt_bar_drag() {
+        let mut h = harness();
+        let at = egui::pos2(1100.0, 400.0);
+        h.event(egui::Event::PointerMoved(at));
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+        h.run_steps(1);
+        let (id, start) = start_bar_drag(&mut h);
+        h.run_steps(1);
+        assert!(h.state().st.gantt.drag.is_some(), "the drag goes on while the button is down");
+        h.key_press(egui::Key::Escape);
+        h.run_steps(2);
+        assert!(h.state().st.gantt.drag.is_none(), "Escape ended it");
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+        h.run_steps(3);
+        assert_eq!(start_of(&h, id), start);
+    }
+
+    /// Regression: Task Usage and Resource Usage shared one grid state, so widening Resource Name
+    /// widened Task Name, and the cursor and scrolling carried over.
+    #[test]
+    fn task_usage_and_resource_usage_keep_their_own_grid() {
+        let mut h = harness();
+        h.state_mut().st.view = ViewKind::TaskUsage;
+        h.run_steps(2);
+        let task_widths = h.state().st.task_usage_grid.widths.clone();
+        assert_eq!(task_widths.len(), 2);
+        h.state_mut().st.task_usage_grid.widths[0] += 90.0;
+        h.state_mut().st.task_usage_grid.cursor = Some((3, 1));
+        h.run_steps(2);
+
+        h.state_mut().st.view = ViewKind::ResourceUsage;
+        h.run_steps(2);
+        let res = &h.state().st.resource_usage_grid;
+        assert_eq!(res.widths.first().copied(), Some(220.0), "Resource Name keeps its own width");
+        assert_eq!(res.cursor, None, "and its own cursor");
+        h.state_mut().st.resource_usage_grid.widths[0] = 150.0;
+        h.run_steps(2);
+
+        h.state_mut().st.view = ViewKind::TaskUsage;
+        h.run_steps(2);
+        let task = &h.state().st.task_usage_grid;
+        assert_eq!(task.widths.first().copied(), task_widths.first().map(|w| w + 90.0));
+        assert_eq!(task.cursor, Some((3, 1)));
     }
 }
