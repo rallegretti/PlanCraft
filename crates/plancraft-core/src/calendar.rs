@@ -298,7 +298,13 @@ impl Span {
 
 /// `minute` minutes after midnight on `d` (1440 is the next midnight; clamped at the end of time).
 fn at(d: Date, minute: u32) -> DateTime {
-    shift(d.and_time(Time::MIN), Minutes::from(minute.min(1440)))
+    let m = minute.min(1440);
+    // Building the time of day directly is much cheaper than adding minutes to midnight; minute
+    // 1440 (24:00) is the next day's midnight.
+    match crate::dates::hm(m / 60, m % 60) {
+        Some(t) => d.to_datetime(t),
+        None => shift(d.and_time(Time::MIN), 1440),
+    }
 }
 
 /// `dt` moved by `mins` elapsed minutes, saturating at chrono's representable range.

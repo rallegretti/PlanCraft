@@ -149,7 +149,7 @@ fn get_calendar(ctx: &Ctx, a: &Args) -> ToolResult {
             };
             let to = match a.get("to") {
                 Some(x) => parse_date(x, "to")?,
-                None => from + plancraft_core::dates::days(13),
+                None => plancraft_core::dates::add_days(from, 13).unwrap_or(from),
             };
             if to < from {
                 return err("'to' is before 'from'");
@@ -171,7 +171,10 @@ fn get_calendar(ctx: &Ctx, a: &Args) -> ToolResult {
                     "hours": hours(r.iter().map(|x| x.len() as f64).sum::<f64>()),
                     "exception": exc,
                 }));
-                d += plancraft_core::dates::days(1);
+                match d.succ_opt() {
+                    Some(next) => d = next,
+                    None => break,
+                }
             }
             set(&mut v, "days", Value::Array(days));
         }

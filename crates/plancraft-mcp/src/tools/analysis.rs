@@ -247,7 +247,7 @@ fn default_window(p: &Project, a: &Args) -> ToolResult<(Date, Date)> {
     };
     let to = match a.get("to") {
         Some(v) => parse_date(v, "to")?,
-        None => p.sched.finish.map(|f| f.date()).unwrap_or(from + plancraft_core::dates::days(27)).max(from),
+        None => p.sched.finish.map(|f| f.date()).unwrap_or_else(|| plancraft_core::dates::add_days(from, 27).unwrap_or(from)).max(from),
     };
     if to < from {
         return err("'to' is before 'from'");

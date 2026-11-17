@@ -551,6 +551,14 @@ mod tests {
         assert_eq!(days_between(ymd(2026, 3, 1).unwrap(), d), -29);
     }
 
+    /// `now()` and `today()` read the system's time zone; if `jiff` can't find it, it quietly uses
+    /// UTC and "today" would be off by hours. Each build host checks that its zone is found.
+    #[test]
+    fn the_system_time_zone_is_found() {
+        let tz = jiff::tz::TimeZone::try_system();
+        assert!(tz.is_ok(), "{tz:?}");
+    }
+
     #[test]
     fn weekdays_and_parsing() {
         let mon = ymd(2026, 10, 19).unwrap();

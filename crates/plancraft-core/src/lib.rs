@@ -5,7 +5,6 @@
 //!
 //! ```
 //! use plancraft_core::prelude::*;
-//! use Date;
 //!
 //! let mut p = Project::new("Example", plancraft_core::dates::ymd(2026, 10, 19).unwrap());
 //! let a = p.add_task("Design", None);

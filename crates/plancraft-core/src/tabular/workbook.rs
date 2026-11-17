@@ -150,9 +150,9 @@ fn text(cell: &DataRef<'_>) -> String {
             }
             // Calamine's own conversion follows Excel's calendar (including its 1900 leap-year
             // quirk); a day that doesn't exist (Excel's 29 February 1900) reads as no date.
-            let (y, mo, d, h, mi, s, _) = dt.to_ymd_hms_milli();
+            let (y, mo, d, h, mi, s, ms) = dt.to_ymd_hms_milli();
             match crate::dates::ymd_hm(i32::from(y), u32::from(mo), u32::from(d), u32::from(h), u32::from(mi)) {
-                Some(t) if h == 0 && mi == 0 && s == 0 => crate::dates::format("%Y-%m-%d", t),
+                Some(t) if h == 0 && mi == 0 && s == 0 && ms == 0 => crate::dates::format("%Y-%m-%d", t),
                 Some(t) => crate::dates::format("%Y-%m-%d %H:%M", t),
                 None => String::new(),
             }

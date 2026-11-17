@@ -141,5 +141,4 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
             out.push(Command::TaskInfo);
         }
     }
-    let _ = Date::MIN;
 }

@@ -1999,7 +1999,6 @@ impl PlanCraftApp {
         for c in out {
             self.exec(&ctx, c);
         }
-        let _ = Date::MIN;
     }
 }
 
@@ -3009,7 +3008,7 @@ mod ui_tests {
         use egui_kittest::kittest::Queryable;
         let tmp = crate::recovery::tests::TempDir::new("csv-import");
         let path = tmp.0.join("Team plan.csv");
-        std::fs::write(&path, "Task,SignedDuration,Start,Predecessors,Owner,Budget\nDesign,3d,2026-10-19,,Ana,100\nBuild,5d,,1,Ben,200\n")
+        std::fs::write(&path, "Task,Duration,Start,Predecessors,Owner,Budget\nDesign,3d,2026-10-19,,Ana,100\nBuild,5d,,1,Ben,200\n")
             .unwrap();
         let shared = Workspace::default().shared();
         let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).build_eframe(move |cc| PlanCraftApp::new(cc, shared));
@@ -3106,7 +3105,7 @@ mod ui_tests {
         let mut h = harness();
         let before = { h.state().ws.lock().unwrap().active_doc().unwrap().project.tasks.clone() };
         let history = { h.state().ws.lock().unwrap().active_doc().unwrap().history().len() };
-        // Entry table: 3 = SignedDuration, 4 = Start, 5 = Finish.
+        // Entry table: 3 = Duration, 4 = Start, 5 = Finish.
         for col in [3, 4, 5] {
             h.state_mut().st.task_grid.cursor = Some((3, col));
             focus_task_grid(&mut h);

@@ -217,5 +217,4 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
         let dlt = ui.input(|i| i.smooth_scroll_delta.y);
         st.usage_grid.scroll_y = (st.usage_grid.scroll_y - dlt).clamp(0.0, (rows.len() as f32 * rh - body.height() + rh).max(0.0));
     }
-    let _ = plancraft_core::dates::days(0);
 }

@@ -437,7 +437,9 @@ fn nth_weekday(year: i32, month: u32, nth: i64, weekday: Weekday) -> Option<Date
         }
         return Some(d);
     }
-    let nth = i8::try_from(nth.checked_add(1)?).ok()?;
+    // MonthPosition 0–3 is the first to fourth (4, the last, is handled above); a negative one
+    // is no position at all (jiff would count it from the end of the month).
+    let nth = i8::try_from(nth.checked_add(1)?).ok().filter(|n| *n >= 1)?;
     crate::dates::ymd(year, month, 1)?.nth_weekday_of_month(nth, weekday).ok()
 }
 
