@@ -243,3 +243,52 @@ fn stdio_transport_round_trip() {
     assert_eq!(lines[1]["result"]["isError"], false);
     assert_eq!(lines[2]["error"]["code"], -32700);
 }
+
+/// Regression: requests without `"jsonrpc": "2.0"`, with a null id or with an object id were
+/// processed; MCP ids are strings or integers.
+#[test]
+fn malformed_requests_are_refused() {
+    let c = Client::new();
+    let code = |v: Value| c.server.handle_message(v).unwrap()["error"]["code"].clone();
+    assert_eq!(code(json!({ "id": 1, "method": "ping" })), -32600, "missing jsonrpc");
+    assert_eq!(code(json!({ "jsonrpc": "1.0", "id": 1, "method": "ping" })), -32600);
+    for id in [Value::Null, json!({ "a": 1 }), json!([1]), json!(1.5), json!(true)] {
+        let r = c.server.handle_message(json!({ "jsonrpc": "2.0", "id": id, "method": "ping" })).unwrap();
+        assert_eq!(r["error"]["code"], -32600, "{id}");
+        assert_eq!(r["id"], Value::Null, "an unusable id is not echoed: {id}");
+    }
+    // A valid id is echoed in the error.
+    assert_eq!(c.server.handle_message(json!({ "id": "x", "method": "ping" })).unwrap()["id"], "x");
+    assert_eq!(c.request("ping", json!({}))["result"], json!({}));
+    assert_eq!(c.server.handle_message(json!({ "jsonrpc": "2.0", "id": -3, "method": "ping" })).unwrap()["result"], json!({}));
+}
+
+/// Regression: batches were accepted from clients on revision 2025-06-18 or later, which removed
+/// them; on stdio the revision is the one agreed in `initialize`.
+#[test]
+fn batches_follow_the_negotiated_protocol_version() {
+    let init = |v: &str| {
+        json!({ "jsonrpc": "2.0", "id": 0, "method": "initialize", "params": { "protocolVersion": v, "capabilities": {}, "clientInfo": { "name": "t", "version": "1" } } })
+            .to_string()
+    };
+    let batch = json!([{ "jsonrpc": "2.0", "id": 1, "method": "ping" }]).to_string();
+    // `initialize` inside a batch (allowed before a revision is agreed) still sets the revision.
+    let server = plancraft_mcp::McpServer::new(plancraft_core::workspace::Workspace::default().shared());
+    let input = format!("[{}]\n{batch}\n", init("2025-06-18"));
+    let mut out = Vec::new();
+    plancraft_mcp::run_stdio_with(&server, std::io::Cursor::new(input), &mut out).unwrap();
+    let replies: Vec<Value> = String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(replies[1]["error"]["code"], -32600, "{}", replies[1]);
+    for (version, allowed) in [("2025-03-26", true), ("2025-06-18", false), ("2025-11-25", false)] {
+        let server = plancraft_mcp::McpServer::new(plancraft_core::workspace::Workspace::default().shared());
+        let input = format!("{}\n{batch}\n", init(version));
+        let mut out = Vec::new();
+        plancraft_mcp::run_stdio_with(&server, std::io::Cursor::new(input), &mut out).unwrap();
+        let replies: Vec<Value> = String::from_utf8(out).unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(replies.len(), 2);
+        assert_eq!(replies[1].is_array(), allowed, "{version}: {}", replies[1]);
+        if !allowed {
+            assert_eq!(replies[1]["error"]["code"], -32600);
+        }
+    }
+}

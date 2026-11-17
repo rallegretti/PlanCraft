@@ -1,37 +1,65 @@
-//! MCP "Streamable HTTP" transport (JSON responses only) on top of `tiny_http`.
+//! MCP "Streamable HTTP" transport (JSON responses only): a small HTTP/1.1 server on `std::net`.
 //!
-//! * `POST /mcp` (or `/`) with a JSON-RPC message or batch → `200 application/json`,
-//!   or `202 Accepted` when the body only contained notifications/responses.
+//! * `POST /mcp` (or `/`) with a JSON-RPC message → `200 application/json`, or `202 Accepted`
+//!   when the body only contained notifications/responses.
 //! * `GET /mcp` → `405` (no server-initiated stream).
-//! * `DELETE /mcp` → `200` (session end; sessions are stateless).
-//! * An `Mcp-Session-Id` header is issued on `initialize`.
+//! * `DELETE /mcp` → `200` (sessions are stateless: no `Mcp-Session-Id` is issued).
 //!
-//! Requests carrying an `Origin` header that is not a localhost origin are
-//! rejected (DNS-rebinding protection); when bound to a loopback address the
-//! `Host` header must name a loopback host as well. Every request must carry
-//! `Authorization: Bearer <token>` with the server's per-session token
-//! (see [`crate::session`]); others get `401 Unauthorized`.
+//! Requests carrying an `Origin` header that is not a localhost origin are rejected
+//! (DNS-rebinding protection); when bound to a loopback address the `Host` header must name a
+//! loopback host as well. Every request must carry `Authorization: Bearer <token>` with the
+//! server's per-session token (see [`crate::session`]); others get `401 Unauthorized`.
+//!
+//! The server is written to hold up against a hostile local client:
+//! * at most [`MAX_CONNECTIONS`] connections may be sending their request line and headers at
+//!   once, before the token is checked (others get `503` at once), so clients without the token
+//!   can't tie up the server; requests that passed the token check have their own, larger limit
+//!   ([`MAX_REQUESTS`]), so parallel tool calls from several agents aren't refused;
+//! * the request line and headers are checked (origin, host, token) *before* the body is read,
+//!   so an unauthenticated client can't make the server read a large body;
+//! * each read waits at most [`READ_TIMEOUT`], and the whole request (headers and body) must
+//!   arrive within [`REQUEST_DEADLINE`], so a client sending one byte at a time is cut off;
+//! * headers are limited to [`MAX_HEAD`] bytes and the body to [`MAX_BODY`] bytes.
+//!
+//! Each connection carries one request and is closed after the reply (`Connection: close`).
 
-use std::io::{self, Read};
-use std::net::SocketAddr;
+use std::io::{self, Read, Write};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
-use crate::protocol::{INVALID_REQUEST, RpcError, error_response, parse_error};
+use crate::protocol::{INVALID_REQUEST, RpcError, SUPPORTED_PROTOCOL_VERSIONS, error_response, parse_error};
 use crate::server::McpServer;
 
 /// Maximum accepted request body.
-const MAX_BODY: u64 = 32 * 1024 * 1024;
+pub const MAX_BODY: usize = 32 * 1024 * 1024;
+/// Maximum size of the request line and headers together.
+pub const MAX_HEAD: usize = 64 * 1024;
+/// Maximum number of header lines.
+const MAX_HEADERS: usize = 100;
+/// Connections whose headers are still being read and checked (before the token is accepted);
+/// more get `503 Service Unavailable`.
+pub const MAX_CONNECTIONS: usize = 32;
+/// Requests that passed the token check being served at the same time; more get `503`.
+pub const MAX_REQUESTS: usize = 256;
+/// After a reply, how long (and how much) the server reads what the client still sends before
+/// closing, so the client sees the reply instead of a reset connection.
+const DRAIN_TIME: Duration = Duration::from_secs(1);
+const DRAIN_BYTES: u64 = 64 * 1024;
+/// Longest wait for any one read from a client.
+pub const READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// Time a client has to send the whole request (headers and body).
+pub const REQUEST_DEADLINE: Duration = Duration::from_secs(60);
+/// Longest wait for a client to take the reply.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// A running HTTP server. Dropping it (or calling [`HttpHandle::shutdown`]) stops it.
 pub struct HttpHandle {
     addr: SocketAddr,
-    http: Arc<Server>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
     token: Arc<str>,
@@ -75,8 +103,11 @@ impl HttpHandle {
 
     fn stop_now(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        self.http.unblock();
-        if let Some(t) = self.thread.take() {
+        // The accept loop blocks in `accept`; a connection of our own wakes it to see the flag.
+        let woke = TcpStream::connect_timeout(&wake_addr(self.addr), Duration::from_secs(1)).is_ok();
+        if let Some(t) = self.thread.take()
+            && (woke || t.is_finished())
+        {
             let _ = t.join();
         }
     }
@@ -88,64 +119,429 @@ impl Drop for HttpHandle {
     }
 }
 
+/// Where to connect to reach a server bound to `addr` (a wildcard address is reached on loopback).
+fn wake_addr(addr: SocketAddr) -> SocketAddr {
+    match addr.ip() {
+        IpAddr::V4(ip) if ip.is_unspecified() => SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), addr.port()),
+        IpAddr::V6(ip) if ip.is_unspecified() => SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), addr.port()),
+        _ => addr,
+    }
+}
+
+/// The limits that protect the server from slow or numerous clients ([`HttpLimits::default`]
+/// gives the documented ones; tests use shorter times).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HttpLimits {
+    /// Connections still sending headers (not yet past the token check); more get `503`.
+    pub max_connections: usize,
+    /// Authenticated requests served at the same time; more get `503`.
+    pub max_requests: usize,
+    /// Longest wait for any one read from a client.
+    pub read_timeout: Duration,
+    /// Time a client has to send the whole request (headers and body).
+    pub request_deadline: Duration,
+}
+
+impl Default for HttpLimits {
+    fn default() -> Self {
+        Self {
+            max_connections: MAX_CONNECTIONS,
+            max_requests: MAX_REQUESTS,
+            read_timeout: READ_TIMEOUT,
+            request_deadline: REQUEST_DEADLINE,
+        }
+    }
+}
+
+/// Counts a connection (or an authenticated request) as active until dropped.
+struct Active(Arc<AtomicUsize>);
+
+impl Active {
+    /// Takes a slot of `counter` unless `max` are taken already.
+    fn take(counter: &Arc<AtomicUsize>, max: usize) -> Option<Active> {
+        if counter.fetch_add(1, Ordering::SeqCst) >= max {
+            counter.fetch_sub(1, Ordering::SeqCst);
+            return None;
+        }
+        Some(Active(Arc::clone(counter)))
+    }
+}
+
+impl Drop for Active {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// Starts serving MCP over HTTP on `addr` (e.g. `"127.0.0.1:7878"`, or port 0
 /// for an ephemeral port) on a background thread.
 ///
 /// Clients must authenticate with `token` (make one with [`crate::session::new_token`]).
 pub fn serve_http(server: Arc<McpServer>, addr: &str, token: &str) -> io::Result<HttpHandle> {
+    serve_http_with(server, addr, token, HttpLimits::default())
+}
+
+/// [`serve_http`] with other [`HttpLimits`].
+pub fn serve_http_with(server: Arc<McpServer>, addr: &str, token: &str, limits: HttpLimits) -> io::Result<HttpHandle> {
     if token.len() < 32 {
         return Err(io::Error::new(io::ErrorKind::InvalidInput, "the bearer token must be at least 32 characters"));
     }
     let token: Arc<str> = Arc::from(token);
-    let http = Server::http(addr).map_err(|e| io::Error::new(io::ErrorKind::AddrNotAvailable, format!("cannot listen on {addr}: {e}")))?;
-    let bound = http.server_addr().to_ip().ok_or_else(|| io::Error::other("server is not bound to an IP address"))?;
-    let http = Arc::new(http);
+    let listener = TcpListener::bind(addr).map_err(|e| io::Error::new(e.kind(), format!("cannot listen on {addr}: {e}")))?;
+    let bound = listener.local_addr()?;
     let stop = Arc::new(AtomicBool::new(false));
     let loopback = bound.ip().is_loopback();
     let thread = {
-        let http = Arc::clone(&http);
         let stop = Arc::clone(&stop);
         let token = Arc::clone(&token);
+        let pending = Arc::new(AtomicUsize::new(0));
+        let busy = Arc::new(AtomicUsize::new(0));
         std::thread::Builder::new().name("plancraft-mcp-http".into()).spawn(move || {
-            while !stop.load(Ordering::SeqCst) {
-                match http.recv_timeout(Duration::from_millis(250)) {
-                    Ok(Some(req)) => {
-                        let server = Arc::clone(&server);
-                        let token = Arc::clone(&token);
-                        let spawned = std::thread::Builder::new()
-                            .name("plancraft-mcp-request".into())
-                            .spawn(move || handle(&server, req, loopback, &token));
-                        if let Err(e) = spawned {
-                            eprintln!("plancraft-mcp: cannot spawn request thread: {e}");
-                        }
-                    }
-                    Ok(None) => {}
+            for conn in listener.incoming() {
+                if stop.load(Ordering::SeqCst) {
+                    break;
+                }
+                let stream = match conn {
+                    Ok(s) => s,
                     Err(e) => {
-                        if !stop.load(Ordering::SeqCst) {
-                            eprintln!("plancraft-mcp: HTTP accept error: {e}");
-                            std::thread::sleep(Duration::from_millis(50));
-                        }
+                        eprintln!("plancraft-mcp: HTTP accept error: {e}");
+                        std::thread::sleep(Duration::from_millis(50));
+                        continue;
                     }
+                };
+                let Some(guard) = Active::take(&pending, limits.max_connections) else {
+                    refuse_busy(stream);
+                    continue;
+                };
+                let server = Arc::clone(&server);
+                let token = Arc::clone(&token);
+                let busy = Arc::clone(&busy);
+                // If the thread can't start, the closure (and the guard with it) is dropped.
+                let spawned = std::thread::Builder::new().name("plancraft-mcp-request".into()).spawn(move || {
+                    let slots = Slots { pending: Some(guard), busy, request: None };
+                    serve_connection(&server, stream, loopback, &token, limits, slots);
+                });
+                if let Err(e) = spawned {
+                    eprintln!("plancraft-mcp: cannot start a request thread: {e}");
                 }
             }
         })?
     };
-    Ok(HttpHandle { addr: bound, http, stop, thread: Some(thread), token })
+    Ok(HttpHandle { addr: bound, stop, thread: Some(thread), token })
 }
 
-fn header<'a>(req: &'a Request, name: &str) -> Option<&'a str> {
-    req.headers().iter().find(|h| h.field.as_str().as_str().eq_ignore_ascii_case(name)).map(|h| h.value.as_str())
+/// Answers `503` without waiting on the client (the reply fits in the socket buffer).
+fn refuse_busy(mut stream: TcpStream) {
+    let _ = stream.set_nonblocking(true);
+    let reply = Reply::text(503, "Service Unavailable: too many connections").header("Retry-After", "1");
+    let _ = stream.write_all(&reply.to_bytes());
+    let _ = stream.shutdown(Shutdown::Both);
 }
 
+/// An HTTP reply.
+#[derive(Debug)]
+struct Reply {
+    status: u16,
+    content_type: &'static str,
+    headers: Vec<(&'static str, String)>,
+    body: Vec<u8>,
+}
+
+impl Reply {
+    fn text(status: u16, text: &str) -> Self {
+        Self { status, content_type: "text/plain; charset=utf-8", headers: Vec::new(), body: text.as_bytes().to_vec() }
+    }
+
+    fn json(status: u16, body: &Value) -> Self {
+        Self { status, content_type: "application/json", headers: Vec::new(), body: serde_json::to_vec(body).unwrap_or_default() }
+    }
+
+    fn header(mut self, name: &'static str, value: &str) -> Self {
+        // Values here are constants or numbers; a CR or LF would split the header, so drop them.
+        self.headers.push((name, value.chars().filter(|c| !matches!(c, '\r' | '\n')).collect()));
+        self
+    }
+
+    fn to_bytes(&self) -> Vec<u8> {
+        let mut head = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n",
+            self.status,
+            reason(self.status),
+            self.content_type,
+            self.body.len()
+        );
+        for (name, value) in &self.headers {
+            head.push_str(name);
+            head.push_str(": ");
+            head.push_str(value);
+            head.push_str("\r\n");
+        }
+        head.push_str("\r\n");
+        let mut out = head.into_bytes();
+        out.extend_from_slice(&self.body);
+        out
+    }
+}
+
+fn reason(status: u16) -> &'static str {
+    match status {
+        100 => "Continue",
+        200 => "OK",
+        202 => "Accepted",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        408 => "Request Timeout",
+        413 => "Content Too Large",
+        431 => "Request Header Fields Too Large",
+        501 => "Not Implemented",
+        503 => "Service Unavailable",
+        _ => "Unknown",
+    }
+}
+
+/// The connection's place in the server's limits: a pre-authentication slot until the token is
+/// accepted, then a request slot.
+struct Slots {
+    pending: Option<Active>,
+    busy: Arc<AtomicUsize>,
+    request: Option<Active>,
+}
+
+/// Serves one request on `stream` and closes it.
+fn serve_connection(server: &McpServer, mut stream: TcpStream, loopback: bool, token: &str, limits: HttpLimits, mut slots: Slots) {
+    let _ = stream.set_nodelay(true);
+    let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
+    let reply = {
+        let deadline = Instant::now().checked_add(limits.request_deadline).unwrap_or_else(Instant::now);
+        let mut conn = Conn { stream: &mut stream, buf: Vec::new(), deadline, read_timeout: limits.read_timeout };
+        match read_and_route(server, &mut conn, loopback, token, limits, &mut slots) {
+            Ok(r) | Err(r) => r,
+        }
+    };
+    if reply.status == 0 {
+        return; // the client went away
+    }
+    if stream.write_all(&reply.to_bytes()).and_then(|()| stream.flush()).is_err() {
+        return;
+    }
+    // A request refused before its body was read leaves the body unread; closing with unread
+    // data can reset the connection before the client sees the reply, so drain a little first,
+    // for at most DRAIN_TIME in all (a client dripping bytes can't keep its slot).
+    let _ = stream.shutdown(Shutdown::Write);
+    let until = Instant::now() + DRAIN_TIME;
+    let mut left = DRAIN_BYTES;
+    let mut chunk = [0u8; 8 * 1024];
+    while left > 0 {
+        let Some(wait) = until.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()) else { break };
+        if stream.set_read_timeout(Some(wait)).is_err() {
+            break;
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => left = left.saturating_sub(u64::try_from(n).unwrap_or(u64::MAX)),
+        }
+    }
+    drop(slots);
+}
+
+/// A client connection being read, with everything received so far in `buf`.
+struct Conn<'a> {
+    stream: &'a mut TcpStream,
+    buf: Vec<u8>,
+    deadline: Instant,
+    read_timeout: Duration,
+}
+
+/// "The client went away": no reply is sent.
+fn gone() -> Reply {
+    Reply { status: 0, content_type: "", headers: Vec::new(), body: Vec::new() }
+}
+
+impl Conn<'_> {
+    /// Reads more bytes into `buf`, waiting at most the read timeout and never past the deadline.
+    fn fill(&mut self) -> Result<(), Reply> {
+        let timeout = || Reply::text(408, "Request Timeout: the request did not arrive in time");
+        loop {
+            let left = self.deadline.checked_duration_since(Instant::now()).filter(|d| !d.is_zero()).ok_or_else(timeout)?;
+            self.stream.set_read_timeout(Some(left.min(self.read_timeout))).map_err(|_| gone())?;
+            let mut chunk = [0u8; 16 * 1024];
+            match self.stream.read(&mut chunk) {
+                Ok(0) => return Err(gone()),
+                Ok(n) => {
+                    self.buf.extend_from_slice(chunk.get(..n).unwrap_or_default());
+                    return Ok(());
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => return Err(timeout()),
+                Err(_) => return Err(gone()),
+            }
+        }
+    }
+
+    /// Reads up to the end of the headers; returns where the body starts in `buf`.
+    fn read_head(&mut self) -> Result<usize, Reply> {
+        let mut searched = 0;
+        loop {
+            if let Some(i) = find(self.buf.get(searched..).unwrap_or_default(), b"\r\n\r\n") {
+                let end = searched.saturating_add(i).saturating_add(4);
+                if end > MAX_HEAD {
+                    return Err(Reply::text(431, "Request Header Fields Too Large"));
+                }
+                return Ok(end);
+            }
+            if self.buf.len() > MAX_HEAD {
+                return Err(Reply::text(431, "Request Header Fields Too Large"));
+            }
+            searched = self.buf.len().saturating_sub(3);
+            self.fill()?;
+        }
+    }
+
+    /// Makes sure `buf` holds at least `n` bytes.
+    fn need(&mut self, n: usize) -> Result<(), Reply> {
+        while self.buf.len() < n {
+            self.fill()?;
+        }
+        Ok(())
+    }
+
+    /// Reads a CRLF-terminated line starting at `at` (at most `max` bytes); returns the line and
+    /// the position after its CRLF.
+    fn line(&mut self, at: usize, max: usize) -> Result<(String, usize), Reply> {
+        loop {
+            if let Some(i) = find(self.buf.get(at..).unwrap_or_default(), b"\r\n") {
+                let text = self.buf.get(at..at.saturating_add(i)).unwrap_or_default();
+                return Ok((String::from_utf8_lossy(text).into_owned(), at.saturating_add(i).saturating_add(2)));
+            }
+            if self.buf.len().saturating_sub(at) > max {
+                return Err(Reply::text(400, "Bad Request: malformed chunked body"));
+            }
+            self.fill()?;
+        }
+    }
+
+    /// Reads a body of `len` bytes starting at `start`.
+    fn body_with_length(&mut self, start: usize, len: usize) -> Result<Vec<u8>, Reply> {
+        let end = start.checked_add(len).ok_or_else(too_large)?;
+        self.need(end)?;
+        Ok(self.buf.get(start..end).unwrap_or_default().to_vec())
+    }
+
+    /// Reads a chunked body starting at `start` (at most [`MAX_BODY`] bytes of data).
+    fn body_chunked(&mut self, start: usize) -> Result<Vec<u8>, Reply> {
+        let bad = || Reply::text(400, "Bad Request: malformed chunked body");
+        let mut body = Vec::new();
+        let mut at = start;
+        loop {
+            let (size_line, next) = self.line(at, 1024)?;
+            let size_text = size_line.split(';').next().unwrap_or("").trim();
+            let size = usize::from_str_radix(size_text, 16).map_err(|_| bad())?;
+            at = next;
+            if size == 0 {
+                // Trailers (ignored) up to an empty line.
+                let mut trailer_bytes = 0usize;
+                loop {
+                    let (line, next) = self.line(at, MAX_HEAD)?;
+                    trailer_bytes = trailer_bytes.saturating_add(next.saturating_sub(at));
+                    at = next;
+                    if line.is_empty() {
+                        return Ok(body);
+                    }
+                    if trailer_bytes > MAX_HEAD {
+                        return Err(Reply::text(431, "Request Header Fields Too Large"));
+                    }
+                }
+            }
+            if body.len().saturating_add(size) > MAX_BODY {
+                return Err(too_large());
+            }
+            let end = at.checked_add(size).ok_or_else(too_large)?;
+            let after = end.checked_add(2).ok_or_else(too_large)?;
+            self.need(after)?;
+            body.extend_from_slice(self.buf.get(at..end).unwrap_or_default());
+            if self.buf.get(end..after) != Some(b"\r\n".as_slice()) {
+                return Err(bad());
+            }
+            // Drop what has been consumed so a long body isn't kept twice.
+            self.buf.drain(..after);
+            at = 0;
+        }
+    }
+}
+
+fn too_large() -> Reply {
+    Reply::json(413, &error_response(Value::Null, &RpcError::new(INVALID_REQUEST, "request body too large")))
+}
+
+fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    hay.windows(needle.len()).position(|w| w == needle)
+}
+
+/// A parsed request line and headers.
+struct Head {
+    method: String,
+    path: String,
+    headers: Vec<(String, String)>,
+}
+
+impl Head {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+    }
+
+    fn all(&self, name: &str) -> impl Iterator<Item = &str> {
+        self.headers.iter().filter(move |(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
+    }
+}
+
+fn parse_head(raw: &[u8]) -> Result<Head, Reply> {
+    let bad = |what: &str| Reply::text(400, &format!("Bad Request: {what}"));
+    let text = std::str::from_utf8(raw).map_err(|_| bad("headers are not UTF-8"))?;
+    let mut lines = text.split("\r\n");
+    let request_line = lines.next().unwrap_or("");
+    let mut parts = request_line.split(' ');
+    let (Some(method), Some(target), Some(version), None) = (parts.next(), parts.next(), parts.next(), parts.next()) else {
+        return Err(bad("malformed request line"));
+    };
+    if !version.starts_with("HTTP/1.") || method.is_empty() || !method.bytes().all(|b| b.is_ascii_uppercase()) {
+        return Err(bad("malformed request line"));
+    }
+    let mut headers = Vec::new();
+    for line in lines.filter(|l| !l.is_empty()) {
+        let (name, value) = line.split_once(':').ok_or_else(|| bad("malformed header"))?;
+        // A name with spaces, or a folded continuation line, is refused (request smuggling).
+        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_graphic()) {
+            return Err(bad("malformed header"));
+        }
+        if headers.len() >= MAX_HEADERS {
+            return Err(Reply::text(431, "Request Header Fields Too Large"));
+        }
+        headers.push((name.to_string(), value.trim().to_string()));
+    }
+    let path = target.split('?').next().unwrap_or("").trim_end_matches('/').to_string();
+    Ok(Head { method: method.to_string(), path, headers })
+}
+
+/// Whether `host` (a `Host` header value or a URL authority) names this machine: `localhost`,
+/// a `.localhost` name, or a loopback IP address. A name that merely starts with `127.`
+/// (`127.evil.example`) is not one.
 fn is_loopback_host(host: &str) -> bool {
     let h = host.trim().to_ascii_lowercase();
     // Strip a port, keeping bracketed IPv6 literals intact.
     let name = if let Some(rest) = h.strip_prefix('[') {
-        rest.split(']').next().unwrap_or("")
+        match rest.split_once(']') {
+            Some((inside, after)) if after.is_empty() || after.strip_prefix(':').is_some_and(|p| p.bytes().all(|b| b.is_ascii_digit())) => {
+                inside
+            }
+            _ => return false,
+        }
     } else {
-        h.rsplit_once(':').map(|(n, port)| if port.chars().all(|c| c.is_ascii_digit()) { n } else { h.as_str() }).unwrap_or(&h)
+        h.rsplit_once(':').map(|(n, port)| if port.bytes().all(|b| b.is_ascii_digit()) { n } else { h.as_str() }).unwrap_or(&h)
     };
-    matches!(name, "localhost" | "127.0.0.1" | "::1") || name.ends_with(".localhost") || name.starts_with("127.")
+    name == "localhost" || name.ends_with(".localhost") || name.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
 }
 
 /// Whether an `Origin` header value is a localhost origin.
@@ -162,105 +558,104 @@ pub fn is_local_origin(origin: &str) -> bool {
     is_loopback_host(authority)
 }
 
-/// Adds a header (header names and values here are constants or ASCII, so this never fails in
-/// practice; a header that can't be built is left out).
-fn with(mut r: Response<io::Cursor<Vec<u8>>>, name: &str, value: &str) -> Response<io::Cursor<Vec<u8>>> {
-    if let Ok(h) = Header::from_bytes(name.as_bytes(), value.as_bytes()) {
-        r.add_header(h);
-    }
-    r
-}
-
-fn json_response(status: u16, body: &Value) -> Response<io::Cursor<Vec<u8>>> {
-    with(
-        Response::from_data(serde_json::to_vec(body).unwrap_or_default()).with_status_code(StatusCode(status)),
-        "Content-Type",
-        "application/json",
-    )
-}
-
-fn text_response(status: u16, text: &str) -> Response<io::Cursor<Vec<u8>>> {
-    with(Response::from_string(text).with_status_code(StatusCode(status)), "Content-Type", "text/plain; charset=utf-8")
-}
-
 /// Whether the request carries `Authorization: Bearer <token>`.
-fn authorized(req: &Request, token: &str) -> bool {
-    header(req, "Authorization")
+fn authorized(head: &Head, token: &str) -> bool {
+    head.header("Authorization")
         .and_then(|v| v.trim().split_once(' '))
         .is_some_and(|(scheme, value)| scheme.eq_ignore_ascii_case("bearer") && crate::session::tokens_match(value.trim(), token))
 }
 
-fn contains_initialize(v: &Value) -> bool {
-    match v {
-        Value::Array(items) => items.iter().any(contains_initialize),
-        Value::Object(m) => m.get("method").and_then(Value::as_str) == Some("initialize") && m.get("id").is_some(),
-        _ => false,
-    }
-}
+fn read_and_route(
+    server: &McpServer,
+    conn: &mut Conn<'_>,
+    loopback: bool,
+    token: &str,
+    limits: HttpLimits,
+    slots: &mut Slots,
+) -> Result<Reply, Reply> {
+    let body_start = conn.read_head()?;
+    let head = parse_head(conn.buf.get(..body_start.saturating_sub(4)).unwrap_or_default())?;
 
-fn handle(server: &McpServer, mut req: Request, loopback: bool, token: &str) {
-    let path = req.url().split('?').next().unwrap_or("").trim_end_matches('/').to_string();
-    let response = route(server, &mut req, &path, loopback, token);
-    if let Err(e) = req.respond(response) {
-        eprintln!("plancraft-mcp: failed to send HTTP response: {e}");
-    }
-}
-
-fn route(server: &McpServer, req: &mut Request, path: &str, loopback: bool, token: &str) -> Response<io::Cursor<Vec<u8>>> {
-    if let Some(origin) = header(req, "Origin")
+    // Everything that can refuse the request is checked before the body is read.
+    if let Some(origin) = head.header("Origin")
         && !is_local_origin(origin)
     {
-        return text_response(403, "Forbidden: non-local Origin");
+        return Ok(Reply::text(403, "Forbidden: non-local Origin"));
     }
-    if loopback
-        && let Some(host) = header(req, "Host")
-        && !is_loopback_host(host)
-    {
-        return text_response(403, "Forbidden: invalid Host header");
+    if loopback && !head.header("Host").is_some_and(is_loopback_host) {
+        return Ok(Reply::text(403, "Forbidden: invalid Host header"));
     }
-    if !authorized(req, token) {
-        return with(
-            text_response(401, "Unauthorized: send the PlanCraft session token as 'Authorization: Bearer <token>'"),
-            "WWW-Authenticate",
-            "Bearer realm=\"plancraft\"",
-        );
+    if !authorized(&head, token) {
+        return Ok(Reply::text(401, "Unauthorized: send the PlanCraft session token as 'Authorization: Bearer <token>'")
+            .header("WWW-Authenticate", "Bearer realm=\"plancraft\""));
     }
-    if !(path.is_empty() || path == "/mcp") {
-        return text_response(404, "Not found: the MCP endpoint is /mcp");
+    // Past the token check: free the pre-authentication slot and take a request slot.
+    slots.pending = None;
+    match Active::take(&slots.busy, limits.max_requests) {
+        Some(slot) => slots.request = Some(slot),
+        None => return Ok(Reply::text(503, "Service Unavailable: too many requests at once").header("Retry-After", "1")),
     }
-    match req.method() {
-        Method::Post => {}
-        Method::Delete => return text_response(200, ""),
-        Method::Get => {
-            return with(
-                text_response(405, "Method Not Allowed: this server does not offer an SSE stream; use POST"),
-                "Allow",
-                "POST, DELETE",
+    if !(head.path.is_empty() || head.path == "/mcp") {
+        return Ok(Reply::text(404, "Not found: the MCP endpoint is /mcp"));
+    }
+    match head.method.as_str() {
+        "POST" => {}
+        "DELETE" => return Ok(Reply::text(200, "")),
+        "GET" => {
+            return Ok(
+                Reply::text(405, "Method Not Allowed: this server does not offer an SSE stream; use POST").header("Allow", "POST, DELETE")
             );
         }
-        _ => {
-            return with(text_response(405, "Method Not Allowed"), "Allow", "POST, DELETE");
+        _ => return Ok(Reply::text(405, "Method Not Allowed").header("Allow", "POST, DELETE")),
+    }
+    // The spec: an unsupported MCP-Protocol-Version gets 400; without the header the client is
+    // taken to use 2025-03-26.
+    let version = head.header("MCP-Protocol-Version");
+    if let Some(v) = version
+        && !SUPPORTED_PROTOCOL_VERSIONS.contains(&v)
+    {
+        return Ok(Reply::text(400, &format!("Bad Request: unsupported MCP-Protocol-Version '{v}'")));
+    }
+
+    let lengths: Vec<&str> = head.all("Content-Length").collect();
+    let body = if let Some(te) = head.header("Transfer-Encoding") {
+        if !te.eq_ignore_ascii_case("chunked") || !lengths.is_empty() {
+            return Ok(Reply::text(501, "Not Implemented: only a chunked or Content-Length body is accepted"));
         }
-    }
-    let mut body = Vec::new();
-    if let Err(e) = req.as_reader().take(MAX_BODY + 1).read_to_end(&mut body) {
-        return json_response(400, &parse_error(format!("cannot read body: {e}")));
-    }
-    if body.len() as u64 > MAX_BODY {
-        return json_response(413, &error_response(Value::Null, &RpcError::new(INVALID_REQUEST, "request body too large")));
-    }
+        continue_if_asked(conn, &head)?;
+        conn.body_chunked(body_start)?
+    } else {
+        let len = match lengths.as_slice() {
+            [] => 0,
+            [one, rest @ ..] if rest.iter().all(|r| r == one) => {
+                one.parse::<usize>().map_err(|_| Reply::text(400, "Bad Request: invalid Content-Length"))?
+            }
+            _ => return Ok(Reply::text(400, "Bad Request: conflicting Content-Length headers")),
+        };
+        if len > MAX_BODY {
+            return Ok(too_large());
+        }
+        continue_if_asked(conn, &head)?;
+        conn.body_with_length(body_start, len)?
+    };
+
     let msg: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
-        Err(e) => return json_response(400, &parse_error(e)),
+        Err(e) => return Ok(Reply::json(400, &parse_error(e))),
     };
-    let init = contains_initialize(&msg);
-    match server.handle_message(msg) {
-        None => Response::from_data(Vec::new()).with_status_code(StatusCode(202)),
-        Some(resp) => {
-            let r = json_response(200, &resp);
-            if init { with(r, "Mcp-Session-Id", &uuid::Uuid::new_v4().to_string()) } else { r }
-        }
+    drop(body);
+    Ok(match server.handle_message_as(msg, version) {
+        None => Reply { status: 202, content_type: "application/json", headers: Vec::new(), body: Vec::new() },
+        Some(resp) => Reply::json(200, &resp),
+    })
+}
+
+/// Answers `Expect: 100-continue`, so a client waiting for it sends the body.
+fn continue_if_asked(conn: &mut Conn<'_>, head: &Head) -> Result<(), Reply> {
+    if head.header("Expect").is_some_and(|e| e.eq_ignore_ascii_case("100-continue")) {
+        conn.stream.write_all(b"HTTP/1.1 100 Continue\r\n\r\n").map_err(|_| gone())?;
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -276,7 +671,35 @@ mod tests {
         assert!(!is_local_origin("http://localhost.evil.com"));
         assert!(!is_local_origin("null"));
         assert!(is_loopback_host("127.0.0.1:7878"));
+        assert!(is_loopback_host("127.0.0.2"));
         assert!(is_loopback_host("localhost"));
+        assert!(is_loopback_host("[::1]:7878"));
         assert!(!is_loopback_host("attacker.example:7878"));
+    }
+
+    /// Regression: the DNS-rebinding check took any name starting with "127." as loopback, so a
+    /// page on `127.evil.example` (which its owner can point at 127.0.0.1) passed the Host and
+    /// Origin checks.
+    #[test]
+    fn names_that_only_look_like_loopback_are_refused() {
+        for host in ["127.evil.example", "127.0.0.1.evil.example", "127.evil.example:7878", "[::1]evil", "[::1]:x", "127.1"] {
+            assert!(!is_loopback_host(host), "{host}");
+        }
+        assert!(!is_local_origin("http://127.evil.example:7878"));
+    }
+
+    #[test]
+    fn heads_parse_strictly() {
+        let h = parse_head(b"POST /mcp/?x=1 HTTP/1.1\r\nHost: localhost\r\nX-A:  b \r\n").unwrap();
+        assert_eq!((h.method.as_str(), h.path.as_str(), h.header("x-a")), ("POST", "/mcp", Some("b")));
+        for bad in [
+            &b"POST /mcp\r\n"[..],
+            b"POST /mcp HTTP/2\r\n",
+            b"post /mcp HTTP/1.1\r\n",
+            b"POST /mcp HTTP/1.1\r\nBad Name: x\r\n",
+            b"POST / HTTP/1.1\r\n folded\r\n",
+        ] {
+            assert!(parse_head(bad).is_err(), "{}", String::from_utf8_lossy(bad));
+        }
     }
 }

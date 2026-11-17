@@ -166,24 +166,69 @@ pub fn milestone_status(p: &Project, at: NaiveDateTime) -> Vec<MilestoneStatus> 
         .collect()
 }
 
+/// Share (0–1) of a task's completed part that lies before `at`: the completed part runs from the
+/// task's start to its stop (the end of the completed work), or to its finish once it is
+/// complete, leaving out the pauses between its parts.
+fn done_share_by(t: &Task, at: NaiveDateTime, wc: &WorkCal) -> f64 {
+    let Some(start) = t.sched.start else { return 1.0 };
+    let end = match t.sched.stop {
+        Some(stop) => stop,
+        None if t.sched.percent_complete >= 100.0 => t.sched.finish.unwrap_or(start),
+        // No completed part laid out (no progress): whatever was done counts from the start.
+        None => return if at >= start { 1.0 } else { 0.0 },
+    };
+    let len = |a: NaiveDateTime, b: NaiveDateTime| -> f64 {
+        if b <= a {
+            0.0
+        } else if t.elapsed {
+            b.signed_duration_since(a).num_minutes() as f64
+        } else {
+            wc.between(a, b) as f64
+        }
+    };
+    let whole = [(start, t.sched.finish.unwrap_or(end))];
+    let parts: &[(NaiveDateTime, NaiveDateTime)] = if t.sched.parts.is_empty() { &whole } else { &t.sched.parts };
+    let (mut total, mut before) = (0.0, 0.0);
+    for &(a, b) in parts {
+        total += len(a, b.min(end));
+        before += len(a, b.min(end).min(at));
+    }
+    if total <= 0.0 {
+        return if at >= end { 1.0 } else { 0.0 };
+    }
+    (before / total).clamp(0.0, 1.0)
+}
+
 pub fn earned_value(p: &Project, at: NaiveDateTime) -> Option<EarnedValue> {
     let leaves = p.tasks.iter().filter(|t| !t.sched.is_summary && t.active);
     let mut ev = EarnedValue::default();
     let mut any_baseline = false;
     let slot = p.settings.earned_value_baseline;
     let wc = project_calendar(p);
+    // Tracked time per task: (all of it, the part logged up to the status date).
+    let mut logged: std::collections::HashMap<TaskId, (Minutes, Minutes)> = std::collections::HashMap::new();
+    for e in &p.time_entries {
+        let slot = logged.entry(e.task).or_default();
+        slot.0 = slot.0.saturating_add(e.minutes);
+        if e.date <= at.date() {
+            slot.1 = slot.1.saturating_add(e.minutes);
+        }
+    }
     for t in leaves {
         let Some(b) = t.baseline_in(slot) else { continue };
         any_baseline = true;
         ev.bcws += b.cost * planned_fraction(b.start, b.finish, at, &wc, t.elapsed);
         ev.bcwp += b.cost * t.sched.percent_complete as f64 / 100.0;
-        // Actual cost (ACWP): the cost of the work done so far. Progress entered as actual work
-        // (tracked time) counts as that work; progress entered as % complete counts as that share
-        // of the work, as it does for tasks with no resources.
+        // Actual cost (ACWP): the cost of the work done up to the status date. Tracked time counts
+        // on the day it was logged; other actual work, and progress entered as % complete (as for
+        // tasks with no resources), count as they were laid out from the task's start.
+        let share = done_share_by(t, at, &wc);
         let actual_ratio = if t.sched.work > 0 && t.sched.actual_work > 0 {
-            t.sched.actual_work as f64 / t.sched.work as f64
+            let (all_logged, logged_by) = logged.get(&t.id).copied().unwrap_or_default();
+            let other = t.sched.actual_work.saturating_sub(all_logged).max(0);
+            (logged_by as f64 + other as f64 * share) / t.sched.work as f64
         } else {
-            t.sched.percent_complete as f64 / 100.0
+            t.sched.percent_complete as f64 / 100.0 * share
         };
         ev.acwp += t.sched.cost * actual_ratio;
     }

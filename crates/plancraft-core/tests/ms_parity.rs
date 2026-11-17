@@ -663,6 +663,48 @@ fn acwp_counts_progress_entered_as_percent_complete() {
     assert!((ev.cpi - 1.0).abs() < 1e-9);
 }
 
+// Source: https://support.microsoft.com/en-us/project/acwp-fields — "ACWP (task field)", "Example"
+// ACWP counts the cost of actual work only up to the status date. A 10-hour task at $20/h has 5
+// hours reported on one day and 5 more on a later day: ACWP is $100 with the earlier day as the
+// status date and $200 with the later one.
+#[test]
+fn acwp_counts_actual_work_up_to_the_status_date() {
+    let mut p = project();
+    let t = task(&mut p, "Build", 10 * HOUR);
+    let r = p.add_resource("Ana");
+    p.resource_mut(r).unwrap().standard_rate = 20.0;
+    p.assign(t, r, Some(1.0), None).unwrap();
+    recalculate(&mut p);
+    p.set_baseline(&[]);
+    p.log_time(t, r, d(2026, 10, 19), 5 * HOUR, "").unwrap();
+    p.log_time(t, r, d(2026, 10, 20), 5 * HOUR, "").unwrap();
+    recalculate(&mut p);
+    let acwp = |p: &Project, day: u32| plancraft_core::report::earned_value(p, dt(2026, 10, day, 17)).unwrap().acwp;
+    assert!((acwp(&p, 19) - 100.0).abs() < 1e-6, "ACWP at the first day {}", acwp(&p, 19));
+    assert!((acwp(&p, 20) - 200.0).abs() < 1e-6, "ACWP at the second day {}", acwp(&p, 20));
+}
+
+// Source: https://support.microsoft.com/en-us/project/acwp-fields — "ACWP (task field)", "How Calculated" and "Remarks"
+// ACWP also follows progress entered as % complete, and it is timephased: it runs from the first
+// actual work up to the status date. A 10-day task at $100/h that is 50% complete has its first 5
+// days done; with the status date after the third day, only those 3 days ($2,400) count.
+#[test]
+fn acwp_from_percent_complete_stops_at_the_status_date() {
+    let mut p = project();
+    let t = task(&mut p, "Build", 10 * DAY);
+    let r = p.add_resource("Ana");
+    p.resource_mut(r).unwrap().standard_rate = 100.0;
+    p.assign(t, r, Some(1.0), None).unwrap();
+    recalculate(&mut p);
+    p.set_baseline(&[]);
+    p.set_percent_complete(t, 50).unwrap();
+    recalculate(&mut p);
+    let ev = plancraft_core::report::earned_value(&p, dt(2026, 10, 21, 17)).unwrap();
+    assert!((ev.acwp - 2400.0).abs() < 1e-6, "ACWP {}", ev.acwp);
+    let before = plancraft_core::report::earned_value(&p, dt(2026, 10, 16, 17)).unwrap();
+    assert!(before.acwp.abs() < 1e-9, "nothing was done before the task started: {}", before.acwp);
+}
+
 // ---------------------------------------------------------------------------
 // Tracking: Stop/Resume, Update Project, Mark on Track
 // ---------------------------------------------------------------------------

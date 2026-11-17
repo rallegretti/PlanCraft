@@ -642,6 +642,28 @@ impl<'a> Engine<'a> {
 
     fn build_edges(&mut self) {
         let p = self.p;
+        // A finish-to-finish or start-to-finish link into an automatic summary would set the
+        // summary's finish, which comes from its subtasks; such links (from older files, or on a
+        // task that later became a summary) are ignored with a warning instead of being pushed
+        // onto every subtask.
+        for (i, t) in p.tasks.iter().enumerate() {
+            if self.leaf(i) || self.manual_summary(i).is_some() || !t.active {
+                continue;
+            }
+            for d in t.predecessors.iter().filter(|d| matches!(d.kind, LinkType::FF | LinkType::SF)) {
+                let from = match d.predecessor {
+                    TaskRef::Local(id) => {
+                        self.position.get(&id).and_then(|&pi| self.task(pi)).map_or_else(|| id.to_string(), |pt| pt.name.clone())
+                    }
+                    TaskRef::External { task, .. } => task.to_string(),
+                };
+                self.warnings.push(format!(
+                    "The {} link from '{from}' to summary task '{}' is ignored: a summary task's finish comes from its subtasks. Link to one of its subtasks instead.",
+                    d.kind.code(),
+                    t.name
+                ));
+            }
+        }
         for succ in self.leaves.clone() {
             let Some(task) = self.task(succ) else { continue };
             // Own links, links inherited from ancestor summaries, and milestone membership.
@@ -654,7 +676,7 @@ impl<'a> Engine<'a> {
                     break;
                 }
                 if let Some(t) = p.tasks.get(a) {
-                    deps.extend(t.predecessors.iter().copied());
+                    deps.extend(t.predecessors.iter().copied().filter(|d| !matches!(d.kind, LinkType::FF | LinkType::SF)));
                 }
                 anc = self.parent.get(a).copied().flatten();
             }

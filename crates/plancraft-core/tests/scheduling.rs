@@ -818,3 +818,52 @@ fn an_elapsed_task_starts_when_its_predecessor_ends_even_after_hours() {
     assert_eq!(start(&p, strip), dt(2026, 10, 27, 8));
     assert!(p.task(cure).unwrap().sched.critical);
 }
+
+/// Regression (bug 18): a finish-to-finish link into an automatic summary was pushed onto every
+/// subtask, so X –FF→ S{A→B} delayed A and made S run past what X required. A summary's finish
+/// comes from its subtasks, so such links are refused; start links into a summary still work, and
+/// a manually scheduled summary (which keeps its own dates) takes any link.
+#[test]
+fn finish_links_into_an_automatic_summary_are_refused() {
+    let mut p = project();
+    let x = task(&mut p, "X", 7);
+    let s = p.add_task("S", None);
+    let a = task(&mut p, "A", 3);
+    let b = task(&mut p, "B", 2);
+    p.indent(a).unwrap();
+    p.indent(b).unwrap();
+    p.link(a.into(), b, LinkType::FS, Lag::None).unwrap();
+    for kind in [LinkType::FF, LinkType::SF] {
+        let err = p.link(x.into(), s, kind, Lag::None).unwrap_err();
+        assert!(err.to_string().contains("subtasks"), "{err}");
+        let err = p.set_predecessors(s, vec![Dependency { predecessor: x.into(), kind, lag: Lag::None }]).unwrap_err();
+        assert!(err.to_string().contains("subtasks"), "{err}");
+    }
+    assert!(p.task(s).unwrap().predecessors.is_empty(), "a refused link leaves nothing behind");
+    p.link(x.into(), s, LinkType::SS, Lag::None).unwrap();
+    p.link(x.into(), a, LinkType::FF, Lag::None).unwrap();
+
+    p.set_schedule_mode(&[s], ScheduleMode::Manual).unwrap();
+    p.link(x.into(), s, LinkType::FF, Lag::None).unwrap();
+}
+
+/// Regression (bug 18): a finish-to-finish link that already ends at an automatic summary (from an
+/// older file, or on a task that later became a summary) no longer moves its subtasks; the
+/// recalculation warns that it is ignored.
+#[test]
+fn an_existing_finish_link_into_a_summary_is_ignored_with_a_warning() {
+    let mut p = project();
+    let x = task(&mut p, "X", 7);
+    let s = task(&mut p, "S", 1);
+    p.link(x.into(), s, LinkType::FF, Lag::None).unwrap();
+    let a = task(&mut p, "A", 3);
+    let b = task(&mut p, "B", 2);
+    p.indent(a).unwrap();
+    p.indent(b).unwrap();
+    p.link(a.into(), b, LinkType::FS, Lag::None).unwrap();
+    assert!(p.task(s).unwrap().predecessors.iter().any(|d| d.kind == LinkType::FF), "S kept its link when it became a summary");
+    let report = recalculate(&mut p);
+    assert_eq!(start(&p, a), dt(2026, 10, 19, 8), "A is not pushed by X's finish");
+    assert_eq!(finish(&p, b), dt(2026, 10, 23, 17), "S spans its subtasks only");
+    assert!(report.warnings.iter().any(|w| w.contains("FF") && w.contains("'S'") && w.contains("ignored")), "{:?}", report.warnings);
+}

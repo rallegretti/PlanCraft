@@ -398,9 +398,37 @@ impl Document {
         Ok(())
     }
 
-    /// Re-reads external documents and recalculates. Returns warnings.
+    /// Re-reads external documents (an explicit Refresh Links, following every link) and updates
+    /// their snapshots as an undoable edit by the user. Returns warnings.
     pub fn refresh_external(&mut self) -> Vec<String> {
-        self.refresh_external_with(io::refresh_external)
+        let reads = io::read_external_projects(&self.project.external_projects, self.path.as_deref(), true);
+        self.apply_external_reads(reads, ChangeSource::User)
+    }
+
+    /// Updates the external-link snapshots from documents read (without holding the workspace
+    /// lock) by [`io::read_external_projects`], as an undoable edit attributed to `source`.
+    /// Returns warnings.
+    pub fn apply_external_reads(&mut self, reads: io::ExternalReads, source: ChangeSource) -> Vec<String> {
+        if self.project.external_projects.is_empty() {
+            return Vec::new();
+        }
+        let mut probe = self.project.clone();
+        let warnings = io::apply_external_projects(&mut probe, reads);
+        let links = probe.external_projects;
+        // Nothing new in the linked files: only their "last synced" times change, which is no
+        // edit to undo and no reason to save (as before Refresh Links became an edit).
+        let without_sync = |l: &[crate::model::ExternalProject]| {
+            l.iter().map(|e| crate::model::ExternalProject { last_sync: None, ..e.clone() }).collect::<Vec<_>>()
+        };
+        if without_sync(&links) == without_sync(&self.project.external_projects) {
+            self.project.external_projects = links;
+            self.revision = self.revision.wrapping_add(1);
+            return warnings;
+        }
+        match self.edit_as("Refresh Links", source, |p| p.external_projects = links) {
+            Ok(()) => warnings,
+            Err(e) => vec![format!("Links were not refreshed: {e}")],
+        }
     }
 
     /// The refresh done when a document opens: network-share links wait for an explicit refresh,

@@ -47,7 +47,7 @@ use std::path::{Path, PathBuf};
 use plancraft_core::model::{FILE_EXTENSION, Project};
 use plancraft_core::workspace::{SharedWorkspace, Workspace};
 
-pub use http::{HttpHandle, serve_http};
+pub use http::{HttpHandle, HttpLimits, serve_http, serve_http_with};
 pub use server::{ChangeCallback, McpServer, ServerOptions};
 pub use stdio::{run_stdio, run_stdio_with};
 

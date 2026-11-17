@@ -84,7 +84,21 @@ fn invalid<T>(msg: impl Into<String>) -> PlanResult<T> {
     Err(PlanError::Invalid(msg.into()))
 }
 
+/// Why a finish-to-finish or start-to-finish link into an automatically scheduled summary task is
+/// refused (and ignored by the scheduler when one exists already).
+pub const SUMMARY_FINISH_LINK: &str = "a summary task's finish comes from its subtasks, so it can't have a finish-to-finish or \
+     start-to-finish predecessor; link to one of its subtasks instead";
+
 impl Project {
+    /// Whether a link of `kind` may end at row `si`: a link that sets the successor's finish (FF or
+    /// SF) can't end at an automatically scheduled summary task, whose finish comes from its
+    /// subtasks. A manually scheduled summary keeps its own dates, so any link may end there.
+    pub(crate) fn finish_link_allowed(&self, si: usize, kind: LinkType) -> bool {
+        !matches!(kind, LinkType::FF | LinkType::SF)
+            || !self.has_children(si)
+            || self.tasks.get(si).is_some_and(|t| t.mode == ScheduleMode::Manual)
+    }
+
     fn require_task(&self, id: TaskId) -> PlanResult<usize> {
         self.task_index(id).ok_or(PlanError::TaskNotFound(id))
     }
@@ -368,6 +382,9 @@ impl Project {
     /// Adds (or updates) a dependency `pred -> succ`.
     pub fn link(&mut self, pred: TaskRef, succ: TaskId, kind: LinkType, lag: Lag) -> PlanResult<()> {
         let si = self.require_task(succ)?;
+        if !self.finish_link_allowed(si, kind) {
+            return invalid(SUMMARY_FINISH_LINK);
+        }
         if let TaskRef::Local(pid) = pred {
             let pi = self.require_task(pid)?;
             if pid == succ || self.descendants_range(pi).contains(&si) || self.descendants_range(si).contains(&pi) {

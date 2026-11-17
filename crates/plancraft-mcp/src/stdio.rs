@@ -48,14 +48,19 @@ pub fn run_stdio(server: &McpServer) -> io::Result<()> {
 /// Serves MCP over arbitrary reader/writer streams (one JSON message per line).
 pub fn run_stdio_with<R: BufRead, W: Write>(server: &McpServer, mut reader: R, mut writer: W) -> io::Result<()> {
     let mut buf = Vec::new();
+    // The protocol revision agreed with this client (it decides whether batches are allowed).
+    let mut version: Option<String> = None;
     loop {
         let resp = match read_line(&mut reader, &mut buf)? {
             Line::Eof => return Ok(()),
             Line::TooLong => Some(crate::protocol::parse_error("message too large")),
             Line::Text(line) if line.is_empty() => None,
-            Line::Text(line) => server.handle_text(&line),
+            Line::Text(line) => server.handle_text_as(&line, version.as_deref()),
         };
         if let Some(resp) = resp {
+            if let Some(v) = crate::server::negotiated_version(&resp) {
+                version = Some(v.to_string());
+            }
             serde_json::to_writer(&mut writer, &resp).map_err(io::Error::other)?;
             writer.write_all(b"\n")?;
             writer.flush()?;
