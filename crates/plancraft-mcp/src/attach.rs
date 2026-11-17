@@ -88,16 +88,33 @@ fn write_message<W: Write>(w: &mut W, v: &Value) -> io::Result<()> {
 /// restarted and has a new token).
 fn forward(line: &str, version: Option<&str>, session: &dyn Fn() -> io::Result<SessionInfo>) -> io::Result<Option<Value>> {
     let info = session().map_err(|e| io::Error::new(e.kind(), format!("no running PlanCraft session found ({e})")))?;
-    match post(&info, line, version)? {
+    match post_retrying(&info, line, version)? {
         (401, _) => {
             let fresh = session()?;
-            match post(&fresh, line, version)? {
+            match post_retrying(&fresh, line, version)? {
                 (401, _) => Err(io::Error::new(io::ErrorKind::PermissionDenied, "the app refused the session token")),
                 reply => parse_reply(reply),
             }
         }
         reply => parse_reply(reply),
     }
+}
+
+/// [`post`], waiting and trying again (up to three times) while the app answers `503` because it
+/// is serving many requests at once.
+fn post_retrying(info: &SessionInfo, body: &str, version: Option<&str>) -> io::Result<(u16, Vec<u8>)> {
+    let mut reply = post(info, body, version)?;
+    for _ in 0..3 {
+        if reply.0 != 503 {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(1));
+        reply = post(info, body, version)?;
+    }
+    if reply.0 == 503 {
+        return Err(io::Error::other("PlanCraft is busy with many requests at once; try again"));
+    }
+    Ok(reply)
 }
 
 fn parse_reply((status, body): (u16, Vec<u8>)) -> io::Result<Option<Value>> {

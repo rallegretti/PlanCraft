@@ -412,8 +412,21 @@ impl Document {
         if self.project.external_projects.is_empty() {
             return Vec::new();
         }
-        match self.edit_as("Refresh Links", source, |p| io::apply_external_projects(p, reads)) {
-            Ok(warnings) => warnings,
+        let mut probe = self.project.clone();
+        let warnings = io::apply_external_projects(&mut probe, reads);
+        let links = probe.external_projects;
+        // Nothing new in the linked files: only their "last synced" times change, which is no
+        // edit to undo and no reason to save (as before Refresh Links became an edit).
+        let without_sync = |l: &[crate::model::ExternalProject]| {
+            l.iter().map(|e| crate::model::ExternalProject { last_sync: None, ..e.clone() }).collect::<Vec<_>>()
+        };
+        if without_sync(&links) == without_sync(&self.project.external_projects) {
+            self.project.external_projects = links;
+            self.revision = self.revision.wrapping_add(1);
+            return warnings;
+        }
+        match self.edit_as("Refresh Links", source, |p| p.external_projects = links) {
+            Ok(()) => warnings,
             Err(e) => vec![format!("Links were not refreshed: {e}")],
         }
     }

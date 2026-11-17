@@ -239,7 +239,12 @@ fn host_names_that_only_look_like_loopback_are_refused() {
 /// client that stalls is cut off, and connections beyond the limit are turned away at once.
 #[test]
 fn slow_unauthenticated_and_excess_clients_are_cut_off() {
-    let limits = HttpLimits { max_connections: 4, read_timeout: Duration::from_millis(300), request_deadline: Duration::from_secs(2) };
+    let limits = HttpLimits {
+        max_connections: 4,
+        max_requests: 4,
+        read_timeout: Duration::from_millis(300),
+        request_deadline: Duration::from_secs(2),
+    };
     let handle = serve_http_with(server(), "127.0.0.1:0", TOKEN, limits).unwrap();
     let port = handle.port();
 
@@ -281,15 +286,40 @@ fn slow_unauthenticated_and_excess_clients_are_cut_off() {
     let req = format!("POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Big: {}\r\n\r\n", "a".repeat(70 * 1024));
     assert_eq!(raw_status(port, req.as_bytes()), 431);
 
-    // Four idle connections fill the server; the fifth is turned away with 503.
-    let idle: Vec<TcpStream> = (0..4).map(|_| TcpStream::connect(("127.0.0.1", port)).unwrap()).collect();
-    std::thread::sleep(Duration::from_millis(100));
-    assert_eq!(raw_status(port, b"GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n"), 503);
+    handle.shutdown();
+
+    // Connections still sending headers are limited: with long timeouts (so none of them times out
+    // while the test runs), four half-sent requests fill the server and the fifth gets 503.
+    let limits = HttpLimits {
+        max_connections: 4,
+        max_requests: 4,
+        read_timeout: Duration::from_secs(30),
+        request_deadline: Duration::from_secs(30),
+    };
+    let handle = serve_http_with(server(), "127.0.0.1:0", TOKEN, limits).unwrap();
+    let port = handle.port();
+    let mut idle: Vec<TcpStream> = (0..4).map(|_| TcpStream::connect(("127.0.0.1", port)).unwrap()).collect();
+    for s in &mut idle {
+        s.write_all(b"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n").unwrap();
+    }
+    let started = std::time::Instant::now();
+    loop {
+        let status = raw_status(port, b"GET /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+        if status == 503 {
+            break;
+        }
+        // The accept loop may not have counted all four yet.
+        assert!(started.elapsed() < Duration::from_secs(5), "never refused (last status {status})");
+        std::thread::sleep(Duration::from_millis(20));
+    }
     drop(idle);
-    // Once they are gone (timed out or closed) the server takes requests again.
-    std::thread::sleep(Duration::from_millis(600));
+    // Once they are gone the server takes requests again.
     let ping = json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }).to_string();
-    assert_eq!(send(port, "POST", "/mcp", &[], &ping).status, 200);
+    let started = std::time::Instant::now();
+    while send(port, "POST", "/mcp", &[], &ping).status != 200 {
+        assert!(started.elapsed() < Duration::from_secs(5), "the slots were never freed");
+        std::thread::sleep(Duration::from_millis(20));
+    }
     handle.shutdown();
 }
 
@@ -376,4 +406,146 @@ fn attach_bridge_answers_each_request_of_a_failed_batch() {
     let ids: Vec<&Value> = reply.as_array().unwrap().iter().map(|r| &r["id"]).collect();
     assert_eq!(ids, [&json!(1), &json!("b")]);
     assert!(reply[0]["error"]["message"].as_str().unwrap().contains("not reachable"));
+}
+
+/// Regression (review): after its reply the server read what the client still sent, 500 ms at a
+/// time with no overall limit, so a client without the token could drip bytes and keep its slot
+/// for days. The drain now ends after a second, and the slot frees.
+#[test]
+fn a_client_dripping_after_its_reply_loses_its_slot() {
+    let limits =
+        HttpLimits { max_connections: 1, max_requests: 4, read_timeout: Duration::from_secs(5), request_deadline: Duration::from_secs(5) };
+    let handle = serve_http_with(server(), "127.0.0.1:0", TOKEN, limits).unwrap();
+    let port = handle.port();
+    let mut drip = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    drip.write_all(b"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 100000\r\n\r\n").unwrap();
+    let dripping = std::thread::spawn(move || {
+        for _ in 0..40 {
+            if drip.write_all(b"x").is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    });
+    std::thread::sleep(Duration::from_millis(1500));
+    let ping = json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }).to_string();
+    let started = std::time::Instant::now();
+    loop {
+        let status = send(port, "POST", "/mcp", &[], &ping).status;
+        if status == 200 {
+            break;
+        }
+        assert!(started.elapsed() < Duration::from_secs(2), "the dripping client kept the only slot (status {status})");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let _ = dripping.join();
+    handle.shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// Hostile requests (the HTTP parser is new code that reads untrusted bytes)
+// ---------------------------------------------------------------------------
+
+static SERVER_PANICS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A server for the sweep, with short timeouts, whose threads' panics are counted (the request
+/// threads catch nothing, so a panic there would kill a connection silently).
+fn sweep_port() -> u16 {
+    static HANDLE: std::sync::OnceLock<plancraft_mcp::HttpHandle> = std::sync::OnceLock::new();
+    HANDLE
+        .get_or_init(|| {
+            let default = std::panic::take_hook();
+            std::panic::set_hook(Box::new(move |info| {
+                if std::thread::current().name().is_some_and(|n| n.starts_with("plancraft-mcp")) {
+                    SERVER_PANICS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                }
+                default(info);
+            }));
+            let limits = HttpLimits {
+                max_connections: 8,
+                max_requests: 8,
+                read_timeout: Duration::from_millis(300),
+                request_deadline: Duration::from_secs(1),
+            };
+            serve_http_with(server(), "127.0.0.1:0", TOKEN, limits).unwrap()
+        })
+        .port()
+}
+
+/// Request text built from plausible and broken pieces.
+fn request_bytes() -> impl proptest::strategy::Strategy<Value = Vec<u8>> {
+    use proptest::prelude::*;
+    let line = prop_oneof![
+        Just("POST /mcp HTTP/1.1".to_string()),
+        Just("GET / HTTP/1.0".to_string()),
+        Just("DELETE /mcp?x HTTP/1.1".to_string()),
+        "[A-Z]{0,8} [ -~]{0,20} HTTP/[0-9.]{0,4}",
+        "[ -~]{0,40}",
+    ];
+    let header = prop_oneof![
+        Just(format!("Authorization: Bearer {TOKEN}")),
+        Just("Host: 127.0.0.1".to_string()),
+        Just("Transfer-Encoding: chunked".to_string()),
+        Just("Expect: 100-continue".to_string()),
+        "Content-Length: [-+0-9a-f ]{0,22}",
+        "MCP-Protocol-Version: [ -~]{0,12}",
+        "Origin: [ -~]{0,30}",
+        "[ -~]{0,30}",
+        " [ -~]{0,10}",
+    ];
+    let body = prop_oneof![
+        Just(r#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#.to_string()),
+        "[0-9a-fA-F]{0,8}(;[a-z=]{0,5})?\r\n[ -~]{0,20}\r\n(0\r\n\r\n)?",
+        "[ -~\r\n]{0,60}",
+    ];
+    let raw = proptest::collection::vec(any::<u8>(), 0..300);
+    prop_oneof![
+        3 => (line, proptest::collection::vec(header, 0..8), body, any::<bool>(), proptest::bool::weighted(0.8)).prop_map(|(l, hs, b, crlf, valid)| {
+            let nl = if crlf { "\r\n" } else { "\n" };
+            let mut s = l + nl;
+            // Most requests pass the host and token checks, so what lies behind them (methods,
+            // framing, bodies, JSON-RPC) gets the hostile input too.
+            if valid {
+                s.push_str(&format!("Host: 127.0.0.1{nl}Authorization: Bearer {TOKEN}{nl}"));
+            }
+            for h in hs {
+                s.push_str(&h);
+                s.push_str(nl);
+            }
+            s.push_str(nl);
+            s.push_str(&b);
+            s.into_bytes()
+        }),
+        1 => raw,
+    ]
+}
+
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig { cases: 128, ..proptest::prelude::ProptestConfig::default() })]
+
+    /// Any bytes sent as a request get a reply or a closed connection, never a panic, and the
+    /// server keeps answering valid requests afterwards.
+    #[test]
+    fn hostile_requests_never_panic_the_server(bytes in request_bytes()) {
+        let port = sweep_port();
+        let before = SERVER_PANICS.load(std::sync::atomic::Ordering::SeqCst);
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let _ = s.write_all(&bytes);
+        let _ = s.shutdown(std::net::Shutdown::Write);
+        let mut reply = Vec::new();
+        let _ = s.read_to_end(&mut reply);
+        if !reply.is_empty() {
+            proptest::prop_assert!(reply.starts_with(b"HTTP/1.1 "), "{}", String::from_utf8_lossy(&reply));
+        }
+        let ping = json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }).to_string();
+        let started = std::time::Instant::now();
+        let mut status = send(port, "POST", "/mcp", &[], &ping).status;
+        while status == 503 && started.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+            status = send(port, "POST", "/mcp", &[], &ping).status;
+        }
+        proptest::prop_assert_eq!(status, 200);
+        proptest::prop_assert_eq!(SERVER_PANICS.load(std::sync::atomic::Ordering::SeqCst), before, "a server thread panicked");
+    }
 }

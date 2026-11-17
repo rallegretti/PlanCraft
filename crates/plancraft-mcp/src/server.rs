@@ -335,8 +335,12 @@ pub fn batches_allowed(version: Option<&str>) -> bool {
     version.is_none_or(|v| v < "2025-06-18")
 }
 
-/// The protocol revision agreed in a reply to `initialize` (`None` for any other reply).
+/// The protocol revision agreed in a reply to `initialize`, also inside a batch reply (`None`
+/// for any other reply).
 pub fn negotiated_version(reply: &Value) -> Option<&str> {
+    if let Value::Array(items) = reply {
+        return items.iter().find_map(negotiated_version);
+    }
     let result = reply.get("result")?;
     result.get("serverInfo")?;
     result.get("protocolVersion")?.as_str()
@@ -428,8 +432,24 @@ impl Ctx<'_> {
         f: impl FnOnce(&mut Project, Option<&Path>) -> ToolResult<R>,
         view: impl FnOnce(&Document, R) -> ToolResult<Value>,
     ) -> ToolResult<Value> {
+        self.edit_doc(a, None, label, f, view)
+    }
+
+    /// [`Ctx::edit`] on the document with `handle` when given (one chosen earlier, before the
+    /// workspace lock was released), else on the one the arguments select.
+    pub fn edit_doc<R>(
+        &self,
+        a: &Args,
+        handle: Option<u64>,
+        label: &str,
+        f: impl FnOnce(&mut Project, Option<&Path>) -> ToolResult<R>,
+        view: impl FnOnce(&Document, R) -> ToolResult<Value>,
+    ) -> ToolResult<Value> {
         let mut ws = self.server.lock();
-        let i = Self::doc_index(&ws, a)?;
+        let i = match handle {
+            Some(h) => ws.index_of(h).ok_or_else(|| ToolError("the document was closed while its linked files were being read".into()))?,
+            None => Self::doc_index(&ws, a)?,
+        };
         let doc = doc_at_mut(&mut ws, i)?;
         let path = doc.path.clone();
         // `try_edit` validates the result against the core limits and rolls back on any error,

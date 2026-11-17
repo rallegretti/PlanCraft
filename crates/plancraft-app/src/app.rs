@@ -56,6 +56,9 @@ pub struct PlanCraftApp {
     /// The close (of a document or the app) to carry on with once the overwrite question is
     /// answered and the save went through.
     close_after_save: Option<CloseRequest>,
+    /// Refresh Links was chosen for this document: the files are read once the workspace is
+    /// unlocked (see [`PlanCraftApp::refresh_links`]).
+    refresh_links: Option<u64>,
 }
 
 /// Locks the shared workspace. A panic caught while it was held must not lock the user out of
@@ -117,6 +120,7 @@ impl PlanCraftApp {
             confirm_close: None,
             confirm_overwrite: None,
             close_after_save: None,
+            refresh_links: None,
             allow_exit: false,
             last_title: String::new(),
             shot: std::env::var_os("PLANCRAFT_SCREENSHOT").map(|p| (PathBuf::from(p), 0)),
@@ -402,6 +406,39 @@ impl PlanCraftApp {
         let mut ws = lock(&self.ws);
         if let Some(doc) = ws.index_of(b.doc).and_then(|i| ws.docs.get_mut(i)) {
             b.dialog.add_file(doc, &path);
+        }
+    }
+
+    /// Refresh Links (the command, or Refresh All in Links Between Projects): reads the linked files
+    /// without the workspace lock, so agents keep working while a slow disk or network share
+    /// answers, then updates the plan's snapshots of them.
+    fn refresh_links(&mut self) {
+        let from_dialog = self.dialogs.external.as_mut().filter(|b| b.dialog.refresh_requested).map(|b| {
+            b.dialog.refresh_requested = false;
+            b.doc
+        });
+        let Some(handle) = self.refresh_links.take().or(from_dialog) else { return };
+        let target = {
+            let ws = lock(&self.ws);
+            ws.index_of(handle).and_then(|i| ws.docs.get(i)).map(|d| (d.project.external_projects.clone(), d.path.clone()))
+        };
+        let Some((links, path)) = target else { return };
+        let reads = plancraft_core::io::read_external_projects(&links, path.as_deref(), true);
+        let warnings = {
+            let mut ws = lock(&self.ws);
+            match ws.index_of(handle).and_then(|i| ws.docs.get_mut(i)) {
+                Some(doc) => doc.apply_external_reads(reads, ChangeSource::User),
+                None => vec!["The plan was closed while its links were being read.".to_string()],
+            }
+        };
+        if let Some(b) = self.dialogs.external.as_mut().filter(|b| b.doc == handle) {
+            b.dialog.refreshed();
+        }
+        if warnings.is_empty() {
+            self.st.toast(ToastKind::Success, "External links are up to date");
+        }
+        for m in warnings {
+            self.st.toast(ToastKind::Warning, m);
         }
     }
 
@@ -969,15 +1006,7 @@ impl PlanCraftApp {
                 Err(e) => st.toast(ToastKind::Warning, e.to_string()),
             },
             Command::ExternalLinks => self.dialogs.external = Some(Bound::new(doc, Default::default())),
-            Command::RefreshExternal => {
-                let w = doc.refresh_external();
-                if w.is_empty() {
-                    st.toast(ToastKind::Success, "External links are up to date");
-                }
-                for m in w {
-                    st.toast(ToastKind::Warning, m);
-                }
-            }
+            Command::RefreshExternal => self.refresh_links = Some(doc.handle),
             Command::Statistics => self.dialogs.stats = true,
             Command::ZoomIn | Command::ZoomOut if st.view == ViewKind::NetworkDiagram => {
                 let n = &mut st.network;
@@ -1992,6 +2021,7 @@ impl PlanCraftApp {
             self.save_pdf(pdf);
         }
         self.pick_external_project();
+        self.refresh_links();
         self.confirm_dialog(&ctx);
         self.overwrite_dialog(&ctx);
         self.toasts(&ctx);
