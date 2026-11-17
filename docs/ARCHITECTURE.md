@@ -95,6 +95,10 @@ A task with an **estimate** carries `sched.work` before any assignment. The firs
 
 Scheduling only ever reads the snapshots, so a file opens and schedules even when the linked file is missing. `io::refresh_external` reloads the linked files and updates the snapshots. The workspace calls it when a document opens; you can also trigger it with *Refresh Links*. `Document::save_as` rewrites relative paths so links survive moving a file.
 
+### Changes on disk (`watch`)
+
+Another PlanCraft, the headless MCP server, an agent, git or a sync tool may write an open plan's file. `io::DiskStamp` records the file's modification time and size (not the inode, which FUSE and some network mounts change on their own) when a document is loaded or saved; `Document::disk_status` compares the file with it (`InSync`, `Changed`, `Missing`, `NoFile`), and `save` refuses to overwrite a changed file. `watch::Watcher::poll` checks every open document's file and the files it links to, with plain `std::fs::metadata` polling (no platform notification APIs, so it behaves the same on every system and on network shares). It reports a change only after it held for two polls, reads the new file (`workspace::read_for_reload`, which reads again while the file is still changing) and reports each version once. PlanCraft's own saves record the new stamp, so they are never reported. `Document::reload_from` replaces the project as one undoable edit and marks the document as matching the file; `Document::refresh_external_from` updates link snapshots the way opening does (no undo step). `watch::compare` summarises how two versions differ (tasks and resources added, removed or changed).
+
 ### Undo and attribution
 
 `Document::edit` and `Document::try_edit` snapshot the project, apply the change, validate it against `limits`, recalculate and bump `revision`. Both return a `Result` and roll back on error. Each snapshot records whether the user or an agent made the change. Whole-project snapshots are simple and reliable. The history keeps up to 200 steps within an estimated 256 MiB per document, dropping the oldest first.
@@ -114,7 +118,7 @@ The MCP server is a hand-rolled JSON-RPC 2.0 server. It has no async runtime, wh
   - Tool errors come back as `isError` results.
   - Each request locks the shared workspace briefly.
   - The change callback runs after the lock is released.
-- **`tools/*`:** 91 tools grouped by domain.
+- **`tools/*`:** 92 tools grouped by domain.
   - All mutations go through `Document::try_edit(…, ChangeSource::Agent, …)`.
   - Unknown arguments are rejected so agents find their typos.
 - **Transports:**
@@ -137,6 +141,7 @@ The desktop app uses egui and eframe 0.36 with the wgpu renderer.
 - **`views/*`:** the thirteen views. The Gantt view (also the Tracking Gantt and the Multiple Baselines Gantt) combines the task grid with `gantt_chart`, which draws bars, links, milestone connectors and baselines and handles drag-to-move, resize, progress and link. `network` draws the core's Network Diagram layout (cached per edit) and handles selection, Task Information, drag-to-link, panning and zoom. `board` paints the Task Board's columns and cards and handles selection, dragging cards between columns and the column menu.
 - **`columns`:** task table definitions. Each column defines how to display, edit and commit its value. Tables: Entry, Schedule, Tracking, Work, Cost, Estimates, Variance, Summary.
 - **`dialogs/*`:** Task, Resource and Project Information, Change Working Time, Assign Resources, External Links, Statistics, History, About, and the MCP panel.
+- **`disk_watch`:** a background thread polls the open plans' files every second (`plancraft_core::watch`), without the workspace lock, and queues what it finds. `app` then reloads a plan without unsaved changes (undoably, with a toast), shows a bar above a plan with unsaved changes (Reload, Keep Mine, Compare, Save As), keeps a plan whose file was deleted or moved as unsaved work, and refreshes link snapshots when a linked plan changes.
 - **`mcp_host`:** starts and stops the HTTP MCP server on the app's `SharedWorkspace`, and repaints the window when agents make changes.
 - **`theme`:** light and dark palettes; all drawing reads colors from `theme::pal()`, and the Theme setting (System/Light/Dark) switches between them.
 - **`logo`:** the mark as geometry, painted with egui and rasterized for the window icon.

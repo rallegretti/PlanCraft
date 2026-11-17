@@ -256,6 +256,55 @@ fn file_tools_with_junk_in_a_temporary_folder() {
     assert_eq!(std::fs::read_to_string(dir.path().join("build.xml")).unwrap(), "<project name=\"other\"/>");
 }
 
+/// reload_project when the document's file was replaced by something hostile (garbage, an
+/// empty file, deep nesting, a file past the size limit, a folder, a project of another id with
+/// junk values), with junk arguments too: an error or a clamped plan, never a panic.
+#[test]
+fn reload_project_with_hostile_files() {
+    count_panics();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("plan.plancraft");
+    let demo = || demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap());
+    let mut mutated: Value = serde_json::from_str(&plancraft_core::io::to_json(&demo()).unwrap()).unwrap();
+    mutated["tasks"][0]["duration"] = json!(i64::MAX);
+    mutated["tasks"][1]["start"] = json!("+262143-12-31T23:59:59");
+    type Spoil = Box<dyn Fn(&std::path::Path)>;
+    let hostile: Vec<Spoil> = vec![
+        Box::new(|p| std::fs::write(p, b"\xff\xfe\x00garbage").unwrap()),
+        Box::new(|p| std::fs::write(p, b"").unwrap()),
+        Box::new(|p| std::fs::write(p, format!("{{\"format\":\"plancraft\",\"tasks\":{}", "[".repeat(100_000))).unwrap()),
+        Box::new(|p| {
+            let f = std::fs::OpenOptions::new().write(true).open(p).unwrap();
+            f.set_len(plancraft_core::limits::MAX_FILE_BYTES + 1).unwrap();
+        }),
+        Box::new(|p| {
+            std::fs::remove_file(p).unwrap();
+            std::fs::create_dir(p).unwrap();
+        }),
+        Box::new(move |p| std::fs::write(p, mutated.to_string()).unwrap()),
+    ];
+    let mut calls = 0;
+    for (k, spoil) in hostile.iter().enumerate() {
+        for value in junk_values().iter().take(12).chain([&json!(true)]) {
+            if path.is_dir() {
+                std::fs::remove_dir(&path).unwrap();
+            }
+            plancraft_core::io::save(&demo(), &path).unwrap();
+            let mut ws = Workspace::default();
+            ws.open(&path).unwrap();
+            let s = McpServer::with_options(ws.shared(), ServerOptions { allow_file_access: false, ..ServerOptions::default() });
+            spoil(&path);
+            let before = panics();
+            let r = call(&s, "reload_project", json!({ "discard_changes": value }));
+            assert!(panics() == before, "reload_project panicked on hostile file {k}: {}", r["result"]["content"][0]["text"]);
+            let _ = call(&s, "list_documents", json!({}));
+            still_alive(&s);
+            calls += 1;
+        }
+    }
+    assert!(calls >= 60, "only {calls} calls");
+}
+
 /// import_spreadsheet with junk as a column heading, as a field, as a sheet and as a date order.
 #[test]
 fn spreadsheet_import_with_junk_columns() {

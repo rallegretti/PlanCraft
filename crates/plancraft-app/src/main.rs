@@ -15,6 +15,7 @@ mod bundled_libs;
 mod columns;
 mod commands;
 mod dialogs;
+mod disk_watch;
 mod edit;
 mod fields;
 mod fonts;

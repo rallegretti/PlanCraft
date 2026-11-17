@@ -108,6 +108,65 @@ fn approx_bytes(p: &Project) -> usize {
         + p.time_entries.iter().map(|e| size_of::<crate::model::TimeEntry>() + e.note.len()).sum::<usize>()
 }
 
+/// The undo label of a reload from disk.
+pub const RELOAD_LABEL: &str = "Reload from disk";
+
+/// How an open document's file compares with the version the document matches.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DiskStatus {
+    /// The document has no file (new or imported, never saved).
+    NoFile,
+    /// The file is the version last loaded or saved.
+    InSync,
+    /// Another program (or PlanCraft instance, git, a sync tool) changed the file since; or the
+    /// document was never read from it (a restored recovery copy), so its version is unknown.
+    Changed,
+    /// The file is gone (deleted, moved or renamed); saving writes it again.
+    Missing,
+}
+
+impl DiskStatus {
+    /// Short name used by the MCP tools.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DiskStatus::NoFile => "no_file",
+            DiskStatus::InSync => "in_sync",
+            DiskStatus::Changed => "changed",
+            DiskStatus::Missing => "missing",
+        }
+    }
+}
+
+/// How the file at `path` compares with `known`, the version a document matches (see
+/// [`Document::disk_status`]; this form needs no lock).
+pub fn disk_status(path: Option<&Path>, known: Option<io::DiskStamp>) -> DiskStatus {
+    let Some(path) = path else { return DiskStatus::NoFile };
+    match (io::disk_stamp(path), known) {
+        (None, Some(_)) => DiskStatus::Missing,
+        (None, None) => DiskStatus::NoFile,
+        (Some(now), Some(known)) if now == known => DiskStatus::InSync,
+        (Some(_), _) => DiskStatus::Changed,
+    }
+}
+
+/// Reads a document's file for a reload: the project, its load notes and the file's stamp taken
+/// before reading. A file that changes while it is read (a program still writing it) is read
+/// again, a few times at most, so a half-written file is not taken for the new version.
+pub fn read_for_reload(path: &Path) -> FileResult<(Project, Vec<String>, Option<io::DiskStamp>)> {
+    let mut last = None;
+    for _ in 0..3 {
+        let stamp = io::disk_stamp(path);
+        let read = guard::catch("reading a plan", || io::load_with_notes(path))
+            .unwrap_or_else(|p| Err(io::FileError::Limit { path: path.into(), message: p.to_string() }));
+        if io::disk_stamp(path) == stamp {
+            return read.map(|(p, notes)| (p, notes, stamp));
+        }
+        last = Some(read.map(|(p, notes)| (p, notes, None)));
+    }
+    // Still changing: report what the last read found, with no stamp (so a later save asks).
+    last.unwrap_or_else(|| Err(io::FileError::ChangedOnDisk { path: path.into() }))
+}
+
 /// Who made a change (shown in the undo history and status bar).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum ChangeSource {
@@ -345,6 +404,80 @@ impl Document {
     /// Records the file's current stamp as the version this document matches (after loading).
     pub fn mark_in_sync_with_disk(&mut self) {
         self.disk_stamp = self.path.as_ref().and_then(io::disk_stamp);
+    }
+
+    /// The version of the file this document matches (as last loaded or saved), if known.
+    pub fn disk_stamp(&self) -> Option<io::DiskStamp> {
+        self.disk_stamp
+    }
+
+    /// How the document's file on disk compares with the version the document matches. Reads the
+    /// file's metadata: on a slow network share, take [`Document::path`] and
+    /// [`Document::disk_stamp`] and call [`disk_status`] without holding the workspace lock.
+    pub fn disk_status(&self) -> DiskStatus {
+        disk_status(self.path.as_deref(), self.disk_stamp)
+    }
+
+    /// Replaces the project with `project`, read from the document's file (whose stamp, taken
+    /// before reading, is `stamp`), as an undoable edit: Undo brings back the version that was
+    /// open, unsaved changes included. Afterwards the document matches the file: not modified,
+    /// and the next save needs no confirmation. `notes` are the file's load notes.
+    ///
+    /// Callers decide whether unsaved changes may be discarded (an agent may never discard the
+    /// user's, see [`Document::user_changes`]).
+    pub fn reload_from(
+        &mut self,
+        project: Project,
+        notes: Vec<String>,
+        stamp: Option<io::DiskStamp>,
+        source: ChangeSource,
+    ) -> PlanResult<()> {
+        self.edit_as(RELOAD_LABEL, source, |p| *p = project)?;
+        self.disk_stamp = stamp;
+        self.dirty = false;
+        self.user_changes = false;
+        self.load_notes = notes;
+        // As when the file is opened: its snapshots of linked plans may be older than those files.
+        let _ = self.refresh_external_on_open();
+        Ok(())
+    }
+
+    /// Reads the document's file again and replaces the project with it (see
+    /// [`Document::reload_from`]). Reads the file while the caller holds the document; to keep a
+    /// slow disk from stalling others, use [`read_for_reload`] without the lock, then
+    /// [`Document::reload_from`].
+    pub fn reload(&mut self, source: ChangeSource) -> FileResult<()> {
+        let Some(path) = self.path.clone() else {
+            return Err(io::FileError::Io {
+                path: PathBuf::new(),
+                source: std::io::Error::new(std::io::ErrorKind::NotFound, "document has no file to reload"),
+            });
+        };
+        let (project, notes, stamp) = read_for_reload(&path)?;
+        self.reload_from(project, notes, stamp, source).map_err(|e| io::FileError::Limit { path, message: e.to_string() })
+    }
+
+    /// Updates the snapshots of linked plans from files read because they changed on disk, the
+    /// way opening the plan does: the snapshots are a copy of other files, not the user's edit, so
+    /// this is no undo step and leaves the document's unsaved state as it was. Returns warnings.
+    pub fn refresh_external_from(&mut self, reads: io::ExternalReads) -> Vec<String> {
+        if self.project.external_projects.is_empty() {
+            return Vec::new();
+        }
+        let before = self.project.external_projects.clone();
+        let mut probe = self.project.clone();
+        let warnings = io::apply_external_projects(&mut probe, reads);
+        // Recalculated on a copy: a failure leaves the plan as it was.
+        match try_recalculate(&mut probe) {
+            Ok(_) => {
+                if probe.external_projects != before {
+                    self.project = probe;
+                    self.revision = self.revision.wrapping_add(1);
+                }
+                warnings
+            }
+            Err(e) => vec![format!("Links were not refreshed: {}", PlanError::from(e))],
+        }
     }
 
     fn save_checked(&mut self, check: bool) -> FileResult<()> {
@@ -723,6 +856,39 @@ mod tests {
         doc.save_overwriting().unwrap();
         assert!(!doc.changed_on_disk(), "after saving, the file is known");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Reloading a file another program changed is one undo step: Undo brings back the version
+    /// that was open, unsaved changes included, and marks it unsaved again.
+    #[test]
+    fn reload_is_undoable_and_leaves_the_document_matching_its_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plan.plancraft");
+        let start = crate::dates::ymd(2026, 10, 19).unwrap();
+        io::save(&Project::new("Plan", start), &path).unwrap();
+        let mut ws = Workspace::default();
+        ws.open(&path).unwrap();
+        let doc = ws.active_doc_mut().unwrap();
+        doc.edit("Add mine", |p| p.add_task("Mine", None)).unwrap();
+        let mut theirs = Project::new("Plan", start);
+        theirs.add_task("Theirs", None);
+        io::save(&theirs, &path).unwrap();
+        assert_eq!(doc.disk_status(), DiskStatus::Changed);
+        assert!(matches!(doc.save(), Err(io::FileError::ChangedOnDisk { .. })));
+
+        doc.reload(ChangeSource::User).unwrap();
+        assert_eq!(doc.project.tasks[0].name, "Theirs");
+        assert!(!doc.dirty && !doc.user_changes);
+        assert_eq!(doc.disk_status(), DiskStatus::InSync);
+        assert_eq!(doc.undo_label(), Some(RELOAD_LABEL));
+
+        assert!(doc.undo());
+        assert_eq!(doc.project.tasks[0].name, "Mine");
+        assert!(doc.dirty && doc.user_changes, "the undone reload is unsaved work again");
+        // The file on disk is the version reloaded, so saving now replaces it without asking.
+        doc.save().unwrap();
+        assert_eq!(io::load(&path).unwrap().tasks[0].name, "Mine");
+        assert_eq!(disk_status(None, None), DiskStatus::NoFile);
     }
 
     /// Regression: a failed Save As left the external links rewritten relative to the folder it

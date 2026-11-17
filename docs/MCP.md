@@ -155,6 +155,12 @@ These are also sent to the client as `instructions` in the `initialize` result.
 * **Bulk creation** — `create_tasks` builds a whole WBS in one call and one undo step: nest with `children`
   (or flat items with relative `level`), give items a `key` and reference keys in other items' `predecessors`
   or milestone `members`.
+* **Changes on disk** — when the file of the document a call worked on (or the active one) was changed on disk by
+  another program (a second PlanCraft, the headless server, git, a sync tool) or deleted since it was opened or
+  saved, the result carries a `disk_notice` (also appended to text-only results). `list_documents` and
+  `get_project` show `disk`: `in_sync`, `changed`, `missing` or `no_file`. `reload_project` reads the file again;
+  `save_project` refuses to overwrite a changed file unless `overwrite` is true. In the desktop app, a plan without
+  unsaved changes reloads by itself.
 * **Errors** — tool failures are returned as results with `isError: true` and an explanation (unknown
   arguments are reported with the list of valid ones); nothing is changed when a tool fails.
 
@@ -202,6 +208,7 @@ entity; read-only tools are annotated with `readOnlyHint`.
 | `import_spreadsheet` | columns, date_order, name, **path**, preview, sheet | Import a task list from `.csv`, `.tsv`, `.xlsx`, `.xlsm` or `.xlsb` as a new unsaved document. Columns are matched to task fields by their headings; `columns` corrects them (heading or column number → `name`, `duration`, `start`, `finish`, `predecessors`, `resources`, `percent_complete`, `outline_level`, `wbs`, `milestone`, `notes`, `id`, or null). `preview: true` shows the headings, guesses and first rows without importing. Needs file access. |
 | `export_csv` | overwrite, **path**, table | Save one of the plan's tables as CSV. `tasks` (default): ID, WBS, outline level, name, duration, dates, % complete, work, cost, predecessors, resources, custom fields; `import_spreadsheet` reads it back. `resources`: the resource sheet with work, actual work, cost and overallocation. `assignments`: a row per resource on a task (units, work, actual work, cost, contour, dates). `time`: logged time, a row per timesheet entry. Needs file access; replaces an existing file only with `overwrite`. |
 | `save_project` | path, overwrite | Save the document to its file. With 'path', save as a new file (relative links to external projects are rewritten so they keep working). Fails when another program changed the file since it was opened or last saved, unless overwrite is true. |
+| `reload_project` | discard_changes | Read the document's file again and replace the open version with it, for example after another program, PlanCraft instance or git changed the file. One undoable step; `changes` summarizes how the file differed. Refused while the user has unsaved changes in PlanCraft (they choose in the app); unsaved changes made by agents are discarded only with discard_changes: true. |
 | `close_project` | discard_changes | Close a document. Fails when it has unsaved changes unless discard_changes is true. Unsaved changes the user made in the app are never discarded. |
 | `set_active_document` | – | Make another open document the active one (the default target of all tools and the document shown in the app). |
 | `get_project` *(read-only)* | – | Get project information (name, dates, manager, file), settings (hours per day, currency, points, scheduling options), calendars and key statistics (task counts, late/critical tasks, work, cost, % complete, warnings). |

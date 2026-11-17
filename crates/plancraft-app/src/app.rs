@@ -61,6 +61,45 @@ pub struct PlanCraftApp {
     refresh_links: Option<u64>,
     /// What the last Copy or Cut noted about its plan besides the tasks (`UiState::clipboard`).
     clip_source: Option<ClipSource>,
+    /// Changes to the open plans' files on disk, found by a background thread.
+    disk: crate::disk_watch::DiskWatch,
+    /// Plans whose file changed on disk in a way that needs the user (unsaved changes, a file
+    /// that can't be read, a file that is gone): the bar shown above the plan, by handle.
+    disk_bars: HashMap<u64, DiskBar>,
+    /// A button of the disk bar was clicked: acted on once the workspace is unlocked.
+    disk_action: Option<(u64, DiskAction)>,
+}
+
+/// Why a plan's file needs the user's attention (see [`PlanCraftApp::disk_bar`]).
+struct DiskBar {
+    /// The plan's file when this was noticed (saved elsewhere since: the bar no longer applies).
+    path: Option<PathBuf>,
+    kind: DiskBarKind,
+    /// What Compare found, while it is shown.
+    compare: Option<Vec<String>>,
+}
+
+enum DiskBarKind {
+    /// Another program changed the file while the plan had unsaved changes: `theirs` is the file.
+    Changed { theirs: Box<Project>, notes: Vec<String>, stamp: Option<plancraft_core::io::DiskStamp> },
+    /// The file changed but is not a plan PlanCraft can open (garbage, too large, unreadable).
+    Unreadable { error: String, stamp: Option<plancraft_core::io::DiskStamp> },
+    /// The file was deleted or moved; the plan was marked unsaved so it is not lost. `was_clean`
+    /// and `revision` tell whether nothing else changed it since (it is clean again if the file
+    /// comes back).
+    Missing { revision: u64, was_clean: bool },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DiskAction {
+    /// Load the file, discarding unsaved changes (undoable).
+    Reload,
+    /// Keep the open version; the next save asks before replacing the file.
+    KeepMine,
+    Compare,
+    SaveAs,
+    /// Write the plan to its file again (after the file was deleted).
+    Save,
 }
 
 /// Locks the shared workspace. A panic caught while it was held must not lock the user out of
@@ -278,6 +317,11 @@ fn same_file(a: &std::path::Path, b: &std::path::Path) -> bool {
     a == b || matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(x), Ok(y)) if x == y)
 }
 
+/// The plan's file name for messages (its project name when it has no file).
+fn file_name_of(doc: &Document) -> String {
+    doc.path.as_ref().and_then(|p| p.file_name()).map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| doc.project.name.clone())
+}
+
 /// Longest panic message shown to the user.
 const MAX_CRASH_CHARS: usize = 400;
 
@@ -321,6 +365,9 @@ impl PlanCraftApp {
             close_after_save: None,
             refresh_links: None,
             clip_source: None,
+            disk: Default::default(),
+            disk_bars: HashMap::new(),
+            disk_action: None,
             allow_exit: false,
             last_title: String::new(),
             shot: std::env::var_os("PLANCRAFT_SCREENSHOT").map(|p| (PathBuf::from(p), 0)),
@@ -338,6 +385,10 @@ impl PlanCraftApp {
         }
         app.inbox.wake_with(&cc.egui_ctx);
         recovery::spawn_background_writer(&app.recovery, &app.ws, cc.egui_ctx.clone());
+        // Tests poll the files themselves (`DiskWatch::poll_now`).
+        if !cfg!(test) {
+            app.disk.spawn(&app.ws, cc.egui_ctx.clone());
+        }
         if !app.rec().found.is_empty() && !app.st.start_page {
             app.st.toast(ToastKind::Info, RECOVERY_FOUND);
         }
@@ -1444,7 +1495,8 @@ impl PlanCraftApp {
         let mut close = None;
         for (i, d) in ws.docs.iter().enumerate() {
             let active = ws.active == Some(i);
-            let resp = child.selectable_label(active, format!("📄 {}", d.title()));
+            let mark = if self.disk_bars.contains_key(&d.handle) { "⚠ " } else { "" };
+            let resp = child.selectable_label(active, format!("📄 {mark}{}", d.title()));
             if resp.clicked() {
                 switch = Some(i);
             }
@@ -1806,6 +1858,20 @@ impl PlanCraftApp {
                         self.inject_panic = true;
                         continue;
                     }
+                    // The bar shown when the plan's file changed on disk while it had unsaved
+                    // changes, with Compare open (the "file" is the plan with one task renamed).
+                    "DiskChanged" => {
+                        if let Some(doc) = lock(&self.ws).active_doc() {
+                            let mut theirs = doc.project.clone();
+                            if let Some(t) = theirs.tasks.iter_mut().find(|t| t.outline_level > 1) {
+                                t.name.push_str(" (revised)");
+                            }
+                            let compare = Some(plancraft_core::watch::compare(&doc.project, &theirs));
+                            let kind = DiskBarKind::Changed { theirs: Box::new(theirs), notes: Vec::new(), stamp: None };
+                            self.disk_bars.insert(doc.handle, DiskBar { path: doc.path.clone(), kind, compare });
+                        }
+                        continue;
+                    }
                     "CustomFields" => Command::CustomFields,
                     "Print" => Command::Print,
                     "UpdateProject" => Command::UpdateProject,
@@ -1955,6 +2021,7 @@ impl PlanCraftApp {
             self.settings.save();
         }
         self.mcp.stop();
+        self.disk.stop();
         self.rec().forget_all();
     }
 
@@ -2038,6 +2105,211 @@ impl PlanCraftApp {
         }
     }
 
+    /// Acts on what the file watcher found: a plan without unsaved changes reloads (undoably), a
+    /// plan with some gets a bar to choose, a deleted file keeps the plan as unsaved work, and
+    /// changed linked files refresh the plan's snapshots of them.
+    fn apply_disk_changes(&mut self, ws: &mut Workspace) {
+        // Bars that no longer apply: the plan was closed or saved elsewhere, or the version on
+        // disk was reloaded or saved over (by the user or an agent).
+        self.disk_bars.retain(|h, bar| {
+            let Some(doc) = ws.index_of(*h).and_then(|i| ws.docs.get(i)) else { return false };
+            let settled = match &bar.kind {
+                DiskBarKind::Changed { stamp, .. } | DiskBarKind::Unreadable { stamp, .. } => stamp.is_some() && doc.disk_stamp() == *stamp,
+                DiskBarKind::Missing { .. } => false,
+            };
+            doc.path == bar.path && !settled
+        });
+        for change in self.disk.take() {
+            match change {
+                plancraft_core::watch::Change::Modified { handle, stamp, read } => {
+                    let Some(doc) = ws.index_of(handle).and_then(|i| ws.docs.get_mut(i)) else { continue };
+                    // Saved or reloaded since the watcher looked.
+                    if stamp.is_some() && doc.disk_stamp() == stamp {
+                        continue;
+                    }
+                    let name = file_name_of(doc);
+                    // Unsaved only because its file went missing: nothing of the user's to lose.
+                    let clean = !doc.dirty
+                        || matches!(self.disk_bars.get(&handle), Some(DiskBar { kind: DiskBarKind::Missing { revision, was_clean: true }, .. }) if *revision == doc.revision);
+                    let path = doc.path.clone();
+                    match *read {
+                        Ok((theirs, notes)) if clean => match doc.reload_from(theirs, notes, stamp, ChangeSource::User) {
+                            Ok(()) => {
+                                self.disk_bars.remove(&handle);
+                                let msg = format!("Reloaded {name}: it was changed on disk. Undo brings back the version you had open.");
+                                self.set_status(msg.clone());
+                                self.st.toast(ToastKind::Info, msg);
+                            }
+                            Err(e) => self.st.toast(ToastKind::Error, format!("{name} changed on disk but could not be reloaded: {e}")),
+                        },
+                        Ok((theirs, notes)) => {
+                            self.st.toast(
+                                ToastKind::Warning,
+                                format!(
+                                    "{name} was changed on disk by another program, and you have unsaved changes. Choose which to keep."
+                                ),
+                            );
+                            let kind = DiskBarKind::Changed { theirs: Box::new(theirs), notes, stamp };
+                            self.disk_bars.insert(handle, DiskBar { path, kind, compare: None });
+                        }
+                        Err(e) => {
+                            let error = e.to_string();
+                            self.st.toast(ToastKind::Error, format!("{name} changed on disk but can't be opened: {error}"));
+                            let kind = DiskBarKind::Unreadable { error, stamp };
+                            self.disk_bars.insert(handle, DiskBar { path, kind, compare: None });
+                        }
+                    }
+                }
+                plancraft_core::watch::Change::Missing { handle } => {
+                    let Some(doc) = ws.index_of(handle).and_then(|i| ws.docs.get_mut(i)) else { continue };
+                    let was_clean = !doc.dirty;
+                    // The open plan is now the only copy: keep it as unsaved work (a recovery copy
+                    // is written, closing asks to save, an agent may not discard it).
+                    doc.dirty = true;
+                    doc.user_changes = true;
+                    let name = file_name_of(doc);
+                    self.st.toast(ToastKind::Warning, format!("{name} was deleted or moved. The plan stays open as unsaved work."));
+                    let kind = DiskBarKind::Missing { revision: doc.revision, was_clean };
+                    self.disk_bars.insert(handle, DiskBar { path: doc.path.clone(), kind, compare: None });
+                }
+                plancraft_core::watch::Change::InSync { handle } => {
+                    if let Some(DiskBar { kind: DiskBarKind::Missing { revision, was_clean: true }, .. }) = self.disk_bars.get(&handle)
+                        && let Some(doc) = ws.index_of(handle).and_then(|i| ws.docs.get_mut(i))
+                        && doc.revision == *revision
+                    {
+                        // The file came back as it was, and nothing changed the plan meanwhile.
+                        doc.dirty = false;
+                        doc.user_changes = false;
+                    }
+                    self.disk_bars.remove(&handle);
+                }
+                plancraft_core::watch::Change::Links { handle, names, reads } => {
+                    let Some(doc) = ws.index_of(handle).and_then(|i| ws.docs.get_mut(i)) else { continue };
+                    let warnings = doc.refresh_external_from(reads);
+                    if warnings.is_empty() {
+                        let names = names.iter().map(|n| format!("'{n}'")).collect::<Vec<_>>().join(", ");
+                        self.set_status(format!("Updated the links to {names} in {}: changed on disk", doc.project.name));
+                    }
+                    for w in warnings {
+                        self.st.toast(ToastKind::Warning, w);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The bar above the active plan when its file changed on disk and PlanCraft needs the user
+    /// to choose (non-blocking: the plan stays usable underneath).
+    fn disk_bar(&mut self, ui: &mut Ui, ws: &Workspace) {
+        let Some(doc) = ws.active_doc() else { return };
+        let handle = doc.handle;
+        let Some(bar) = self.disk_bars.get_mut(&handle) else { return };
+        let name = file_name_of(doc);
+        let (message, buttons): (String, &[(DiskAction, &str, &str)]) = match &bar.kind {
+            DiskBarKind::Changed { .. } => (
+                format!("{name} was changed on disk by another program, and you have unsaved changes."),
+                &[
+                    (DiskAction::Reload, "Reload", "Load the file from disk, discarding your unsaved changes (Undo brings them back)"),
+                    (DiskAction::KeepMine, "Keep Mine", "Keep your version; saving asks before replacing the file on disk"),
+                    (DiskAction::Compare, "Compare", "List what differs between your version and the file on disk"),
+                    (DiskAction::SaveAs, "Save As…", "Save your version under another name"),
+                ],
+            ),
+            DiskBarKind::Unreadable { error, .. } => (
+                format!("{name} changed on disk but can't be opened ({error}). Your plan is unchanged."),
+                &[
+                    (DiskAction::KeepMine, "Keep Mine", "Keep your version; saving asks before replacing the file on disk"),
+                    (DiskAction::SaveAs, "Save As…", "Save your version under another name"),
+                ],
+            ),
+            DiskBarKind::Missing { .. } => (
+                format!("{name} was deleted or moved. Your plan is still open as unsaved work."),
+                &[
+                    (DiskAction::Save, "Save", "Write the plan to its file again"),
+                    (DiskAction::SaveAs, "Save As…", "Save the plan under another name"),
+                    (DiskAction::KeepMine, "Dismiss", "Hide this message; the plan stays unsaved"),
+                ],
+            ),
+        };
+        let mut clicked = None;
+        egui::Frame::new()
+            .fill(theme::pal().PANEL_BG)
+            .stroke(Stroke::new(1.0, theme::pal().WARN))
+            .inner_margin(egui::Margin::symmetric(10, 5))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("⚠").color(theme::pal().WARN).size(15.0));
+                    ui.label(RichText::new(message).color(theme::pal().TEXT));
+                    for (action, label, hover) in buttons {
+                        let selected = *action == DiskAction::Compare && bar.compare.is_some();
+                        if ui.add(egui::Button::new(*label).selected(selected)).on_hover_text(*hover).clicked() {
+                            clicked = Some(*action);
+                        }
+                    }
+                });
+                if let Some(lines) = &bar.compare {
+                    ui.add_space(2.0);
+                    if lines.is_empty() {
+                        ui.label(
+                            RichText::new("The file on disk holds the same tasks and resources as your version.")
+                                .color(theme::pal().TEXT_WEAK),
+                        );
+                    }
+                    for line in lines {
+                        ui.label(RichText::new(format!("• {line}")).color(theme::pal().TEXT_WEAK));
+                    }
+                }
+            });
+        if clicked == Some(DiskAction::Compare) {
+            bar.compare = match (&bar.compare, &bar.kind) {
+                (None, DiskBarKind::Changed { theirs, .. }) => Some(plancraft_core::watch::compare(&doc.project, theirs)),
+                _ => None,
+            };
+        } else if let Some(action) = clicked {
+            self.disk_action = Some((handle, action));
+        }
+    }
+
+    /// Carries out the disk bar's button (outside the frame's workspace lock).
+    fn disk_bar_action(&mut self) {
+        let Some((handle, action)) = self.disk_action.take() else { return };
+        match action {
+            DiskAction::Compare => {}
+            DiskAction::KeepMine => {
+                if self.disk_bars.remove(&handle).is_some_and(|b| !matches!(b.kind, DiskBarKind::Missing { .. })) {
+                    self.set_status("Kept your version. Saving asks before replacing the file on disk.");
+                }
+            }
+            DiskAction::Reload => {
+                let Some(DiskBar { kind: DiskBarKind::Changed { theirs, notes, stamp }, .. }) = self.disk_bars.remove(&handle) else {
+                    return;
+                };
+                let r = {
+                    let mut ws = lock(&self.ws);
+                    ws.index_of(handle)
+                        .and_then(|i| ws.docs.get_mut(i))
+                        .map(|doc| (file_name_of(doc), doc.reload_from(*theirs, notes, stamp, ChangeSource::User)))
+                };
+                match r {
+                    Some((name, Ok(()))) => self.set_status(format!("Reloaded {name} from disk. Undo brings back your changes.")),
+                    Some((name, Err(e))) => self.st.toast(ToastKind::Error, format!("Could not reload {name}: {e}")),
+                    None => {}
+                }
+            }
+            DiskAction::Save | DiskAction::SaveAs => {
+                {
+                    let mut ws = lock(&self.ws);
+                    let Some(i) = ws.index_of(handle) else { return };
+                    ws.active = Some(i);
+                }
+                if self.save(action == DiskAction::SaveAs) {
+                    self.disk_bars.remove(&handle);
+                }
+            }
+        }
+    }
+
     /// Everything drawn in one frame (run behind the frame guard).
     fn frame(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
@@ -2082,6 +2354,7 @@ impl PlanCraftApp {
                 self.recovery_error = Some(e);
             }
         }
+        self.apply_disk_changes(&mut ws);
         self.report_load_notes(&mut ws);
 
         // Notice changes made by AI agents through MCP.
@@ -2184,6 +2457,7 @@ impl PlanCraftApp {
                 menubar::title_bar(ui, &info, &mut out);
                 menubar::command_bar(ui, &mut self.st, &info, &self.settings, &mut out);
                 self.doc_tabs(ui, &mut ws, &mut out);
+                self.disk_bar(ui, &ws);
             });
             egui::Panel::bottom("status")
                 .frame(egui::Frame::new().fill(theme::pal().HEADER_BG).inner_margin(egui::Margin::symmetric(10, 3)))
@@ -2321,6 +2595,7 @@ impl PlanCraftApp {
         self.pick_external_project();
         self.external_links_reads(&ctx);
         self.refresh_links();
+        self.disk_bar_action();
         self.confirm_dialog(&ctx);
         self.overwrite_dialog(&ctx);
         self.toasts(&ctx);
@@ -3328,6 +3603,212 @@ mod ui_tests {
         let saved = plancraft_core::io::load(&path).unwrap();
         assert!(saved.tasks.iter().any(|t| t.name == "Mine"), "overwritten on request");
         assert!(!h.state().ws.lock().unwrap().active_doc().unwrap().dirty);
+    }
+
+    /// A plan opened from `path` in a fresh window.
+    fn harness_on(path: &std::path::Path) -> Harness<'static, PlanCraftApp> {
+        let mut ws = Workspace::default();
+        ws.open(path).unwrap();
+        harness_with(ws)
+    }
+
+    /// Lets the file watcher look (twice, as a change must settle) and draws what it found.
+    fn watch(h: &mut Harness<'static, PlanCraftApp>) {
+        let ws = h.state().ws.clone();
+        h.state_mut().disk.poll_now(&ws);
+        h.run_steps(2);
+    }
+
+    fn write_elsewhere(path: &std::path::Path, task: &str) {
+        let mut other = plancraft_core::io::load(path).unwrap();
+        other.add_task(task, None);
+        plancraft_core::io::save(&other, path).unwrap();
+    }
+
+    fn active_names(h: &Harness<'static, PlanCraftApp>) -> Vec<String> {
+        lock(&h.state().ws).active_doc().unwrap().project.tasks.iter().map(|t| t.name.clone()).collect()
+    }
+
+    /// A plan with no unsaved changes reloads by itself when its file changes on disk, keeping the
+    /// selection and view; Undo brings back the version that was open.
+    #[test]
+    fn a_plan_changed_on_disk_reloads_itself_and_undo_brings_it_back() {
+        let tmp = crate::recovery::tests::TempDir::new("reload");
+        let path = tmp.0.join("plan.plancraft");
+        let mut p = Project::new("Plan", plancraft_core::dates::ymd(2026, 10, 19).unwrap());
+        let a = p.add_task("A", None);
+        plancraft_core::io::save(&p, &path).unwrap();
+        let mut h = harness_on(&path);
+        h.state_mut().st.view = ViewKind::TaskUsage;
+        h.state_mut().st.sel.tasks.insert(a);
+        h.run_steps(2);
+        watch(&mut h);
+        assert_eq!(active_names(&h), ["A"], "nothing changed yet");
+
+        write_elsewhere(&path, "Written elsewhere");
+        watch(&mut h);
+        assert_eq!(active_names(&h), ["A", "Written elsewhere"]);
+        let st = &h.state().st;
+        assert!(st.sel.tasks.contains(&a) && st.view == ViewKind::TaskUsage, "selection and view stay");
+        assert!(st.toasts.iter().any(|t| t.text.starts_with("Reloaded plan.plancraft")));
+        assert!(h.state().disk_bars.is_empty());
+        {
+            let ws = lock(&h.state().ws);
+            let doc = ws.active_doc().unwrap();
+            assert!(!doc.dirty);
+            assert_eq!(doc.undo_label(), Some(plancraft_core::workspace::RELOAD_LABEL));
+        }
+        let ctx = h.ctx.clone();
+        h.state_mut().exec(&ctx, Command::Undo);
+        h.run_steps(2);
+        assert_eq!(active_names(&h), ["A"]);
+        assert!(lock(&h.state().ws).active_doc().unwrap().dirty, "the undone reload is unsaved");
+    }
+
+    /// With unsaved changes, a change on disk shows a bar instead: Compare lists the differences,
+    /// Keep Mine leaves the next save to ask, Reload loads the file (undoably).
+    #[test]
+    fn unsaved_changes_and_a_change_on_disk_show_a_bar_to_choose() {
+        use egui_kittest::kittest::Queryable;
+        let tmp = crate::recovery::tests::TempDir::new("conflict");
+        let path = tmp.0.join("plan.plancraft");
+        plancraft_core::io::save(&Project::new("Plan", plancraft_core::dates::ymd(2026, 10, 19).unwrap()), &path).unwrap();
+        let mut h = harness_on(&path);
+        watch(&mut h);
+        lock(&h.state().ws).active_doc_mut().unwrap().edit("Add", |p| p.add_task("Mine", None)).unwrap();
+
+        write_elsewhere(&path, "Theirs");
+        watch(&mut h);
+        assert_eq!(active_names(&h), ["Mine"], "unsaved changes are never replaced unasked");
+        assert!(matches!(h.state().disk_bars.values().next().map(|b| &b.kind), Some(DiskBarKind::Changed { .. })));
+        h.get_by_label("Compare").click();
+        h.run_steps(2);
+        // Both sides added task 1, under different names.
+        h.get_by_label_contains("1 task changed on disk: 'Theirs'");
+
+        h.get_by_label("Keep Mine").click();
+        h.run_steps(2);
+        assert!(h.state().disk_bars.is_empty());
+        let ctx = h.ctx.clone();
+        h.state_mut().exec(&ctx, Command::Save);
+        h.run_steps(2);
+        assert!(h.state().confirm_overwrite.is_some(), "the next save asks before overwriting");
+        h.get_by_label("Cancel").click();
+        h.run_steps(2);
+        watch(&mut h);
+        assert!(h.state().disk_bars.is_empty(), "the version kept is not reported again");
+
+        // Another change on disk asks again; Reload discards mine, and Undo brings it back.
+        write_elsewhere(&path, "Theirs again");
+        watch(&mut h);
+        assert!(!h.state().disk_bars.is_empty());
+        h.get_by_label("Reload").click();
+        h.run_steps(2);
+        assert_eq!(active_names(&h), ["Theirs", "Theirs again"]);
+        assert!(h.state().disk_bars.is_empty());
+        assert!(!lock(&h.state().ws).active_doc().unwrap().dirty);
+        h.state_mut().exec(&ctx, Command::Undo);
+        h.run_steps(2);
+        assert_eq!(active_names(&h), ["Mine"]);
+    }
+
+    /// A deleted or moved file keeps the plan open as unsaved work; Save writes it again.
+    #[test]
+    fn a_deleted_file_keeps_the_plan_as_unsaved_work() {
+        let tmp = crate::recovery::tests::TempDir::new("deleted");
+        let path = tmp.0.join("plan.plancraft");
+        plancraft_core::io::save(&Project::new("Plan", plancraft_core::dates::ymd(2026, 10, 19).unwrap()), &path).unwrap();
+        let mut h = harness_on(&path);
+        watch(&mut h);
+        std::fs::remove_file(&path).unwrap();
+        watch(&mut h);
+        let handle = {
+            let ws = lock(&h.state().ws);
+            let doc = ws.active_doc().unwrap();
+            assert!(doc.dirty && doc.user_changes, "kept as the user's unsaved work");
+            doc.handle
+        };
+        assert!(matches!(h.state().disk_bars.get(&handle).map(|b| &b.kind), Some(DiskBarKind::Missing { .. })));
+        assert_eq!(h.state().last_title, "plan* - PlanCraft");
+
+        h.state_mut().disk_action = Some((handle, DiskAction::Save));
+        h.run_steps(2);
+        assert!(path.exists(), "written again");
+        assert!(h.state().disk_bars.is_empty());
+        assert!(!lock(&h.state().ws).active_doc().unwrap().dirty);
+        watch(&mut h);
+        assert!(h.state().disk_bars.is_empty());
+    }
+
+    /// A file deleted and put back unchanged (a sync tool, git) leaves the plan as it was.
+    #[test]
+    fn a_file_that_comes_back_unchanged_leaves_the_plan_saved() {
+        let tmp = crate::recovery::tests::TempDir::new("comeback");
+        let path = tmp.0.join("plan.plancraft");
+        plancraft_core::io::save(&Project::new("Plan", plancraft_core::dates::ymd(2026, 10, 19).unwrap()), &path).unwrap();
+        let mut h = harness_on(&path);
+        watch(&mut h);
+        let aside = tmp.0.join("aside.plancraft");
+        std::fs::rename(&path, &aside).unwrap();
+        watch(&mut h);
+        assert!(lock(&h.state().ws).active_doc().unwrap().dirty);
+        std::fs::rename(&aside, &path).unwrap();
+        watch(&mut h);
+        assert!(!lock(&h.state().ws).active_doc().unwrap().dirty);
+        assert!(h.state().disk_bars.is_empty());
+    }
+
+    /// A file replaced by garbage is reported, never loaded, and the plan stays as it was.
+    #[test]
+    fn a_file_replaced_by_garbage_is_reported_and_the_plan_kept() {
+        let tmp = crate::recovery::tests::TempDir::new("garbage");
+        let path = tmp.0.join("plan.plancraft");
+        let mut p = Project::new("Plan", plancraft_core::dates::ymd(2026, 10, 19).unwrap());
+        p.add_task("A", None);
+        plancraft_core::io::save(&p, &path).unwrap();
+        let mut h = harness_on(&path);
+        watch(&mut h);
+        std::fs::write(&path, [0xffu8, 0, 1, 2, b'{']).unwrap();
+        watch(&mut h);
+        assert_eq!(active_names(&h), ["A"]);
+        assert!(matches!(h.state().disk_bars.values().next().map(|b| &b.kind), Some(DiskBarKind::Unreadable { .. })));
+        assert!(h.state().st.toasts.iter().any(|t| t.kind == ToastKind::Error && t.text.contains("can't be opened")));
+    }
+
+    /// When a plan this one links to is saved (here, from the same window), the links refresh.
+    #[test]
+    fn links_refresh_when_a_linked_plan_changes_on_disk() {
+        let tmp = crate::recovery::tests::TempDir::new("links");
+        let day = plancraft_core::dates::ymd(2026, 10, 19).unwrap();
+        let other_path = tmp.0.join("other.plancraft");
+        let mut other = Project::new("Other", day);
+        let api = other.add_task("API", None);
+        plancraft_core::io::save(&other, &other_path).unwrap();
+        let main_path = tmp.0.join("main.plancraft");
+        let mut main = Project::new("Main", day);
+        let ext = plancraft_core::io::add_external_project(&mut main, Some(&main_path), &other_path).unwrap();
+        plancraft_core::io::ensure_external_task(&mut main, Some(&main_path), ext, api).unwrap();
+        let mine = main.add_task("Mine", None);
+        main.link(TaskRef::External { project: ext, task: api }, mine, LinkType::FS, Lag::None).unwrap();
+        plancraft_core::io::save(&main, &main_path).unwrap();
+        let mut ws = Workspace::default();
+        ws.open(&other_path).unwrap();
+        ws.open(&main_path).unwrap();
+        let mut h = harness_with(ws);
+        watch(&mut h);
+        {
+            let mut ws = lock(&h.state().ws);
+            let doc = ws.docs.iter_mut().find(|d| d.project.name == "Other").unwrap();
+            doc.edit("Rename", |p| p.task_mut(api).map(|t| t.name = "API v2".into())).unwrap();
+            doc.save().unwrap();
+        }
+        watch(&mut h);
+        let ws = lock(&h.state().ws);
+        let main = ws.docs.iter().find(|d| d.project.name == "Main").unwrap();
+        assert_eq!(main.project.external_projects[0].tasks[0].name, "API v2");
+        assert!(!main.dirty);
+        drop(ws);
+        assert!(h.state().status.as_ref().is_some_and(|(m, _)| m.contains("Updated the links to 'Other'")));
     }
 
     /// Opening a spreadsheet shows the Import Spreadsheet window; Import makes an unsaved plan
