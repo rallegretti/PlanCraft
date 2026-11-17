@@ -54,9 +54,10 @@ pub fn publish_http_token(addr: std::net::SocketAddr, token: &str) -> io::Result
     let dir = path()?.parent().map(PathBuf::from).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no config directory"))?;
     create_private_dir(&dir)?;
     let file = dir.join(format!("mcp-http-{}.token", addr.port()));
-    write_atomic(&file, token.as_bytes(), Privacy::OwnerOnly)?;
-    // The address the server listens on, so a later start can tell whether it still runs.
+    // The address the server listens on, so a later start can tell whether it still runs. It is
+    // written first: another server's sweep never sees this token without its address.
     write_atomic(&file.with_extension("addr"), addr.to_string().as_bytes(), Privacy::OwnerOnly)?;
+    write_atomic(&file, token.as_bytes(), Privacy::OwnerOnly)?;
     Ok(file)
 }
 

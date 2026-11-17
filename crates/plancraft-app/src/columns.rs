@@ -675,9 +675,13 @@ pub(crate) fn set_actual_start(p: &mut Project, id: TaskId, d: Option<DateTime>)
 }
 
 /// Sets (or with `None` clears) a task's Actual Finish. Finishing makes it 100% complete and,
-/// if it had no actual start, starts it on its scheduled start.
+/// if it had no actual start, starts it on its scheduled start. A task that is 100% complete has
+/// finished, so its actual finish can only be cleared once its % complete is lower.
 pub(crate) fn set_actual_finish(p: &mut Project, id: TaskId, d: Option<DateTime>) -> Result<(), String> {
     let t = task_mut(p, id)?;
+    if d.is_none() && t.actual_finish.is_some() && t.percent_complete >= 100 {
+        return Err("This task is 100% complete, so it has finished: lower % complete first to clear its Actual Finish".into());
+    }
     t.actual_finish = d;
     if d.is_some() {
         t.percent_complete = 100;

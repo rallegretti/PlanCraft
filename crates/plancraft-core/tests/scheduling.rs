@@ -989,3 +989,20 @@ fn a_manual_task_with_a_typed_finish_keeps_its_duration_from_its_actual_start() 
     recalculate(&mut p);
     assert_eq!(finish(&p, a), dt(2026, 10, 28, 17));
 }
+
+/// Regression (second review): typing a start and finish doesn't change a manual task's Duration
+/// field, so taking the length from the duration still squeezed a typed Mon–Fri task to one day
+/// when it started on Tuesday. The length of the typed dates is kept.
+#[test]
+fn a_late_start_keeps_the_length_of_the_typed_dates() {
+    let mut p = project();
+    let a = task(&mut p, "A", 1);
+    p.set_schedule_mode(&[a], ScheduleMode::Manual).unwrap();
+    p.set_manual_date(a, dt(2026, 10, 26, 8), false).unwrap();
+    p.set_manual_date(a, dt(2026, 10, 30, 17), true).unwrap();
+    recalculate(&mut p);
+    assert_eq!((start(&p, a), finish(&p, a)), (dt(2026, 10, 26, 8), dt(2026, 10, 30, 17)));
+    p.task_mut(a).unwrap().actual_start = Some(dt(2026, 10, 27, 8));
+    recalculate(&mut p);
+    assert_eq!((start(&p, a), finish(&p, a)), (dt(2026, 10, 27, 8), dt(2026, 11, 2, 17)), "five working days from Tuesday");
+}

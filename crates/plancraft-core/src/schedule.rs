@@ -808,13 +808,24 @@ impl<'a> Engine<'a> {
 
             if t.mode == ScheduleMode::Manual {
                 // Actual dates win over typed ones, at both ends. A task that started on another
-                // day than typed (and hasn't finished) keeps its duration from its actual start:
-                // its typed finish moves with it instead of squeezing or stretching the task.
+                // day than typed (and hasn't finished) keeps its length from its actual start: its
+                // typed finish moves with it instead of squeezing or stretching the task. The
+                // length is that of its typed dates when both were typed (typing a date doesn't
+                // change the Duration field), else its duration.
                 let start = t.actual_start.or(t.manual_start).unwrap_or(project_start);
                 let from_start = || if dur > 0 { along(start, true) } else { start };
                 let finish = match (t.actual_finish, t.actual_start) {
                     (Some(f), _) => f,
-                    (None, Some(a)) if Some(a) != t.manual_start => from_start(),
+                    (None, Some(a)) if Some(a) != t.manual_start => match (t.manual_start, t.manual_finish) {
+                        (Some(ms), Some(mf)) if mf > ms => {
+                            if t.elapsed {
+                                shift(start, crate::dates::minutes_between(ms, mf))
+                            } else {
+                                cal.add(start, cal.between(ms, mf))
+                            }
+                        }
+                        _ => from_start(),
+                    },
                     _ => t.manual_finish.unwrap_or_else(from_start),
                 };
                 self.set_early(i, start, finish.max(start));

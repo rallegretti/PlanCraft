@@ -269,7 +269,13 @@ pub fn write_atomic(path: &Path, bytes: &[u8], privacy: Privacy) -> std::io::Res
         Privacy::KeepExisting => std::fs::metadata(path).ok(),
         Privacy::OwnerOnly => None,
     };
-    if existing.as_ref().is_some_and(|m| m.permissions().readonly()) {
+    // Read-only by its permission bits, or not writable by this user for another reason (a file
+    // owned by someone else, in a folder this user may write to, would otherwise be replaced).
+    let not_writable = existing.as_ref().is_some_and(|m| {
+        m.permissions().readonly()
+            || matches!(std::fs::OpenOptions::new().write(true).open(path), Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied)
+    });
+    if not_writable {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
             format!("{} is read-only; make it writable or save under another name", path.display()),
@@ -279,10 +285,17 @@ pub fn write_atomic(path: &Path, bytes: &[u8], privacy: Privacy) -> std::io::Res
         let mut f = create_private(&tmp)?;
         f.write_all(bytes)?;
         if let Some(m) = &existing {
-            // The group first (best effort: only a group the user belongs to can be set), so the
-            // permissions below never apply to the wrong group.
+            // The group first (best effort: only a group the user belongs to can be set). If it
+            // can't be kept, the old file's group permissions are not given to the user's own
+            // group instead.
             #[cfg(unix)]
-            let _ = std::os::unix::fs::fchown(&f, None, Some(std::os::unix::fs::MetadataExt::gid(m)));
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let kept = std::os::unix::fs::fchown(&f, None, Some(std::os::unix::fs::MetadataExt::gid(m))).is_ok();
+                let mode = m.permissions().mode();
+                f.set_permissions(std::fs::Permissions::from_mode(if kept { mode } else { mode & !0o070 }))?;
+            }
+            #[cfg(not(unix))]
             f.set_permissions(m.permissions())?;
         }
         f.sync_all()?;

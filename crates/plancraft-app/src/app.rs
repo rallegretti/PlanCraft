@@ -85,6 +85,9 @@ fn has_selected_ancestor(p: &Project, i: usize, sel: &[TaskId]) -> bool {
 /// custom fields and resources by name in whichever plan it lands in (ids differ between plans).
 #[derive(Clone, Default)]
 struct ClipSource {
+    /// The plan the tasks were copied from: pasted back into it, calendars, fields and resources
+    /// keep their ids (also when renamed since the copy).
+    project: uuid::Uuid,
     /// The copied tasks' ids: this belongs to the clipboard only while it holds those tasks.
     tasks: Vec<TaskId>,
     calendars: HashMap<CalendarId, String>,
@@ -100,6 +103,7 @@ impl ClipSource {
             copied.iter().flat_map(|t| [t.calendar, t.recurrence.as_ref().and_then(|r| r.calendar)]).flatten().collect();
         let used_fields: HashSet<CustomFieldId> = copied.iter().flat_map(|t| t.custom.keys().copied()).collect();
         Self {
+            project: p.id,
             tasks: copied.iter().map(|t| t.id).collect(),
             calendars: p.calendars.iter().filter(|c| used_calendars.contains(&c.id)).map(|c| (c.id, c.name.clone())).collect(),
             fields: p.custom_fields.iter().filter(|f| used_fields.contains(&f.id)).map(|f| (f.id, (f.name.clone(), f.kind))).collect(),
@@ -120,7 +124,10 @@ impl ClipSource {
 
 /// The item of a plan matching one from another plan (or the same plan): the same id under the
 /// same name first, otherwise the first of that name (ignoring case).
-fn match_by_name<I: Copy + PartialEq>(items: impl Iterator<Item = (I, String)> + Clone, id: I, name: &str) -> Option<I> {
+fn match_by_name<I: Copy + PartialEq>(items: impl Iterator<Item = (I, String)> + Clone, id: I, name: &str, same_plan: bool) -> Option<I> {
+    if same_plan && items.clone().any(|(i, _)| i == id) {
+        return Some(id);
+    }
     let key = name.to_lowercase();
     let same = |n: &String| n.to_lowercase() == key;
     items.clone().find(|(i, n)| *i == id && same(n)).or_else(|| items.into_iter().find(|(_, n)| same(n))).map(|(i, _)| i)
@@ -142,6 +149,7 @@ fn paste_tasks(p: &mut Project, clip: &[Task], source: Option<&ClipSource>, at: 
     let target_level = p.tasks.get(at).map_or(1, |t| t.outline_level);
     let at = at.min(p.tasks.len());
     let recurring_in_clip = clip.iter().any(|t| t.recurrence.is_some());
+    let same_plan = source.is_some_and(|s| s.project == p.id);
     let ids: Vec<TaskId> = clip.iter().map(|_| p.ids.next_task()).collect();
     let mut new_id: HashMap<TaskId, TaskId> = HashMap::new();
     for (t, id) in clip.iter().zip(&ids) {
@@ -149,6 +157,10 @@ fn paste_tasks(p: &mut Project, clip: &[Task], source: Option<&ClipSource>, at: 
     }
     let (mut lost_calendars, mut lost_fields, mut lost_resources) = (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
     let mut lost_external = false;
+    // Links and milestone members are added after the tasks are in place, through the same
+    // operations as by hand, so the pasted outline can't hold a link those would refuse (a loop,
+    // a link between a summary and its own subtask, a finish link into a summary).
+    let mut links: Vec<(TaskId, Vec<Dependency>, Vec<TaskRef>)> = Vec::new();
 
     for (k, (t, id)) in clip.iter().zip(&ids).enumerate() {
         let mut nt = t.clone();
@@ -161,9 +173,12 @@ fn paste_tasks(p: &mut Project, clip: &[Task], source: Option<&ClipSource>, at: 
                 None
             }
         };
-        nt.predecessors =
+        let deps: Vec<Dependency> =
             t.predecessors.iter().filter_map(|d| remap(d.predecessor).map(|predecessor| Dependency { predecessor, ..*d })).collect();
-        nt.members = t.members.iter().filter_map(|m| remap(*m)).collect();
+        let members: Vec<TaskRef> = t.members.iter().filter_map(|m| remap(*m)).collect();
+        links.push((*id, deps, members));
+        nt.predecessors.clear();
+        nt.members.clear();
         nt.baseline = None;
         nt.baselines.clear();
         nt.interim.clear();
@@ -176,7 +191,7 @@ fn paste_tasks(p: &mut Project, clip: &[Task], source: Option<&ClipSource>, at: 
         // Calendars by name; none (the project calendar) when this plan has no such calendar.
         let mut calendar = |c: CalendarId| match source.and_then(|s| s.calendars.get(&c)) {
             Some(name) => {
-                let found = match_by_name(p.calendars.iter().map(|k| (k.id, k.name.clone())), c, name);
+                let found = match_by_name(p.calendars.iter().map(|k| (k.id, k.name.clone())), c, name, same_plan);
                 if found.is_none() {
                     lost_calendars.insert(name.clone());
                 }
@@ -197,7 +212,7 @@ fn paste_tasks(p: &mut Project, clip: &[Task], source: Option<&ClipSource>, at: 
                 let target = match source.and_then(|s| s.fields.get(f)) {
                     Some((name, kind)) => {
                         let same_kind = p.custom_fields.iter().filter(|d| d.kind == *kind).map(|d| (d.id, d.name.clone()));
-                        let found = match_by_name(same_kind, *f, name);
+                        let found = match_by_name(same_kind, *f, name, same_plan);
                         if found.is_none() {
                             lost_fields.insert(name.clone());
                         }
@@ -213,27 +228,13 @@ fn paste_tasks(p: &mut Project, clip: &[Task], source: Option<&ClipSource>, at: 
         p.tasks.insert(at.saturating_add(k).min(p.tasks.len()), nt);
     }
     p.normalize_outline();
-    // The pasted outline can make a task a summary of one it was linked with (X → Y, with Y
-    // now under X): a link between a summary and its own subtask is refused when made by hand,
-    // so it is left out here too.
     let mut lost_links = false;
-    for id in &ids {
-        let Some(si) = p.task_index(*id) else { continue };
-        let own_group: Vec<TaskId> = {
-            let mut g: Vec<TaskId> = p.descendants_range(si).filter_map(|i| p.tasks.get(i).map(|t| t.id)).collect();
-            let mut parent = p.parent_index(si);
-            while let Some(pi) = parent {
-                if let Some(t) = p.tasks.get(pi) {
-                    g.push(t.id);
-                }
-                parent = p.parent_index(pi);
-            }
-            g
-        };
-        if let Some(t) = p.task_mut(*id) {
-            let before = t.predecessors.len();
-            t.predecessors.retain(|d| d.predecessor.local().is_none_or(|pid| !own_group.contains(&pid)));
-            lost_links |= t.predecessors.len() != before;
+    for (id, deps, members) in links {
+        for d in deps {
+            lost_links |= p.link(d.predecessor, id, d.kind, d.lag).is_err();
+        }
+        for m in members {
+            lost_links |= p.add_milestone_members(id, &[m]).is_err();
         }
     }
 
@@ -241,7 +242,7 @@ fn paste_tasks(p: &mut Project, clip: &[Task], source: Option<&ClipSource>, at: 
     for (a, name, kind) in source.map(|s| s.assignments.as_slice()).unwrap_or_default() {
         let Some(task) = new_id.get(&a.task).copied() else { continue };
         let same_kind = p.resources.iter().filter(|r| r.kind == *kind).map(|r| (r.id, r.name.clone()));
-        let Some(resource) = match_by_name(same_kind, a.resource, name) else {
+        let Some(resource) = match_by_name(same_kind, a.resource, name, same_plan) else {
             lost_resources.insert(name.clone());
             continue;
         };
@@ -264,7 +265,7 @@ fn paste_tasks(p: &mut Project, clip: &[Task], source: Option<&ClipSource>, at: 
         notes.push(format!("This plan has no resource {}, so those assignments were left out.", quoted(lost_resources)));
     }
     if lost_links {
-        notes.push("Links between a pasted summary and its own subtasks were left out.".to_string());
+        notes.push("Some links and milestone members can't exist in the pasted outline (a loop, or a link between a summary and its own subtasks), so they were left out.".to_string());
     }
     if lost_external {
         notes.push("Links to projects this plan is not linked with were left out.".to_string());
@@ -868,12 +869,20 @@ impl PlanCraftApp {
         let Some(item) = self.rec().find(stem).cloned() else { return };
         let Some(store) = self.rec().store().cloned() else { return };
         match store.load(&item) {
-            Ok((project, notes)) => {
+            Ok((mut project, notes)) => {
                 // Two documents bound to one file would overwrite each other's saves: when the
                 // file is open already, the copy comes back as an unsaved plan of its own.
                 let open_paths: Vec<PathBuf> = lock(&self.ws).docs.iter().filter_map(|d| d.path.clone()).collect();
                 let already_open = item.original_path.as_deref().is_some_and(|o| open_paths.iter().any(|p| same_file(p, o)));
                 let path = if already_open { None } else { item.original_path.clone() };
+                // Links to other projects are stored relative to the plan's folder: unsaved, the
+                // copy has none, so they become absolute (from the original file's folder).
+                if already_open {
+                    for e in &mut project.external_projects {
+                        let abs = plancraft_core::io::resolve_external_path(&e.path, item.original_path.as_deref());
+                        e.path = abs.to_string_lossy().replace('\\', "/");
+                    }
+                }
                 let mut ws = lock(&self.ws);
                 ws.add(project, path);
                 if let Some(doc) = ws.active_doc_mut() {
@@ -3964,6 +3973,52 @@ mod ui_tests {
         assert!(plancraft_core::limits::check_edit(&mut dst).is_ok());
     }
 
+    /// Regression (second review): pasting back into the plan it came from lost a calendar or
+    /// resource renamed since the copy (matched by name only). The same plan keeps them by id.
+    #[test]
+    fn pasting_into_the_same_plan_keeps_renamed_calendars_and_resources() {
+        let mut p = Project::new("Plan", day());
+        let t = p.add_task("T", None);
+        let cal = p.add_calendar("Late crew", None).unwrap();
+        p.task_mut(t).unwrap().calendar = Some(cal);
+        let ana = p.add_resource("Ana");
+        p.assign(t, ana, Some(1.0), None).unwrap();
+        plancraft_core::schedule::recalculate(&mut p);
+        let clip = vec![p.task(t).unwrap().clone()];
+        let source = ClipSource::capture(&p, &clip);
+        p.calendars.iter_mut().find(|c| c.id == cal).unwrap().name = "Night crew".into();
+        p.resource_mut(ana).unwrap().name = "Ana Lima".into();
+        let at = p.tasks.len();
+        let (ids, notes) = super::paste_tasks(&mut p, &clip, Some(&source), at);
+        assert_eq!(p.task(ids[0]).unwrap().calendar, Some(cal), "{notes:?}");
+        assert!(p.assignments.iter().any(|a| a.task == ids[0] && a.resource == ana), "{notes:?}");
+        assert!(notes.is_empty(), "{notes:?}");
+    }
+
+    /// Regression (second review): a loop through a pasted summary survived the paste (only a
+    /// warning on recalculation), though linking it by hand is refused.
+    #[test]
+    fn pasting_leaves_out_a_loop_through_the_new_outline() {
+        let mut src = Project::new("Source", day());
+        let x = src.add_task("X", None);
+        let _s = src.add_task("S", None);
+        let y = src.add_task("Y", None);
+        src.indent(y).unwrap();
+        let z = src.add_task("Z", None);
+        src.outdent(z).ok();
+        src.link(y.into(), z, LinkType::FS, Lag::None).unwrap();
+        src.link(z.into(), x, LinkType::FS, Lag::None).unwrap();
+        plancraft_core::schedule::recalculate(&mut src);
+        let clip: Vec<Task> = [x, y, z].iter().map(|id| src.task(*id).unwrap().clone()).collect();
+        let source = ClipSource::capture(&src, &clip);
+        let mut dst = Project::new("Target", day());
+        let (ids, notes) = super::paste_tasks(&mut dst, &clip, Some(&source), 0);
+        assert_eq!(dst.task(ids[1]).unwrap().outline_level, 2, "Y is pasted under X");
+        let report = plancraft_core::schedule::recalculate(&mut dst);
+        assert!(!report.warnings.iter().any(|w| w.contains("ircular")), "{:?}", report.warnings);
+        assert!(notes.iter().any(|n| n.contains("left out")), "{notes:?}");
+    }
+
     /// Regression: pasted tasks lost their links and milestone memberships, even to each other,
     /// and their resource assignments.
     #[test]
@@ -4081,7 +4136,18 @@ mod ui_tests {
         {
             let mut ws = Workspace::default();
             ws.add(Project::new("Plan", day()), Some(path.clone()));
-            ws.docs[0].edit("Add", |p| p.add_task("Recovered task", None)).unwrap();
+            ws.docs[0]
+                .edit("Add", |p| {
+                    p.add_task("Recovered task", None);
+                    p.external_projects.push(plancraft_core::model::ExternalProject {
+                        id: uuid::Uuid::new_v4(),
+                        name: "Other".into(),
+                        path: "other.plancraft".into(),
+                        tasks: Vec::new(),
+                        last_sync: None,
+                    });
+                })
+                .unwrap();
             Recovery::new(Some(store.clone())).write_dirty(&ws).unwrap();
         }
         let mut ws = Workspace::default();
@@ -4098,6 +4164,11 @@ mod ui_tests {
         let doc = ws.active_doc().unwrap();
         assert!(doc.path.is_none() && doc.dirty);
         assert!(doc.project.tasks.iter().any(|t| t.name == "Recovered task"));
+        // Regression (second review): the copy has no folder of its own, so its relative link
+        // to another plan would have pointed at the working directory.
+        let link = std::path::PathBuf::from(&doc.project.external_projects[0].path);
+        assert!(link.is_absolute() && link.ends_with("other.plancraft"), "{link:?}");
+        assert_eq!(link.parent(), path.parent());
         assert!(h.state().st.toasts.iter().any(|t| t.text.contains("plan.plancraft is already open")), "the user is told");
     }
 
@@ -4188,8 +4259,18 @@ mod ui_tests {
         h.event(egui::Event::PointerGone);
         h.run_steps(2);
         assert!(h.state().st.gantt.drag.is_some(), "the drag survives the pointer leaving while the button is held");
-        h.event(egui::Event::Key { key: Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+
+        // Regression (second review): the release outside the window never arrived (egui still
+        // thinks the button is down); the next click must cancel the drag, not drop the bar there.
+        let (id, start) = (id, start_of(&h, id));
+        let back = egui::pos2(1200.0, 300.0);
+        h.event(egui::Event::PointerMoved(back));
+        h.event(egui::Event::PointerButton { pos: back, button: egui::PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+        h.run_steps(1);
+        assert!(h.state().st.gantt.drag.is_none(), "a new press ends the lost drag");
+        h.event(egui::Event::PointerButton { pos: back, button: egui::PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
         h.run_steps(2);
+        assert_eq!(start_of(&h, id), start, "nothing moved");
     }
 
     /// Escape cancels a bar drag with the button still down, and the release then changes nothing.

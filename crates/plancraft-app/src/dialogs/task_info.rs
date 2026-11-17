@@ -967,6 +967,17 @@ mod tests {
         let e = info.apply(&mut p).unwrap_err();
         assert!(e.contains("% complete to 0"), "{e}");
 
+        // Regression (second review): clearing Actual Finish left a task "100% complete, not
+        // finished"; it is refused while the task is 100% complete.
+        let mut p = demo();
+        let id = p.tasks.iter().find(|t| !t.sched.is_summary && !t.is_milestone() && t.percent_complete == 0).unwrap().id;
+        p.set_percent_complete(id, 100).unwrap();
+        plancraft_core::schedule::recalculate(&mut p);
+        let mut info = TaskInfo::new(&p, id, false).unwrap();
+        info.actual_finish = String::new();
+        let e = info.apply(&mut p).unwrap_err();
+        assert!(e.contains("lower % complete"), "{e}");
+
         let mut p = demo();
         let id = p.tasks.iter().find(|t| !t.sched.is_summary && !t.is_milestone() && t.percent_complete == 0).unwrap().id;
         let scheduled = p.task(id).unwrap().sched.start;
