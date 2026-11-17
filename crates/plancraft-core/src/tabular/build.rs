@@ -31,8 +31,16 @@ impl Notes {
 
 /// Builds the plan (recalculated) and notes on what could not be read or was left out.
 pub fn build(grid: &Grid, options: &ImportOptions) -> Result<(Project, Vec<String>), String> {
-    crate::guard::catch("importing a spreadsheet", || build_plan(grid, options))
-        .map_err(|p| format!("PlanCraft hit an internal error importing the file ({})", p.message))?
+    let (mut p, mut notes) = crate::guard::catch("importing a spreadsheet", || build_plan(grid, options))
+        .map_err(|p| format!("PlanCraft hit an internal error importing the file ({})", p.message))??;
+    // Like opening a plan file: whatever the rows produced is brought into range. A date clamped
+    // to the last allowed day can still move past it (an actual start set to that day's 8:00).
+    let fixed = limits::sanitize(&mut p);
+    if !fixed.is_empty() {
+        crate::schedule::recalculate(&mut p);
+        notes.extend(fixed);
+    }
+    Ok((p, notes))
 }
 
 fn build_plan(grid: &Grid, options: &ImportOptions) -> Result<(Project, Vec<String>), String> {
@@ -661,6 +669,23 @@ mod tests {
 
     fn task<'a>(p: &'a Project, name: &str) -> &'a Task {
         p.tasks.iter().find(|t| t.name == name).unwrap()
+    }
+
+    /// Regression (found by the hostile sweep): a start in the year 3000 was clamped to the last
+    /// allowed day, then progress set the actual start to that day's 8:00, past the limit.
+    #[test]
+    fn an_imported_plan_is_always_in_range() {
+        // The case the sweep found: a "yes" in the % Complete column, a start in the year 3000.
+        let g = grid("m\n0,1,0\n0,yes,0,\\,1-1-3000\n");
+        let options = ImportOptions {
+            columns: vec![None, Some(Field::PercentComplete), Some(Field::Name), None, Some(Field::Start)],
+            date_order: DateOrder::DayFirst,
+            name: "x".into(),
+        };
+        let (p, _) = build(&g, &options).unwrap();
+        assert!(p.tasks.iter().any(|t| t.actual_start.is_some()), "the case sets an actual start");
+        let mut copy = p.clone();
+        assert_eq!(limits::sanitize(&mut copy), Vec::<String>::new());
     }
 
     fn day(y: i32, m: u32, d: u32) -> NaiveDate {

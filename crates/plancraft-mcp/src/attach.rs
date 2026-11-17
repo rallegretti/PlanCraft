@@ -32,6 +32,8 @@ pub fn run_attach_with<R: BufRead, W: Write>(
     session: &dyn Fn() -> io::Result<SessionInfo>,
 ) -> io::Result<()> {
     let mut buf = Vec::new();
+    // The protocol revision the client agreed with the app, sent as `MCP-Protocol-Version`.
+    let mut version: Option<String> = None;
     loop {
         let line = match read_line(&mut reader, &mut buf)? {
             Line::Eof => return Ok(()),
@@ -44,15 +46,32 @@ pub fn run_attach_with<R: BufRead, W: Write>(
         if line.is_empty() {
             continue;
         }
-        match forward(&line, session) {
-            Ok(Some(reply)) => write_message(&mut writer, &reply)?,
+        match forward(&line, version.as_deref(), session) {
+            Ok(Some(reply)) => {
+                if let Some(v) = crate::server::negotiated_version(&reply) {
+                    version = Some(v.to_string());
+                }
+                write_message(&mut writer, &reply)?;
+            }
             Ok(None) => {}
             Err(e) => {
-                // Answer requests (not notifications) so the client isn't left waiting.
-                let id = serde_json::from_str::<Value>(&line).ok().and_then(|v| v.get("id").cloned());
-                if let Some(id) = id {
-                    let msg = format!("PlanCraft is not reachable: {e}. Open PlanCraft and start the server in Project ▸ AI Agents.");
-                    write_message(&mut writer, &json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": msg } }))?;
+                // Answer every request (not notifications) so the client isn't left waiting,
+                // including each request of a batch.
+                let msg = format!("PlanCraft is not reachable: {e}. Open PlanCraft and start the server in Project ▸ AI Agents.");
+                let error = |id: &Value| json!({ "jsonrpc": "2.0", "id": id, "error": { "code": -32000, "message": msg } });
+                match serde_json::from_str::<Value>(&line) {
+                    Ok(Value::Array(items)) => {
+                        let replies: Vec<Value> = items.iter().filter_map(|m| m.get("id")).map(error).collect();
+                        if !replies.is_empty() {
+                            write_message(&mut writer, &Value::Array(replies))?;
+                        }
+                    }
+                    Ok(v) => {
+                        if let Some(id) = v.get("id") {
+                            write_message(&mut writer, &error(id))?;
+                        }
+                    }
+                    Err(_) => write_message(&mut writer, &crate::protocol::parse_error("the message is not valid JSON"))?,
                 }
             }
         }
@@ -67,12 +86,12 @@ fn write_message<W: Write>(w: &mut W, v: &Value) -> io::Result<()> {
 
 /// Sends one message to the app; retries once with a fresh session file after a 401 (the app
 /// restarted and has a new token).
-fn forward(line: &str, session: &dyn Fn() -> io::Result<SessionInfo>) -> io::Result<Option<Value>> {
+fn forward(line: &str, version: Option<&str>, session: &dyn Fn() -> io::Result<SessionInfo>) -> io::Result<Option<Value>> {
     let info = session().map_err(|e| io::Error::new(e.kind(), format!("no running PlanCraft session found ({e})")))?;
-    match post(&info, line)? {
+    match post(&info, line, version)? {
         (401, _) => {
             let fresh = session()?;
-            match post(&fresh, line)? {
+            match post(&fresh, line, version)? {
                 (401, _) => Err(io::Error::new(io::ErrorKind::PermissionDenied, "the app refused the session token")),
                 reply => parse_reply(reply),
             }
@@ -102,13 +121,19 @@ fn loopback_target(url: &str) -> io::Result<(SocketAddr, String)> {
 }
 
 /// A minimal HTTP/1.1 POST over a loopback socket. Returns the status and body.
-fn post(info: &SessionInfo, body: &str) -> io::Result<(u16, Vec<u8>)> {
+fn post(info: &SessionInfo, body: &str, version: Option<&str>) -> io::Result<(u16, Vec<u8>)> {
     let (addr, path) = loopback_target(&info.url)?;
     let mut s = TcpStream::connect_timeout(&addr, Duration::from_secs(5))?;
     s.set_read_timeout(Some(Duration::from_secs(600)))?;
     s.set_write_timeout(Some(Duration::from_secs(60)))?;
+    // Only a supported revision is sent (it came from the app's own reply), so no CR or LF can
+    // reach the header.
+    let version_header = version
+        .filter(|v| crate::protocol::SUPPORTED_PROTOCOL_VERSIONS.contains(v))
+        .map(|v| format!("MCP-Protocol-Version: {v}\r\n"))
+        .unwrap_or_default();
     let head = format!(
-        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nAccept: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nAccept: application/json\r\n{version_header}Content-Length: {}\r\nConnection: close\r\n\r\n",
         info.token,
         body.len()
     );
@@ -127,7 +152,7 @@ fn post(info: &SessionInfo, body: &str) -> io::Result<(u16, Vec<u8>)> {
         .and_then(|c| c.parse::<u16>().ok())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "bad HTTP status line"))?;
     let body = rest.get(4..).unwrap_or_default();
-    // Large replies arrive with chunked transfer encoding (tiny_http does this from 32 KiB).
+    // Some HTTP servers send large replies with chunked transfer encoding.
     let chunked = head.lines().skip(1).any(|l| {
         l.split_once(':').is_some_and(|(name, value)| {
             name.trim().eq_ignore_ascii_case("transfer-encoding") && value.split(',').any(|v| v.trim().eq_ignore_ascii_case("chunked"))

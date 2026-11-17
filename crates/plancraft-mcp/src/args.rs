@@ -90,6 +90,9 @@ pub struct Args<'a> {
 
 static EMPTY: std::sync::LazyLock<Map<String, Value>> = std::sync::LazyLock::new(Map::new);
 
+/// The largest integer an `f64` (a JSON number) holds exactly: 2^53.
+const MAX_EXACT: f64 = 9_007_199_254_740_992.0;
+
 impl<'a> Args<'a> {
     pub fn new(map: &'a Map<String, Value>) -> Self {
         Self { map }
@@ -178,8 +181,19 @@ impl<'a> Args<'a> {
     pub fn u64(&self, key: &str) -> ToolResult<Option<u64>> {
         match self.f64(key)? {
             None => Ok(None),
-            Some(v) if v >= 0.0 && v.fract() == 0.0 => Ok(Some(v as u64)),
+            // Beyond 2^53 a number is no longer exact, so a large id would match another one.
+            Some(v) if v >= 0.0 && v.fract() == 0.0 && v <= MAX_EXACT => Ok(Some(v as u64)),
+            Some(v) if v > MAX_EXACT => err(format!("'{key}' is too large")),
             Some(_) => err(format!("'{key}' must be a non-negative integer")),
+        }
+    }
+
+    /// An id argument (tasks, resources, assignments, time entries): a non-negative integer that
+    /// fits an id, never truncated to a smaller one.
+    pub fn id(&self, key: &str) -> ToolResult<Option<u32>> {
+        match self.u64(key)? {
+            None => Ok(None),
+            Some(v) => u32::try_from(v).map(Some).map_err(|_| ToolError(format!("'{key}' {v} is not a valid id (too large)"))),
         }
     }
 

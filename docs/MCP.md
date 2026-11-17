@@ -62,7 +62,8 @@ For clients that connect over HTTP directly, copy the command with the current t
 claude mcp add --transport http plancraft http://127.0.0.1:7878/mcp --header "Authorization: Bearer <token>"
 ```
 
-The standalone binary can serve HTTP too; it prints its token at startup:
+The standalone binary can serve HTTP too. It writes a new token at startup to an owner-only file in PlanCraft's
+config folder (`mcp-http-<port>.token`) and prints the file's path, never the token:
 
 ```sh
 plancraft-mcp project.plancraft --http 127.0.0.1:7878
@@ -70,13 +71,20 @@ plancraft-mcp project.plancraft --http 127.0.0.1:7878
 
 HTTP details (MCP "Streamable HTTP", JSON responses only):
 
-* `POST /mcp` (or `/`) with a JSON-RPC message or batch → `200 application/json`, or `202 Accepted` when the body
-  only contained notifications. An `Mcp-Session-Id` header is issued on `initialize`.
+* `POST /mcp` (or `/`) with a JSON-RPC message → `200 application/json`, or `202 Accepted` when the body only
+  contained notifications. The server is stateless and issues no `Mcp-Session-Id`.
+* Batches are accepted only from clients on protocol revisions before 2025-06-18 (which removed them). The revision
+  comes from the `MCP-Protocol-Version` header; an unsupported value gets `400`, and a request without the header
+  is taken as 2025-03-26, as the specification says.
+* Messages must carry `"jsonrpc": "2.0"`, and request ids must be strings or integers.
 * `GET /mcp` → `405` (no server-initiated SSE stream); `DELETE /mcp` → `200`.
 * Security: bind to `127.0.0.1` (the default). Requests whose `Origin` header is not a localhost origin are rejected
-  with `403`, and when bound to a loopback address the `Host` header must name a loopback host (DNS-rebinding
-  protection). Requests without the session's bearer token get `401` (tokens are compared in constant time).
-  Bodies over 32 MiB get `413`. Even with a token, do not bind to a public interface: traffic is not encrypted.
+  with `403`, and when bound to a loopback address the `Host` header must name a loopback host: `localhost`, a
+  `.localhost` name or a loopback IP address (DNS-rebinding protection). Requests without the session's bearer
+  token get `401` (tokens are compared in constant time). These checks run before the body is read.
+* Limits: at most 32 connections at a time (more get `503`), 64 KiB of headers, bodies up to 32 MiB (`413`
+  beyond), at most 10 s between reads and 60 s for the whole request (`408`). Each connection carries one request.
+  Even with a token, do not bind to a public interface: traffic is not encrypted.
 
 ### Command line
 
@@ -86,7 +94,7 @@ plancraft-mcp --attach
 
   FILE...             .plancraft documents to open
   --http [ADDR]       serve HTTP on ADDR (default 127.0.0.1:7878) instead of stdio;
-                      prints this session's bearer token
+                      writes this session's bearer token to an owner-only file
   --attach            serve stdio by relaying to the running desktop app
   --no-file-access    refuse tools that open/create/link arbitrary paths
                       (saving open documents to their own path still works)

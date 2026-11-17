@@ -72,8 +72,8 @@ pub fn tools() -> Vec<Tool> {
 }
 
 fn find_assignment(p: &Project, a: &Args) -> ToolResult<AssignmentId> {
-    if let Some(id) = a.u64("assignment")? {
-        let id = AssignmentId(id as u32);
+    if let Some(id) = a.id("assignment")? {
+        let id = AssignmentId(id);
         return p.assignment(id).map(|x| x.id).ok_or_else(|| ToolError(format!("no assignment with id {}", id.0)));
     }
     if a.get("task").is_none() || a.get("resource").is_none() {

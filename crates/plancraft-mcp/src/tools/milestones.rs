@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::args::*;
+use crate::tools::dependencies::{LinkedDocs, linked_doc, read_linked_docs};
 use crate::tools::tasks::{apply_task_fields, apply_task_links, insert_new_task, insert_position};
 use crate::views;
 
@@ -74,13 +75,21 @@ pub fn tools() -> Vec<Tool> {
     ]
 }
 
-/// Resolves member references, refreshing snapshots of external tasks.
-fn resolve_members(p: &mut Project, doc_path: Option<&std::path::Path>, items: &[Value]) -> ToolResult<Vec<TaskRef>> {
+/// Reads the documents of the external projects that member items name (see
+/// [`read_linked_docs`]), before the edit takes the workspace lock.
+fn read_member_docs(ctx: &Ctx, a: &Args, key: &str) -> ToolResult<LinkedDocs> {
+    let items = a.array(key)?.map(Vec::as_slice).unwrap_or_default();
+    let refs: Vec<&Value> = items.iter().filter_map(|m| m.get("external_project")).collect();
+    read_linked_docs(ctx, a, &refs)
+}
+
+/// Resolves member references, refreshing snapshots of external tasks from `docs`.
+fn resolve_members(p: &mut Project, docs: &LinkedDocs, items: &[Value]) -> ToolResult<Vec<TaskRef>> {
     let mut refs = Vec::new();
     for m in items {
         let r = resolve_task_ref(p, m, None)?;
         if let TaskRef::External { project, task } = r {
-            io::ensure_external_task(p, doc_path, project, task)?;
+            io::ensure_external_task_from(p, project, linked_doc(docs, project)?, task);
             if p.external(project).and_then(|e| e.task(task)).is_none() {
                 return err(format!(
                     "task {} does not exist in external project '{}'",
@@ -99,10 +108,11 @@ fn create_milestone(ctx: &Ctx, a: &Args) -> ToolResult {
     if name.is_empty() {
         return err("'name' must not be empty");
     }
+    let docs = read_member_docs(ctx, a, "members")?;
     ctx.edit(
         a,
         &format!("Add milestone '{name}'"),
-        |p, path| {
+        |p, _| {
             let (index, level) = insert_position(p, a)?;
             let id = insert_new_task(p, &name, index, level, true);
             {
@@ -124,7 +134,7 @@ fn create_milestone(ctx: &Ctx, a: &Args) -> ToolResult {
             apply_task_fields(p, id, &fa)?;
             apply_task_links(p, id, &fa, None)?;
             if let Some(members) = a.array("members")? {
-                let refs = resolve_members(p, path, members)?;
+                let refs = resolve_members(p, &docs, members)?;
                 p.add_milestone_members(id, &refs)?;
             }
             Ok(id)
@@ -134,10 +144,11 @@ fn create_milestone(ctx: &Ctx, a: &Args) -> ToolResult {
 }
 
 fn update_milestone_members(ctx: &Ctx, a: &Args) -> ToolResult {
+    let docs = read_member_docs(ctx, a, "add")?;
     ctx.edit(
         a,
         "Change milestone members",
-        |p, path| {
+        |p, _| {
             let id = task_arg(p, a, "milestone")?;
             if !p.task(id).is_some_and(|t| t.is_milestone()) {
                 return err(format!("task {} is not a milestone (use update_task with is_milestone: true to convert it)", id.0));
@@ -150,7 +161,7 @@ fn update_milestone_members(ctx: &Ctx, a: &Args) -> ToolResult {
                 p.remove_milestone_members(id, &refs)?;
             }
             if let Some(add) = a.array("add")? {
-                let refs = resolve_members(p, path, add)?;
+                let refs = resolve_members(p, &docs, add)?;
                 p.add_milestone_members(id, &refs)?;
             }
             Ok(id)

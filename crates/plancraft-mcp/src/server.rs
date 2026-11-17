@@ -117,7 +117,22 @@ impl McpServer {
     /// Returns the response to send, or `None` for notifications and
     /// client responses.
     pub fn handle_message(&self, msg: Value) -> Option<Value> {
+        self.handle_message_as(msg, None)
+    }
+
+    /// Handles one JSON-RPC message for a client using protocol revision `version` (`None` when
+    /// it isn't known: before `initialize`, or an HTTP request without an `MCP-Protocol-Version`
+    /// header, which the spec says means 2025-03-26). Revision 2025-06-18 removed batches, so a
+    /// batch from a client on that revision or later is refused.
+    pub fn handle_message_as(&self, msg: Value, version: Option<&str>) -> Option<Value> {
         match msg {
+            Value::Array(_) if !batches_allowed(version) => Some(error_response(
+                Value::Null,
+                &RpcError::new(
+                    INVALID_REQUEST,
+                    format!("Invalid Request: protocol version {} does not allow batches", version.unwrap_or("")),
+                ),
+            )),
             Value::Array(items) => {
                 if items.is_empty() {
                     return Some(error_response(Value::Null, &RpcError::new(INVALID_REQUEST, "Invalid Request: empty batch")));
@@ -131,8 +146,14 @@ impl McpServer {
 
     /// Parses and handles a raw JSON text message.
     pub fn handle_text(&self, text: &str) -> Option<Value> {
+        self.handle_text_as(text, None)
+    }
+
+    /// [`McpServer::handle_text`] for a client on protocol revision `version` (see
+    /// [`McpServer::handle_message_as`]).
+    pub fn handle_text_as(&self, text: &str, version: Option<&str>) -> Option<Value> {
         match serde_json::from_str::<Value>(text) {
-            Ok(v) => self.handle_message(v),
+            Ok(v) => self.handle_message_as(v, version),
             Err(e) => Some(parse_error(e)),
         }
     }
@@ -141,13 +162,28 @@ impl McpServer {
         let Value::Object(obj) = msg else {
             return Some(error_response(Value::Null, &RpcError::new(INVALID_REQUEST, "Invalid Request: expected an object")));
         };
-        let id = obj.get("id").cloned();
+        let invalid = |what: &str, id: Option<&Value>| {
+            // Echo the id only when it is a valid one (JSON-RPC answers an unusable id with null).
+            let id = id.filter(|v| valid_id(v)).cloned().unwrap_or(Value::Null);
+            Some(error_response(id, &RpcError::new(INVALID_REQUEST, format!("Invalid Request: {what}"))))
+        };
+        let id = obj.get("id");
+        if obj.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+            return invalid("'jsonrpc' must be \"2.0\"", id);
+        }
         let Some(method) = obj.get("method").and_then(Value::as_str) else {
             if obj.contains_key("result") || obj.contains_key("error") {
                 return None; // a response to a server request; we never send any
             }
-            return Some(error_response(id.unwrap_or(Value::Null), &RpcError::new(INVALID_REQUEST, "Invalid Request: missing 'method'")));
+            return invalid("missing 'method'", id);
         };
+        // MCP request ids are strings or integers, never null (and never objects or arrays).
+        if let Some(v) = id
+            && !valid_id(v)
+        {
+            return invalid("'id' must be a string or an integer", None);
+        }
+        let id = id.cloned();
         let params = obj.get("params").cloned().unwrap_or(Value::Null);
         match id {
             None => {
@@ -282,6 +318,28 @@ fn tool_success_result(tool: &Tool, value: Value) -> Value {
         "structuredContent": structured,
         "isError": false,
     })
+}
+
+/// Whether `v` is a usable JSON-RPC request id for MCP: a string or an integer.
+fn valid_id(v: &Value) -> bool {
+    match v {
+        Value::String(_) => true,
+        Value::Number(n) => n.is_i64() || n.is_u64(),
+        _ => false,
+    }
+}
+
+/// Whether a client on protocol revision `version` may send JSON-RPC batches (revision
+/// 2025-06-18 removed them; revisions are dates, so they compare as text).
+pub fn batches_allowed(version: Option<&str>) -> bool {
+    version.is_none_or(|v| v < "2025-06-18")
+}
+
+/// The protocol revision agreed in a reply to `initialize` (`None` for any other reply).
+pub fn negotiated_version(reply: &Value) -> Option<&str> {
+    let result = reply.get("result")?;
+    result.get("serverInfo")?;
+    result.get("protocolVersion")?.as_str()
 }
 
 fn tool_error_result(msg: impl Into<String>) -> Value {

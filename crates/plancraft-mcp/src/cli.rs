@@ -24,7 +24,8 @@ ARGS:
 OPTIONS:
     --http [ADDR]       Serve MCP Streamable HTTP on ADDR (default 127.0.0.1:7878)
                         at http://ADDR/mcp instead of stdio. A new bearer token is
-                        printed at startup; clients send 'Authorization: Bearer <token>'.
+                        written at startup to an owner-only file (its path is printed);
+                        clients send 'Authorization: Bearer <token>'.
     --attach            Serve MCP on stdio by forwarding to the running PlanCraft
                         desktop app (Project > AI Agents > Start server).
     --no-file-access    Refuse tools that open, create or link arbitrary file paths.
@@ -120,16 +121,25 @@ pub fn run(args: Vec<String>) -> ExitCode {
             let token = crate::session::new_token();
             match serve_http(server, &addr, &token) {
                 Ok(handle) => {
+                    // The token goes to an owner-only file, never to the terminal or a log.
+                    let token_file = match crate::session::publish_http_token(handle.port(), handle.token()) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            eprintln!("plancraft-mcp: cannot write the bearer token file: {e}");
+                            return ExitCode::FAILURE;
+                        }
+                    };
                     eprintln!("plancraft-mcp {}: serving MCP at {}", env!("CARGO_PKG_VERSION"), handle.url());
-                    eprintln!("this session's bearer token: {}", handle.token());
+                    eprintln!("this session's bearer token is in {} (readable only by you)", token_file.display());
                     eprintln!(
-                        "connect with: claude mcp add --transport http plancraft {} --header \"Authorization: Bearer {}\"",
+                        "connect with: claude mcp add --transport http plancraft {} --header \"Authorization: Bearer $(cat '{}')\"",
                         handle.url(),
-                        handle.token()
+                        token_file.display()
                     );
                     while handle.is_running() {
                         std::thread::sleep(std::time::Duration::from_millis(500));
                     }
+                    crate::session::withdraw_http_token(&token_file, handle.token());
                     ExitCode::SUCCESS
                 }
                 Err(e) => {

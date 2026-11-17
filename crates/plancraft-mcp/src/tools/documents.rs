@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use plancraft_core::duration::DurationUnit;
+use plancraft_core::limits::MAX_MINUTES;
 use plancraft_core::model::{FILE_EXTENSION, Project};
 use plancraft_core::report;
 use plancraft_core::workspace::Document;
@@ -417,16 +418,18 @@ fn update_project(ctx: &Ctx, a: &Args) -> ToolResult {
                     parse_enum::<DurationUnit>(v, "duration_unit", &["minutes", "hours", "days", "weeks", "months"])?;
             }
             if let Some(h) = a.f64("hours_per_point")? {
-                if h <= 0.0 {
-                    return err("'hours_per_point' must be positive");
+                // NaN fails every comparison, so test for the valid range, not the invalid one.
+                let minutes = h * 60.0;
+                if !(minutes.is_finite() && minutes >= 0.5 && minutes <= MAX_MINUTES as f64) {
+                    return err("'hours_per_point' must be at least one minute (0.0167 hours) and at most 5 years");
                 }
-                p.settings.minutes_per_point = (h * 60.0).round() as i64;
+                p.settings.minutes_per_point = minutes.round() as i64;
             }
             if let Some(m) = a.u64("minutes_per_point")? {
-                if m == 0 {
-                    return err("'minutes_per_point' must be positive");
+                match i64::try_from(m) {
+                    Ok(m) if (1..=MAX_MINUTES).contains(&m) => p.settings.minutes_per_point = m,
+                    _ => return err("'minutes_per_point' must be from 1 to 5 years of minutes"),
                 }
-                p.settings.minutes_per_point = m as i64;
             }
             if let Some(v) = a.get("calendar") {
                 p.calendar = resolve_calendar(p, v)?;

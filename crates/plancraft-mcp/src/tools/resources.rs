@@ -342,10 +342,10 @@ fn remove_resource_exception(ctx: &Ctx, a: &Args) -> ToolResult {
             let before = r.exceptions.len();
             match (index, name) {
                 (Some(i), _) => {
-                    if (i as usize) >= r.exceptions.len() {
+                    if usize::try_from(i).map_or(true, |i| i >= r.exceptions.len()) {
                         return err(format!("exception index {i} out of range (resource has {})", r.exceptions.len()));
                     }
-                    r.exceptions.remove(i as usize);
+                    r.exceptions.remove(usize::try_from(i).unwrap_or_default());
                 }
                 (None, Some(n)) => r.exceptions.retain(|e| !e.name.eq_ignore_ascii_case(n.trim())),
                 (None, None) => return err("give 'index' or 'name'"),

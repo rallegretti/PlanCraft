@@ -47,6 +47,24 @@ pub fn publish(info: &SessionInfo) -> io::Result<PathBuf> {
     Ok(path)
 }
 
+/// Writes the bearer token of a standalone `plancraft-mcp --http` server to an owner-only file
+/// (one per port) and returns its path. The token is never printed or logged, so it can't end
+/// up in a terminal's scrollback, a log collector or a screen share.
+pub fn publish_http_token(port: u16, token: &str) -> io::Result<PathBuf> {
+    let dir = path()?.parent().map(PathBuf::from).ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no config directory"))?;
+    create_private_dir(&dir)?;
+    let file = dir.join(format!("mcp-http-{port}.token"));
+    write_atomic(&file, token.as_bytes(), Privacy::OwnerOnly)?;
+    Ok(file)
+}
+
+/// Removes the token file of a standalone HTTP server if it still holds `token`.
+pub fn withdraw_http_token(file: &std::path::Path, token: &str) {
+    if std::fs::read_to_string(file).is_ok_and(|t| tokens_match(t.trim(), token)) {
+        let _ = std::fs::remove_file(file);
+    }
+}
+
 /// Reads the session published by the running desktop app.
 pub fn read() -> io::Result<SessionInfo> {
     let path = path()?;
@@ -78,5 +96,22 @@ mod tests {
         assert!(!tokens_match(&a, &b));
         assert!(!tokens_match(&a, &a[..63]));
         assert!(!tokens_match("", &a));
+    }
+
+    /// Regression: `--http` printed the bearer token to stderr. It now goes to an owner-only file.
+    #[test]
+    fn the_http_token_file_is_owner_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("t.token");
+        write_atomic(&file, b"secret-token", Privacy::OwnerOnly).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&file).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        withdraw_http_token(&file, "another-token");
+        assert!(file.exists(), "a file holding another server's token is left alone");
+        withdraw_http_token(&file, "secret-token");
+        assert!(!file.exists());
     }
 }

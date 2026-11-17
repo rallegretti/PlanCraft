@@ -35,6 +35,8 @@ pub enum FileError {
     ChangedOnDisk { path: PathBuf },
     #[error("{path} could not be imported: {message}")]
     Import { path: PathBuf, message: String },
+    #[error("{path} now contains a different project ('{name}'), not the one this plan links to")]
+    DifferentProject { path: PathBuf, name: String },
 }
 
 /// What a file looked like on disk (modification time and size), to notice when another program
@@ -319,12 +321,24 @@ pub fn referenced_external_tasks(p: &Project, project: Uuid) -> HashSet<TaskId> 
 ///
 /// The stored path is relative to `doc_path`'s directory when `doc_path` is known.
 pub fn add_external_project(p: &mut Project, doc_path: Option<&Path>, other: &Path) -> FileResult<Uuid> {
-    let abs_other = if other.is_absolute() {
-        other.to_path_buf()
-    } else {
-        std::env::current_dir().map(|c| c.join(other)).unwrap_or_else(|_| other.to_path_buf())
-    };
+    let abs_other = absolute_path(other);
     let other_project = load(&abs_other)?;
+    Ok(add_loaded_external_project(p, doc_path, &abs_other, &other_project))
+}
+
+/// `path` made absolute against the current directory.
+pub fn absolute_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().map(|c| c.join(path)).unwrap_or_else(|_| path.to_path_buf())
+    }
+}
+
+/// [`add_external_project`] with the other document already read from `abs_other` (an absolute
+/// path), so the file can be read without holding the workspace lock.
+pub fn add_loaded_external_project(p: &mut Project, doc_path: Option<&Path>, abs_other: &Path, other_project: &Project) -> Uuid {
+    let abs_other = abs_other.to_path_buf();
     let stored = match doc_path.and_then(|d| d.parent()) {
         Some(dir) => {
             let dir = if dir.is_absolute() { dir.to_path_buf() } else { std::env::current_dir().map(|c| c.join(dir)).unwrap_or_default() };
@@ -336,7 +350,7 @@ pub fn add_external_project(p: &mut Project, doc_path: Option<&Path>, other: &Pa
     if let Some(e) = p.external_projects.iter_mut().find(|e| e.id == other_project.id) {
         e.path = stored;
         e.name = other_project.name.clone();
-        return Ok(e.id);
+        return e.id;
     }
     p.external_projects.push(ExternalProject {
         id: other_project.id,
@@ -345,32 +359,55 @@ pub fn add_external_project(p: &mut Project, doc_path: Option<&Path>, other: &Pa
         tasks: Vec::new(),
         last_sync: Some(chrono::Local::now().naive_local()),
     });
-    Ok(other_project.id)
+    other_project.id
 }
 
 /// Ensures snapshot data exists for an external task (loading the other document).
 pub fn ensure_external_task(p: &mut Project, doc_path: Option<&Path>, project: Uuid, task: TaskId) -> FileResult<()> {
-    let Some(ext) = p.external_projects.iter().find(|e| e.id == project) else {
+    let Some(path) = external_path(p, doc_path, project) else {
         return Ok(());
     };
-    let path = resolve_external_path(&ext.path, doc_path);
-    let other = load(&path)?;
+    let other = load_external(&path, project)?;
+    ensure_external_task_from(p, project, &other, task);
+    Ok(())
+}
+
+/// Where the linked project `project` is stored, resolved against `doc_path`.
+pub fn external_path(p: &Project, doc_path: Option<&Path>, project: Uuid) -> Option<PathBuf> {
+    p.external(project).map(|e| resolve_external_path(&e.path, doc_path))
+}
+
+/// Reads the document of the linked project `project` from `path`, refusing a file that now
+/// holds a different project (it was replaced since the link was made).
+pub fn load_external(path: &Path, project: Uuid) -> FileResult<Project> {
+    let other = load(path)?;
+    if other.id != project {
+        return Err(FileError::DifferentProject { path: path.to_path_buf(), name: other.name });
+    }
+    Ok(other)
+}
+
+/// [`ensure_external_task`] with the linked document already read (see [`load_external`]).
+pub fn ensure_external_task_from(p: &mut Project, project: Uuid, other: &Project, task: TaskId) {
     if let Some(ext) = p.external_projects.iter_mut().find(|e| e.id == project)
         && let Some(t) = other.task(task)
     {
         ext.tasks.retain(|s| s.id != task);
         ext.tasks.push(snapshot(t));
     }
-    Ok(())
 }
 
 /// Lists the tasks of an external project document (loading it from disk).
 pub fn external_task_list(p: &Project, doc_path: Option<&Path>, project: Uuid) -> FileResult<Vec<ExternalTaskSnapshot>> {
-    let Some(ext) = p.external(project) else {
+    let Some(path) = external_path(p, doc_path, project) else {
         return Ok(Vec::new());
     };
-    let other = load(resolve_external_path(&ext.path, doc_path))?;
-    Ok(other.tasks.iter().map(snapshot).collect())
+    Ok(external_tasks_of(&load_external(&path, project)?))
+}
+
+/// The tasks of a linked document, as snapshots.
+pub fn external_tasks_of(other: &Project) -> Vec<ExternalTaskSnapshot> {
+    other.tasks.iter().map(snapshot).collect()
 }
 
 /// Whether a stored link path names a network share or device namespace (`\\server\share`,
@@ -394,19 +431,46 @@ pub fn refresh_external_on_open(p: &mut Project, doc_path: Option<&Path>) -> Vec
 }
 
 fn refresh_external_links(p: &mut Project, doc_path: Option<&Path>, follow_network: bool) -> Vec<String> {
-    let mut warnings = Vec::new();
-    let now = chrono::Local::now().naive_local();
-    for i in 0..p.external_projects.len() {
-        let Some((id, stored, name)) = p.external_projects.get(i).map(|e| (e.id, e.path.clone(), e.name.clone())) else {
-            continue;
-        };
-        if !follow_network && is_network_path(&stored) {
-            warnings.push(format!("'{name}' is on a network share ({stored}); use Refresh Links to update it"));
+    let reads = read_external_projects(&p.external_projects, doc_path, follow_network);
+    apply_external_projects(p, reads)
+}
+
+/// The linked documents read for a refresh, made by [`read_external_projects`] and applied with
+/// [`apply_external_projects`].
+#[derive(Debug, Default)]
+pub struct ExternalReads {
+    /// For each followed link: its id, the resolved path, and the document read from it.
+    docs: Vec<(Uuid, PathBuf, FileResult<Project>)>,
+    /// Links that were not followed, as warnings.
+    skipped: Vec<String>,
+}
+
+/// Reads the documents behind a plan's external links (an explicit refresh follows network-share
+/// links too). Only the file reading happens here, so it can run without holding the workspace
+/// lock; [`apply_external_projects`] then updates the snapshots.
+pub fn read_external_projects(links: &[ExternalProject], doc_path: Option<&Path>, follow_network: bool) -> ExternalReads {
+    let mut reads = ExternalReads::default();
+    for e in links {
+        if !follow_network && is_network_path(&e.path) {
+            reads.skipped.push(format!("'{}' is on a network share ({}); use Refresh Links to update it", e.name, e.path));
             continue;
         }
+        let path = resolve_external_path(&e.path, doc_path);
+        let loaded = load(&path);
+        reads.docs.push((e.id, path, loaded));
+    }
+    reads
+}
+
+/// Updates the cached snapshots of `p`'s external links from documents read with
+/// [`read_external_projects`]. Returns warnings.
+pub fn apply_external_projects(p: &mut Project, reads: ExternalReads) -> Vec<String> {
+    let mut warnings = reads.skipped;
+    let now = chrono::Local::now().naive_local();
+    for (id, path, loaded) in reads.docs {
         let wanted = referenced_external_tasks(p, id);
-        let path = resolve_external_path(&stored, doc_path);
-        match load(&path) {
+        let Some(ext) = p.external_projects.iter_mut().find(|e| e.id == id) else { continue };
+        match loaded {
             Ok(other) => {
                 if other.id != id {
                     warnings.push(format!(
@@ -416,7 +480,6 @@ fn refresh_external_links(p: &mut Project, doc_path: Option<&Path>, follow_netwo
                     ));
                     continue;
                 }
-                let Some(ext) = p.external_projects.get_mut(i) else { continue };
                 ext.name = other.name.clone();
                 ext.tasks.retain(|s| wanted.contains(&s.id));
                 for tid in &wanted {
@@ -431,7 +494,7 @@ fn refresh_external_links(p: &mut Project, doc_path: Option<&Path>, follow_netwo
                 ext.tasks.sort_by_key(|s| s.id);
                 ext.last_sync = Some(now);
             }
-            Err(e) => warnings.push(format!("Could not refresh '{name}': {e}")),
+            Err(e) => warnings.push(format!("Could not refresh '{}': {e}", ext.name)),
         }
     }
     warnings
@@ -440,6 +503,31 @@ fn refresh_external_links(p: &mut Project, doc_path: Option<&Path>, follow_netwo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: linking a task read whatever file now sits at the link's path, even when it
+    /// holds a different project, and cached its task under the old project's id.
+    #[test]
+    fn a_link_to_a_replaced_file_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let start = chrono::NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+        let other_path = dir.path().join("other.plancraft");
+        let mut other = Project::new("Other", start);
+        let t = other.add_task("API", None);
+        save(&other, &other_path).unwrap();
+        let main_path = dir.path().join("main.plancraft");
+        let mut p = Project::new("Main", start);
+        let ext = add_external_project(&mut p, Some(&main_path), &other_path).unwrap();
+        ensure_external_task(&mut p, Some(&main_path), ext, t).unwrap();
+
+        let mut stranger = Project::new("Stranger", start);
+        stranger.add_task("API", None);
+        save(&stranger, &other_path).unwrap();
+        p.external_projects.iter_mut().for_each(|e| e.tasks.clear());
+        let e = ensure_external_task(&mut p, Some(&main_path), ext, t).unwrap_err();
+        assert!(matches!(e, FileError::DifferentProject { .. }), "{e}");
+        assert!(p.external(ext).unwrap().tasks.is_empty(), "nothing was cached from the other project");
+        assert!(external_task_list(&p, Some(&main_path), ext).is_err());
+    }
 
     /// Regression: opening a document read every path in its external links. A FIFO or device
     /// path blocked forever, and on Windows a `\\\\server\\share` path made the machine connect to

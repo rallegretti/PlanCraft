@@ -21,7 +21,6 @@ serde_json.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
-tiny_http = "0.12"
 
 [dev-dependencies]
 proptest = "1"

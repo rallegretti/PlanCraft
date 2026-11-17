@@ -323,10 +323,10 @@ fn remove_calendar_exception(ctx: &Ctx, a: &Args) -> ToolResult {
             let before = cal.exceptions.len();
             match (index, name) {
                 (Some(i), _) => {
-                    if i as usize >= cal.exceptions.len() {
+                    if usize::try_from(i).map_or(true, |i| i >= cal.exceptions.len()) {
                         return err(format!("exception index {i} out of range (calendar has {})", cal.exceptions.len()));
                     }
-                    cal.exceptions.remove(i as usize);
+                    cal.exceptions.remove(usize::try_from(i).unwrap_or_default());
                 }
                 (None, Some(n)) => cal.exceptions.retain(|e| !e.name.eq_ignore_ascii_case(n.trim())),
                 (None, None) => return err("give 'index' or 'name'"),

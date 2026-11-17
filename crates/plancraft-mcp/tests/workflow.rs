@@ -436,6 +436,19 @@ fn cross_document_external_links() {
     let r = c.call("refresh_external_links", json!({ "document": "App" }));
     assert_eq!(r["warnings"], json!([]));
     assert_eq!(c.call("get_task", json!({ "document": "App", "task": "Integrate" }))["start"], "2026-11-04 08:00");
+    // Regression: the refresh skipped undo, attribution and the unsaved-changes flag. It is now an
+    // agent's edit like any other, and undo brings the old dates back.
+    {
+        use plancraft_core::workspace::ChangeSource;
+        let ws = c.server.workspace().lock().unwrap();
+        let doc = ws.docs.iter().find(|d| d.project.name == "App").unwrap();
+        assert!(doc.dirty);
+        assert_eq!(doc.undo_label(), Some("Refresh Links"));
+        assert_eq!(doc.last_change.as_ref().map(|(l, s)| (l.as_str(), *s)), Some(("Refresh Links", ChangeSource::Agent)));
+    }
+    c.call("undo", json!({ "document": "App" }));
+    assert_eq!(c.call("get_task", json!({ "document": "App", "task": "Integrate" }))["start"], "2026-11-02 08:00");
+    c.call("redo", json!({ "document": "App" }));
 
     // Reopen the dependent document from disk.
     c.call("save_project", json!({ "document": "App" }));
@@ -944,4 +957,39 @@ fn spreadsheet_import_and_csv_export() {
     std::fs::write(&kickoff, "Task,Kick-off\nA,25/10/2026\n").unwrap();
     c.call("import_spreadsheet", json!({ "path": kickoff.to_str().unwrap(), "columns": { "Kick-off": "start" } }));
     assert_eq!(task(&c.call("list_tasks", json!({})), "A")["start"], "2026-10-26 08:00", "25 October 2026 is a Sunday");
+}
+
+/// Regression: ids above 2^32 were cut to 32 bits, so entry 4294967297 deleted entry 1 (and the
+/// same for assignments and external tasks).
+#[test]
+fn oversized_ids_are_refused_not_truncated() {
+    let c = Client::new();
+    c.call("new_project", json!({ "name": "Ids", "start": "2026-10-19" }));
+    c.call("create_task", json!({ "name": "A", "duration": "2d" }));
+    c.call("create_resource", json!({ "name": "Ana" }));
+    c.call("assign_resource", json!({ "task": "A", "resource": "Ana" }));
+    let logged = c.call("log_time", json!({ "task": "A", "resource": "Ana", "date": "2026-10-19", "hours": 2 }));
+    let entry = logged["entry"]["id"].as_u64().or_else(|| logged["id"].as_u64()).unwrap_or(1);
+    let wrapped = (1u64 << 32) + entry;
+    let e = c.call_err("delete_time_entry", json!({ "entry": wrapped }));
+    assert!(e.contains("too large"), "{e}");
+    assert_eq!(c.call("list_time_entries", json!({}))["entries"].as_array().map(Vec::len), Some(1), "entry 1 is still there");
+    let e = c.call_err("unassign_resource", json!({ "assignment": (1u64 << 32) + 1 }));
+    assert!(e.contains("too large"), "{e}");
+    let e = c.call_err("delete_time_entry", json!({ "entry": 1e300 }));
+    assert!(e.contains("too large"), "{e}");
+}
+
+/// Regression: `hours_per_point` accepted "NaN" and values so small they stored 0 minutes.
+#[test]
+fn hours_per_point_must_be_a_real_amount_of_time() {
+    let c = Client::new();
+    c.call("new_project", json!({ "name": "Points", "start": "2026-10-19" }));
+    for bad in [json!("NaN"), json!("inf"), json!(0.0001), json!(-1), json!(0), json!(1e12)] {
+        let e = c.call_err("update_project", json!({ "hours_per_point": bad }));
+        assert!(e.contains("hours_per_point"), "{bad}: {e}");
+    }
+    c.call("update_project", json!({ "hours_per_point": 2.5 }));
+    let ws = c.server.workspace().lock().unwrap();
+    assert_eq!(ws.active_doc().unwrap().project.settings.minutes_per_point, 150);
 }

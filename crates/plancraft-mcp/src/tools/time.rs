@@ -151,7 +151,7 @@ fn list_time_entries(ctx: &Ctx, a: &Args) -> ToolResult {
 }
 
 fn delete_time_entry(ctx: &Ctx, a: &Args) -> ToolResult {
-    let id = TimeEntryId(a.u64("entry")?.ok_or_else(|| ToolError("missing 'entry'".into()))? as u32);
+    let id = TimeEntryId(a.id("entry")?.ok_or_else(|| ToolError("missing 'entry'".into()))?);
     ctx.edit(a, "Delete time entry", |p, _| Ok(p.delete_time_entry(id)?), |_, _| Ok(json!({ "deleted": id.0 })))
 }
 

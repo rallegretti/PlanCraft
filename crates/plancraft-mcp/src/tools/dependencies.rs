@@ -1,14 +1,18 @@
 //! Dependency tools, including cross-document links to external projects.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use plancraft_core::ids::TaskId;
 use plancraft_core::io;
 use plancraft_core::model::*;
+use plancraft_core::workspace::ChangeSource;
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use super::*;
 use crate::args::*;
+use crate::server::doc_at_mut;
 use crate::views;
 
 pub fn tools() -> Vec<Tool> {
@@ -244,14 +248,48 @@ fn list_dependencies(ctx: &Ctx, a: &Args) -> ToolResult {
     })
 }
 
+/// The documents of linked projects, read without holding the workspace lock.
+pub(crate) type LinkedDocs = HashMap<Uuid, io::FileResult<Project>>;
+
+/// Reads the documents of the external projects that `refs` (values of `external_project`
+/// arguments) name in the selected document. Only the link paths are looked up under the
+/// workspace lock; the files are read after it is released, so a slow disk or network share
+/// never freezes the app or other agent calls. Names that match no link are left for the edit
+/// to report.
+pub(crate) fn read_linked_docs(ctx: &Ctx, a: &Args, refs: &[&Value]) -> ToolResult<LinkedDocs> {
+    if refs.is_empty() {
+        return Ok(LinkedDocs::new());
+    }
+    let targets: Vec<(Uuid, PathBuf)> = ctx.with_doc(a, |doc| {
+        let p = &doc.project;
+        Ok(refs
+            .iter()
+            .filter_map(|v| resolve_external(p, v).ok())
+            .filter_map(|id| io::external_path(p, doc.path.as_deref(), id).map(|path| (id, path)))
+            .collect())
+    })?;
+    Ok(targets.into_iter().map(|(id, path)| (id, io::load_external(&path, id))).collect())
+}
+
+/// The document read for the linked project `id` (see [`read_linked_docs`]).
+pub(crate) fn linked_doc(docs: &LinkedDocs, id: Uuid) -> ToolResult<&Project> {
+    match docs.get(&id) {
+        Some(Ok(p)) => Ok(p),
+        Some(Err(e)) => Err(ToolError(e.to_string())),
+        None => err("the external projects of this document changed while its files were being read; try again"),
+    }
+}
+
 fn add_external_project(ctx: &Ctx, a: &Args) -> ToolResult {
     ctx.require_file_access("Linking external files")?;
-    let path = PathBuf::from(a.req_str("path")?.trim());
+    let path = io::absolute_path(&PathBuf::from(a.req_str("path")?.trim()));
+    // Read the other document before taking the workspace lock.
+    let other = io::load(&path)?;
     ctx.edit(
         a,
         "Add external project",
         |p, doc_path| {
-            let id = io::add_external_project(p, doc_path, &path)?;
+            let id = io::add_loaded_external_project(p, doc_path, &path, &other);
             if id == p.id {
                 return err("a project cannot reference itself");
             }
@@ -317,11 +355,13 @@ fn list_external_projects(ctx: &Ctx, a: &Args) -> ToolResult {
 }
 
 fn list_external_tasks(ctx: &Ctx, a: &Args) -> ToolResult {
+    let which = a.get("external_project").unwrap_or(&Value::Null);
+    let docs = read_linked_docs(ctx, a, &[which])?;
     ctx.read(a, |doc| {
         let p = &doc.project;
-        let ext = resolve_external(p, a.get("external_project").unwrap_or(&Value::Null))?;
+        let ext = resolve_external(p, which)?;
         let search = a.str("search")?.map(|s| s.to_lowercase());
-        let tasks = io::external_task_list(p, doc.path.as_deref(), ext)?;
+        let tasks = io::external_tasks_of(linked_doc(&docs, ext)?);
         let list: Vec<Value> = tasks
             .iter()
             .filter(|s| search.as_ref().is_none_or(|q| s.name.to_lowercase().contains(q)))
@@ -337,17 +377,21 @@ fn list_external_tasks(ctx: &Ctx, a: &Args) -> ToolResult {
 }
 
 fn link_external_task(ctx: &Ctx, a: &Args) -> ToolResult {
+    let which = a.get("external_project").unwrap_or(&Value::Null);
+    let docs = read_linked_docs(ctx, a, &[which])?;
     ctx.edit(
         a,
         "Link external task",
-        |p, doc_path| {
-            let ext = resolve_external(p, a.get("external_project").unwrap_or(&Value::Null))?;
+        |p, _| {
+            let ext = resolve_external(p, which)?;
+            let other = linked_doc(&docs, ext)?;
             let task_v = a.get("task").ok_or_else(|| ToolError("missing 'task'".into()))?;
-            let task = match task_v.as_u64().or_else(|| task_v.as_str().and_then(|s| s.trim().parse().ok())) {
-                Some(n) => TaskId(n as u32),
+            let number = task_v.as_u64().or_else(|| task_v.as_str().and_then(|s| s.trim().parse::<u64>().ok()));
+            let task = match number {
+                Some(n) => TaskId(u32::try_from(n).map_err(|_| ToolError(format!("'task' {n} is not a valid task id (too large)")))?),
                 None => {
                     let name = task_v.as_str().unwrap_or_default();
-                    let list = io::external_task_list(p, doc_path, ext)?;
+                    let list = io::external_tasks_of(other);
                     let hits: Vec<_> = list.iter().filter(|s| s.name.eq_ignore_ascii_case(name.trim())).collect();
                     match hits.as_slice() {
                         [one] => one.id,
@@ -356,7 +400,7 @@ fn link_external_task(ctx: &Ctx, a: &Args) -> ToolResult {
                     }
                 }
             };
-            io::ensure_external_task(p, doc_path, ext, task)?;
+            io::ensure_external_task_from(p, ext, other, task);
             if p.external(ext).and_then(|e| e.task(task)).is_none() {
                 return err(format!("task {} does not exist in the external project (see list_external_tasks)", task.0));
             }
@@ -394,8 +438,15 @@ fn link_external_task(ctx: &Ctx, a: &Args) -> ToolResult {
 }
 
 fn refresh_external_links(ctx: &Ctx, a: &Args) -> ToolResult {
-    let out = ctx.with_doc(a, |doc| {
-        let warnings = doc.refresh_external();
+    // Read the linked files without holding the workspace lock (a slow disk or network share
+    // would otherwise freeze the app and every other agent call), then apply them as an undoable
+    // agent edit. The document is looked up again by handle in case it closed meanwhile.
+    let (handle, links, path) = ctx.with_doc(a, |doc| Ok((doc.handle, doc.project.external_projects.clone(), doc.path.clone())))?;
+    let reads = io::read_external_projects(&links, path.as_deref(), true);
+    let out = ctx.with_workspace(|ws| {
+        let i = ws.index_of(handle).ok_or_else(|| ToolError("the document was closed while its links were being read".into()))?;
+        let doc = doc_at_mut(ws, i)?;
+        let warnings = doc.apply_external_reads(reads, ChangeSource::Agent);
         let p = &doc.project;
         Ok(json!({
             "refreshed": p.external_projects.len(),
