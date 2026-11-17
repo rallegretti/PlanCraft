@@ -34,7 +34,7 @@ fn pack(p: &Project, mut idxs: Vec<usize>) -> (Vec<(usize, usize)>, usize) {
         let (Some(s), Some(f)) = (t.sched.start, t.sched.finish) else {
             continue;
         };
-        let end = f.max(s + SignedDuration::from_mins(1));
+        let end = f.max(plancraft_core::dates::add_minutes(s, 1));
         let lane = match lane_end.iter().position(|e| *e <= s) {
             Some(lane) => {
                 if let Some(e) = lane_end.get_mut(lane) {
@@ -123,10 +123,10 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                 st.gantt.zoom_by(z, x, chart_left);
             }
         } else if shift {
-            st.gantt.left -= SignedDuration::from_mins(((d.y + d.x) / st.gantt.px_per_day * 1440.0) as i64);
+            st.gantt.left = plancraft_core::dates::add_minutes(st.gantt.left, -(((d.y + d.x) / st.gantt.px_per_day * 1440.0) as i64));
         } else {
             st.misc_grid.scroll_y -= d.y;
-            st.gantt.left -= SignedDuration::from_mins((d.x / st.gantt.px_per_day * 1440.0) as i64);
+            st.gantt.left = plancraft_core::dates::add_minutes(st.gantt.left, -((d.x / st.gantt.px_per_day * 1440.0) as i64));
         }
     }
     st.misc_grid.scroll_y = st.misc_grid.scroll_y.clamp(0.0, (total_h - body.height() + 20.0).max(0.0));

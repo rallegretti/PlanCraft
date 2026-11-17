@@ -37,7 +37,7 @@ pub fn show(ui: &mut Ui, rect: Rect, p: &Project, shown: &[bool], g: &mut GanttS
     let span = finish.signed_duration_since(start).num_minutes().max(60) as f32;
     let bar = Rect::from_min_max(pos2(rect.left() + 90.0, rect.top() + 30.0), pos2(rect.right() - 90.0, rect.top() + 52.0));
     let x_of = |t: DateTime| bar.left() + t.signed_duration_since(start).num_minutes() as f32 / span * bar.width();
-    let t_of = |x: f32| start + SignedDuration::from_mins(((x - bar.left()) / bar.width() * span) as i64);
+    let t_of = |x: f32| plancraft_core::dates::add_minutes(start, ((x - bar.left()) / bar.width() * span) as i64);
 
     // Start/finish labels.
     painter.text(
@@ -165,7 +165,7 @@ pub fn show(ui: &mut Ui, rect: Rect, p: &Project, shown: &[bool], g: &mut GanttS
     if (resp.dragged() || resp.clicked())
         && let Some(pp) = resp.interact_pointer_pos()
     {
-        let half = SignedDuration::from_mins(view_end.signed_duration_since(view_start).num_minutes() / 2);
-        g.left = t_of(pp.x) - half;
+        let half = view_end.signed_duration_since(view_start).num_minutes() / 2;
+        g.left = plancraft_core::dates::add_minutes(t_of(pp.x), -half);
     }
 }

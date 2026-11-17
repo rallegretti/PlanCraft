@@ -161,6 +161,7 @@ proptest! {
             }
             let report = recalculate(&mut q);
             prop_assert!(!report.warnings.iter().any(|w| w.contains("internal error")), "{:?}", report.warnings);
+            check_csv_tables(&q)?;
         }
     }
 
@@ -190,6 +191,7 @@ proptest! {
         // Whatever the edits left exports to Microsoft Project XML and imports again.
         let (xml, _) = plancraft_core::mspdi::to_xml(&doc.project);
         check_mspdi(&xml)?;
+        check_csv_tables(&doc.project)?;
         // Whatever the edits left, the plan prints (table and chart) to a valid PDF, also over
         // any date range and at any zoom.
         let p = &doc.project;
@@ -1209,6 +1211,25 @@ fn check_spreadsheet(bytes: &[u8], extension: &str, columns: &[Option<plancraft_
             }
             prop_assert_eq!(panics(), before, "building the plan panicked");
         }
+    }
+    Ok(())
+}
+
+/// Every table of the plan exports as CSV without a panic, and each reads back as one sheet
+/// with a row per item, none wider than the headings.
+fn check_csv_tables(p: &Project) -> Result<(), TestCaseError> {
+    use plancraft_core::tabular;
+    let before = panics();
+    for table in tabular::CsvTable::ALL {
+        let csv = tabular::table_to_csv(p, table);
+        prop_assert_eq!(panics(), before, "exporting {:?} panicked", table);
+        let sheets = tabular::read_bytes(csv.as_bytes(), "csv");
+        prop_assert!(sheets.is_ok(), "{:?} doesn't read back", table);
+        let Ok(sheets) = sheets else { return Ok(()) };
+        let grid = &sheets.sheets[0].1;
+        prop_assert_eq!(grid.rows.len(), table.rows(p), "{:?}: one row per item", table);
+        let width = grid.headers.len();
+        prop_assert!(grid.rows.iter().all(|r| r.len() <= width), "{:?}: a row wider than the headings", table);
     }
     Ok(())
 }

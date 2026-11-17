@@ -1,5 +1,6 @@
 //! Task lists from spreadsheets: importing CSV, tab-separated text and Excel workbooks (`.xlsx`,
-//! `.xlsm`, `.xlsb`), and exporting a plan's task list as CSV.
+//! `.xlsm`, `.xlsb`), and exporting a plan's tables (tasks, resources, assignments, logged time) as
+//! CSV.
 //!
 //! Importing takes three steps, so a person (or an agent) can check the middle one:
 //! 1. [`read_path`] / [`read_bytes`] read the file into worksheets of text cells.
@@ -26,7 +27,7 @@ use crate::io::{FileError, FileResult};
 use crate::limits::{MAX_FILE_BYTES, MAX_NOTES_CHARS, MAX_TASKS};
 
 pub use build::build;
-pub use export::to_csv;
+pub use export::{CsvTable, table_to_csv, to_csv};
 
 /// File extensions read as CSV text.
 pub const TEXT_EXTENSIONS: [&str; 3] = ["csv", "tsv", "txt"];

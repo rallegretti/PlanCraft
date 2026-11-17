@@ -237,7 +237,13 @@ fn file_menu(ui: &mut Ui, info: &MenuInfo, settings: &AppSettings, push: &dyn Fn
     item(ui, "Print…", "Ctrl+P", doc, Command::Print);
     item(ui, "Export PDF…", "", doc, Command::ExportPdf);
     item(ui, "Import Excel or CSV…", "", true, Command::ImportSpreadsheet);
-    item(ui, "Export CSV…", "", doc, Command::ExportCsv);
+    ui.add_enabled_ui(doc, |ui| {
+        ui.menu_button("Export CSV", |ui| {
+            for table in plancraft_core::tabular::CsvTable::ALL {
+                item(ui, &format!("{}…", table.label()), "", doc, Command::ExportCsv(table));
+            }
+        });
+    });
     item(ui, "Export Microsoft Project XML…", "", doc, Command::ExportMspdi);
     ui.separator();
     item(ui, "Project Information…", "", doc, Command::ProjectInfo);
@@ -450,7 +456,14 @@ fn toolbar(ui: &mut Ui, st: &mut UiState, info: &MenuInfo, settings: &AppSetting
             sep(ui);
             b(ui, "🖶", Some("Print"), "Print preview, page setup and printing (Ctrl+P)", doc, Command::Print);
             b(ui, "📄", Some("Export PDF"), "Save the current view as a PDF", doc, Command::ExportPdf);
-            b(ui, "🗐", Some("Export CSV"), "Export the task list as CSV", doc, Command::ExportCsv);
+            b(
+                ui,
+                "🗐",
+                Some("Export CSV"),
+                "Export the task list as CSV",
+                doc,
+                Command::ExportCsv(plancraft_core::tabular::CsvTable::Tasks),
+            );
             b(ui, "📤", Some("Export XML"), "Save the plan as a Microsoft Project XML file", doc, Command::ExportMspdi);
         }
         MenuTab::View => {

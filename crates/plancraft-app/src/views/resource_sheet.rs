@@ -220,11 +220,7 @@ fn totals(p: &Project) -> HashMap<ResourceId, (Minutes, f64)> {
         };
         let e = work.entry(a.resource).or_default();
         e.0 = e.0.saturating_add(a.work);
-        e.1 += match r.kind {
-            ResourceType::Work => a.work as f64 / 60.0 * r.standard_rate + r.cost_per_use,
-            ResourceType::Material => a.units * r.standard_rate + r.cost_per_use,
-            ResourceType::Cost => a.cost,
-        };
+        e.1 += a.cost_with(r);
     }
     work
 }

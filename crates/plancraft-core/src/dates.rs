@@ -67,6 +67,12 @@ pub fn add_years(d: Date, n: i64) -> Option<Date> {
     d.checked_add(jiff::Span::new().try_years(n).ok()?).ok()
 }
 
+/// `d` moved by `n` days, stopping at the first or last representable day instead of failing.
+/// For display code, where a date at the edge beats none; plan edits use [`add_days`].
+pub fn shift_days(d: Date, n: i64) -> Date {
+    add_days(d, n).unwrap_or(if n < 0 { Date::MIN } else { Date::MAX })
+}
+
 /// Days from `a` to `b` (negative when `b` is earlier).
 pub fn days_between(a: Date, b: Date) -> i64 {
     b.duration_since(a).as_hours() / 24
@@ -542,6 +548,11 @@ mod tests {
         assert_eq!(add_months(d, 1), ymd(2026, 2, 28));
         assert_eq!(add_days(d, 1), ymd(2026, 2, 1));
         assert_eq!(add_days(d, i64::MAX), None);
+        assert_eq!(shift_days(d, 1), ymd(2026, 2, 1).unwrap());
+        assert_eq!(shift_days(d, i64::MAX), Date::MAX);
+        assert_eq!(shift_days(d, i64::MIN), Date::MIN);
+        assert_eq!(shift_days(Date::MAX, 1), Date::MAX);
+        assert_eq!(shift_days(Date::MIN, -7), Date::MIN);
         assert_eq!(add_years(ymd(2024, 2, 29).unwrap(), 1), ymd(2025, 2, 28));
         let dt = midnight(d);
         assert_eq!(add_minutes(dt, i64::MAX), DateTime::MAX);

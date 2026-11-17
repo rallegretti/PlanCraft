@@ -218,14 +218,7 @@ pub fn estimate_json(p: &Project, e: &Estimate) -> Value {
 
 /// Assignment cost using the same formula as the scheduler.
 pub fn assignment_cost(p: &Project, a: &Assignment) -> f64 {
-    match p.resource(a.resource) {
-        Some(r) => match r.kind {
-            ResourceType::Work => a.work as f64 / 60.0 * r.standard_rate + r.cost_per_use,
-            ResourceType::Material => a.units * r.standard_rate + r.cost_per_use,
-            ResourceType::Cost => a.cost,
-        },
-        None => 0.0,
-    }
+    p.resource(a.resource).map_or(0.0, |r| a.cost_with(r))
 }
 
 /// Actual work of an assignment: direct actual work plus tracked time.

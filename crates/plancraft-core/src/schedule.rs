@@ -1081,14 +1081,10 @@ fn rollup_tracking(p: &mut Project) {
         };
         let slot = by_task.entry(a.task).or_default();
         slot.1 = slot.1.saturating_add(a.actual_work);
-        match r.kind {
-            ResourceType::Work => {
-                slot.3 = true;
-                slot.0 = slot.0.saturating_add(a.work);
-                slot.2 += a.work as f64 / 60.0 * r.standard_rate + r.cost_per_use;
-            }
-            ResourceType::Material => slot.2 += a.units * r.standard_rate + r.cost_per_use,
-            ResourceType::Cost => slot.2 += a.cost,
+        slot.2 += a.cost_with(r);
+        if r.kind == ResourceType::Work {
+            slot.3 = true;
+            slot.0 = slot.0.saturating_add(a.work);
         }
     }
     let settings = p.settings.clone();

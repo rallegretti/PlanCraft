@@ -331,7 +331,7 @@ fn serve_connection(server: &McpServer, mut stream: TcpStream, loopback: bool, t
     // data can reset the connection before the client sees the reply, so drain a little first,
     // for at most DRAIN_TIME in all (a client dripping bytes can't keep its slot).
     let _ = stream.shutdown(Shutdown::Write);
-    let until = Instant::now() + DRAIN_TIME;
+    let Some(until) = Instant::now().checked_add(DRAIN_TIME) else { return };
     let mut left = DRAIN_BYTES;
     let mut chunk = [0u8; 8 * 1024];
     while left > 0 {

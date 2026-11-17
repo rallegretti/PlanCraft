@@ -63,8 +63,8 @@ pub fn period_toolbar(ui: &mut Ui, st: &mut UiState, p: &Project) -> Date {
 
 pub fn step(g: Granularity, d: Date, n: i32) -> Date {
     match g {
-        Granularity::Day => d + plancraft_core::dates::days(n as i64),
-        Granularity::Week => d + plancraft_core::dates::days(7 * n as i64),
+        Granularity::Day => plancraft_core::dates::shift_days(d, i64::from(n)),
+        Granularity::Week => plancraft_core::dates::shift_days(d, 7 * i64::from(n)),
         Granularity::Month => {
             let total = d.year32() * 12 + d.month0() as i32 + n;
             plancraft_core::dates::ymd(total.div_euclid(12), total.rem_euclid(12) as u32 + 1, 1).unwrap_or(d)
@@ -86,7 +86,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     for _ in 0..nper {
         to = step(st.granularity, to, 1);
     }
-    let report = workload(p, from, to - plancraft_core::dates::days(1), st.granularity);
+    let report = workload(p, from, plancraft_core::dates::shift_days(to, -1), st.granularity);
 
     // Rows.
     let mut rows: Vec<Row> = Vec::new();

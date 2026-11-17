@@ -197,11 +197,11 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
             }
         } else if shift {
             let dx = scroll.y + scroll.x;
-            g.left -= SignedDuration::from_mins((dx / g.px_per_day * 1440.0) as i64);
+            g.left = plancraft_core::dates::add_minutes(g.left, -((dx / g.px_per_day * 1440.0) as i64));
         } else {
             *scroll_y -= scroll.y;
             if scroll.x.abs() > 0.0 {
-                g.left -= SignedDuration::from_mins((scroll.x / g.px_per_day * 1440.0) as i64);
+                g.left = plancraft_core::dates::add_minutes(g.left, -((scroll.x / g.px_per_day * 1440.0) as i64));
             }
         }
     }
@@ -223,10 +223,12 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
             if !proj_cal.is_working_day(d) {
                 let t0 = d.and_time(Time::MIN);
                 let x0 = g.x_of(chart_left, t0);
-                let x1 = g.x_of(chart_left, t0 + plancraft_core::dates::days(1));
+                let x1 = g.x_of(chart_left, plancraft_core::dates::add_minutes(t0, 1440));
                 bp.rect_filled(Rect::from_x_y_ranges(x0..=x1, body.y_range()), 0.0, theme::pal().NONWORKING);
             }
-            d += plancraft_core::dates::days(1);
+            // Stops at the last representable day instead of overflowing.
+            let Some(next) = plancraft_core::dates::next_day(d) else { break };
+            d = next;
         }
     }
     let (_, bottom_unit) = timescale::tiers(g.px_per_day);
@@ -693,9 +695,9 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
     let snap = |t: DateTime| -> DateTime {
         if g.px_per_day >= 72.0 {
             let midnight = t.date().and_time(Time::MIN);
-            midnight + SignedDuration::from_mins((t.signed_duration_since(midnight).num_minutes() + 30) / 60 * 60)
+            plancraft_core::dates::add_minutes(midnight, t.signed_duration_since(midnight).num_minutes().saturating_add(30) / 60 * 60)
         } else {
-            (t + SignedDuration::from_hours(12)).date().and_time(Time::MIN)
+            plancraft_core::dates::add_minutes(t, 12 * 60).date().and_time(Time::MIN)
         }
     };
     // A drag ends without a change when Escape is pressed, or when it can no longer end here: the
@@ -925,13 +927,13 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
     );
     let hs = Rect::from_min_max(pos2(body.left(), body.bottom()), pos2(body.right(), rect.bottom()));
     // Horizontal range: project span with margins.
-    let span_start = p.sched.start.unwrap_or(p.start) - plancraft_core::dates::days(30);
-    let span_end = p.sched.finish.unwrap_or(p.start).max(now) + plancraft_core::dates::days(60);
+    let span_start = plancraft_core::dates::add_minutes(p.sched.start.unwrap_or(p.start), -30 * 1440);
+    let span_end = plancraft_core::dates::add_minutes(p.sched.finish.unwrap_or(p.start).max(now), 60 * 1440);
     let total_px = (span_end.signed_duration_since(span_start).num_minutes() as f32 / 1440.0 * g.px_per_day).max(body.width() + 1.0);
     let cur = (g.left.signed_duration_since(span_start).num_minutes() as f32 / 1440.0 * g.px_per_day).clamp(0.0, total_px - body.width());
     let new = scrollbar(ui, ui.id().with("gantt_hs"), hs, false, cur, total_px, body.width());
     if (new - cur).abs() > 0.5 {
-        g.left = span_start + SignedDuration::from_mins((new / g.px_per_day * 1440.0) as i64);
+        g.left = plancraft_core::dates::add_minutes(span_start, (new / g.px_per_day * 1440.0) as i64);
     }
     painter.rect_filled(Rect::from_min_max(pos2(rect.right() - 12.0, body.bottom()), rect.max), 0.0, theme::pal().PANEL_BG);
     painter.vline(rect.left() + 0.5, rect.y_range(), Stroke::new(1.0, theme::pal().GRID_LINE_STRONG));

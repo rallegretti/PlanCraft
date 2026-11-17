@@ -1,4 +1,4 @@
-//! Spreadsheet tools: import a task list from CSV or Excel, export one as CSV.
+//! Spreadsheet tools: import a task list from CSV or Excel, export the plan's tables as CSV.
 
 use std::path::PathBuf;
 
@@ -35,11 +35,12 @@ pub fn tools() -> Vec<Tool> {
         ),
         Tool::new(
             "export_csv",
-            "Export the task list as CSV",
-            "Save the document's task list as a CSV file for spreadsheets: ID, WBS, outline level, name, milestone, duration, start, finish, % complete, work, cost, predecessors, resources, critical and custom fields. import_spreadsheet reads the file back. The document itself is not changed. A relative path is relative to the PlanCraft process's working folder.",
+            "Export a table as CSV",
+            "Save one of the document's tables as a CSV file for spreadsheets. 'tasks' (the default): ID, WBS, outline level, name, milestone, duration, start, finish, % complete, work, cost, predecessors, resources, critical and custom fields; import_spreadsheet reads it back. 'resources': the resource sheet with each resource's work, actual work, cost and whether it is overallocated. 'assignments': a row per resource on a task, with units, work, actual work, cost, contour and the task's dates. 'time': logged time, a row per timesheet entry. Work is in hours. The document itself is not changed. A relative path is relative to the PlanCraft process's working folder.",
             schema(
                 json!({
                     "path": string("File path ending in .csv (added when missing)."),
+                    "table": string_enum("Which table to export (default tasks).", &["tasks", "resources", "assignments", "time"]),
                     "overwrite": boolean("Replace an existing file at 'path' (default false). Check with the user first."),
                 }),
                 &["path"],
@@ -209,6 +210,11 @@ fn import_spreadsheet(ctx: &Ctx, a: &Args) -> ToolResult {
 fn export_csv(ctx: &Ctx, a: &Args) -> ToolResult {
     ctx.require_file_access("Exporting files")?;
     let overwrite = a.bool("overwrite")?.unwrap_or(false);
+    let table = match a.str("table")? {
+        None => tabular::CsvTable::Tasks,
+        Some(k) => tabular::CsvTable::from_key(k)
+            .ok_or_else(|| ToolError::from(format!("unknown table '{k}': use tasks, resources, assignments or time")))?,
+    };
     let raw = a.req_str("path")?.trim();
     if raw.is_empty() {
         return err("'path' is empty");
@@ -224,8 +230,8 @@ fn export_csv(ctx: &Ctx, a: &Args) -> ToolResult {
         return err(format!("{} already exists; pass overwrite: true to replace it (check with the user first)", path.display()));
     }
     // Make the text, then write without holding the workspace.
-    let (csv, tasks) = ctx.read(a, |doc| Ok((tabular::to_csv(&doc.project), doc.project.tasks.len())))?;
+    let (csv, rows) = ctx.read(a, |doc| Ok((tabular::table_to_csv(&doc.project, table), table.rows(&doc.project))))?;
     plancraft_core::io::write_atomic(&path, csv.as_bytes(), plancraft_core::io::Privacy::KeepExisting)
         .map_err(|e| ToolError::from(format!("could not write {}: {e}", path.display())))?;
-    Ok(json!({ "path": path.display().to_string(), "tasks": tasks }))
+    Ok(json!({ "path": path.display().to_string(), "table": table.key(), "rows": rows }))
 }
