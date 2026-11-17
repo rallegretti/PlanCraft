@@ -207,10 +207,36 @@ pub fn save(p: &Project, path: impl AsRef<Path>) -> FileResult<()> {
 /// Who may read a file written by [`write_atomic`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Privacy {
-    /// A new file is readable by its owner only (0600 on Unix); a replaced file keeps its permissions.
+    /// The user's own document (a plan, an export). A new file is readable by its owner only (0600
+    /// on Unix); a replaced file keeps its permissions and (on Unix) its group, a symbolic link is
+    /// followed so its target is updated, and a read-only file is refused rather than replaced.
     KeepExisting,
-    /// Always readable by the owner only (settings, recovery copies, session tokens).
+    /// Always readable by the owner only (settings, recovery copies, session tokens). A symbolic
+    /// link at `path` is replaced, never followed, so private data can't be redirected elsewhere.
     OwnerOnly,
+}
+
+/// Most symbolic links followed in a row before giving up (as Linux's `ELOOP` limit).
+const MAX_SYMLINK_HOPS: usize = 40;
+
+/// Where a write to `path` should land: `path` itself, or (when it is a symbolic link) the file it
+/// finally points at, so that saving through a link updates the real file instead of replacing
+/// the link with a copy. A link to a file that does not exist yet gives that file's path.
+fn resolve_symlinks(path: &Path) -> std::io::Result<PathBuf> {
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_SYMLINK_HOPS {
+        match std::fs::symlink_metadata(&current) {
+            Ok(m) if m.file_type().is_symlink() => {
+                let target = std::fs::read_link(&current)?;
+                current = match current.parent() {
+                    Some(dir) if target.is_relative() => dir.join(target),
+                    _ => target,
+                };
+            }
+            _ => return Ok(current),
+        }
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{} is a loop of symbolic links", path.display())))
 }
 
 /// Writes `bytes` to `path` so that a crash or power cut never leaves a torn file.
@@ -218,23 +244,46 @@ pub enum Privacy {
 /// The data goes to a temporary file in the same directory, is flushed to disk (`fsync`) and is
 /// then renamed over `path` in one step, so `path` holds either the old or the new contents. On
 /// Unix the directory is synced too, so the rename itself survives a power cut.
+///
+/// With [`Privacy::KeepExisting`] a symbolic link is followed (the temporary file goes next to
+/// its target) and a read-only file is refused with [`std::io::ErrorKind::PermissionDenied`].
+/// The replaced file's permissions and group are kept; its access control lists (ACLs) and other
+/// extended attributes are not, as copying them needs platform code beyond the standard library.
 pub fn write_atomic(path: &Path, bytes: &[u8], privacy: Privacy) -> std::io::Result<()> {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let resolved;
+    let path = match privacy {
+        Privacy::KeepExisting => {
+            resolved = resolve_symlinks(path)?;
+            resolved.as_path()
+        }
+        Privacy::OwnerOnly => path,
+    };
     let dir = match path.parent() {
         Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
         _ => PathBuf::from("."),
     };
     let name = path.file_name().ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a file path"))?;
     let tmp = dir.join(format!(".{}.{}-{}.tmp", name.to_string_lossy(), std::process::id(), COUNTER.fetch_add(1, Ordering::Relaxed)));
-    let keep = match privacy {
-        Privacy::KeepExisting => std::fs::metadata(path).ok().map(|m| m.permissions()),
+    let existing = match privacy {
+        Privacy::KeepExisting => std::fs::metadata(path).ok(),
         Privacy::OwnerOnly => None,
     };
+    if existing.as_ref().is_some_and(|m| m.permissions().readonly()) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("{} is read-only; make it writable or save under another name", path.display()),
+        ));
+    }
     let result = (|| {
         let mut f = create_private(&tmp)?;
         f.write_all(bytes)?;
-        if let Some(perms) = keep {
-            f.set_permissions(perms)?;
+        if let Some(m) = &existing {
+            // The group first (best effort: only a group the user belongs to can be set), so the
+            // permissions below never apply to the wrong group.
+            #[cfg(unix)]
+            let _ = std::os::unix::fs::fchown(&f, None, Some(std::os::unix::fs::MetadataExt::gid(m)));
+            f.set_permissions(m.permissions())?;
         }
         f.sync_all()?;
         drop(f);
@@ -645,6 +694,87 @@ mod tests {
             create_private_dir(&private).unwrap();
             assert_eq!(std::fs::metadata(&private).unwrap().permissions().mode() & 0o777, 0o700);
         }
+    }
+
+    /// Regression: saving through a symbolic link replaced the link with a regular file, leaving
+    /// the real plan it pointed at unchanged.
+    #[cfg(unix)]
+    #[test]
+    fn saving_through_a_symlink_updates_its_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let real_dir = dir.path().join("real");
+        std::fs::create_dir(&real_dir).unwrap();
+        let target = real_dir.join("plan.plancraft");
+        let mut p = Project::new("A", crate::dates::ymd(2026, 10, 19).unwrap());
+        save(&p, &target).unwrap();
+        // A relative link, and a link to that link.
+        let link = dir.path().join("link.plancraft");
+        std::os::unix::fs::symlink("real/plan.plancraft", &link).unwrap();
+        let link2 = dir.path().join("link2.plancraft");
+        std::os::unix::fs::symlink(&link, &link2).unwrap();
+
+        p.name = "B".into();
+        save(&p, &link2).unwrap();
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link stays a link");
+        assert!(std::fs::symlink_metadata(&link2).unwrap().file_type().is_symlink(), "the link stays a link");
+        assert_eq!(load(&target).unwrap().name, "B", "the target was updated");
+        let names: Vec<_> = std::fs::read_dir(&real_dir).unwrap().map(|e| e.unwrap().file_name()).collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("plan.plancraft")], "no temporary file is left behind");
+
+        // A loop of links is refused, not followed forever.
+        let a = dir.path().join("a.plancraft");
+        let b = dir.path().join("b.plancraft");
+        std::os::unix::fs::symlink(&b, &a).unwrap();
+        std::os::unix::fs::symlink(&a, &b).unwrap();
+        assert!(save(&p, &a).is_err());
+    }
+
+    /// Regression: a read-only plan (mode 0444) was silently replaced on save.
+    #[test]
+    fn a_read_only_plan_is_not_overwritten() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plan.plancraft");
+        let mut p = Project::new("A", crate::dates::ymd(2026, 10, 19).unwrap());
+        save(&p, &path).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&path, perms).unwrap();
+
+        p.name = "B".into();
+        let e = save(&p, &path).unwrap_err();
+        assert!(e.to_string().contains("read-only"), "{e}");
+        assert!(matches!(&e, FileError::Io { source, .. } if source.kind() == std::io::ErrorKind::PermissionDenied), "{e}");
+        assert_eq!(load(&path).unwrap().name, "A", "the file was left alone");
+        let count = std::fs::read_dir(dir.path()).unwrap().count();
+        assert_eq!(count, 1, "no temporary file is left behind");
+        // Private files (settings, recovery copies) are still replaced (Windows refuses to rename
+        // over a read-only file whatever we do).
+        #[cfg(unix)]
+        {
+            write_atomic(&path, b"{}", Privacy::OwnerOnly).unwrap();
+            assert_eq!(std::fs::read(&path).unwrap(), b"{}");
+        }
+    }
+
+    /// Regression: a replaced file lost its group (it got the user's primary group). Needs a
+    /// second group the user belongs to; without one there is nothing to check.
+    #[cfg(unix)]
+    #[test]
+    fn a_replaced_plan_keeps_its_group() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plan.plancraft");
+        let p = Project::new("A", crate::dates::ymd(2026, 10, 19).unwrap());
+        save(&p, &path).unwrap();
+        let primary = std::fs::metadata(&path).unwrap().gid();
+        let groups = std::process::Command::new("id").arg("-G").output().map(|o| String::from_utf8_lossy(&o.stdout).into_owned());
+        let other = groups.unwrap_or_default().split_whitespace().filter_map(|g| g.parse::<u32>().ok()).find(|&g| g != primary);
+        let Some(other) = other.filter(|&g| std::os::unix::fs::chown(&path, None, Some(g)).is_ok()) else {
+            eprintln!("skipped: the user belongs to no second group");
+            return;
+        };
+        save(&p, &path).unwrap();
+        assert_eq!(std::fs::metadata(&path).unwrap().gid(), other, "the group was kept");
     }
 
     #[test]

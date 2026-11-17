@@ -698,6 +698,15 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
             (t + SignedDuration::from_hours(12)).date().and_time(Time::MIN)
         }
     };
+    // A drag ends without a change when Escape is pressed, or when it can no longer end here: the
+    // button was released outside the window (no drag stop arrives). While the button is held
+    // the drag goes on, also with the pointer outside the window for a moment.
+    if g.drag.is_some() {
+        let (esc, released) = ui.input(|i| (i.key_pressed(egui::Key::Escape), !i.pointer.any_down()));
+        if esc || (released && !resp.drag_stopped()) {
+            g.drag = None;
+        }
+    }
     if let (Some(drag), Some(pp)) = (g.drag.clone(), ui.input(|i| i.pointer.interact_pos())) {
         let row_at = |y: f32| -> Option<usize> {
             let r = ((y - body.top() + *scroll_y) / rh).floor();

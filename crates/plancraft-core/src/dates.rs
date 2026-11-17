@@ -603,6 +603,15 @@ mod typed_dates {
         assert_eq!(start("2026-10-19 13:30:15").as_deref(), Some("2026-10-19T13:30:15"));
         assert_eq!(start("10/19/2026 9:05").as_deref(), Some("2026-10-19T09:05:00"));
         assert_eq!(p.parse_datetime("Mon 10/19/26", true).map(|d| d.to_string()).as_deref(), Some("2026-10-19T17:00:00"));
+        // Regression: a two-digit year was read as the year 26 (`%Y` took the two digits first).
+        // Two digits follow `%y`: 00–68 are 2000–2068 and 69–99 are 1969–1999; four digits stay.
+        assert_eq!(start("10/19/26").as_deref(), Some(day));
+        assert_eq!(start("1/5/26").as_deref(), Some("2026-01-05T08:00:00"));
+        assert_eq!(start("10/19/26 08:00").as_deref(), Some(day));
+        assert_eq!(start("10/19/26 13:30").as_deref(), Some("2026-10-19T13:30:00"));
+        assert_eq!(start("10/19/68").as_deref(), Some("2068-10-19T08:00:00"));
+        assert_eq!(start("10/19/69").as_deref(), Some("1969-10-20T08:00:00"), "a Sunday: the next working day");
+        assert_eq!(start("10/19/0026").as_deref(), Some("0026-10-19T08:00:00"), "four digits are taken as written");
         for bad in ["", "soon", "13/40/2026", "2026-02-30", "Tue 10/19/26", "19 Foo 2026"] {
             assert_eq!(start(bad), None, "{bad:?}");
         }

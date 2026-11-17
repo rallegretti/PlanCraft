@@ -144,13 +144,12 @@ fn build_plan(grid: &Grid, options: &ImportOptions) -> Result<(Project, Vec<Stri
         };
         // The tasks are new (no assignments, estimates or members), so this is what
         // `set_duration` and `set_milestone` do, without looking each task up by its id.
-        let auto_milestone = p.settings.new_tasks_auto;
         let Some(t) = p.tasks.get_mut(i).filter(|t| t.id == id) else { continue };
         if let Some(typed) = minutes {
             t.duration = typed.minutes.clamp(0, MAX_MINUTES);
             t.estimated = typed.estimated;
             t.elapsed = typed.elapsed && t.duration > 0;
-            if t.duration == 0 && auto_milestone {
+            if t.duration == 0 {
                 t.kind = TaskKind::Milestone;
             }
         }

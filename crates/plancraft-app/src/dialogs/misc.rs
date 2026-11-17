@@ -234,24 +234,93 @@ pub struct ExternalLinks {
     pub pick_requested: bool,
     /// "Refresh All" was clicked: the app reads the linked files once the workspace is unlocked.
     pub refresh_requested: bool,
+    /// The task list of this linked project is wanted: the app reads its file once the workspace
+    /// is unlocked, then hands the tasks to [`ExternalLinks::tasks_loaded`].
+    pub list_requested: Option<Uuid>,
+    /// "Predecessor" or "Milestone member" was clicked: the app reads the linked file once the
+    /// workspace is unlocked, then calls [`ExternalLinks::link_loaded`].
+    pub link_requested: Option<LinkRequest>,
+}
+
+/// A link to an external task the user asked for in Links Between Projects.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LinkRequest {
+    /// The linked project and its task.
+    pub project: Uuid,
+    pub task: TaskId,
+    /// The task of this plan that gets the link.
+    pub target: TaskId,
+    /// A milestone member rather than a predecessor.
+    pub member: bool,
 }
 
 impl ExternalLinks {
-    /// Links the project file picked for "Add Project File…".
     /// The linked files were refreshed: show their tasks afresh.
     pub fn refreshed(&mut self) {
         self.loaded_for = None;
     }
 
-    pub fn add_file(&mut self, doc: &mut Document, path: &std::path::Path) {
+    /// Links the project file picked for "Add Project File…", read by the app from `abs_path`
+    /// (an absolute path) without the workspace lock.
+    pub fn add_loaded(&mut self, doc: &mut Document, abs_path: &std::path::Path, read: io::FileResult<Project>) {
+        let other = match read {
+            Ok(other) => other,
+            Err(e) => return self.error = Some(e.to_string()),
+        };
+        if other.id == doc.project.id {
+            return self.error = Some("A plan can't link to itself: pick another plan's file.".into());
+        }
         let doc_path = doc.path.clone();
-        match doc.edit_msg("Add External Project", |p| io::add_external_project(p, doc_path.as_deref(), path).map_err(|e| e.to_string())) {
+        match doc.edit_msg("Add External Project", |p| Ok(io::add_loaded_external_project(p, doc_path.as_deref(), abs_path, &other))) {
             Ok(id) => {
                 self.selected = Some(id);
                 self.loaded_for = None;
                 self.error = None;
             }
-            Err(e) => self.error = Some(e.to_string()),
+            Err(e) => self.error = Some(e),
+        }
+    }
+
+    /// The tasks of linked project `project`, read by the app without the workspace lock.
+    pub fn tasks_loaded(&mut self, project: Uuid, read: io::FileResult<Vec<ExternalTaskSnapshot>>) {
+        if self.list_requested == Some(project) {
+            self.list_requested = None;
+        }
+        match read {
+            Ok(t) => {
+                self.tasks = t;
+                self.error = None;
+            }
+            Err(e) => {
+                self.tasks.clear();
+                self.error = Some(e.to_string());
+            }
+        }
+        self.loaded_for = Some(project);
+    }
+
+    /// Makes the link asked for, with the linked document the app read without the workspace
+    /// lock (`None`: the plan no longer knows where that project is stored).
+    pub fn link_loaded(&mut self, doc: &mut Document, req: LinkRequest, read: Option<io::FileResult<Project>>, st: &mut UiState) {
+        let other = match read {
+            Some(Err(e)) => return self.error = Some(e.to_string()),
+            Some(Ok(other)) => Some(other),
+            None => None,
+        };
+        let r = doc.edit_msg("Link External Task", |p| {
+            if let Some(other) = &other {
+                io::ensure_external_task_from(p, req.project, other, req.task);
+            }
+            let r = TaskRef::External { project: req.project, task: req.task };
+            if req.member { p.add_milestone_members(req.target, &[r]) } else { p.link(r, req.target, LinkType::FS, Lag::None) }
+                .map_err(|e| e.to_string())
+        });
+        match r {
+            Ok(()) => {
+                self.error = None;
+                st.toast(ToastKind::Success, "Linked to external task");
+            }
+            Err(e) => self.error = Some(e),
         }
     }
 
@@ -295,17 +364,13 @@ impl ExternalLinks {
                         return;
                     };
                     if self.loaded_for != Some(ext_id) {
-                        match io::external_task_list(&doc.project, doc.path.as_deref(), ext_id) {
-                            Ok(t) => {
-                                self.tasks = t;
-                                self.error = None;
-                            }
-                            Err(e) => {
-                                self.tasks.clear();
-                                self.error = Some(e.to_string());
-                            }
+                        // The app reads the file once the workspace is unlocked.
+                        if self.list_requested != Some(ext_id) {
+                            self.list_requested = Some(ext_id);
+                            self.tasks.clear();
                         }
-                        self.loaded_for = Some(ext_id);
+                        ui.label(RichText::new("Reading the linked project…").color(theme::pal().TEXT_WEAK));
+                        return;
                     }
                     let target = st.sel.single_task();
                     let target_name = target.and_then(|t| doc.project.task(t)).map(|t| t.name.clone());
@@ -334,17 +399,9 @@ impl ExternalLinks {
                             }
                         });
                     });
-                    if let (Some((tid, member)), Some(target)) = (link, target) {
-                        let doc_path = doc.path.clone();
-                        let r = doc.edit_msg("Link External Task", |p| {
-                            io::ensure_external_task(p, doc_path.as_deref(), ext_id, tid).map_err(|e| e.to_string())?;
-                            let r = TaskRef::External { project: ext_id, task: tid };
-                            if member { p.add_milestone_members(target, &[r]) } else { p.link(r, target, LinkType::FS, Lag::None) }.map_err(|e| e.to_string())
-                        });
-                        match r {
-                            Ok(()) => st.toast(ToastKind::Success, "Linked to external task"),
-                            Err(e) => self.error = Some(e),
-                        }
+                    if let (Some((task, member)), Some(target)) = (link, target) {
+                        // The app reads the linked file once the workspace is unlocked.
+                        self.link_requested = Some(LinkRequest { project: ext_id, task, target, member });
                     }
                 });
             });
@@ -425,6 +482,17 @@ pub fn config_dir() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    /// A plan can't be linked to itself (the MCP tool refuses it too).
+    #[test]
+    fn a_plan_cannot_link_to_itself() {
+        let p = plancraft_core::model::Project::new("Self", plancraft_core::dates::ymd(2026, 10, 19).unwrap());
+        let mut doc = Document::new(1, p.clone(), None);
+        let mut d = ExternalLinks::default();
+        d.add_loaded(&mut doc, std::path::Path::new("/tmp/self.plancraft"), Ok(p));
+        assert!(d.error.as_deref().is_some_and(|e| e.contains("itself")), "{:?}", d.error);
+        assert!(doc.project.external_projects.is_empty());
+    }
+
     use super::*;
     use egui_kittest::kittest::Queryable;
     use plancraft_core::workspace::Workspace;
@@ -479,5 +547,61 @@ mod tests {
         let (ws, dialog, _) = h.state();
         assert!(dialog.pick_requested);
         assert!(ws.docs[0].history().is_empty());
+    }
+
+    /// Regression: the window read the linked file while the app held the workspace lock (to list
+    /// its tasks, and again to link one). It now asks the app, which reads after unlocking.
+    #[test]
+    fn the_window_asks_the_app_to_read_linked_files() {
+        let tmp = crate::recovery::tests::TempDir::new("links-window");
+        let other_path = tmp.0.join("Other.plancraft");
+        let mut other = Project::new("Other", plancraft_core::dates::ymd(2026, 10, 19).unwrap());
+        let delivery = other.add_task("Supplier delivery", None);
+        plancraft_core::schedule::recalculate(&mut other);
+        io::save(&other, &other_path).unwrap();
+
+        let mut ws = Workspace::default();
+        ws.add(plancraft_core::sample::demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap()), None);
+        let target = ws.docs[0].project.tasks.iter().find(|t| !t.sched.is_summary).unwrap().id;
+        let mut dialog = ExternalLinks::default();
+        dialog.add_loaded(&mut ws.docs[0], &other_path, io::load(&other_path));
+        assert_eq!(dialog.selected, Some(other.id), "{:?}", dialog.error);
+        // The file goes away: the window must not try to read it itself.
+        std::fs::remove_file(&other_path).unwrap();
+        let mut st = UiState::default();
+        st.sel.select_task(target);
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1000.0, 800.0)).build_ui_state(
+            |ui, (ws, dialog, st): &mut (Workspace, ExternalLinks, UiState)| {
+                dialog.show(ui.ctx(), &mut ws.docs[0], st);
+            },
+            (ws, dialog, st),
+        );
+        h.run();
+        {
+            let (_, dialog, _) = h.state();
+            assert_eq!(dialog.list_requested, Some(other.id), "the app is asked for the task list");
+            assert!(dialog.error.is_none() && dialog.tasks.is_empty());
+        }
+        // The app hands over the tasks it read.
+        h.state_mut().1.tasks_loaded(other.id, Ok(io::external_tasks_of(&other)));
+        h.run();
+        h.query_all_by_label("Predecessor").next().unwrap().click();
+        h.run();
+        let (ws, dialog, st) = h.state_mut();
+        let req = dialog.link_requested.take().expect("the app is asked to read the file for the link");
+        assert_eq!(req, LinkRequest { project: other.id, task: delivery, target, member: false });
+        assert_eq!(ws.docs[0].history().len(), 1, "nothing linked yet (only the project file was added)");
+        dialog.link_loaded(&mut ws.docs[0], req, Some(Ok(other.clone())), st);
+        let p = &ws.docs[0].project;
+        assert!(
+            p.task(target).unwrap().predecessors.iter().any(|d| d.predecessor == TaskRef::External { project: other.id, task: delivery })
+        );
+        assert!(p.external(other.id).unwrap().task(delivery).is_some(), "its dates are cached");
+        // A file that could not be read is reported, and nothing changes.
+        let unreadable = io::load(&other_path);
+        assert!(unreadable.is_err());
+        dialog.link_loaded(&mut ws.docs[0], LinkRequest { member: true, ..req }, Some(unreadable), st);
+        assert!(dialog.error.is_some());
+        assert_eq!(ws.docs[0].history().len(), 2);
     }
 }

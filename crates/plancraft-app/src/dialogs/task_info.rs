@@ -347,17 +347,16 @@ impl TaskInfo {
                     as u8;
             p.set_percent_complete(id, pct).map_err(err)?;
         }
-        if self.actual_start != o.actual_start
-            && let Some(d) = opt_date(p, &self.actual_start, false)?
-        {
-            p.task_mut(id).ok_or("task was deleted")?.actual_start = Some(d);
+        // An emptied (or "NA") field clears the date, with the same rules as the table's Actual
+        // Start and Actual Finish columns (`columns::set_actual_start` / `set_actual_finish`).
+        // The finish first: clearing both clears the finish before the start is checked.
+        if self.actual_finish != o.actual_finish {
+            let d = opt_date(p, &self.actual_finish, true)?;
+            crate::columns::set_actual_finish(p, id, d)?;
         }
-        if self.actual_finish != o.actual_finish
-            && let Some(d) = opt_date(p, &self.actual_finish, true)?
-        {
-            let t = p.task_mut(id).ok_or("task was deleted")?;
-            t.actual_finish = Some(d);
-            t.percent_complete = 100;
+        if self.actual_start != o.actual_start {
+            let d = opt_date(p, &self.actual_start, false)?;
+            crate::columns::set_actual_start(p, id, d)?;
         }
         if self.resume.trim() != self.resume_orig.trim() {
             let resume = opt_date(p, &self.resume, false)?;
@@ -931,6 +930,66 @@ mod tests {
         assert!(!now.contains(&first), "removed in the dialog");
         assert!(now.contains(&extra), "the agent's assignment stays: {now:?}");
         assert_eq!(now.len(), 2);
+    }
+
+    /// Regression: emptying Actual Start or Actual Finish did nothing (an empty field parsed to
+    /// "no date", which was skipped).
+    #[test]
+    fn emptied_actual_dates_are_cleared() {
+        let mut p = demo();
+        let id = p.tasks.iter().find(|t| !t.sched.is_summary && !t.is_milestone() && t.percent_complete == 0).unwrap().id;
+        p.set_percent_complete(id, 100).unwrap();
+        plancraft_core::schedule::recalculate(&mut p);
+        let t = p.task(id).unwrap();
+        assert!(t.actual_start.is_some() && t.actual_finish.is_some());
+
+        // Back to 0% with both dates emptied (" " and "NA" count as empty): both are cleared.
+        let mut info = TaskInfo::new(&p, id, false).unwrap();
+        info.percent = "0".into();
+        info.actual_start = "NA".into();
+        info.actual_finish = "  ".into();
+        info.apply(&mut p).unwrap();
+        let t = p.task(id).unwrap();
+        assert_eq!((t.actual_start, t.actual_finish), (None, None));
+    }
+
+    /// Regression (review): clearing Actual Start left a task "half done, never started". A task
+    /// that shows progress keeps its start (with a message saying why); entering an Actual Finish
+    /// on a task that never started starts it, as in the table.
+    #[test]
+    fn a_task_with_progress_keeps_its_actual_start() {
+        let mut p = demo();
+        let id = p.tasks.iter().find(|t| !t.sched.is_summary && !t.is_milestone() && t.percent_complete == 0).unwrap().id;
+        p.set_percent_complete(id, 50).unwrap();
+        plancraft_core::schedule::recalculate(&mut p);
+        let mut info = TaskInfo::new(&p, id, false).unwrap();
+        info.actual_start = String::new();
+        let e = info.apply(&mut p).unwrap_err();
+        assert!(e.contains("% complete to 0"), "{e}");
+
+        let mut p = demo();
+        let id = p.tasks.iter().find(|t| !t.sched.is_summary && !t.is_milestone() && t.percent_complete == 0).unwrap().id;
+        let scheduled = p.task(id).unwrap().sched.start;
+        let mut info = TaskInfo::new(&p, id, false).unwrap();
+        info.actual_finish = "2026-12-01".into();
+        info.apply(&mut p).unwrap();
+        let t = p.task(id).unwrap();
+        assert_eq!((t.actual_start, t.percent_complete), (scheduled, 100));
+    }
+
+    /// An actual date that was already empty when the dialog opened is left alone, so one an
+    /// agent entered meanwhile is kept.
+    #[test]
+    fn untouched_empty_actual_dates_keep_what_an_agent_entered() {
+        let mut p = demo();
+        let id = p.tasks.iter().find(|t| !t.sched.is_summary && !t.is_milestone() && t.percent_complete == 0).unwrap().id;
+        let mut info = TaskInfo::new(&p, id, false).unwrap();
+        assert!(info.actual_start.is_empty() && info.actual_finish.is_empty());
+        p.set_percent_complete(id, 100).unwrap();
+        info.notes = "Done early".into();
+        info.apply(&mut p).unwrap();
+        let t = p.task(id).unwrap();
+        assert!(t.actual_start.is_some() && t.actual_finish.is_some(), "{:?} {:?}", t.actual_start, t.actual_finish);
     }
 
     #[test]

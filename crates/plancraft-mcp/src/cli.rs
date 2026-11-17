@@ -121,8 +121,9 @@ pub fn run(args: Vec<String>) -> ExitCode {
             let token = crate::session::new_token();
             match serve_http(server, &addr, &token) {
                 Ok(handle) => {
+                    crate::session::remove_stale_http_tokens();
                     // The token goes to an owner-only file, never to the terminal or a log.
-                    let token_file = match crate::session::publish_http_token(handle.port(), handle.token()) {
+                    let token_file = match crate::session::publish_http_token(handle.addr(), handle.token()) {
                         Ok(f) => f,
                         Err(e) => {
                             eprintln!("plancraft-mcp: cannot write the bearer token file: {e}");

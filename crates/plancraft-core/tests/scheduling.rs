@@ -867,3 +867,125 @@ fn an_existing_finish_link_into_a_summary_is_ignored_with_a_warning() {
     assert_eq!(finish(&p, b), dt(2026, 10, 23, 17), "S spans its subtasks only");
     assert!(report.warnings.iter().any(|w| w.contains("FF") && w.contains("'S'") && w.contains("ignored")), "{:?}", report.warnings);
 }
+
+/// Names and outline levels, row by row.
+fn outline(p: &Project) -> Vec<(String, u16)> {
+    p.tasks.iter().map(|t| (t.name.clone(), t.outline_level)).collect()
+}
+
+fn rows(spec: &[(&str, u16)]) -> Vec<(String, u16)> {
+    spec.iter().map(|(n, l)| (n.to_string(), *l)).collect()
+}
+
+/// A plan built from (name, level) rows; returns the ids in row order.
+fn outlined(spec: &[(&str, u16)]) -> (Project, Vec<TaskId>) {
+    let mut p = project();
+    let ids: Vec<TaskId> = spec
+        .iter()
+        .map(|(name, level)| {
+            let id = task(&mut p, name, 1);
+            while p.task(id).unwrap().outline_level < *level {
+                p.indent(id).unwrap();
+            }
+            while p.task(id).unwrap().outline_level > *level {
+                p.outdent(id).unwrap();
+            }
+            id
+        })
+        .collect();
+    assert_eq!(outline(&p), rows(spec));
+    (p, ids)
+}
+
+#[test]
+fn insert_summary_over_adjacent_tasks() {
+    let (mut p, ids) = outlined(&[("A", 1), ("B", 1), ("C", 1)]);
+    p.add_summary_over("S", &[ids[1], ids[0]]).unwrap();
+    assert_eq!(outline(&p), rows(&[("S", 1), ("A", 2), ("B", 2), ("C", 1)]));
+}
+
+/// Regression: a summary over A and C (B between them, unselected) put A under it and made C a
+/// subtask of B. Tasks that are not next to each other at one level are refused, unchanged.
+#[test]
+fn insert_summary_over_separated_tasks_is_refused() {
+    for (spec, pick) in [
+        (&[("A", 1), ("B", 1), ("C", 1)][..], &[0, 2][..]),
+        // Different levels: a subtask and a task after its summary.
+        (&[("P", 1), ("X", 2), ("Q", 1)][..], &[1, 2][..]),
+        // Adjacent rows, but a subtask and the next summary's sibling at a lower level.
+        (&[("P", 1), ("X", 2), ("Y", 2), ("Q", 1), ("R", 1)][..], &[2, 3][..]),
+    ] {
+        let (mut p, ids) = outlined(spec);
+        let before = p.clone();
+        let picked: Vec<TaskId> = pick.iter().map(|&i| ids[i]).collect();
+        let e = p.add_summary_over("S", &picked).unwrap_err();
+        assert!(e.to_string().contains("adjacent tasks at the same outline level"), "{e}");
+        assert_eq!(p, before, "nothing changed for {spec:?}");
+    }
+}
+
+/// Regression: selecting a summary and its own subtask failed ("already a subtask of the row
+/// above"); the subtask goes along with its summary.
+#[test]
+fn insert_summary_over_a_summary_and_its_subtask() {
+    let (mut p, ids) = outlined(&[("P", 1), ("X", 2), ("Q", 1), ("R", 1)]);
+    p.add_summary_over("S", &[ids[0], ids[1]]).unwrap();
+    assert_eq!(outline(&p), rows(&[("S", 1), ("P", 2), ("X", 3), ("Q", 1), ("R", 1)]));
+
+    let (mut p, ids) = outlined(&[("P", 1), ("X", 2), ("Q", 1), ("R", 1)]);
+    p.add_summary_over("S", &[ids[1], ids[0], ids[2], ids[1]]).unwrap();
+    assert_eq!(outline(&p), rows(&[("S", 1), ("P", 2), ("X", 3), ("Q", 2), ("R", 1)]));
+}
+
+#[test]
+fn insert_summary_inside_a_summary() {
+    // Subtasks of a summary, one of them a summary itself, move under a new summary at their level.
+    let (mut p, ids) = outlined(&[("P", 1), ("X", 2), ("X1", 3), ("Y", 2), ("Z", 2), ("Q", 1)]);
+    let s = p.add_summary_over("S", &[ids[1], ids[3]]).unwrap();
+    assert_eq!(outline(&p), rows(&[("P", 1), ("S", 2), ("X", 3), ("X1", 4), ("Y", 3), ("Z", 2), ("Q", 1)]));
+    recalculate(&mut p);
+    assert!(p.task(s).unwrap().is_summary());
+    // The nested summary alone (with its subtask selected too).
+    let (mut p, ids) = outlined(&[("P", 1), ("X", 2), ("X1", 3), ("Y", 2)]);
+    p.add_summary_over("S", &[ids[2], ids[1]]).unwrap();
+    assert_eq!(outline(&p), rows(&[("P", 1), ("S", 2), ("X", 3), ("X1", 4), ("Y", 2)]));
+}
+
+/// Regression: a manually scheduled task with an Actual Start showed its typed start instead
+/// (its finish already put the actual finish first).
+#[test]
+fn a_manual_task_starts_at_its_actual_start() {
+    let mut p = project();
+    let a = task(&mut p, "A", 2);
+    p.set_schedule_mode(&[a], ScheduleMode::Manual).unwrap();
+    p.set_manual_date(a, dt(2026, 10, 21, 8), false).unwrap();
+    p.task_mut(a).unwrap().actual_start = Some(dt(2026, 10, 20, 8));
+    recalculate(&mut p);
+    assert_eq!(start(&p, a), dt(2026, 10, 20, 8), "the actual start wins over the typed one");
+    // Without an actual start, the typed start stands.
+    p.task_mut(a).unwrap().actual_start = None;
+    recalculate(&mut p);
+    assert_eq!(start(&p, a), dt(2026, 10, 21, 8));
+}
+
+/// Regression (review): with a typed finish, a later actual start squeezed the task to nothing
+/// (start and finish both on the actual start) and an earlier one stretched it. It keeps its
+/// duration from the actual start instead.
+#[test]
+fn a_manual_task_with_a_typed_finish_keeps_its_duration_from_its_actual_start() {
+    let mut p = project();
+    let a = task(&mut p, "A", 3);
+    p.set_schedule_mode(&[a], ScheduleMode::Manual).unwrap();
+    p.set_manual_date(a, dt(2026, 10, 26, 8), false).unwrap();
+    p.set_manual_date(a, dt(2026, 10, 28, 17), true).unwrap();
+    recalculate(&mut p);
+    assert_eq!((start(&p, a), finish(&p, a)), (dt(2026, 10, 26, 8), dt(2026, 10, 28, 17)));
+    // Started on Thursday: three working days from there.
+    p.task_mut(a).unwrap().actual_start = Some(dt(2026, 10, 29, 8));
+    recalculate(&mut p);
+    assert_eq!((start(&p, a), finish(&p, a)), (dt(2026, 10, 29, 8), dt(2026, 11, 2, 17)));
+    // Started as typed: the typed finish stands.
+    p.task_mut(a).unwrap().actual_start = Some(dt(2026, 10, 26, 8));
+    recalculate(&mut p);
+    assert_eq!(finish(&p, a), dt(2026, 10, 28, 17));
+}

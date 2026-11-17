@@ -162,20 +162,43 @@ impl Project {
         id
     }
 
-    /// Inserts a summary task above the given contiguous tasks and indents them under it.
+    /// Inserts a summary task above the given tasks and indents them (with their subtasks) under it.
+    ///
+    /// A selected task whose summary is selected too goes along with that summary. What remains
+    /// must be adjacent tasks at the same level (siblings next to each other), or nothing changes.
     pub fn add_summary_over(&mut self, name: impl Into<String>, ids: &[TaskId]) -> PlanResult<TaskId> {
         let mut idxs: Vec<usize> = ids.iter().map(|&id| self.require_task(id)).collect::<PlanResult<_>>()?;
         idxs.sort_unstable();
-        let first = *idxs.first().ok_or_else(|| PlanError::Invalid("no tasks selected".into()))?;
+        idxs.dedup();
+        // The topmost selected rows, each with the end of its subtree. Rows are in outline order,
+        // so a row inside a selected subtree lies inside the last kept one.
+        let mut blocks: Vec<(usize, usize)> = Vec::new();
+        for i in idxs {
+            if blocks.last().is_some_and(|&(_, end)| i < end) {
+                continue;
+            }
+            blocks.push((i, self.descendants_range(i).end));
+        }
+        let (first, _) = *blocks.first().ok_or_else(|| PlanError::Invalid("no tasks selected".into()))?;
         let level = self.row(first)?.outline_level;
+        for pair in blocks.windows(2) {
+            if let [(_, end), (next, _)] = pair
+                && (*next != *end || self.level_at(*next) != Some(level))
+            {
+                return invalid("select adjacent tasks at the same outline level to insert a summary task over them");
+            }
+        }
+        let end = blocks.last().map_or(first, |&(_, end)| end);
+        let deepest = self.tasks.get(first..end).unwrap_or_default().iter().map(|t| t.outline_level).max().unwrap_or(level);
+        if deepest >= MAX_OUTLINE_LEVEL {
+            return invalid(format!("tasks can be nested at most {MAX_OUTLINE_LEVEL} levels deep"));
+        }
         let sid = self.ids.next_task();
         let mut t = Task::new(sid, name, self.settings.time.minutes_per_day);
         t.outline_level = level;
         self.tasks.insert(first, t);
-        // Indent the selected blocks (shifted by one).
-        for id in ids {
-            self.indent(*id)?;
-        }
+        // The selected blocks, now one row further down, move under the new summary.
+        self.shift_levels(first.saturating_add(1)..end.saturating_add(1), true);
         Ok(sid)
     }
 
@@ -682,12 +705,13 @@ impl Project {
             t.manual_finish = None;
             return Ok(());
         }
-        let auto_milestone = self.settings.new_tasks_auto;
         let t = self.row_mut(idx)?;
         let task_type = t.task_type;
         t.duration = minutes;
         t.estimated = estimated;
-        if minutes == 0 && t.kind == TaskKind::Task && auto_milestone {
+        // A zero duration makes a milestone, whether the task is scheduled automatically or
+        // manually (a summary, handled above, never becomes one).
+        if minutes == 0 && t.kind == TaskKind::Task {
             t.kind = TaskKind::Milestone;
         } else if minutes > 0 && t.kind == TaskKind::Milestone && t.members.is_empty() {
             t.kind = TaskKind::Task;
@@ -1318,17 +1342,22 @@ impl Project {
         }
         let id = self.ids.next_time_entry();
         self.time_entries.push(TimeEntry { id, task, resource, date, minutes, note: note.into() });
-        // Starting work on a task records its actual start.
-        let start_of_day = self.base_cal_day_start(date);
+        // Starting work on a task records its actual start: the start of that day's working
+        // time for the one who worked (the task's calendar with only that resource's calendar:
+        // others assigned may not work that day), else on the task's own calendar; on a day
+        // neither has working time, the next working start.
+        let start_of_day = {
+            let worker: Vec<&Resource> = self.resource(resource).into_iter().collect();
+            let t = self.tasks.get(ti).ok_or(PlanError::TaskNotFound(task))?;
+            let with_worker = crate::schedule::calendar_for(self, t, &worker);
+            let own = crate::schedule::calendar_for(self, t, &[]);
+            if with_worker.is_working_day(date) || !own.is_working_day(date) { with_worker.day_start(date) } else { own.day_start(date) }
+        };
         let t = self.row_mut(ti)?;
         if t.actual_start.is_none_or(|s| s > start_of_day) {
             t.actual_start = Some(start_of_day);
         }
         Ok(id)
-    }
-
-    fn base_cal_day_start(&self, date: Date) -> DateTime {
-        crate::calendar::WorkCal::single(self.base_calendar()).day_start(date)
     }
 
     pub fn delete_time_entry(&mut self, id: TimeEntryId) -> PlanResult<()> {
@@ -1414,17 +1443,22 @@ impl Project {
         Ok(())
     }
 
-    /// Parses a date or date-time entered by a user: `2026-10-19`, `2026-10-19 13:00`, `10/19/2026`.
+    /// Parses a date or date-time entered by a user: `2026-10-19`, `2026-10-19 13:00`, `10/19/2026`,
+    /// `10/19/26 13:00`.
+    ///
+    /// A two-digit year is read as `jiff`'s `%y` reads it: 00–68 are 2000–2068, 69–99 are
+    /// 1969–1999. (`%y` comes before `%Y`, which would take two digits as the year 26; `%y`
+    /// refuses more than two digits, so a four-digit year still reaches `%Y`.)
     ///
     /// Dates without time use the start (or end when `finish` is set) of the project's working day.
     pub fn parse_datetime(&self, text: &str, finish: bool) -> Option<DateTime> {
         let t = text.trim();
-        for f in ["%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%m/%d/%Y %H:%M"] {
+        for f in ["%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%m/%d/%y %H:%M", "%m/%d/%Y %H:%M"] {
             if let Ok(dt) = DateTime::parse_from_str(t, f) {
                 return Some(dt);
             }
         }
-        let date = ["%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%a %m/%d/%y", "%d %b %Y", "%b %d %Y", "%b %d, %Y"]
+        let date = ["%Y-%m-%d", "%m/%d/%y", "%m/%d/%Y", "%a %m/%d/%y", "%d %b %Y", "%b %d %Y", "%b %d, %Y"]
             .iter()
             .find_map(|f| Date::parse_from_str(t, f).ok())?;
         let wc = crate::calendar::WorkCal::single(self.base_calendar());

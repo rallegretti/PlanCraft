@@ -564,7 +564,10 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
             }
         }
         FixedCost => task_mut(p, id)?.fixed_cost = format::parse_money(text).ok_or("invalid amount")?,
-        ActualStart => task_mut(p, id)?.actual_start = parse_date(p, text, false)?,
+        ActualStart => {
+            let d = parse_date(p, text, false)?;
+            set_actual_start(p, id, d)?;
+        }
         ActualDuration | RemainingDuration => {
             let m = p.parse_task_minutes(id, text).map_err(err)?;
             if col == ActualDuration { p.set_actual_duration(id, m) } else { p.set_remaining_duration(id, m) }.map_err(err)?;
@@ -575,14 +578,7 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
         }
         ActualFinish => {
             let d = parse_date(p, text, true)?;
-            let t = task_mut(p, id)?;
-            t.actual_finish = d;
-            if d.is_some() {
-                t.percent_complete = 100;
-                if t.actual_start.is_none() {
-                    t.actual_start = t.sched.start;
-                }
-            }
+            set_actual_finish(p, id, d)?;
         }
         ConstraintType => {
             let kind = ConstraintKind::ALL.into_iter().find(|k| k.label() == text).unwrap_or_default();
@@ -664,6 +660,32 @@ pub fn commit(col: TaskCol, p: &mut Project, id: TaskId, text: &str) -> Result<(
 /// Late-task check used by filters and indicators.
 pub fn is_late(p: &Project, t: &Task) -> bool {
     report::is_late(t, report::status_moment(p), p)
+}
+
+/// Sets (or with `None` clears) a task's Actual Start. A task that shows progress has started,
+/// so its actual start can only be cleared once its % complete is 0 and it has no actual finish
+/// (clearing it then would leave "half done, never started").
+pub(crate) fn set_actual_start(p: &mut Project, id: TaskId, d: Option<DateTime>) -> Result<(), String> {
+    let t = task_mut(p, id)?;
+    if d.is_none() && (t.percent_complete > 0 || t.actual_finish.is_some()) {
+        return Err("This task shows progress, so it has started: set % complete to 0 first to clear its Actual Start".into());
+    }
+    t.actual_start = d;
+    Ok(())
+}
+
+/// Sets (or with `None` clears) a task's Actual Finish. Finishing makes it 100% complete and,
+/// if it had no actual start, starts it on its scheduled start.
+pub(crate) fn set_actual_finish(p: &mut Project, id: TaskId, d: Option<DateTime>) -> Result<(), String> {
+    let t = task_mut(p, id)?;
+    t.actual_finish = d;
+    if d.is_some() {
+        t.percent_complete = 100;
+        if t.actual_start.is_none() {
+            t.actual_start = t.sched.start;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

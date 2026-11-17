@@ -296,12 +296,14 @@ pub fn custom_display(p: &Project, id: CustomFieldId, v: &CustomValue) -> String
     }
 }
 
-/// The columns a task table shows: the plan's saved layout, or the table's defaults.
+/// The columns a task table shows: the plan's saved layout, or the table's defaults (also when
+/// none of the saved columns is known here, so a table never ends up without columns).
 pub fn table_fields(p: &Project, table: TaskTable) -> Vec<Field> {
-    match p.table_layout(table.label()) {
-        Some(layout) => layout.columns.iter().filter_map(|k| Field::from_key(p, k)).collect(),
-        None => table.columns().into_iter().map(Field::Builtin).collect(),
-    }
+    let saved: Vec<Field> = p
+        .table_layout(table.label())
+        .map(|layout| layout.columns.iter().filter_map(|k| Field::from_key(p, k)).collect())
+        .unwrap_or_default();
+    if saved.is_empty() { table.columns().into_iter().map(Field::Builtin).collect() } else { saved }
 }
 
 /// Baseline1–10 values and the interim plans (Start1–10, Finish1–10), in that order.
@@ -382,6 +384,20 @@ mod tests {
                 assert!(!Field::Builtin(col).key().is_empty(), "{col:?} in {table:?} has no key");
             }
         }
+    }
+
+    /// Regression: a saved layout naming only unknown columns (a crafted or newer file) gave the
+    /// table no columns at all, and the grid's cursor maths panicked on it.
+    #[test]
+    fn a_saved_layout_without_known_columns_falls_back_to_the_defaults() {
+        let mut p = plancraft_core::sample::demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap());
+        let defaults: Vec<Field> = TaskTable::Entry.columns().into_iter().map(Field::Builtin).collect();
+        p.set_table_columns(TaskTable::Entry.label(), &["nonsense".to_string(), "from_the_future".to_string()]).unwrap();
+        assert_eq!(table_fields(&p, TaskTable::Entry), defaults);
+
+        // A layout with some known columns keeps just those.
+        p.set_table_columns(TaskTable::Entry.label(), &["nonsense".to_string(), "name".to_string()]).unwrap();
+        assert_eq!(table_fields(&p, TaskTable::Entry), vec![Field::from_key(&p, "name").unwrap()]);
     }
 
     #[test]

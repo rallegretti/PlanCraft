@@ -69,6 +69,9 @@ pub struct Cell {
     pub tooltip: Option<String>,
     /// Value placed in the editor when editing starts (defaults to `text`).
     pub edit_text: Option<String>,
+    /// No editor for this cell even in an editable column (a totals row, say): double click
+    /// raises [`GridEvent::Activate`] instead.
+    pub read_only: bool,
 }
 
 impl Cell {
@@ -578,13 +581,16 @@ pub fn show(
         if body_resp.double_clicked() {
             match col {
                 Some(c) if cfg.columns.get(c).is_some_and(|d| d.editor != Editor::None) && row < total_rows => {
-                    let text = if row < cfg.row_count {
+                    if row < cfg.row_count {
                         let ce = cell(row, c);
-                        ce.edit_text.unwrap_or(ce.text)
+                        if ce.read_only {
+                            events.push(GridEvent::Activate { row, col });
+                        } else {
+                            state.begin_edit(row, c, ce.edit_text.unwrap_or(ce.text));
+                        }
                     } else {
-                        String::new()
-                    };
-                    state.begin_edit(row, c, text);
+                        state.begin_edit(row, c, String::new());
+                    }
                 }
                 _ if row < cfg.row_count => events.push(GridEvent::Activate { row, col }),
                 _ => {}
@@ -718,8 +724,9 @@ pub fn show(
             events.push(GridEvent::Commit { row: e.row, col: e.col, text: e.text.trim().to_string() });
         }
         if let Some((dr, dc)) = mv {
-            let nr = (e.row as isize + dr).clamp(0, total_rows.saturating_sub(1) as isize) as usize;
-            let nc = (e.col as isize + dc).clamp(0, ncols as isize - 1) as usize;
+            let nr = (e.row as isize).saturating_add(dr).clamp(0, total_rows.saturating_sub(1) as isize) as usize;
+            // `saturating_sub`: a grid without columns must not make the range empty (clamp panics).
+            let nc = (e.col as isize).saturating_add(dc).clamp(0, ncols.saturating_sub(1) as isize) as usize;
             state.cursor = Some((nr, nc));
             state.scroll_to = Some(nr);
             if dr != 0 && nr < cfg.row_count {
@@ -751,6 +758,7 @@ pub fn show(
                         Key::ArrowUp => dr -= 1,
                         Key::ArrowDown | Key::Enter => dr += 1,
                         Key::ArrowLeft => dc -= 1,
+                        Key::Tab if modifiers.shift => dc -= 1,
                         Key::ArrowRight | Key::Tab => dc += 1,
                         Key::F2 => start_edit = true,
                         Key::Delete => del = true,
@@ -766,8 +774,8 @@ pub fn show(
         });
         let (row, col) = state.cursor.unwrap_or((0, 0));
         if dr != 0 || dc != 0 {
-            let nr = (row as isize + dr).clamp(0, total_rows.saturating_sub(1) as isize) as usize;
-            let nc = (col as isize + dc).clamp(0, ncols as isize - 1) as usize;
+            let nr = (row as isize).saturating_add(dr).clamp(0, total_rows.saturating_sub(1) as isize) as usize;
+            let nc = (col as isize).saturating_add(dc).clamp(0, ncols.saturating_sub(1) as isize) as usize;
             state.cursor = Some((nr, nc));
             if dc != 0 {
                 state.whole_row = false;
@@ -787,6 +795,7 @@ pub fn show(
             && r < total_rows
             && let Some(def) = cfg.columns.get(c)
             && def.editor != Editor::None
+            && (r >= cfg.row_count || !cell(r, c).read_only)
         {
             if let Some(t) = typed.filter(|t| !t.trim().is_empty()) {
                 if matches!(def.editor, Editor::Text) {
@@ -830,4 +839,121 @@ pub fn show(
         _ => None,
     };
     GridOutput { events }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use egui::{Modifiers, vec2};
+    use egui_kittest::Harness;
+
+    /// A grid of `rows` rows alone in a window; `read_only_row` has no editor in any cell.
+    struct TestGrid {
+        grid: GridState,
+        columns: Vec<ColumnDef>,
+        rows: usize,
+        read_only_row: Option<usize>,
+        events: Vec<GridEvent>,
+    }
+
+    fn harness(columns: Vec<ColumnDef>, rows: usize, read_only_row: Option<usize>) -> Harness<'static, TestGrid> {
+        let state = TestGrid { grid: GridState::default(), columns, rows, read_only_row, events: Vec::new() };
+        let mut h = Harness::builder().with_size(vec2(800.0, 400.0)).build_ui_state(
+            |ui, t: &mut TestGrid| {
+                let TestGrid { grid, columns, rows, read_only_row, events } = t;
+                let cfg = GridConfig {
+                    id: Id::new("test_grid"),
+                    columns,
+                    row_count: *rows,
+                    blank_rows: 0,
+                    row_numbers: false,
+                    row_label: None,
+                    show_vscroll: false,
+                    header_height: 24.0,
+                    row_height: 22.0,
+                    row_key: None,
+                };
+                let ro = *read_only_row;
+                let mut cell = |r: usize, c: usize| Cell { text: format!("{r}:{c}"), read_only: Some(r) == ro, ..Default::default() };
+                let out = show(ui, ui.max_rect(), grid, &cfg, &|_| false, &mut cell);
+                events.extend(out.events);
+            },
+            state,
+        );
+        h.run_steps(2);
+        h
+    }
+
+    fn focus(h: &mut Harness<'static, TestGrid>, cursor: (usize, usize)) {
+        h.state_mut().grid.cursor = Some(cursor);
+        h.ctx.memory_mut(|m| m.request_focus(Id::new("test_grid").with("body")));
+        h.run_steps(2);
+    }
+
+    fn three_columns() -> Vec<ColumnDef> {
+        vec![ColumnDef::new("A", 100.0), ColumnDef::new("B", 100.0), ColumnDef::new("C", 100.0)]
+    }
+
+    /// Regression: Shift+Tab moved the cursor right, like Tab, when no cell was being edited.
+    #[test]
+    fn shift_tab_moves_the_cursor_left() {
+        let mut h = harness(three_columns(), 3, None);
+        focus(&mut h, (1, 1));
+        h.key_press_modifiers(Modifiers::SHIFT, Key::Tab);
+        h.run_steps(2);
+        assert_eq!(h.state().grid.cursor, Some((1, 0)));
+        h.key_press(Key::Tab);
+        h.run_steps(2);
+        assert_eq!(h.state().grid.cursor, Some((1, 1)));
+    }
+
+    /// Regression: moving the cursor in a grid without columns panicked (`clamp(0, -1)`).
+    #[test]
+    fn a_grid_without_columns_survives_the_keyboard() {
+        let mut h = harness(Vec::new(), 3, None);
+        focus(&mut h, (0, 0));
+        for key in [Key::ArrowRight, Key::ArrowLeft, Key::Tab, Key::ArrowDown, Key::Enter, Key::F2] {
+            h.key_press(key);
+            h.run_steps(2);
+        }
+        h.key_press_modifiers(Modifiers::SHIFT, Key::Tab);
+        h.run_steps(2);
+        assert!(h.state().grid.editing.is_none());
+        assert_eq!(h.state().grid.cursor.map(|(r, _)| r), Some(2));
+    }
+
+    /// Regression (Timesheet totals): a cell marked read-only in an editable column opened an
+    /// editor, and the edit was accepted and then dropped.
+    #[test]
+    fn a_read_only_cell_opens_no_editor() {
+        let mut h = harness(three_columns(), 3, Some(2));
+        focus(&mut h, (2, 1));
+        h.key_press(Key::F2);
+        h.run_steps(2);
+        assert!(h.state().grid.editing.is_none(), "F2");
+        h.event(egui::Event::Text("5".into()));
+        h.run_steps(2);
+        assert!(h.state().grid.editing.is_none(), "typing");
+
+        // A double click activates the cell instead.
+        let at = pos2(150.0, 24.0 + 2.0 * 22.0 + 11.0);
+        h.event(egui::Event::PointerMoved(at));
+        // Long enough after the start that egui doesn't count a triple click.
+        h.run_steps(60);
+        for _ in 0..2 {
+            let button =
+                |pressed| egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+            h.input_mut().events.extend([button(true), button(false)]);
+            h.run_steps(1);
+        }
+        h.run_steps(1);
+        assert!(h.state().grid.editing.is_none(), "double click");
+        assert!(h.state().events.contains(&GridEvent::Activate { row: 2, col: Some(1) }), "{:?}", h.state().events);
+
+        // Other rows still edit.
+        focus(&mut h, (1, 1));
+        h.key_press(Key::F2);
+        h.run_steps(2);
+        assert_eq!(h.state().grid.editing.as_ref().map(|e| (e.row, e.col)), Some((1, 1)));
+    }
 }

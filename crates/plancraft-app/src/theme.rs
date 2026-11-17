@@ -75,6 +75,14 @@ pub struct Palette {
     pub OK: Color32,
     pub WARN: Color32,
     pub ERROR: Color32,
+    /// Status chips (Milestones view): text, and the Complete / Slipping / Late backgrounds.
+    pub CHIP_TEXT: Color32,
+    pub CHIP_OK: Color32,
+    pub CHIP_WARN: Color32,
+    pub CHIP_ERROR: Color32,
+    /// The MCP server indicator on the title bar: running, stopped.
+    pub MCP_LIVE: Color32,
+    pub MCP_OFF: Color32,
 }
 
 pub const LIGHT: Palette = Palette {
@@ -144,6 +152,12 @@ pub const LIGHT: Palette = Palette {
     OK: rgb(0x2E, 0x8B, 0x57),
     WARN: rgb(0xE0, 0x7B, 0x00),
     ERROR: rgb(0xC6, 0x28, 0x28),
+    CHIP_TEXT: rgb(0xFF, 0xFF, 0xFF),
+    CHIP_OK: rgb(0x1E, 0x7A, 0x4A),
+    CHIP_WARN: rgb(0xB4, 0x53, 0x09),
+    CHIP_ERROR: rgb(0xC6, 0x28, 0x28),
+    MCP_LIVE: rgb(0x8E, 0xF0, 0xB0),
+    MCP_OFF: rgb(0xC0, 0xC8, 0xDE),
 };
 
 pub const DARK: Palette = Palette {
@@ -213,6 +227,13 @@ pub const DARK: Palette = Palette {
     OK: rgb(0x4C, 0xC3, 0x8A),
     WARN: rgb(0xF0, 0x93, 0x1E),
     ERROR: rgb(0xEF, 0x6B, 0x6B),
+    // Bright chips with dark text: white on these light tints is unreadable.
+    CHIP_TEXT: rgb(0x15, 0x17, 0x1C),
+    CHIP_OK: rgb(0x4C, 0xC3, 0x8A),
+    CHIP_WARN: rgb(0xF0, 0x93, 0x1E),
+    CHIP_ERROR: rgb(0xEF, 0x6B, 0x6B),
+    MCP_LIVE: rgb(0x8E, 0xF0, 0xB0),
+    MCP_OFF: rgb(0xC0, 0xC8, 0xDE),
 };
 
 static DARK_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -385,6 +406,16 @@ mod tests {
             assert!(contrast(Color32::WHITE, p.TITLE_BAR) >= 7.0, "{name}: title bar text");
             assert!(contrast(Color32::WHITE, p.ACCENT) >= 4.5, "{name}: text on accent buttons");
             assert!(contrast(p.ERROR, p.BG) >= 4.5, "{name}: error text");
+            for (what, fg, bg) in [
+                ("Complete chip", p.CHIP_TEXT, p.CHIP_OK),
+                ("Slipping chip", p.CHIP_TEXT, p.CHIP_WARN),
+                ("Late chip", p.CHIP_TEXT, p.CHIP_ERROR),
+                ("On track chip", p.ACCENT_DARK, p.ACCENT_LIGHT),
+                ("MCP live", p.MCP_LIVE, p.TITLE_BAR),
+                ("MCP off", p.MCP_OFF, p.TITLE_BAR),
+            ] {
+                assert!(contrast(fg, bg) >= 4.5, "{name}: {what} is {:.1}:1", contrast(fg, bg));
+            }
         }
     }
     /// Glyphs the bundled egui fonts cannot render (they show as empty boxes).
