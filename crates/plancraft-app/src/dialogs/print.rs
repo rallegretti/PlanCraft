@@ -4,8 +4,8 @@
 use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 
-use chrono::NaiveDate;
 use egui::{Align2, Color32, Context, FontId, Painter, Pos2, Rect, RichText, Sense, Shape, Stroke, Ui, pos2, vec2};
+use plancraft_core::dates::prelude::*;
 use plancraft_core::print::{self, Item, LegendPlacement, Orientation, PageSetup, Paper, TimescaleFit, font};
 use plancraft_core::workspace::Document;
 
@@ -61,14 +61,14 @@ impl PrintDialog {
     }
 
     /// The dates to print, or why they are wrong.
-    fn range(&self) -> Result<(Option<NaiveDate>, Option<NaiveDate>), String> {
-        let parse = |s: &str, what: &str| -> Result<Option<NaiveDate>, String> {
+    fn range(&self) -> Result<(Option<Date>, Option<Date>), String> {
+        let parse = |s: &str, what: &str| -> Result<Option<Date>, String> {
             let s = s.trim();
             if s.is_empty() {
                 return Ok(None);
             }
-            let d = NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| format!("{what}: enter a date like 2026-11-30"))?;
-            let year = chrono::Datelike::year(&d);
+            let d = Date::parse_from_str(s, "%Y-%m-%d").map_err(|_| format!("{what}: enter a date like 2026-11-30"))?;
+            let year = i32::from(d.year());
             if !(1900..=2300).contains(&year) {
                 return Err(format!("{what}: pick a year between 1900 and 2300"));
             }

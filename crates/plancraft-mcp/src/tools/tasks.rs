@@ -1,5 +1,6 @@
 //! Task tools: listing, details, creation (single and bulk WBS), updates and outline editing.
 
+use plancraft_core::dates::prelude::*;
 use std::collections::HashSet;
 
 use plancraft_core::ids::TaskId;
@@ -262,7 +263,7 @@ fn parse_color(v: &Value) -> ToolResult<Option<[u8; 3]>> {
     }
 }
 
-fn opt_dt(p: &Project, a: &Args, key: &str, finish: bool) -> ToolResult<Option<Option<chrono::NaiveDateTime>>> {
+fn opt_dt(p: &Project, a: &Args, key: &str, finish: bool) -> ToolResult<Option<Option<DateTime>>> {
     if a.is_clear(key) {
         return Ok(Some(None));
     }

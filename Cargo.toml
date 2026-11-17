@@ -15,7 +15,8 @@ plancraft-core = { path = "crates/plancraft-core" }
 plancraft-mcp = { path = "crates/plancraft-mcp" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
+# Dates and times (replacing chrono, which is unmaintained: RUSTSEC-2026-0543).
+jiff = { version = "1", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 thiserror = "2"
 anyhow = "1"

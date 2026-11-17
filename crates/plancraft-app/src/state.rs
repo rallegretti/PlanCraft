@@ -3,7 +3,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::time::Instant;
 
-use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime};
+use plancraft_core::dates::prelude::*;
 use plancraft_core::prelude::*;
 use plancraft_core::workload::Granularity;
 
@@ -247,7 +247,7 @@ pub enum BarDrag {
     Move {
         task: TaskId,
         grab_dx: f32,
-        origin_start: NaiveDateTime,
+        origin_start: DateTime,
     },
     Resize {
         task: TaskId,
@@ -263,7 +263,7 @@ pub enum BarDrag {
         task: TaskId,
         k: usize,
         grab_dx: f32,
-        origin: NaiveDateTime,
+        origin: DateTime,
     },
     /// The right end of part `k` (not the last) of a split task.
     PartEnd {
@@ -275,7 +275,7 @@ pub enum BarDrag {
 #[derive(Clone, Debug)]
 pub struct GanttState {
     /// Time at the left edge of the chart.
-    pub left: NaiveDateTime,
+    pub left: DateTime,
     pub px_per_day: f32,
     pub drag: Option<BarDrag>,
     pub show_critical: bool,
@@ -297,7 +297,7 @@ pub struct GanttState {
 impl Default for GanttState {
     fn default() -> Self {
         Self {
-            left: chrono::Local::now().naive_local(),
+            left: plancraft_core::dates::now(),
             px_per_day: 24.0,
             drag: None,
             show_critical: false,
@@ -316,14 +316,14 @@ impl Default for GanttState {
 }
 
 impl GanttState {
-    pub fn x_of(&self, chart_left: f32, t: NaiveDateTime) -> f32 {
-        let mins = (t - self.left).num_minutes() as f32;
+    pub fn x_of(&self, chart_left: f32, t: DateTime) -> f32 {
+        let mins = t.signed_duration_since(self.left).num_minutes() as f32;
         chart_left + mins / 1440.0 * self.px_per_day
     }
 
-    pub fn time_at(&self, chart_left: f32, x: f32) -> NaiveDateTime {
+    pub fn time_at(&self, chart_left: f32, x: f32) -> DateTime {
         let days = (x - chart_left) / self.px_per_day;
-        self.left + Duration::minutes((days * 1440.0) as i64)
+        self.left + SignedDuration::from_mins((days * 1440.0) as i64)
     }
 
     /// Zoom presets (px per day), from years to hours.
@@ -336,7 +336,7 @@ impl GanttState {
         self.px_per_day = Self::ZOOMS.get(n).copied().unwrap_or(self.px_per_day);
         // Keep the anchor time under the cursor.
         let days = (anchor_x - chart_left) / self.px_per_day;
-        self.left = anchor_t - Duration::minutes((days * 1440.0) as i64);
+        self.left = anchor_t - SignedDuration::from_mins((days * 1440.0) as i64);
     }
 
     /// Continuous zoom by a factor, keeping the time under `anchor_x` fixed.
@@ -344,11 +344,11 @@ impl GanttState {
         let anchor_t = self.time_at(chart_left, anchor_x);
         self.px_per_day = (self.px_per_day * factor).clamp(0.5, 160.0);
         let days = (anchor_x - chart_left) / self.px_per_day;
-        self.left = anchor_t - Duration::minutes((days * 1440.0) as i64);
+        self.left = anchor_t - SignedDuration::from_mins((days * 1440.0) as i64);
     }
 
-    pub fn scroll_to(&mut self, t: NaiveDateTime) {
-        self.left = t - Duration::days(2);
+    pub fn scroll_to(&mut self, t: DateTime) {
+        self.left = t - plancraft_core::dates::days(2);
     }
 }
 
@@ -437,10 +437,10 @@ pub struct UiState {
     pub table_width: f32,
     pub timeline_visible: bool,
     pub granularity: Granularity,
-    pub usage_from: Option<NaiveDate>,
-    pub timesheet_week: NaiveDate,
+    pub usage_from: Option<Date>,
+    pub timesheet_week: Date,
     pub timesheet_resource: Option<ResourceId>,
-    pub calendar_month: NaiveDate,
+    pub calendar_month: Date,
     pub toasts: Vec<Toast>,
     pub clipboard: Vec<Task>,
     pub show_history: bool,
@@ -448,8 +448,8 @@ pub struct UiState {
 
 impl Default for UiState {
     fn default() -> Self {
-        let today = chrono::Local::now().date_naive();
-        let monday = today - Duration::days(today.weekday().num_days_from_monday() as i64);
+        let today = plancraft_core::dates::today();
+        let monday = today - plancraft_core::dates::days(today.weekday().num_days_from_monday() as i64);
         Self {
             view: ViewKind::Gantt,
             menu_tab: MenuTab::Task,

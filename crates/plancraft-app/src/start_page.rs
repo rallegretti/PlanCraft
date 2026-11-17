@@ -4,6 +4,7 @@
 //! on the left, recent projects on the right, a summary of the open project
 //! when there is one, and work recovered after a crash.
 
+use plancraft_core::dates::prelude::*;
 use std::path::Path;
 
 use egui::{Align, Align2, Color32, FontId, Layout, Rect, RichText, Sense, Stroke, Ui, pos2, vec2};
@@ -85,17 +86,18 @@ fn home_relative(path: &Path) -> String {
 
 fn modified_label(path: &Path) -> Option<String> {
     let modified = std::fs::metadata(path).ok()?.modified().ok()?;
-    Some(time_label(modified.into(), false))
+    Some(time_label(plancraft_core::dates::timestamp(modified)?, false))
 }
 
 /// "Today 14:05", "Yesterday" (with the time when `with_time`), or a date.
-fn time_label(dt: chrono::DateTime<chrono::Local>, with_time: bool) -> String {
-    let today = chrono::Local::now().date_naive();
-    let d = dt.date_naive();
+fn time_label(t: Timestamp, with_time: bool) -> String {
+    let today = plancraft_core::dates::today();
+    let dt = plancraft_core::dates::local(t);
+    let d = dt.date();
     let time = if with_time { dt.format(" %H:%M").to_string() } else { String::new() };
     if d == today {
         format!("Today {}", dt.format("%H:%M"))
-    } else if (today - d).num_days() == 1 {
+    } else if today.signed_duration_since(d).num_days() == 1 {
         format!("Yesterday{time}")
     } else {
         format!("{}{time}", dt.format("%b %-d, %Y"))

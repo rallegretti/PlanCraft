@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use chrono::NaiveDateTime;
+use crate::dates::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::calendar::WorkCal;
@@ -139,9 +139,9 @@ pub struct PlanInfo {
     /// Tasks that have a value in this slot.
     pub tasks: usize,
     /// When the baseline was last saved (baselines only).
-    pub saved: Option<NaiveDateTime>,
-    pub start: Option<NaiveDateTime>,
-    pub finish: Option<NaiveDateTime>,
+    pub saved: Option<DateTime>,
+    pub start: Option<DateTime>,
+    pub finish: Option<DateTime>,
     /// Total cost and work, each counted once at the highest outline level that has a value
     /// (baselines only).
     pub cost: f64,
@@ -160,7 +160,7 @@ impl Task {
     }
 
     /// The start and finish dates the task has in `slot`.
-    pub fn dates_in(&self, slot: PlanSlot) -> Option<(NaiveDateTime, NaiveDateTime)> {
+    pub fn dates_in(&self, slot: PlanSlot) -> Option<(DateTime, DateTime)> {
         match slot {
             PlanSlot::Scheduled => self.sched.start.zip(self.sched.finish),
             PlanSlot::Baseline(n) => self.baseline_in(n).map(|b| (b.start, b.finish)),
@@ -191,17 +191,15 @@ impl Task {
         }
     }
 
-    fn snapshot(&self, saved: NaiveDateTime) -> Option<Baseline> {
+    fn snapshot(&self, saved: DateTime) -> Option<Baseline> {
         let (start, finish) = self.sched.start.zip(self.sched.finish)?;
         Some(Baseline { start, finish, duration: self.sched.duration, work: self.sched.work, cost: self.sched.cost, saved })
     }
 }
 
 /// The current local time to the minute (a baseline's "saved on" stamp).
-fn now_minute() -> NaiveDateTime {
-    use chrono::Timelike;
-    let now = chrono::Local::now().naive_local();
-    now.with_second(0).and_then(|n| n.with_nanosecond(0)).unwrap_or(now)
+fn now_minute() -> DateTime {
+    crate::dates::now_minute()
 }
 
 fn invalid<T>(msg: impl Into<String>) -> PlanResult<T> {
@@ -323,7 +321,7 @@ impl Project {
     /// A summary's baseline is built the way the scheduler builds its schedule: from its active
     /// subtasks (all of them when none is active), plus the summary's own work and cost
     /// (assignments and fixed cost on the summary row).
-    fn roll_up_baseline(&mut self, n: u8, rows: &HashSet<usize>, scope: &Scope, now: NaiveDateTime) -> Vec<usize> {
+    fn roll_up_baseline(&mut self, n: u8, rows: &HashSet<usize>, scope: &Scope, now: DateTime) -> Vec<usize> {
         if !scope.roll_up_to_summaries && !scope.roll_up_from_subtasks {
             return Vec::new();
         }
@@ -371,7 +369,7 @@ impl Project {
             let own_work = src.iter().fold(summary.sched.work, |w, t| w.saturating_sub(t.sched.work)).max(0);
             let own_cost = summary.sched.cost - src.iter().map(|t| t.sched.cost).sum::<f64>();
             let own_cost = if own_cost.is_finite() { own_cost } else { 0.0 };
-            let mut acc: Option<(NaiveDateTime, NaiveDateTime, Minutes, f64)> = None;
+            let mut acc: Option<(DateTime, DateTime, Minutes, f64)> = None;
             for b in src.iter().filter_map(|t| t.baseline_in(n)) {
                 acc = Some(match acc {
                     None => (b.start, b.finish, b.work, b.cost),
@@ -471,12 +469,11 @@ pub fn baseline_totals(p: &Project, n: u8) -> (f64, Minutes) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::NaiveDate;
 
     use crate::prelude::*;
 
     fn plan() -> (Project, TaskId, TaskId, TaskId) {
-        let mut p = Project::new("B", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let mut p = Project::new("B", crate::dates::ymd(2026, 10, 19).unwrap());
         let phase = p.add_task("Phase", None);
         let a = p.add_task("A", None);
         let b = p.add_task("B", None);
@@ -539,7 +536,7 @@ mod tests {
     #[test]
     fn big_summaries_can_be_baselined() {
         use crate::workspace::{ChangeSource, Document};
-        let mut p = Project::new("Big", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let mut p = Project::new("Big", crate::dates::ymd(2026, 10, 19).unwrap());
         let phase = p.add_task("Phase", None);
         let r = p.add_resource("Ana");
         for k in 0..12 {
@@ -566,7 +563,7 @@ mod tests {
     #[test]
     fn roll_ups_match_the_scheduler() {
         // Phase had a resource before it got subtasks; B is inactive.
-        let mut p = Project::new("B", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let mut p = Project::new("B", crate::dates::ymd(2026, 10, 19).unwrap());
         let phase = p.add_task("Phase", None);
         let r = p.add_resource("Ana");
         p.resource_mut(r).unwrap().standard_rate = 10.0;

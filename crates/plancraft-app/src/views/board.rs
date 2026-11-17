@@ -382,7 +382,7 @@ enum ColumnCmd {
     Delete(BoardColumnId),
 }
 
-fn report_late(t: &Task, status: chrono::NaiveDateTime, p: &Project) -> bool {
+fn report_late(t: &Task, status: DateTime, p: &Project) -> bool {
     plancraft_core::report::is_late(t, status, p)
 }
 

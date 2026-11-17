@@ -9,7 +9,6 @@
 use std::cell::Cell;
 use std::sync::Once;
 
-use chrono::NaiveDate;
 use plancraft_core::sample::demo_project;
 use plancraft_core::workspace::Workspace;
 use plancraft_mcp::{McpServer, ServerOptions};
@@ -40,7 +39,7 @@ fn panics() -> usize {
 fn server() -> McpServer {
     count_panics();
     let mut ws = Workspace::default();
-    ws.add(demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+    ws.add(demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap()), None);
     McpServer::with_options(ws.shared(), ServerOptions { allow_file_access: false, ..ServerOptions::default() })
 }
 
@@ -177,7 +176,7 @@ fn drawing_pdf_export_with_junk() {
         for prop in props.iter().filter(|p| *p != "view" && *p != "path") {
             for (k, value) in junk_values().iter().enumerate() {
                 let mut ws = Workspace::default();
-                ws.add(demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+                ws.add(demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap()), None);
                 let s = McpServer::with_options(ws.shared(), ServerOptions { allow_file_access: true, ..ServerOptions::default() });
                 let mut args = Map::new();
                 args.insert("path".into(), json!(dir.path().join(format!("{view}-{k}.pdf")).to_string_lossy()));
@@ -203,11 +202,11 @@ fn file_tools_with_junk_in_a_temporary_folder() {
     let dir = tempfile::tempdir().unwrap();
     let plan = dir.path().join("plan.plancraft");
     let xml = dir.path().join("plan.xml");
-    plancraft_core::io::save(&demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), &plan).unwrap();
-    plancraft_core::mspdi::save(&demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), &xml).unwrap();
+    plancraft_core::io::save(&demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap()), &plan).unwrap();
+    plancraft_core::mspdi::save(&demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap()), &xml).unwrap();
     std::fs::write(dir.path().join("build.xml"), "<project name=\"other\"/>").unwrap();
     let csv = dir.path().join("plan.csv");
-    let mut demo = demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+    let mut demo = demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap());
     plancraft_core::schedule::recalculate(&mut demo);
     std::fs::write(&csv, plancraft_core::tabular::to_csv(&demo)).unwrap();
     let in_dir = |v: &Value| match v.as_str() {
@@ -235,7 +234,7 @@ fn file_tools_with_junk_in_a_temporary_folder() {
         for prop in &props {
             for (k, value) in junk_values().iter().enumerate() {
                 let mut ws = Workspace::default();
-                ws.add(demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+                ws.add(demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap()), None);
                 let s = McpServer::with_options(ws.shared(), ServerOptions { allow_file_access: true, ..ServerOptions::default() });
                 let mut args = Map::new();
                 args.insert("path".into(), json!(paths[k % paths.len()].to_string_lossy()));

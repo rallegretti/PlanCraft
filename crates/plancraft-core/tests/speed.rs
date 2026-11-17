@@ -13,7 +13,7 @@
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
-use chrono::NaiveDate;
+use plancraft_core::dates::prelude::*;
 use plancraft_core::prelude::*;
 
 /// The tests here time themselves, so they run one at a time: run side by side (the test
@@ -26,7 +26,7 @@ fn timed() -> MutexGuard<'static, ()> {
 }
 
 fn project(tasks: usize) -> Project {
-    let mut p = Project::new("Speed", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+    let mut p = Project::new("Speed", plancraft_core::dates::ymd(2026, 10, 19).unwrap());
     let people: Vec<ResourceId> = (0..12).map(|i| p.add_resource(format!("Person {i}"))).collect();
     let mut ids = Vec::new();
     for i in 0..tasks {
@@ -107,7 +107,7 @@ fn flat_tasks(p: &mut Project, n: usize) -> Vec<TaskId> {
 #[cfg_attr(debug_assertions, ignore = "a timing test: `cargo xtask ci` runs it in release")]
 fn linking_a_2000_task_chain_is_fast() {
     let _serial = timed();
-    let mut p = Project::new("Chain", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+    let mut p = Project::new("Chain", plancraft_core::dates::ymd(2026, 10, 19).unwrap());
     let ids = flat_tasks(&mut p, 2000);
     let t = Instant::now();
     for w in ids.windows(2).rev() {
@@ -127,9 +127,9 @@ fn linking_a_2000_task_chain_is_fast() {
 #[cfg_attr(debug_assertions, ignore = "a timing test: `cargo xtask ci` runs it in release")]
 fn a_far_future_date_keeps_recalculation_fast() {
     let _serial = timed();
-    let mut p = Project::new("Far", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+    let mut p = Project::new("Far", plancraft_core::dates::ymd(2026, 10, 19).unwrap());
     let ids = flat_tasks(&mut p, 2000);
-    let far = NaiveDate::from_ymd_opt(2299, 6, 1).unwrap().and_hms_opt(8, 0, 0).unwrap();
+    let far = plancraft_core::dates::ymd(2299, 6, 1).unwrap().and_hms_opt(8, 0, 0).unwrap();
     p.task_mut(ids[0]).unwrap().constraint = Constraint { kind: ConstraintKind::Mso, date: Some(far) };
     recalculate(&mut p);
     let best = best_of(3, || {
@@ -147,7 +147,7 @@ fn a_far_future_date_keeps_recalculation_fast() {
 fn leveling_1000_tasks_is_fast() {
     let _serial = timed();
     use plancraft_core::leveling::{LevelingOptions, level_resources};
-    let mut p = Project::new("Level", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+    let mut p = Project::new("Level", plancraft_core::dates::ymd(2026, 10, 19).unwrap());
     let people: Vec<ResourceId> = (0..5).map(|i| p.add_resource(format!("Person {i}"))).collect();
     let ids = flat_tasks(&mut p, 1000);
     for (i, id) in ids.iter().enumerate() {
@@ -170,7 +170,7 @@ fn leveling_1000_tasks_is_fast() {
 fn printing_10000_linked_tasks_is_fast() {
     let _serial = timed();
     use plancraft_core::print::{self, PageSetup};
-    let mut p = Project::new("Big print", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+    let mut p = Project::new("Big print", plancraft_core::dates::ymd(2026, 10, 19).unwrap());
     let ids = flat_tasks(&mut p, 10_000);
     for w in ids.windows(2).step_by(2) {
         p.link(w[0].into(), w[1], LinkType::FS, Lag::None).unwrap();
@@ -203,7 +203,7 @@ fn printing_10000_linked_tasks_is_fast() {
 fn laying_out_a_10000_task_network_diagram_is_fast() {
     let _serial = timed();
     use plancraft_core::network::{NetworkOptions, boxes_for, layout};
-    let mut p = Project::new("Big network", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+    let mut p = Project::new("Big network", plancraft_core::dates::ymd(2026, 10, 19).unwrap());
     let mut leaves = Vec::new();
     for i in 0..10_000 {
         let id = p.add_task(format!("Task {i}"), None);
@@ -246,7 +246,7 @@ fn printing_a_10000_task_network_diagram_is_fast() {
     let _serial = timed();
     use plancraft_core::network::{NetworkOptions, boxes_for, layout};
     use plancraft_core::print::{self, PageSetup, TimescaleFit};
-    let mut p = Project::new("Big network", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+    let mut p = Project::new("Big network", plancraft_core::dates::ymd(2026, 10, 19).unwrap());
     let ids = flat_tasks(&mut p, 10_000);
     for (k, w) in ids.windows(2).enumerate() {
         if k % 5 != 0 {
@@ -288,7 +288,7 @@ fn printing_a_hub_shaped_network_diagram_is_fast() {
     let _serial = timed();
     use plancraft_core::network::{NetworkOptions, boxes_for, layout};
     use plancraft_core::print::{self, PageSetup, TimescaleFit};
-    let mut p = Project::new("Hub", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+    let mut p = Project::new("Hub", plancraft_core::dates::ymd(2026, 10, 19).unwrap());
     let chain = flat_tasks(&mut p, 300);
     for w in chain.windows(2) {
         p.link(w[0].into(), w[1], LinkType::FS, Lag::None).unwrap();
@@ -328,7 +328,7 @@ fn printing_a_hub_shaped_network_diagram_is_fast() {
 #[cfg_attr(debug_assertions, ignore = "a timing test: `cargo xtask ci` runs it in release")]
 fn moving_50000_cards_on_the_board_is_fast() {
     let _serial = timed();
-    let mut p = Project::new("Board", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+    let mut p = Project::new("Board", plancraft_core::dates::ymd(2026, 10, 19).unwrap());
     let ids = flat_tasks(&mut p, 50_000);
     let done = p.find_board_column("Done").unwrap();
     let t = best_of(2, || {
@@ -346,7 +346,7 @@ fn moving_50000_cards_on_the_board_is_fast() {
 #[cfg_attr(debug_assertions, ignore = "a timing test: `cargo xtask ci` runs it in release")]
 fn importing_and_exporting_10000_tasks_as_mspdi_is_fast() {
     let _serial = timed();
-    let mut p = Project::new("Big exchange", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+    let mut p = Project::new("Big exchange", plancraft_core::dates::ymd(2026, 10, 19).unwrap());
     let ids = flat_tasks(&mut p, 10_000);
     for w in ids.windows(2).step_by(2) {
         p.link(w[0].into(), w[1], LinkType::FS, Lag::None).unwrap();
@@ -402,7 +402,7 @@ fn importing_a_50000_row_spreadsheet_is_fast() {
 #[cfg_attr(debug_assertions, ignore = "a timing test: `cargo xtask ci` runs it in release")]
 fn scheduling_2000_of_the_longest_tasks_is_fast() {
     let _serial = timed();
-    let mut p = Project::new("Long", NaiveDate::from_ymd_opt(1900, 1, 1).unwrap());
+    let mut p = Project::new("Long", plancraft_core::dates::ymd(1900, 1, 1).unwrap());
     let mut prev = None;
     for i in 0..2000 {
         let id = p.add_task(format!("T{i}"), None);
@@ -430,7 +430,7 @@ fn scheduling_2000_of_the_longest_tasks_is_fast() {
 #[cfg_attr(debug_assertions, ignore = "a timing test: `cargo xtask ci` runs it in release")]
 fn scheduling_long_tasks_with_many_resources_is_fast() {
     let _serial = timed();
-    let mut p = Project::new("Crowded", NaiveDate::from_ymd_opt(2026, 1, 5).unwrap());
+    let mut p = Project::new("Crowded", plancraft_core::dates::ymd(2026, 1, 5).unwrap());
     for i in 0..5_000 {
         let id = p.add_task(format!("T{i}"), None);
         p.set_duration(id, plancraft_core::limits::MAX_MINUTES, false).unwrap();

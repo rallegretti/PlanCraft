@@ -2,6 +2,7 @@
 //! timeline. Drag a task to another resource to reassign it.
 
 use egui::{Align2, Color32, CursorIcon, FontId, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
+use plancraft_core::dates::prelude::*;
 use plancraft_core::prelude::*;
 use plancraft_core::workspace::{ChangeSource, Document};
 
@@ -26,14 +27,14 @@ struct Lane {
 
 fn pack(p: &Project, mut idxs: Vec<usize>) -> (Vec<(usize, usize)>, usize) {
     idxs.sort_by_key(|&i| p.tasks.get(i).and_then(|t| t.sched.start));
-    let mut lane_end: Vec<chrono::NaiveDateTime> = Vec::new();
+    let mut lane_end: Vec<DateTime> = Vec::new();
     let mut out = Vec::new();
     for i in idxs {
         let Some(t) = p.tasks.get(i) else { continue };
         let (Some(s), Some(f)) = (t.sched.start, t.sched.finish) else {
             continue;
         };
-        let end = f.max(s + chrono::Duration::minutes(1));
+        let end = f.max(s + SignedDuration::from_mins(1));
         let lane = match lane_end.iter().position(|e| *e <= s) {
             Some(lane) => {
                 if let Some(e) = lane_end.get_mut(lane) {
@@ -122,10 +123,10 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                 st.gantt.zoom_by(z, x, chart_left);
             }
         } else if shift {
-            st.gantt.left -= chrono::Duration::minutes(((d.y + d.x) / st.gantt.px_per_day * 1440.0) as i64);
+            st.gantt.left -= SignedDuration::from_mins(((d.y + d.x) / st.gantt.px_per_day * 1440.0) as i64);
         } else {
             st.misc_grid.scroll_y -= d.y;
-            st.gantt.left -= chrono::Duration::minutes((d.x / st.gantt.px_per_day * 1440.0) as i64);
+            st.gantt.left -= SignedDuration::from_mins((d.x / st.gantt.px_per_day * 1440.0) as i64);
         }
     }
     st.misc_grid.scroll_y = st.misc_grid.scroll_y.clamp(0.0, (total_h - body.height() + 20.0).max(0.0));
@@ -133,7 +134,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     let bp = painter.with_clip_rect(body);
     let cp = painter.with_clip_rect(chart);
     // Today line.
-    let now = chrono::Local::now().naive_local();
+    let now = plancraft_core::dates::now();
     let xt = st.gantt.x_of(chart_left, now);
     if chart.x_range().contains(xt) {
         cp.vline(xt, chart.y_range(), Stroke::new(1.5, theme::pal().TODAY));
@@ -293,7 +294,7 @@ mod tests {
     /// the status bar said "Filter: …".
     #[test]
     fn lanes_show_only_tasks_that_pass_the_filter() {
-        let p = plancraft_core::sample::demo_project(chrono::NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let p = plancraft_core::sample::demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap());
         let mut st = UiState::default();
         let bars =
             |lanes: &[Lane]| -> Vec<String> { lanes.iter().flat_map(|l| l.bars.iter().map(|(i, _)| p.tasks[*i].name.clone())).collect() };

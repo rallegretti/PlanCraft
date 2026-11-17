@@ -1,6 +1,6 @@
 //! A ready-made demonstration project.
 
-use chrono::NaiveDate;
+use crate::dates::prelude::*;
 
 use crate::calendar::CalendarException;
 use crate::custom::{CustomFieldKind, CustomValue};
@@ -12,11 +12,11 @@ use crate::schedule::recalculate;
 
 /// A small product-launch project with summaries, milestones, resources of
 /// every category, estimates, progress and tracked time.
-pub fn demo_project(start: NaiveDate) -> Project {
+pub fn demo_project(start: Date) -> Project {
     build(start).unwrap_or_else(|_| Project::new("Product Launch", start))
 }
 
-fn build(start: NaiveDate) -> PlanResult<Project> {
+fn build(start: Date) -> PlanResult<Project> {
     let mut p = Project::new("Product Launch", start);
     p.manager = "Project Manager".into();
     p.company = "PlanCraft Demo Co.".into();
@@ -36,11 +36,7 @@ fn build(start: NaiveDate) -> PlanResult<Project> {
         r.group = "Product".into();
         r.standard_rate = 85.0;
         r.email = "ana@example.com".into();
-        r.exceptions.push(CalendarException::non_working(
-            "Vacation",
-            start + chrono::Duration::days(23),
-            start + chrono::Duration::days(25),
-        ));
+        r.exceptions.push(CalendarException::non_working("Vacation", start + crate::dates::days(23), start + crate::dates::days(25)));
     }
     {
         let r = p.resource_mut(ben).ok_or(PlanError::ResourceNotFound(ben))?;
@@ -137,7 +133,7 @@ fn build(start: NaiveDate) -> PlanResult<Project> {
     p.task_mut(beta).ok_or(PlanError::TaskNotFound(beta))?.deliverable = "Feature-complete beta build".into();
     p.task_mut(golive).ok_or(PlanError::TaskNotFound(golive))?.deliverable = "Public release".into();
     p.task_mut(golive).ok_or(PlanError::TaskNotFound(golive))?.deadline =
-        p.parse_datetime(&(start + chrono::Duration::days(70)).to_string(), true);
+        p.parse_datetime(&(start + crate::dates::days(70)).to_string(), true);
     for id in [plan_ok, design_ok, beta, golive] {
         p.task_mut(id).ok_or(PlanError::TaskNotFound(id))?.show_on_timeline = true;
     }
@@ -170,7 +166,7 @@ fn build(start: NaiveDate) -> PlanResult<Project> {
     p.set_percent_complete(scope, 100)?;
     let s = p.task(scope).and_then(|t| t.sched.start).map_or(start, |s| s.date());
     for i in 0..3 {
-        let _ = p.log_time(scope, ana, s + chrono::Duration::days(i), 8 * 60, "Scoping workshop");
+        let _ = p.log_time(scope, ana, s + crate::dates::days(i), 8 * 60, "Scoping workshop");
     }
     p.set_percent_complete(research, 40)?;
 

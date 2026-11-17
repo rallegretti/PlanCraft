@@ -1,6 +1,6 @@
 //! Task table columns: how each field is displayed and edited.
 
-use chrono::NaiveDateTime;
+use plancraft_core::dates::prelude::*;
 use plancraft_core::prelude::*;
 use plancraft_core::report;
 
@@ -465,7 +465,7 @@ pub fn cell(col: TaskCol, p: &Project, idx: usize, ctx: &CellCtx) -> Cell {
     c
 }
 
-fn parse_date(p: &Project, text: &str, finish: bool) -> Result<Option<NaiveDateTime>, String> {
+fn parse_date(p: &Project, text: &str, finish: bool) -> Result<Option<DateTime>, String> {
     let t = text.trim();
     if t.is_empty() || t.eq_ignore_ascii_case("na") {
         return Ok(None);
@@ -669,13 +669,12 @@ pub fn is_late(p: &Project, t: &Task) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::NaiveDate;
 
     /// Regression: the Notes cell shows only the first line, and committing it used to replace
     /// the whole note with that line.
     #[test]
     fn editing_the_notes_cell_keeps_the_other_lines() {
-        let mut p = Project::new("Notes", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let mut p = Project::new("Notes", plancraft_core::dates::ymd(2026, 10, 19).unwrap());
         let id = p.add_task("Task", None);
         p.task_mut(id).unwrap().notes = "first\nsecond\nthird".into();
         commit(TaskCol::Notes, &mut p, id, "changed").unwrap();

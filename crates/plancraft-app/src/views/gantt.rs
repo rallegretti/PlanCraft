@@ -3,6 +3,7 @@
 use std::collections::HashSet;
 
 use egui::{CursorIcon, Rect, Sense, Stroke, Ui, pos2, vec2};
+use plancraft_core::dates::prelude::*;
 use plancraft_core::prelude::*;
 use plancraft_core::schedule::task_calendar;
 use plancraft_core::workspace::{ChangeSource, Document};
@@ -478,8 +479,8 @@ pub fn apply_chart_actions(doc: &mut Document, st: &mut UiState, rows: &[Row], a
                     let cal = task_calendar(p, idx);
                     // Zoomed out, split at the end of the day clicked; zoomed in, at the hour.
                     let at = if st.gantt.px_per_day >= 72.0 {
-                        let midnight = at.date().and_time(chrono::NaiveTime::MIN);
-                        plancraft_core::calendar::shift(midnight, ((at - midnight).num_minutes() + 30) / 60 * 60)
+                        let midnight = at.date().and_time(Time::MIN);
+                        plancraft_core::calendar::shift(midnight, (at.signed_duration_since(midnight).num_minutes() + 30) / 60 * 60)
                     } else {
                         cal.day_finish(at.date())
                     };

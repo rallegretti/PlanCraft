@@ -638,12 +638,11 @@ mod tests {
     use super::*;
     use crate::duration::Minutes;
     use crate::schedule::recalculate;
-    use chrono::NaiveDate;
 
     const DAY: Minutes = 480;
 
     fn project() -> Project {
-        Project::new("Net", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap())
+        Project::new("Net", crate::dates::ymd(2026, 10, 19).unwrap())
     }
 
     fn all(p: &Project) -> Diagram {

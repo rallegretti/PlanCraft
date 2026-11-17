@@ -32,7 +32,7 @@ mod tests {
     #[test]
     fn messages_and_plan_errors_both_reach_the_caller() {
         let mut ws = Workspace::default();
-        ws.add(Project::new("P", chrono::NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+        ws.add(Project::new("P", plancraft_core::dates::ymd(2026, 10, 19).unwrap()), None);
         let doc = ws.active_doc_mut().unwrap();
         assert_eq!(doc.edit_msg("Bad", |_| Err::<(), _>("nope".to_string())), Err("nope".to_string()));
         let r = doc.edit_msg("Boom", |_| -> Result<(), String> { panic!("kaput") });

@@ -1,8 +1,8 @@
 //! Change Working Time: calendars, work weeks and exceptions.
 
-use chrono::{Datelike, Duration, NaiveDate};
 use egui::{Align2, Context, FontId, Rect, RichText, Sense, Stroke, Ui, pos2, vec2};
 use plancraft_core::calendar::{WEEKDAYS, WorkCal};
+use plancraft_core::dates::prelude::*;
 use plancraft_core::prelude::*;
 use plancraft_core::workspace::{ChangeSource, Document};
 
@@ -11,8 +11,8 @@ use crate::theme;
 
 pub struct WorkingTime {
     calendar: CalendarId,
-    month: NaiveDate,
-    selected_day: Option<NaiveDate>,
+    month: Date,
+    selected_day: Option<Date>,
     tab: u8,
     week_text: Vec<String>,
     week_loaded_for: Option<CalendarId>,
@@ -27,7 +27,7 @@ pub struct WorkingTime {
 
 impl WorkingTime {
     pub fn new(p: &Project) -> Self {
-        let today = chrono::Local::now().date_naive();
+        let today = plancraft_core::dates::today();
         Self {
             calendar: p.calendar,
             month: today.with_day(1).unwrap_or(today),
@@ -54,11 +54,11 @@ impl WorkingTime {
         let wc = WorkCal::single(cal);
         ui.horizontal(|ui| {
             if ui.small_button("⏴").clicked() {
-                self.month = (self.month - Duration::days(1)).with_day(1).unwrap_or(self.month);
+                self.month = (self.month - plancraft_core::dates::days(1)).with_day(1).unwrap_or(self.month);
             }
             ui.label(RichText::new(self.month.format("%B %Y").to_string()).strong());
             if ui.small_button("⏵").clicked() {
-                self.month = (self.month + Duration::days(32)).with_day(1).unwrap_or(self.month);
+                self.month = (self.month + plancraft_core::dates::days(32)).with_day(1).unwrap_or(self.month);
             }
         });
         let cell = 30.0;
@@ -73,9 +73,9 @@ impl WorkingTime {
                 theme::pal().TEXT_WEAK,
             );
         }
-        let first = self.month - Duration::days(self.month.weekday().num_days_from_monday() as i64);
+        let first = self.month - plancraft_core::dates::days(self.month.weekday().num_days_from_monday() as i64);
         for k in 0..42 {
-            let day = first + Duration::days(k);
+            let day = first + plancraft_core::dates::days(k);
             let r = Rect::from_min_size(
                 pos2(rect.left() + (k % 7) as f32 * cell, rect.top() + (k / 7 + 1) as f32 * cell),
                 vec2(cell - 2.0, cell - 2.0),
@@ -93,8 +93,8 @@ impl WorkingTime {
                 theme::pal().NONWORKING
             };
             painter.rect_filled(r, 3.0, fill);
-            let color = if day.month() == self.month.month() { theme::pal().TEXT } else { theme::pal().GRID_LINE_STRONG };
-            painter.text(r.center(), Align2::CENTER_CENTER, day.day().to_string(), FontId::proportional(12.0), color);
+            let color = if day.month32() == self.month.month32() { theme::pal().TEXT } else { theme::pal().GRID_LINE_STRONG };
+            painter.text(r.center(), Align2::CENTER_CENTER, day.day32().to_string(), FontId::proportional(12.0), color);
             if self.selected_day == Some(day) {
                 painter.rect_stroke(r, 3.0, Stroke::new(2.0, theme::pal().ACCENT), egui::StrokeKind::Inside);
             }
@@ -246,7 +246,7 @@ impl WorkingTime {
                                 );
                                 ui.checkbox(&mut self.ex_yearly, "Every year");
                                 if ui.button("Add Exception").clicked() {
-                                    let parse = |s: &str| NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok();
+                                    let parse = |s: &str| Date::parse_from_str(s.trim(), "%Y-%m-%d").ok();
                                     let working: Option<Vec<TimeRange>> = if self.ex_hours.trim().is_empty() {
                                         Some(vec![])
                                     } else {
@@ -278,7 +278,7 @@ impl WorkingTime {
                             ui.label("Working times for each day of the default work week (comma-separated, empty = nonworking):");
                             egui::Grid::new("wt_week").num_columns(2).spacing([10.0, 6.0]).show(ui, |ui| {
                                 for (wd, text) in WEEKDAYS.iter().zip(self.week_text.iter_mut()) {
-                                    ui.label(format!("{wd:?}"));
+                                    ui.label(plancraft_core::dates::weekday_short(*wd));
                                     ui.add(egui::TextEdit::singleline(text).desired_width(260.0).hint_text("nonworking"));
                                     ui.end_row();
                                 }

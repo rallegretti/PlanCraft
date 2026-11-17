@@ -1,7 +1,7 @@
 //! Resource Information dialog: general details, availability and time off.
 
-use chrono::NaiveDate;
 use egui::{Context, RichText};
+use plancraft_core::dates::prelude::*;
 use plancraft_core::prelude::*;
 use plancraft_core::workspace::Document;
 
@@ -177,7 +177,7 @@ impl ResourceInfo {
                             ui.add(egui::TextEdit::singleline(&mut self.new_off_end).desired_width(90.0).hint_text("YYYY-MM-DD"));
                             ui.add(egui::TextEdit::singleline(&mut self.new_off_hours).desired_width(130.0).hint_text("hours (empty = off)"));
                             if ui.button("Add").clicked() {
-                                let parse = |s: &str| NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").ok();
+                                let parse = |s: &str| Date::parse_from_str(s.trim(), "%Y-%m-%d").ok();
                                 match (parse(&self.new_off_start), parse(&self.new_off_end).or(parse(&self.new_off_start))) {
                                     (Some(s), Some(e)) if e >= s => {
                                         let working: Option<Vec<TimeRange>> =
@@ -221,7 +221,7 @@ impl ResourceInfo {
                             ui.add(egui::TextEdit::singleline(&mut self.new_avail_to).desired_width(90.0).hint_text("to (opt.)"));
                             ui.add(egui::TextEdit::singleline(&mut self.new_avail_units).desired_width(60.0));
                             if ui.button("Add").clicked() {
-                                let parse = |s: &str| if s.trim().is_empty() { Ok(None) } else { NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").map(Some) };
+                                let parse = |s: &str| if s.trim().is_empty() { Ok(None) } else { Date::parse_from_str(s.trim(), "%Y-%m-%d").map(Some) };
                                 match (parse(&self.new_avail_from), parse(&self.new_avail_to), format::parse_units(&self.new_avail_units)) {
                                     (Ok(f), Ok(t), Some(u)) => r.availability.push(AvailabilityPeriod { from: f, to: t, units: u }),
                                     _ => self.error = Some("Dates are YYYY-MM-DD, units like 50%".into()),
@@ -319,7 +319,7 @@ mod tests {
     /// undoing an agent's changes.
     #[test]
     fn ok_keeps_what_an_agent_changed_while_the_dialog_was_open() {
-        let mut p = Project::new("Plan", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let mut p = Project::new("Plan", plancraft_core::dates::ymd(2026, 10, 19).unwrap());
         let id = p.add_resource("Ana");
         p.resource_mut(id).unwrap().standard_rate = 12.345;
         let info = ResourceInfo::new(&p, id).unwrap();

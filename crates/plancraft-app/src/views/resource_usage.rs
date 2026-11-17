@@ -1,8 +1,8 @@
 //! Resource Usage: resources and their assignments with time-phased work,
 //! highlighting overallocation.
 
-use chrono::{Datelike, Duration, NaiveDate};
 use egui::{Align2, Color32, FontId, Rect, Sense, Stroke, Ui, pos2, vec2};
+use plancraft_core::dates::prelude::*;
 use plancraft_core::prelude::*;
 use plancraft_core::workload::{AssignmentLoad, Granularity, ResourceLoad, workload};
 use plancraft_core::workspace::Document;
@@ -21,7 +21,7 @@ enum Row<'a> {
     Assignment(&'a Resource, &'a AssignmentLoad),
 }
 
-pub fn period_label(g: Granularity, d: NaiveDate) -> String {
+pub fn period_label(g: Granularity, d: Date) -> String {
     match g {
         Granularity::Day => d.format("%a %-m/%-d").to_string(),
         Granularity::Week => format!("Wk {}", d.format("%-m/%-d")),
@@ -30,7 +30,7 @@ pub fn period_label(g: Granularity, d: NaiveDate) -> String {
 }
 
 /// Toolbar shared by the time-phased views. Returns the first period to show.
-pub fn period_toolbar(ui: &mut Ui, st: &mut UiState, p: &Project) -> NaiveDate {
+pub fn period_toolbar(ui: &mut Ui, st: &mut UiState, p: &Project) -> Date {
     let default_from = st.granularity.bucket_start(p.sched.start.unwrap_or(p.start).date());
     let mut from = st.usage_from.unwrap_or(default_from);
     ui.horizontal(|ui| {
@@ -49,7 +49,7 @@ pub fn period_toolbar(ui: &mut Ui, st: &mut UiState, p: &Project) -> NaiveDate {
             from = default_from;
         }
         if ui.button("Today").clicked() {
-            from = st.granularity.bucket_start(chrono::Local::now().date_naive());
+            from = st.granularity.bucket_start(plancraft_core::dates::today());
         }
         if ui.button("⏵").on_hover_text("Later").clicked() {
             from = step(st.granularity, from, 4);
@@ -61,13 +61,13 @@ pub fn period_toolbar(ui: &mut Ui, st: &mut UiState, p: &Project) -> NaiveDate {
     from
 }
 
-pub fn step(g: Granularity, d: NaiveDate, n: i32) -> NaiveDate {
+pub fn step(g: Granularity, d: Date, n: i32) -> Date {
     match g {
-        Granularity::Day => d + Duration::days(n as i64),
-        Granularity::Week => d + Duration::days(7 * n as i64),
+        Granularity::Day => d + plancraft_core::dates::days(n as i64),
+        Granularity::Week => d + plancraft_core::dates::days(7 * n as i64),
         Granularity::Month => {
-            let total = d.year() * 12 + d.month0() as i32 + n;
-            NaiveDate::from_ymd_opt(total.div_euclid(12), total.rem_euclid(12) as u32 + 1, 1).unwrap_or(d)
+            let total = d.year32() * 12 + d.month0() as i32 + n;
+            plancraft_core::dates::ymd(total.div_euclid(12), total.rem_euclid(12) as u32 + 1, 1).unwrap_or(d)
         }
     }
 }
@@ -86,7 +86,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     for _ in 0..nper {
         to = step(st.granularity, to, 1);
     }
-    let report = workload(p, from, to - Duration::days(1), st.granularity);
+    let report = workload(p, from, to - plancraft_core::dates::days(1), st.granularity);
 
     // Rows.
     let mut rows: Vec<Row> = Vec::new();

@@ -8,7 +8,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use chrono::{NaiveDate, NaiveDateTime};
+use crate::dates::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::calendar::WorkCal;
@@ -41,8 +41,8 @@ pub struct LevelingReport {
     pub delayed: Vec<(TaskId, Minutes)>,
     /// Tasks that could not be resolved (e.g. assigned beyond a resource's maximum units).
     pub unresolved: Vec<String>,
-    pub finish_before: Option<chrono::NaiveDateTime>,
-    pub finish_after: Option<chrono::NaiveDateTime>,
+    pub finish_before: Option<DateTime>,
+    pub finish_after: Option<DateTime>,
 }
 
 /// Removes all leveling delays.
@@ -53,17 +53,17 @@ pub fn clear_leveling(p: &mut Project) {
     recalculate(p);
 }
 
-type Load = HashMap<ResourceId, BTreeMap<NaiveDate, f64>>;
+type Load = HashMap<ResourceId, BTreeMap<Date, f64>>;
 
 /// What a task's load depends on during leveling, looked up once per task.
 struct TaskPlan<'a> {
     cal: WorkCal<'a>,
-    start: Option<NaiveDateTime>,
+    start: Option<DateTime>,
     duration: Minutes,
     /// The duration is elapsed time: it runs (and works) around the clock.
     elapsed: bool,
     /// Working parts of a split task as scheduled.
-    parts: Vec<(NaiveDateTime, NaiveDateTime)>,
+    parts: Vec<(DateTime, DateTime)>,
     /// Splits planned in the task: they move with it when it is delayed.
     gaps: Vec<Gap>,
     /// (resource, work, contour) of its work assignments within the leveling filter.
@@ -92,14 +92,14 @@ impl<'a> TaskPlan<'a> {
     }
 
     /// The task's load per resource and day when delayed by `delay`, and the start it then has.
-    fn load(&self, delay: Minutes) -> (Load, Option<NaiveDateTime>) {
+    fn load(&self, delay: Minutes) -> (Load, Option<DateTime>) {
         let mut out: Load = HashMap::new();
         let Some(s) = self.start else {
             return (out, None);
         };
         let start = if delay > 0 { self.cal.snap_forward(self.cal.add(s, delay)) } else { s };
         let moved = self.spans_from(start);
-        let spans: &[(NaiveDateTime, NaiveDateTime)] = if delay == 0 && !self.parts.is_empty() { &self.parts } else { &moved };
+        let spans: &[(DateTime, DateTime)] = if delay == 0 && !self.parts.is_empty() { &self.parts } else { &moved };
         for (rid, work, contour) in &self.assignments {
             let e = out.entry(*rid).or_default();
             for (d, w) in distribute_task(&self.cal, self.elapsed, spans, *work, *contour) {
@@ -110,21 +110,21 @@ impl<'a> TaskPlan<'a> {
     }
 
     /// The working parts of the task when it starts at `start`: its planned splits move with it.
-    fn spans_from(&self, start: NaiveDateTime) -> Vec<(NaiveDateTime, NaiveDateTime)> {
+    fn spans_from(&self, start: DateTime) -> Vec<(DateTime, DateTime)> {
         if self.elapsed {
             return vec![(start, crate::calendar::shift(start, self.duration))];
         }
         crate::schedule::segments_of(start, &[], &self.gaps, &self.cal, self.duration).into_iter().map(|(s, f, _)| (s, f)).collect()
     }
 
-    fn finish_after(&self, delay: Minutes) -> Option<NaiveDateTime> {
+    fn finish_after(&self, delay: Minutes) -> Option<DateTime> {
         let s = self.start?;
         let start = if delay > 0 { self.cal.snap_forward(self.cal.add(s, delay)) } else { s };
         self.spans_from(start).last().map(|&(_, f)| f)
     }
 }
 
-fn fits(p: &Project, committed: &Load, candidate: &Load, caps: &mut HashMap<(ResourceId, NaiveDate), f64>) -> bool {
+fn fits(p: &Project, committed: &Load, candidate: &Load, caps: &mut HashMap<(ResourceId, Date), f64>) -> bool {
     for (rid, days) in candidate {
         let Some(r) = p.resource(*rid) else { continue };
         let cal = resource_calendar(p, r);
@@ -202,7 +202,7 @@ pub fn level_resources(p: &mut Project, opts: &LevelingOptions) -> LevelingRepor
 
     // Load currently committed, and each committed task's share with the start it was taken at.
     let mut committed: Load = HashMap::new();
-    let mut shares: HashMap<usize, (Load, Option<NaiveDateTime>)> = HashMap::new();
+    let mut shares: HashMap<usize, (Load, Option<DateTime>)> = HashMap::new();
     // Fixed tasks (started, manual, hard constraints) are committed first.
     for (i, t) in p.tasks.iter().enumerate() {
         if !t.sched.is_summary

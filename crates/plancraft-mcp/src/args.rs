@@ -6,8 +6,8 @@
 
 use std::collections::HashMap;
 
-use chrono::{NaiveDate, NaiveDateTime};
 use plancraft_core::calendar::TimeRange;
+use plancraft_core::dates::prelude::*;
 use plancraft_core::duration::{Lag, Minutes, TypedDuration, parse_work};
 use plancraft_core::ids::*;
 use plancraft_core::model::*;
@@ -230,14 +230,14 @@ impl<'a> Args<'a> {
 pub const DATETIME_FMT: &str = "%Y-%m-%d %H:%M";
 pub const DATE_FMT: &str = "%Y-%m-%d";
 
-pub fn fmt_dt(dt: Option<NaiveDateTime>) -> Value {
+pub fn fmt_dt(dt: Option<DateTime>) -> Value {
     match dt {
         Some(d) => Value::String(d.format(DATETIME_FMT).to_string()),
         None => Value::Null,
     }
 }
 
-pub fn fmt_date(d: Option<NaiveDate>) -> Value {
+pub fn fmt_date(d: Option<Date>) -> Value {
     match d {
         Some(d) => Value::String(d.format(DATE_FMT).to_string()),
         None => Value::Null,
@@ -269,7 +269,7 @@ pub fn pct_text(units: f64) -> String {
 // ---------------------------------------------------------------------------
 
 /// Parses a date/date-time. `finish` selects the end of the working day for bare dates.
-pub fn parse_dt(p: &Project, v: &Value, finish: bool, key: &str) -> ToolResult<NaiveDateTime> {
+pub fn parse_dt(p: &Project, v: &Value, finish: bool, key: &str) -> ToolResult<DateTime> {
     let s = match v {
         Value::String(s) => s.as_str(),
         other => {
@@ -281,7 +281,7 @@ pub fn parse_dt(p: &Project, v: &Value, finish: bool, key: &str) -> ToolResult<N
 }
 
 /// Parses a calendar date (no time).
-pub fn parse_date(v: &Value, key: &str) -> ToolResult<NaiveDate> {
+pub fn parse_date(v: &Value, key: &str) -> ToolResult<Date> {
     let s = match v {
         Value::String(s) => s.trim(),
         other => {
@@ -290,7 +290,7 @@ pub fn parse_date(v: &Value, key: &str) -> ToolResult<NaiveDate> {
     };
     let s = s.split([' ', 'T']).next().unwrap_or(s);
     for f in ["%Y-%m-%d", "%m/%d/%Y", "%d %b %Y", "%b %d %Y", "%b %d, %Y"] {
-        if let Ok(d) = NaiveDate::parse_from_str(s, f) {
+        if let Ok(d) = Date::parse_from_str(s, f) {
             let (lo, hi) = (plancraft_core::limits::min_date(), plancraft_core::limits::max_date());
             if !(lo..=hi).contains(&d) {
                 return err(format!("'{key}' must be between {lo} and {hi}"));
@@ -809,7 +809,7 @@ mod tests {
     use serde_json::json;
 
     fn p() -> Project {
-        let mut p = Project::new("T", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let mut p = Project::new("T", plancraft_core::dates::ymd(2026, 10, 19).unwrap());
         p.add_task("Design", None);
         p.add_task("Build", None);
         p

@@ -5,8 +5,8 @@
 
 use std::collections::HashSet;
 
-use chrono::NaiveDateTime;
 use plancraft_core::calendar::{Calendar, CalendarException, TimeRange, WEEKDAYS};
+use plancraft_core::dates::prelude::*;
 use plancraft_core::duration::{Lag, Minutes, format_work};
 use plancraft_core::ids::*;
 use plancraft_core::model::*;
@@ -17,15 +17,15 @@ use serde_json::{Map, Value, json};
 
 use crate::args::*;
 
-pub fn weekday_name(wd: chrono::Weekday) -> &'static str {
+pub fn weekday_name(wd: Weekday) -> &'static str {
     match wd {
-        chrono::Weekday::Mon => "monday",
-        chrono::Weekday::Tue => "tuesday",
-        chrono::Weekday::Wed => "wednesday",
-        chrono::Weekday::Thu => "thursday",
-        chrono::Weekday::Fri => "friday",
-        chrono::Weekday::Sat => "saturday",
-        chrono::Weekday::Sun => "sunday",
+        Weekday::Monday => "monday",
+        Weekday::Tuesday => "tuesday",
+        Weekday::Wednesday => "wednesday",
+        Weekday::Thursday => "thursday",
+        Weekday::Friday => "friday",
+        Weekday::Saturday => "saturday",
+        Weekday::Sunday => "sunday",
     }
 }
 
@@ -493,7 +493,7 @@ pub fn resource_row(p: &Project, r: &Resource, over: &HashSet<ResourceId>) -> Va
     v
 }
 
-pub fn resource_detail(p: &Project, r: &Resource, over_days: &[chrono::NaiveDate]) -> Value {
+pub fn resource_detail(p: &Project, r: &Resource, over_days: &[Date]) -> Value {
     let over: HashSet<ResourceId> = if over_days.is_empty() { HashSet::new() } else { [r.id].into_iter().collect() };
     let mut v = resource_row(p, r, &over);
     let extra = json!({
@@ -678,7 +678,7 @@ pub fn schedule_table(p: &Project, rows: &[usize]) -> String {
         if !t.sched.warnings.is_empty() {
             flags.push("warning");
         }
-        let short = |d: Option<NaiveDateTime>| d.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_else(|| "-".into());
+        let short = |d: Option<DateTime>| d.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_else(|| "-".into());
         out.push_str(&format!(
             "{} | {} | {} | {}{} | {} | {} | {} | {}% | {} | {} | {}\n",
             i + 1,

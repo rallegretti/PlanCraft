@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use chrono::{Datelike, Days, NaiveDate, NaiveDateTime};
+use crate::dates::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::calendar::{CalLayer, WorkCal};
@@ -28,7 +28,7 @@ pub enum Granularity {
 
 impl Granularity {
     /// First day of the bucket containing `d` (weeks start on Monday).
-    pub fn bucket_start(self, d: NaiveDate) -> NaiveDate {
+    pub fn bucket_start(self, d: Date) -> Date {
         match self {
             Granularity::Day => d,
             Granularity::Week => d.checked_sub_days(Days::new(u64::from(d.weekday().num_days_from_monday()))).unwrap_or(d),
@@ -37,19 +37,19 @@ impl Granularity {
     }
 
     /// First day of the bucket after the one starting at `start`.
-    pub fn next(self, start: NaiveDate) -> NaiveDate {
+    pub fn next(self, start: Date) -> Date {
         match self {
-            Granularity::Day => start.checked_add_days(Days::new(1)).unwrap_or(NaiveDate::MAX),
-            Granularity::Week => start.checked_add_days(Days::new(7)).unwrap_or(NaiveDate::MAX),
+            Granularity::Day => start.checked_add_days(Days::new(1)).unwrap_or(Date::MAX),
+            Granularity::Week => start.checked_add_days(Days::new(7)).unwrap_or(Date::MAX),
             Granularity::Month => {
-                let (y, m) = if start.month() == 12 { (start.year() + 1, 1) } else { (start.year(), start.month() + 1) };
-                NaiveDate::from_ymd_opt(y, m, 1).unwrap_or(NaiveDate::MAX)
+                let (y, m) = if start.month32() == 12 { (start.year32() + 1, 1) } else { (start.year32(), start.month32() + 1) };
+                crate::dates::ymd(y, m, 1).unwrap_or(Date::MAX)
             }
         }
     }
 
     /// Bucket start dates covering `[from, to]`.
-    pub fn buckets(self, from: NaiveDate, to: NaiveDate) -> Vec<NaiveDate> {
+    pub fn buckets(self, from: Date, to: Date) -> Vec<Date> {
         let mut out = Vec::new();
         let mut d = self.bucket_start(from);
         while d <= to && out.len() < 5000 {
@@ -65,7 +65,7 @@ impl Granularity {
 }
 
 /// Work of one assignment per day, in minutes (fractional to avoid rounding drift).
-pub fn assignment_daily_work(p: &Project, a: &Assignment) -> BTreeMap<NaiveDate, f64> {
+pub fn assignment_daily_work(p: &Project, a: &Assignment) -> BTreeMap<Date, f64> {
     let Some(ti) = p.task_index(a.task) else {
         return BTreeMap::new();
     };
@@ -80,30 +80,25 @@ pub fn assignment_daily_work(p: &Project, a: &Assignment) -> BTreeMap<NaiveDate,
 }
 
 /// The working spans of a scheduled task: its parts when it is split, else start to finish.
-pub fn task_spans(t: &Task, start: NaiveDateTime, finish: NaiveDateTime) -> Vec<(NaiveDateTime, NaiveDateTime)> {
+pub fn task_spans(t: &Task, start: DateTime, finish: DateTime) -> Vec<(DateTime, DateTime)> {
     if t.sched.parts.is_empty() { vec![(start, finish)] } else { t.sched.parts.clone() }
 }
 
 /// Spreads `work` over the working time of `[start, finish)` following `contour`.
-pub fn distribute(cal: &WorkCal, start: NaiveDateTime, finish: NaiveDateTime, work: f64, contour: WorkContour) -> BTreeMap<NaiveDate, f64> {
+pub fn distribute(cal: &WorkCal, start: DateTime, finish: DateTime, work: f64, contour: WorkContour) -> BTreeMap<Date, f64> {
     distribute_spans(cal, &[(start, finish)], work, contour)
 }
 
 /// Spreads `work` over the working time of `spans` (in order, not overlapping) following
 /// `contour`, as if they were one stretch: a split task does no work during its pauses.
-pub fn distribute_spans(
-    cal: &WorkCal,
-    spans: &[(NaiveDateTime, NaiveDateTime)],
-    work: f64,
-    contour: WorkContour,
-) -> BTreeMap<NaiveDate, f64> {
+pub fn distribute_spans(cal: &WorkCal, spans: &[(DateTime, DateTime)], work: f64, contour: WorkContour) -> BTreeMap<Date, f64> {
     let (Some(&(start, _)), Some(&(_, finish))) = (spans.first(), spans.last()) else {
         return BTreeMap::new();
     };
     if work <= 0.0 || finish <= start {
         return BTreeMap::new();
     }
-    let mut per_day: BTreeMap<NaiveDate, f64> = BTreeMap::new();
+    let mut per_day: BTreeMap<Date, f64> = BTreeMap::new();
     for &(a, b) in spans.iter().filter(|(a, b)| a < b) {
         for d in a.date().iter_days().take_while(|d| *d <= b.date()) {
             let wm = cal.working_minutes_within(d, a, b) as f64;
@@ -112,23 +107,23 @@ pub fn distribute_spans(
             }
         }
     }
-    let days: Vec<(NaiveDate, f64)> = per_day.into_iter().collect();
+    let days: Vec<(Date, f64)> = per_day.into_iter().collect();
     weigh(&days, start, finish, work, contour)
 }
 
 /// Spreads `work` over all the time of `spans`, nights and non-working days included: the work
 /// of an elapsed-duration task, which runs around the clock.
-pub fn distribute_elapsed(spans: &[(NaiveDateTime, NaiveDateTime)], work: f64, contour: WorkContour) -> BTreeMap<NaiveDate, f64> {
+pub fn distribute_elapsed(spans: &[(DateTime, DateTime)], work: f64, contour: WorkContour) -> BTreeMap<Date, f64> {
     let (Some(&(start, _)), Some(&(_, finish))) = (spans.first(), spans.last()) else {
         return BTreeMap::new();
     };
     if work <= 0.0 || finish <= start {
         return BTreeMap::new();
     }
-    let mut per_day: BTreeMap<NaiveDate, f64> = BTreeMap::new();
+    let mut per_day: BTreeMap<Date, f64> = BTreeMap::new();
     for &(a, b) in spans.iter().filter(|(a, b)| a < b) {
         for d in a.date().iter_days().take_while(|d| *d <= b.date()) {
-            let midnight = d.and_time(chrono::NaiveTime::MIN);
+            let midnight = d.and_time(Time::MIN);
             let from = a.max(midnight);
             let to = b.min(crate::calendar::shift(midnight, 24 * 60));
             let m = to.signed_duration_since(from).num_minutes() as f64;
@@ -137,7 +132,7 @@ pub fn distribute_elapsed(spans: &[(NaiveDateTime, NaiveDateTime)], work: f64, c
             }
         }
     }
-    let days: Vec<(NaiveDate, f64)> = per_day.into_iter().collect();
+    let days: Vec<(Date, f64)> = per_day.into_iter().collect();
     weigh(&days, start, finish, work, contour)
 }
 
@@ -145,27 +140,21 @@ pub fn distribute_elapsed(spans: &[(NaiveDateTime, NaiveDateTime)], work: f64, c
 pub fn distribute_task(
     cal: &WorkCal,
     elapsed: bool,
-    spans: &[(NaiveDateTime, NaiveDateTime)],
+    spans: &[(DateTime, DateTime)],
     work: f64,
     contour: WorkContour,
-) -> BTreeMap<NaiveDate, f64> {
+) -> BTreeMap<Date, f64> {
     if elapsed { distribute_elapsed(spans, work, contour) } else { distribute_spans(cal, spans, work, contour) }
 }
 
 /// Spreads `work` over `days` in proportion to their minutes (`(day, minutes)`) shaped by
 /// `contour`; evenly over the calendar days from `start` to `finish` when there are none.
-fn weigh(
-    days: &[(NaiveDate, f64)],
-    start: NaiveDateTime,
-    finish: NaiveDateTime,
-    work: f64,
-    contour: WorkContour,
-) -> BTreeMap<NaiveDate, f64> {
+fn weigh(days: &[(Date, f64)], start: DateTime, finish: DateTime, work: f64, contour: WorkContour) -> BTreeMap<Date, f64> {
     let mut out = BTreeMap::new();
     let total: f64 = days.iter().map(|(_, w)| w).sum();
     if total <= 0.0 {
         // No working time in span (e.g. elapsed-time task): spread evenly over calendar days.
-        let n = (finish.date() - start.date()).num_days().max(0) + 1;
+        let n = finish.date().signed_duration_since(start.date()).num_days().max(0) + 1;
         for d in start.date().iter_days().take(usize::try_from(n).unwrap_or(0)) {
             out.insert(d, work / n as f64);
         }
@@ -194,13 +183,13 @@ pub fn resource_calendar<'a>(p: &'a Project, r: &'a Resource) -> WorkCal<'a> {
 }
 
 /// Capacity in minutes of a resource on a day: working minutes × available units.
-pub fn capacity_on(cal: &WorkCal, r: &Resource, d: NaiveDate) -> f64 {
+pub fn capacity_on(cal: &WorkCal, r: &Resource, d: Date) -> f64 {
     cal.working_minutes_on(d) as f64 * r.units_on(d)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct PeriodLoad {
-    pub start: NaiveDate,
+    pub start: Date,
     /// Minutes of available working time (capacity).
     pub capacity: f64,
     /// Minutes of planned work.
@@ -247,7 +236,7 @@ pub struct ResourceLoad {
     /// Overallocated on at least one day in the window.
     pub overallocated: bool,
     /// Days within the window on which the resource is overallocated.
-    pub overallocated_days: Vec<NaiveDate>,
+    pub overallocated_days: Vec<Date>,
 }
 
 impl ResourceLoad {
@@ -259,17 +248,17 @@ impl ResourceLoad {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct WorkloadReport {
     pub granularity: Granularity,
-    pub from: NaiveDate,
-    pub to: NaiveDate,
-    pub periods: Vec<NaiveDate>,
+    pub from: Date,
+    pub to: Date,
+    pub periods: Vec<Date>,
     pub resources: Vec<ResourceLoad>,
     /// Estimated work of tasks without work resources, per period.
     pub unassigned: Vec<f64>,
 }
 
 /// Daily load per resource for the whole project.
-pub fn daily_loads(p: &Project) -> HashMap<ResourceId, BTreeMap<NaiveDate, f64>> {
-    let mut map: HashMap<ResourceId, BTreeMap<NaiveDate, f64>> = HashMap::new();
+pub fn daily_loads(p: &Project) -> HashMap<ResourceId, BTreeMap<Date, f64>> {
+    let mut map: HashMap<ResourceId, BTreeMap<Date, f64>> = HashMap::new();
     for a in &p.assignments {
         let Some(r) = p.resource(a.resource) else {
             continue;
@@ -286,7 +275,7 @@ pub fn daily_loads(p: &Project) -> HashMap<ResourceId, BTreeMap<NaiveDate, f64>>
 }
 
 /// Days on which each resource is overallocated (over the whole project).
-pub fn overallocations(p: &Project) -> Vec<(ResourceId, Vec<NaiveDate>)> {
+pub fn overallocations(p: &Project) -> Vec<(ResourceId, Vec<Date>)> {
     let loads = daily_loads(p);
     let mut out = Vec::new();
     for r in &p.resources {
@@ -294,7 +283,7 @@ pub fn overallocations(p: &Project) -> Vec<(ResourceId, Vec<NaiveDate>)> {
             continue;
         };
         let cal = resource_calendar(p, r);
-        let over: Vec<NaiveDate> = days.iter().filter(|(d, load)| **load > capacity_on(&cal, r, **d) + 0.5).map(|(d, _)| *d).collect();
+        let over: Vec<Date> = days.iter().filter(|(d, load)| **load > capacity_on(&cal, r, **d) + 0.5).map(|(d, _)| *d).collect();
         if !over.is_empty() {
             out.push((r.id, over));
         }
@@ -306,10 +295,10 @@ pub fn overallocations(p: &Project) -> Vec<(ResourceId, Vec<NaiveDate>)> {
 pub const MAX_WINDOW_DAYS: u64 = 20 * 366;
 
 /// Builds a time-phased workload report for `[from, to]` (at most [`MAX_WINDOW_DAYS`] long).
-pub fn workload(p: &Project, from: NaiveDate, to: NaiveDate, granularity: Granularity) -> WorkloadReport {
-    let to = to.min(from.checked_add_days(Days::new(MAX_WINDOW_DAYS)).unwrap_or(NaiveDate::MAX));
+pub fn workload(p: &Project, from: Date, to: Date, granularity: Granularity) -> WorkloadReport {
+    let to = to.min(from.checked_add_days(Days::new(MAX_WINDOW_DAYS)).unwrap_or(Date::MAX));
     let periods = granularity.buckets(from, to);
-    let bucket_of = |d: NaiveDate| -> Option<usize> {
+    let bucket_of = |d: Date| -> Option<usize> {
         if d < from || d > to {
             return None;
         }
@@ -322,7 +311,7 @@ pub fn workload(p: &Project, from: NaiveDate, to: NaiveDate, granularity: Granul
         let cal = resource_calendar(p, r);
         let mut periods_load: Vec<PeriodLoad> =
             periods.iter().map(|&start| PeriodLoad { start, capacity: 0.0, load: 0.0, overallocated: false }).collect();
-        let mut daily: BTreeMap<NaiveDate, f64> = BTreeMap::new();
+        let mut daily: BTreeMap<Date, f64> = BTreeMap::new();
         let mut assignment_loads = Vec::new();
         let mut total_work = 0;
         let mut actual_work = 0;

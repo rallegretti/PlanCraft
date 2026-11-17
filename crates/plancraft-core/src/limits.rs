@@ -9,7 +9,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use crate::dates::prelude::*;
 
 use crate::calendar::{Calendar, CalendarException, TimeRange};
 use crate::duration::{Lag, Minutes};
@@ -53,21 +53,21 @@ pub const MAX_PRIORITY: u16 = 1_000;
 pub const MAX_ID: u32 = 1 << 30;
 
 /// Earliest date a project may use.
-pub fn min_date() -> NaiveDate {
-    NaiveDate::from_ymd_opt(1900, 1, 1).unwrap_or(NaiveDate::MIN)
+pub fn min_date() -> Date {
+    crate::dates::ymd(1900, 1, 1).unwrap_or(Date::MIN)
 }
 
 /// Latest date a project may use.
-pub fn max_date() -> NaiveDate {
-    NaiveDate::from_ymd_opt(2300, 12, 31).unwrap_or(NaiveDate::MAX)
+pub fn max_date() -> Date {
+    crate::dates::ymd(2300, 12, 31).unwrap_or(Date::MAX)
 }
 
-pub fn clamp_date(d: NaiveDate) -> NaiveDate {
+pub fn clamp_date(d: Date) -> Date {
     d.clamp(min_date(), max_date())
 }
 
-pub fn clamp_datetime(dt: NaiveDateTime) -> NaiveDateTime {
-    dt.clamp(min_date().and_time(NaiveTime::MIN), max_date().and_time(NaiveTime::MIN))
+pub fn clamp_datetime(dt: DateTime) -> DateTime {
+    dt.clamp(min_date().and_time(Time::MIN), max_date().and_time(Time::MIN))
 }
 
 /// Clamps a duration or amount of work into `0..=MAX_MINUTES`.
@@ -351,7 +351,7 @@ impl Fixer {
         }
     }
 
-    fn date(&mut self, d: &mut NaiveDate) {
+    fn date(&mut self, d: &mut Date) {
         let c = clamp_date(*d);
         if c != *d {
             *d = c;
@@ -359,13 +359,13 @@ impl Fixer {
         }
     }
 
-    fn opt_date(&mut self, d: &mut Option<NaiveDate>) {
+    fn opt_date(&mut self, d: &mut Option<Date>) {
         if let Some(d) = d {
             self.date(d);
         }
     }
 
-    fn datetime(&mut self, dt: &mut NaiveDateTime) {
+    fn datetime(&mut self, dt: &mut DateTime) {
         let c = clamp_datetime(*dt);
         if c != *dt {
             *dt = c;
@@ -373,7 +373,7 @@ impl Fixer {
         }
     }
 
-    fn opt_datetime(&mut self, dt: &mut Option<NaiveDateTime>) {
+    fn opt_datetime(&mut self, dt: &mut Option<DateTime>) {
         if let Some(dt) = dt {
             self.datetime(dt);
         }
@@ -396,7 +396,7 @@ impl Fixer {
     }
 
     /// Swaps a start that comes after its finish.
-    fn ordered(&mut self, start: &mut NaiveDateTime, finish: &mut NaiveDateTime) {
+    fn ordered(&mut self, start: &mut DateTime, finish: &mut DateTime) {
         if start > finish {
             std::mem::swap(start, finish);
             self.note("a baseline or interim plan starts after it finishes");
@@ -606,7 +606,7 @@ mod tests {
     use crate::ids::TaskId;
 
     fn project() -> Project {
-        Project::new("P", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap())
+        Project::new("P", crate::dates::ymd(2026, 10, 19).unwrap())
     }
 
     #[test]
@@ -617,7 +617,7 @@ mod tests {
         t.duration = Minutes::MAX;
         t.percent_complete = 250;
         t.outline_level = 9;
-        t.deadline = NaiveDate::from_ymd_opt(9999, 1, 1).and_then(|d| d.and_hms_opt(0, 0, 0));
+        t.deadline = crate::dates::ymd(9999, 1, 1).and_then(|d| d.and_hms_opt(0, 0, 0));
         t.name = "x".repeat(5000);
         t.predecessors.push(crate::model::Dependency { predecessor: TaskId(99).into(), kind: LinkType::FS, lag: Lag::Percent(i32::MIN) });
         p.settings.time.minutes_per_day = 0;

@@ -20,7 +20,7 @@
 
 use std::collections::HashMap;
 
-use chrono::NaiveDateTime;
+use crate::dates::prelude::*;
 
 use crate::calendar::{CalLayer, WorkCal, shift};
 use crate::duration::{Lag, Minutes};
@@ -36,7 +36,7 @@ enum PredSource {
     /// A summary used as SS/SF predecessor: start = min of leaves' starts.
     SummaryStart(Vec<usize>),
     /// Fixed dates of an external task.
-    Fixed { start: NaiveDateTime, finish: NaiveDateTime, duration: Minutes },
+    Fixed { start: DateTime, finish: DateTime, duration: Minutes },
 }
 
 #[derive(Clone, Debug)]
@@ -49,10 +49,10 @@ struct Edge {
 
 #[derive(Clone, Copy, Debug, Default)]
 struct Dates {
-    es: Option<NaiveDateTime>,
-    ef: Option<NaiveDateTime>,
-    ls: Option<NaiveDateTime>,
-    lf: Option<NaiveDateTime>,
+    es: Option<DateTime>,
+    ef: Option<DateTime>,
+    ls: Option<DateTime>,
+    lf: Option<DateTime>,
     /// Completed and remaining parts of an in-progress task.
     parts: Option<Parts>,
 }
@@ -61,17 +61,17 @@ struct Dates {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Parts {
     /// End of the completed part (Microsoft Project's Stop field).
-    pub stop: NaiveDateTime,
+    pub stop: DateTime,
     /// Start of the remaining part: the next working moment after `stop`, or the start of the next
     /// working part when the task pauses at `stop` (Microsoft Project's Resume field).
-    pub resume: NaiveDateTime,
+    pub resume: DateTime,
     /// Working minutes left to do.
     pub remaining: Minutes,
     /// End of the last working part: the task's finish.
-    pub finish: NaiveDateTime,
+    pub finish: DateTime,
     /// Start of the last working part and the working minutes in it (the part that can still
     /// slip); the actual start and the whole duration when the task is not split.
-    pub last: (NaiveDateTime, Minutes),
+    pub last: (DateTime, Minutes),
     /// The task has pauses (see [`segments_of`]).
     pub split: bool,
 }
@@ -104,15 +104,9 @@ pub fn span_of(t: &Task, dur: Minutes) -> Minutes {
 /// planned split's work the task pauses for the split's length; after an in-progress split's work
 /// it stops until that split's resume date. Splits that would not leave a gap (or lie past the
 /// duration) are ignored, so a task with no real pause has one part.
-pub fn segments_of(
-    start: NaiveDateTime,
-    splits: &[Split],
-    gaps: &[Gap],
-    cal: &WorkCal,
-    dur: Minutes,
-) -> Vec<(NaiveDateTime, NaiveDateTime, Minutes)> {
+pub fn segments_of(start: DateTime, splits: &[Split], gaps: &[Gap], cal: &WorkCal, dur: Minutes) -> Vec<(DateTime, DateTime, Minutes)> {
     enum Until {
-        Date(NaiveDateTime),
+        Date(DateTime),
         For(Minutes),
     }
     let mut breaks: Vec<(Minutes, Until)> = planned_gaps(gaps, dur).into_iter().map(|g| (g.work, Until::For(g.length))).collect();
@@ -190,11 +184,7 @@ pub fn parts_of(t: &Task, cal: &WorkCal, dur: Minutes) -> Option<Parts> {
 
 /// Where `done` working minutes end within `segs` (the Stop), and where the rest starts (the
 /// Resume: the next part when the work done ends exactly at a pause).
-fn stop_and_resume(
-    segs: &[(NaiveDateTime, NaiveDateTime, Minutes)],
-    cal: &WorkCal,
-    done: Minutes,
-) -> Option<(NaiveDateTime, NaiveDateTime)> {
+fn stop_and_resume(segs: &[(DateTime, DateTime, Minutes)], cal: &WorkCal, done: Minutes) -> Option<(DateTime, DateTime)> {
     for (k, &(s, f, before)) in segs.iter().enumerate() {
         let next = segs.get(k + 1);
         let len = next.map_or(Minutes::MAX, |n| n.2.saturating_sub(before));
@@ -212,7 +202,7 @@ fn stop_and_resume(
 }
 
 /// Working minutes of `segs` done by `upto`.
-pub fn work_done_by(segs: &[(NaiveDateTime, NaiveDateTime)], cal: &WorkCal, upto: NaiveDateTime) -> Minutes {
+pub fn work_done_by(segs: &[(DateTime, DateTime)], cal: &WorkCal, upto: DateTime) -> Minutes {
     segs.iter().filter(|(s, _)| *s < upto).map(|&(s, f)| cal.between(s, f.min(upto)).max(0)).fold(0, Minutes::saturating_add)
 }
 
@@ -220,8 +210,8 @@ pub fn work_done_by(segs: &[(NaiveDateTime, NaiveDateTime)], cal: &WorkCal, upto
 #[derive(Clone, Debug, Default)]
 pub struct ScheduleReport {
     pub warnings: Vec<String>,
-    pub start: Option<NaiveDateTime>,
-    pub finish: Option<NaiveDateTime>,
+    pub start: Option<DateTime>,
+    pub finish: Option<DateTime>,
     pub critical_tasks: Vec<TaskId>,
 }
 
@@ -337,7 +327,7 @@ pub fn project_calendar(p: &Project) -> WorkCal<'_> {
 /// The dates of a manually scheduled summary task: its typed start, and its typed finish or
 /// (without one) its start plus its duration on the project calendar `cal`. `None` for any other
 /// task, and for a manual summary without a typed start (it is scheduled like an automatic one).
-pub fn manual_summary_dates(t: &Task, is_summary: bool, cal: &WorkCal) -> Option<(NaiveDateTime, NaiveDateTime)> {
+pub fn manual_summary_dates(t: &Task, is_summary: bool, cal: &WorkCal) -> Option<(DateTime, DateTime)> {
     if !is_summary || t.mode != ScheduleMode::Manual {
         return None;
     }
@@ -350,7 +340,7 @@ fn percent_of(duration: Minutes, pct: i32) -> Minutes {
     duration.saturating_mul(Minutes::from(pct)) / 100
 }
 
-fn apply_lag(cal: &WorkCal, base: NaiveDateTime, lag: Lag, pred_duration: Minutes) -> NaiveDateTime {
+fn apply_lag(cal: &WorkCal, base: DateTime, lag: Lag, pred_duration: Minutes) -> DateTime {
     match lag {
         Lag::None | Lag::Working(0) => base,
         Lag::Working(m) => cal.add(base, m),
@@ -362,7 +352,7 @@ fn apply_lag(cal: &WorkCal, base: NaiveDateTime, lag: Lag, pred_duration: Minute
     }
 }
 
-fn unapply_lag(cal: &WorkCal, base: NaiveDateTime, lag: Lag, pred_duration: Minutes) -> NaiveDateTime {
+fn unapply_lag(cal: &WorkCal, base: DateTime, lag: Lag, pred_duration: Minutes) -> DateTime {
     match lag {
         Lag::None | Lag::Working(0) => base,
         Lag::Working(m) => cal.sub(base, m),
@@ -412,29 +402,25 @@ struct Engine<'a> {
     warnings: Vec<String>,
     dates: Vec<Dates>,
     /// Working parts of split tasks (by task index).
-    segments: HashMap<usize, Vec<(NaiveDateTime, NaiveDateTime)>>,
+    segments: HashMap<usize, Vec<(DateTime, DateTime)>>,
     /// Per task: the latest Start No Earlier Than date and the earliest deadline set on its
     /// ancestor summaries (both apply to every subtask).
     inherited: Vec<Inherited>,
     /// The dates of each manually scheduled summary (see [`manual_summary_dates`]).
-    manual_summary: Vec<Option<(NaiveDateTime, NaiveDateTime)>>,
+    manual_summary: Vec<Option<(DateTime, DateTime)>>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 struct Inherited {
-    snet: Option<NaiveDateTime>,
-    deadline: Option<NaiveDateTime>,
+    snet: Option<DateTime>,
+    deadline: Option<DateTime>,
 }
 
 /// Constraints a summary passes to its subtasks: its Start No Earlier Than date drives their
 /// starts, and its deadline bounds their late finish (and so their slack). A manually scheduled
 /// summary's start drives its subtasks' starts in the same way (its constraint is ignored, like
 /// any manual task's).
-fn inherited_from_summaries(
-    p: &Project,
-    parent: &[Option<usize>],
-    manual_summary: &[Option<(NaiveDateTime, NaiveDateTime)>],
-) -> Vec<Inherited> {
+fn inherited_from_summaries(p: &Project, parent: &[Option<usize>], manual_summary: &[Option<(DateTime, DateTime)>]) -> Vec<Inherited> {
     let mut out = vec![Inherited::default(); p.tasks.len()];
     // Parents come before their children, so each parent's value is final when a child reads it.
     for i in 0..p.tasks.len() {
@@ -454,7 +440,7 @@ fn inherited_from_summaries(
     out
 }
 
-fn min_opt(a: Option<NaiveDateTime>, b: Option<NaiveDateTime>) -> Option<NaiveDateTime> {
+fn min_opt(a: Option<DateTime>, b: Option<DateTime>) -> Option<DateTime> {
     match (a, b) {
         (Some(x), Some(y)) => Some(x.min(y)),
         (x, None) => x,
@@ -483,7 +469,7 @@ impl<'a> Engine<'a> {
             .collect();
         let parent = parents(p);
         let proj_cal = project_calendar(p);
-        let manual_summary: Vec<Option<(NaiveDateTime, NaiveDateTime)>> =
+        let manual_summary: Vec<Option<(DateTime, DateTime)>> =
             p.tasks.iter().zip(&is_leaf).map(|(t, leaf)| manual_summary_dates(t, !leaf, &proj_cal)).collect();
         let inherited = inherited_from_summaries(p, &parent, &manual_summary);
         Self {
@@ -507,7 +493,7 @@ impl<'a> Engine<'a> {
         }
     }
 
-    fn manual_summary(&self, i: usize) -> Option<(NaiveDateTime, NaiveDateTime)> {
+    fn manual_summary(&self, i: usize) -> Option<(DateTime, DateTime)> {
         self.manual_summary.get(i).copied().flatten()
     }
 
@@ -522,7 +508,7 @@ impl<'a> Engine<'a> {
     /// every subtask, or all of them would get the same late start and negative slack.
     /// `group_start[e]` is the earliest start of a summary-start edge's group (see
     /// [`Engine::summary_group_starts`]).
-    fn edge_constrains(&self, e: usize, edge: &Edge, i: usize, group_start: &[Option<NaiveDateTime>]) -> bool {
+    fn edge_constrains(&self, e: usize, edge: &Edge, i: usize, group_start: &[Option<DateTime>]) -> bool {
         if self.task(edge.succ).is_none_or(|t| !t.active) {
             return false;
         }
@@ -537,7 +523,7 @@ impl<'a> Engine<'a> {
 
     /// The earliest start within each summary-start edge's group (early dates are final once the
     /// forward pass is done), so each edge's group is scanned once per pass, not once per leaf.
-    fn summary_group_starts(&self) -> Vec<Option<NaiveDateTime>> {
+    fn summary_group_starts(&self) -> Vec<Option<DateTime>> {
         self.edges
             .iter()
             .map(|edge| match &edge.pred {
@@ -563,7 +549,7 @@ impl<'a> Engine<'a> {
         self.dates.get(i).copied().unwrap_or_default()
     }
 
-    fn set_early(&mut self, i: usize, es: NaiveDateTime, ef: NaiveDateTime) {
+    fn set_early(&mut self, i: usize, es: DateTime, ef: DateTime) {
         if let Some(d) = self.dates.get_mut(i) {
             d.es = Some(es);
             d.ef = Some(ef);
@@ -576,7 +562,7 @@ impl<'a> Engine<'a> {
         }
     }
 
-    fn set_late(&mut self, i: usize, ls: NaiveDateTime, lf: NaiveDateTime) {
+    fn set_late(&mut self, i: usize, ls: DateTime, lf: DateTime) {
         if let Some(d) = self.dates.get_mut(i) {
             d.ls = Some(ls);
             d.lf = Some(lf);
@@ -765,7 +751,7 @@ impl<'a> Engine<'a> {
         self.order = order;
     }
 
-    fn pred_dates(&self, src: &PredSource) -> Option<(NaiveDateTime, NaiveDateTime, Minutes)> {
+    fn pred_dates(&self, src: &PredSource) -> Option<(DateTime, DateTime, Minutes)> {
         match src {
             PredSource::Leaf(i) => {
                 let d = self.date(*i);
@@ -787,7 +773,7 @@ impl<'a> Engine<'a> {
         }
     }
 
-    fn forward(&mut self, alap_pins: &HashMap<usize, NaiveDateTime>, warn: bool) {
+    fn forward(&mut self, alap_pins: &HashMap<usize, DateTime>, warn: bool) {
         let p = self.p;
         let project_start = p.start;
         for i in self.order.clone() {
@@ -801,14 +787,14 @@ impl<'a> Engine<'a> {
             // Working time from start to finish: the duration plus any planned splits.
             let span = if t.mode == ScheduleMode::Auto && !elapsed { span_of(t, dur) } else { dur };
             // `from` moved by the task's span: forward (finish from start), or back (start from finish).
-            let along = |from: NaiveDateTime, forward: bool| match (elapsed, forward) {
+            let along = |from: DateTime, forward: bool| match (elapsed, forward) {
                 (true, true) => shift(from, span),
                 (true, false) => shift(from, span.saturating_neg()),
                 (false, true) => cal.add(from, span),
                 (false, false) => cal.sub(from, span),
             };
 
-            let place = |start: NaiveDateTime| -> (NaiveDateTime, NaiveDateTime) {
+            let place = |start: DateTime| -> (DateTime, DateTime) {
                 if elapsed {
                     (start, along(start, true))
                 } else if dur > 0 {
@@ -853,7 +839,7 @@ impl<'a> Engine<'a> {
 
             let mut warnings = Vec::new();
             if let Some(date) = t.constraint.date.filter(|_| t.constraint.kind.needs_date()) {
-                let finish_of = |s: NaiveDateTime| place(s).1;
+                let finish_of = |s: DateTime| place(s).1;
                 match t.constraint.kind {
                     ConstraintKind::Snet => es = es.max(date),
                     ConstraintKind::Fnet => es = es.max(along(date, false)),
@@ -914,7 +900,7 @@ impl<'a> Engine<'a> {
                 }
                 f = af.max(s);
             }
-            let segments: Vec<(NaiveDateTime, NaiveDateTime)> = match (parts, t.actual_start, t.actual_finish) {
+            let segments: Vec<(DateTime, DateTime)> = match (parts, t.actual_start, t.actual_finish) {
                 (Some(pt), Some(a), _) if pt.split => {
                     segments_of(a, &t.splits, &t.gaps, cal, dur).into_iter().map(|(s, f, _)| (s, f)).collect()
                 }
@@ -937,11 +923,11 @@ impl<'a> Engine<'a> {
     }
 
     /// The earliest start and latest finish of the active leaves and manually scheduled summaries.
-    fn project_bounds(&self) -> (Option<NaiveDateTime>, Option<NaiveDateTime>) {
+    fn project_bounds(&self) -> (Option<DateTime>, Option<DateTime>) {
         let active = |i: &usize| self.task(*i).is_some_and(|t| t.active);
         let leaves = self.leaves.iter().copied().filter(active).filter_map(|i| self.date(i).es.zip(self.date(i).ef));
         let manual = (0..self.manual_summary.len()).filter(active).filter_map(|i| self.manual_summary(i));
-        let dates: Vec<(NaiveDateTime, NaiveDateTime)> = leaves.chain(manual).collect();
+        let dates: Vec<(DateTime, DateTime)> = leaves.chain(manual).collect();
         (dates.iter().map(|d| d.0).min(), dates.iter().map(|d| d.1).max())
     }
 
@@ -956,7 +942,7 @@ impl<'a> Engine<'a> {
             let dur = self.duration_of(i);
             let elapsed = t.elapsed && dur > 0;
             let span = if t.mode == ScheduleMode::Auto && !elapsed { span_of(t, dur) } else { dur };
-            let along = |from: NaiveDateTime, forward: bool| match (elapsed, forward) {
+            let along = |from: DateTime, forward: bool| match (elapsed, forward) {
                 (true, true) => shift(from, span),
                 (true, false) => shift(from, span.saturating_neg()),
                 (false, true) => cal.add(from, span),
@@ -1149,7 +1135,7 @@ fn calculate(p: &mut Project) -> ScheduleReport {
         eng.backward();
         // As-late-as-possible tasks are pinned to their late start and the forward pass is repeated
         // so successors stay consistent.
-        let pins: HashMap<usize, NaiveDateTime> = eng
+        let pins: HashMap<usize, DateTime> = eng
             .order
             .iter()
             .copied()
@@ -1233,29 +1219,19 @@ fn calculate(p: &mut Project) -> ScheduleReport {
         cost,
         percent_complete: pct,
         warnings: report.warnings.clone(),
-        calculated_at: Some(chrono::Local::now().naive_local().with_nanosecond_zero()),
+        calculated_at: Some(crate::dates::now().with().subsec_nanosecond(0).build().unwrap_or_else(|_| crate::dates::now())),
     };
     report
 }
 
-trait NoNanos {
-    fn with_nanosecond_zero(self) -> Self;
-}
-impl NoNanos for NaiveDateTime {
-    fn with_nanosecond_zero(self) -> Self {
-        use chrono::Timelike;
-        self.with_nanosecond(0).unwrap_or(self)
-    }
-}
-
 /// Rolled-up values of one summary task.
 struct Rollup {
-    start: Option<NaiveDateTime>,
-    finish: Option<NaiveDateTime>,
-    es: Option<NaiveDateTime>,
-    ef: Option<NaiveDateTime>,
-    ls: Option<NaiveDateTime>,
-    lf: Option<NaiveDateTime>,
+    start: Option<DateTime>,
+    finish: Option<DateTime>,
+    es: Option<DateTime>,
+    ef: Option<DateTime>,
+    ls: Option<DateTime>,
+    lf: Option<DateTime>,
     work: Minutes,
     actual: Minutes,
     cost: f64,
@@ -1406,13 +1382,13 @@ mod calendar_sharing_tests {
     use crate::calendar::CalendarException;
 
     fn plan() -> Project {
-        let mut p = Project::new("x", chrono::NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let mut p = Project::new("x", crate::dates::ymd(2026, 10, 19).unwrap());
         let (a, b, c) = (p.add_task("A", None), p.add_task("B", None), p.add_task("C", None));
         let (ana, ben, cy) = (p.add_resource("Ana"), p.add_resource("Ben"), p.add_resource("Cy"));
         p.assign(a, ana, None, None).unwrap();
         p.assign(b, ben, None, None).unwrap();
         p.assign(c, cy, None, None).unwrap();
-        let off = chrono::NaiveDate::from_ymd_opt(2026, 10, 21).unwrap();
+        let off = crate::dates::ymd(2026, 10, 21).unwrap();
         p.resource_mut(cy).unwrap().exceptions.push(CalendarException::non_working("Leave", off, off));
         p
     }
@@ -1434,7 +1410,7 @@ mod calendar_sharing_tests {
     fn task_calendars_match_each_tasks_own() {
         let p = plan();
         let mut cals = TaskCalendars::new(&p);
-        let from = chrono::NaiveDate::from_ymd_opt(2026, 10, 19).unwrap().and_hms_opt(8, 0, 0).unwrap();
+        let from = crate::dates::ymd(2026, 10, 19).unwrap().and_hms_opt(8, 0, 0).unwrap();
         for idx in 0..p.tasks.len() {
             let own = task_calendar(&p, idx);
             for mins in [0, 480, 3 * 480, 400 * 480] {

@@ -1,8 +1,8 @@
 //! Update Project: bring progress up to a date, or move work not done yet past it (Microsoft
 //! Project's Project ▸ Update Project).
 
-use chrono::NaiveDate;
 use egui::{Context, RichText};
+use plancraft_core::dates::prelude::*;
 use plancraft_core::prelude::*;
 use plancraft_core::workspace::Document;
 
@@ -23,17 +23,17 @@ pub struct UpdateProject {
 }
 
 /// Parses a date field; empty or "NA" means `default`.
-fn parse_date(text: &str, default: NaiveDate) -> Result<NaiveDate, String> {
+fn parse_date(text: &str, default: Date) -> Result<Date, String> {
     let t = text.trim();
     if t.is_empty() || t.eq_ignore_ascii_case("na") {
         return Ok(default);
     }
-    NaiveDate::parse_from_str(t, "%Y-%m-%d").map_err(|_| format!("'{t}' is not a date like YYYY-MM-DD"))
+    Date::parse_from_str(t, "%Y-%m-%d").map_err(|_| format!("'{t}' is not a date like YYYY-MM-DD"))
 }
 
 /// The date Update Project uses when none is typed: the status date, else today.
-fn status_or_today(p: &Project) -> NaiveDate {
-    p.status_date.unwrap_or_else(|| chrono::Local::now().date_naive())
+fn status_or_today(p: &Project) -> Date {
+    p.status_date.unwrap_or_else(plancraft_core::dates::today)
 }
 
 impl UpdateProject {
@@ -172,10 +172,10 @@ mod tests {
 
     #[test]
     fn empty_or_na_dates_mean_the_status_date() {
-        let d = NaiveDate::from_ymd_opt(2026, 10, 21).unwrap();
+        let d = plancraft_core::dates::ymd(2026, 10, 21).unwrap();
         assert_eq!(parse_date("", d), Ok(d));
         assert_eq!(parse_date(" NA ", d), Ok(d));
-        assert_eq!(parse_date("2026-11-02", d), Ok(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap()));
+        assert_eq!(parse_date("2026-11-02", d), Ok(plancraft_core::dates::ymd(2026, 11, 2).unwrap()));
         assert!(parse_date("next week", d).is_err());
     }
 }

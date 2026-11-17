@@ -3,8 +3,8 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use chrono::NaiveDate;
 use plancraft_core::baseline::{MAX_BASELINE, MAX_INTERIM, PlanSlot, Scope};
+use plancraft_core::dates::prelude::*;
 use plancraft_core::duration::format_work;
 use plancraft_core::ids::{ResourceId, TaskId};
 use plancraft_core::leveling::{LevelingOptions, clear_leveling, level_resources};
@@ -240,19 +240,19 @@ fn critical_path(ctx: &Ctx, a: &Args) -> ToolResult {
     })
 }
 
-fn default_window(p: &Project, a: &Args) -> ToolResult<(NaiveDate, NaiveDate)> {
+fn default_window(p: &Project, a: &Args) -> ToolResult<(Date, Date)> {
     let from = match a.get("from") {
         Some(v) => parse_date(v, "from")?,
         None => p.sched.start.unwrap_or(p.start).date(),
     };
     let to = match a.get("to") {
         Some(v) => parse_date(v, "to")?,
-        None => p.sched.finish.map(|f| f.date()).unwrap_or(from + chrono::Duration::days(27)).max(from),
+        None => p.sched.finish.map(|f| f.date()).unwrap_or(from + plancraft_core::dates::days(27)).max(from),
     };
     if to < from {
         return err("'to' is before 'from'");
     }
-    if (to - from).num_days() > 3660 {
+    if to.signed_duration_since(from).num_days() > 3660 {
         return err("date range too long (max 10 years)");
     }
     Ok((from, to))
@@ -342,8 +342,8 @@ fn get_overallocations(ctx: &Ctx, a: &Args) -> ToolResult {
             }
             let r = p.resource(rid).ok_or_else(|| missing("exists"))?;
             let cal = workload::resource_calendar(p, r);
-            let mut per_day: BTreeMap<NaiveDate, Vec<(TaskId, f64)>> = BTreeMap::new();
-            let wanted: HashSet<NaiveDate> = days.iter().copied().collect();
+            let mut per_day: BTreeMap<Date, Vec<(TaskId, f64)>> = BTreeMap::new();
+            let wanted: HashSet<Date> = days.iter().copied().collect();
             for asg in p.assignments_for_resource(rid) {
                 if p.task(asg.task).is_none_or(|t| !t.active) {
                     continue;

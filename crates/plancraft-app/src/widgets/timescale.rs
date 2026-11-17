@@ -1,7 +1,7 @@
 //! Two-tier timescale used by the Gantt chart, usage views and timeline.
 
-use chrono::NaiveDateTime;
 use egui::{Align2, FontId, Painter, Rect, Stroke, pos2};
+use plancraft_core::dates::prelude::*;
 
 use crate::state::GanttState;
 use crate::theme;
@@ -9,7 +9,7 @@ use crate::theme;
 pub use plancraft_core::timescale::{Unit, tiers};
 
 /// Paints the two-tier header into `rect`. Returns the bottom-tier boundaries (x positions) for gridlines.
-pub fn paint_header(painter: &Painter, rect: Rect, g: &GanttState) -> Vec<(f32, NaiveDateTime)> {
+pub fn paint_header(painter: &Painter, rect: Rect, g: &GanttState) -> Vec<(f32, DateTime)> {
     let (top, bottom) = tiers(g.px_per_day);
     painter.rect_filled(rect, 0.0, theme::pal().HEADER_BG);
     let mid = rect.top() + rect.height() / 2.0;

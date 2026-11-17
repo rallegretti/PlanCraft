@@ -2,7 +2,7 @@
 //! (learn.microsoft.com, "Project XML Data Interchange Schema Reference") and the `PjField`
 //! enumeration (learn.microsoft.com/office/vba/api/project.pjfield).
 
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use crate::dates::prelude::*;
 
 use crate::custom::CustomFieldKind;
 use crate::duration::{DurationUnit, Minutes};
@@ -34,15 +34,15 @@ pub fn num_of(s: &str) -> Option<f64> {
 
 /// An xsd:dateTime. A time zone or fraction of a second is dropped (plans keep local times);
 /// a bare date means midnight.
-pub fn datetime_of(s: &str) -> Option<NaiveDateTime> {
+pub fn datetime_of(s: &str) -> Option<DateTime> {
     let s = s.trim();
     let (date, time) = match s.split_once('T') {
         Some((d, t)) => (d, Some(t)),
         None => (s, None),
     };
-    let date = NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+    let date = Date::parse_from_str(date, "%Y-%m-%d").ok()?;
     let time = match time {
-        None => NaiveTime::MIN,
+        None => Time::MIN,
         Some(t) => {
             // Drop a zone (Z, +hh:mm, -hh:mm) and a fraction of a second.
             let t = t.trim_end_matches('Z');
@@ -57,16 +57,16 @@ pub fn datetime_of(s: &str) -> Option<NaiveDateTime> {
     Some(date.and_time(time))
 }
 
-fn time_of_day(t: &str) -> Option<NaiveTime> {
+fn time_of_day(t: &str) -> Option<Time> {
     let mut parts = t.split(':');
     let h: u32 = parts.next()?.trim().parse().ok()?;
     let m: u32 = parts.next().map_or(Some(0), |p| p.trim().parse().ok())?;
     let sec: u32 = parts.next().map_or(Some(0), |p| p.trim().parse().ok())?;
     if h == 24 && m == 0 && sec == 0 {
         // 24:00:00 is the end of the day; a date-time keeps it as the last second.
-        return NaiveTime::from_hms_opt(23, 59, 59);
+        return crate::dates::hms(23, 59, 59);
     }
-    NaiveTime::from_hms_opt(h, m, sec)
+    crate::dates::hms(h, m, sec)
 }
 
 /// An xsd:time as minutes after midnight (`24:00:00` is 1440).
@@ -132,7 +132,7 @@ pub fn duration_text(m: Minutes) -> String {
     format!("{sign}PT{}H{}M0S", m / 60, m % 60)
 }
 
-pub fn datetime_text(dt: NaiveDateTime) -> String {
+pub fn datetime_text(dt: DateTime) -> String {
     dt.format("%Y-%m-%dT%H:%M:%S").to_string()
 }
 
@@ -278,21 +278,21 @@ pub fn contour_code(c: WorkContour) -> i64 {
 }
 
 /// Calendar `DayType` 1–7 (1=Sunday … 7=Saturday).
-pub fn weekday_of(code: i64) -> Option<chrono::Weekday> {
-    use chrono::Weekday::*;
+pub fn weekday_of(code: i64) -> Option<Weekday> {
+    use crate::dates::Weekday::*;
     Some(match code {
-        1 => Sun,
-        2 => Mon,
-        3 => Tue,
-        4 => Wed,
-        5 => Thu,
-        6 => Fri,
-        7 => Sat,
+        1 => Sunday,
+        2 => Monday,
+        3 => Tuesday,
+        4 => Wednesday,
+        5 => Thursday,
+        6 => Friday,
+        7 => Saturday,
         _ => return None,
     })
 }
 
-pub fn weekday_code(d: chrono::Weekday) -> i64 {
+pub fn weekday_code(d: Weekday) -> i64 {
     i64::from(d.num_days_from_sunday()) + 1
 }
 
@@ -444,10 +444,10 @@ mod tests {
     #[test]
     fn dates_and_times() {
         let d = |s| datetime_of(s).map(|d| d.to_string());
-        assert_eq!(d("2026-11-16T08:00:00").as_deref(), Some("2026-11-16 08:00:00"));
-        assert_eq!(d("2026-11-16T08:00:00.000+01:00").as_deref(), Some("2026-11-16 08:00:00"));
-        assert_eq!(d("2026-11-16T08:00:00Z").as_deref(), Some("2026-11-16 08:00:00"));
-        assert_eq!(d("2026-11-16").as_deref(), Some("2026-11-16 00:00:00"));
+        assert_eq!(d("2026-11-16T08:00:00").as_deref(), Some("2026-11-16T08:00:00"));
+        assert_eq!(d("2026-11-16T08:00:00.000+01:00").as_deref(), Some("2026-11-16T08:00:00"));
+        assert_eq!(d("2026-11-16T08:00:00Z").as_deref(), Some("2026-11-16T08:00:00"));
+        assert_eq!(d("2026-11-16").as_deref(), Some("2026-11-16T00:00:00"));
         assert_eq!(d("2026-13-16T08:00:00"), None);
         assert_eq!(d("nonsense"), None);
         assert_eq!(time_of("17:00:00"), Some(1020));

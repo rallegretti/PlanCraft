@@ -1,9 +1,9 @@
 //! Recurring Task Information: create or change a recurring task (Microsoft Project's
 //! Task ▸ Recurring Task).
 
-use chrono::{Datelike, NaiveDate};
 use egui::{Context, RichText, Ui};
 use plancraft_core::calendar::WorkCal;
+use plancraft_core::dates::prelude::*;
 use plancraft_core::prelude::*;
 use plancraft_core::recurring::{MonthDay, Nth, Pattern, RecurEnd, Recurrence};
 use plancraft_core::workspace::Document;
@@ -65,10 +65,10 @@ impl RecurringTask {
             workdays: false,
             days: std::array::from_fn(|k| k == start.weekday().num_days_from_monday() as usize),
             by_weekday: false,
-            day: start.day().to_string(),
+            day: start.day32().to_string(),
             nth: Nth::First,
             weekday: start.weekday().num_days_from_monday() as u8,
-            month: start.month() as u8,
+            month: start.month32() as u8,
             start: start.to_string(),
             end_by: false,
             occurrences: "10".into(),
@@ -134,7 +134,7 @@ impl RecurringTask {
     fn recurrence(&self, p: &Project) -> Result<Recurrence, String> {
         let int = |s: &str, what: &str| s.trim().parse::<u16>().map_err(|_| format!("{what} must be a whole number"));
         let date =
-            |s: &str, what: &str| NaiveDate::parse_from_str(s.trim(), "%Y-%m-%d").map_err(|_| format!("{what} must look like YYYY-MM-DD"));
+            |s: &str, what: &str| Date::parse_from_str(s.trim(), "%Y-%m-%d").map_err(|_| format!("{what} must look like YYYY-MM-DD"));
         let duration = parse_duration(&self.duration, p.settings.duration_unit, &p.settings.time)
             .map(|(m, _)| m)
             .ok_or("The duration isn't one PlanCraft understands, e.g. 1h or 2d")?;
@@ -172,7 +172,7 @@ impl RecurringTask {
         let rec = self.recurrence(p)?;
         let cal = rec.calendar.and_then(|c| p.calendar(c)).unwrap_or_else(|| p.base_calendar());
         let dates = rec.dates(&WorkCal::single(cal)).map_err(|e| e.to_string())?;
-        let day = |d: Option<&NaiveDate>| d.map(|d| crate::format::day(*d)).unwrap_or_default();
+        let day = |d: Option<&Date>| d.map(|d| crate::format::day(*d)).unwrap_or_default();
         Ok(match dates.len() {
             1 => format!("1 occurrence, {}", day(dates.first())),
             n => format!("{n} occurrences, {} to {}", day(dates.first()), day(dates.last())),
@@ -359,7 +359,7 @@ mod tests {
     /// was cleared and the pattern switched to weekly or daily.
     #[test]
     fn hidden_fields_never_block_ok() {
-        let p = plancraft_core::sample::demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let p = plancraft_core::sample::demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap());
         let mut d = RecurringTask::new(&p, None);
         d.name = "Sync".into();
         d.kind = Kind::Monthly;

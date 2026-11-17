@@ -1,6 +1,6 @@
 //! Project statistics, variance and earned-value metrics.
 
-use chrono::NaiveDateTime;
+use crate::dates::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::calendar::WorkCal;
@@ -14,9 +14,9 @@ pub struct MilestoneStatus {
     pub id: TaskId,
     pub name: String,
     pub deliverable: String,
-    pub date: Option<NaiveDateTime>,
-    pub deadline: Option<NaiveDateTime>,
-    pub baseline: Option<NaiveDateTime>,
+    pub date: Option<DateTime>,
+    pub deadline: Option<DateTime>,
+    pub baseline: Option<DateTime>,
     pub members: usize,
     pub members_complete: usize,
     /// Work-weighted completion of member tasks (0–100).
@@ -44,9 +44,9 @@ pub struct EarnedValue {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub struct ProjectStats {
     pub name: String,
-    pub start: Option<NaiveDateTime>,
-    pub finish: Option<NaiveDateTime>,
-    pub baseline_finish: Option<NaiveDateTime>,
+    pub start: Option<DateTime>,
+    pub finish: Option<DateTime>,
+    pub baseline_finish: Option<DateTime>,
     /// Working minutes the finish has slipped against baseline (negative = ahead).
     pub finish_variance: Minutes,
     pub duration: Minutes,
@@ -71,17 +71,17 @@ pub struct ProjectStats {
 }
 
 /// Status date used for "late" checks: explicit status date, else now.
-pub fn status_moment(p: &Project) -> NaiveDateTime {
+pub fn status_moment(p: &Project) -> DateTime {
     let wc = project_calendar(p);
     match p.status_date {
         Some(d) => wc.day_finish(d),
-        None => chrono::Local::now().naive_local(),
+        None => crate::dates::now(),
     }
 }
 
 /// Fraction of the baseline (or current) span that should be complete at `at`, in the project
 /// calendar `wc`.
-fn planned_fraction(start: NaiveDateTime, finish: NaiveDateTime, at: NaiveDateTime, wc: &WorkCal, elapsed: bool) -> f64 {
+fn planned_fraction(start: DateTime, finish: DateTime, at: DateTime, wc: &WorkCal, elapsed: bool) -> f64 {
     if at <= start {
         return 0.0;
     }
@@ -98,13 +98,13 @@ fn planned_fraction(start: NaiveDateTime, finish: NaiveDateTime, at: NaiveDateTi
 }
 
 /// Whether a task is behind schedule at `at` (should have progressed further).
-pub fn is_late(t: &Task, at: NaiveDateTime, p: &Project) -> bool {
+pub fn is_late(t: &Task, at: DateTime, p: &Project) -> bool {
     is_late_in(t, at, &project_calendar(p))
 }
 
 /// [`is_late`] with the project calendar already made: checking many tasks with one calendar
 /// fills its month-and-year cache once.
-pub fn is_late_in(t: &Task, at: NaiveDateTime, wc: &WorkCal) -> bool {
+pub fn is_late_in(t: &Task, at: DateTime, wc: &WorkCal) -> bool {
     if t.sched.is_summary || t.is_complete() || !t.active {
         return false;
     }
@@ -120,7 +120,7 @@ pub fn is_late_in(t: &Task, at: NaiveDateTime, wc: &WorkCal) -> bool {
     (t.sched.percent_complete as f64) + 0.5 < expected
 }
 
-pub fn milestone_status(p: &Project, at: NaiveDateTime) -> Vec<MilestoneStatus> {
+pub fn milestone_status(p: &Project, at: DateTime) -> Vec<MilestoneStatus> {
     p.tasks
         .iter()
         .filter(|t| t.is_milestone())
@@ -169,7 +169,7 @@ pub fn milestone_status(p: &Project, at: NaiveDateTime) -> Vec<MilestoneStatus> 
 /// Share (0–1) of a task's completed part that lies before `at`: the completed part runs from the
 /// task's start to its stop (the end of the completed work), or to its finish once it is
 /// complete, leaving out the pauses between its parts.
-fn done_share_by(t: &Task, at: NaiveDateTime, wc: &WorkCal) -> f64 {
+fn done_share_by(t: &Task, at: DateTime, wc: &WorkCal) -> f64 {
     let Some(start) = t.sched.start else { return 1.0 };
     let end = match t.sched.stop {
         Some(stop) => stop,
@@ -177,7 +177,7 @@ fn done_share_by(t: &Task, at: NaiveDateTime, wc: &WorkCal) -> f64 {
         // No completed part laid out (no progress): whatever was done counts from the start.
         None => return if at >= start { 1.0 } else { 0.0 },
     };
-    let len = |a: NaiveDateTime, b: NaiveDateTime| -> f64 {
+    let len = |a: DateTime, b: DateTime| -> f64 {
         if b <= a {
             0.0
         } else if t.elapsed {
@@ -187,7 +187,7 @@ fn done_share_by(t: &Task, at: NaiveDateTime, wc: &WorkCal) -> f64 {
         }
     };
     let whole = [(start, t.sched.finish.unwrap_or(end))];
-    let parts: &[(NaiveDateTime, NaiveDateTime)] = if t.sched.parts.is_empty() { &whole } else { &t.sched.parts };
+    let parts: &[(DateTime, DateTime)] = if t.sched.parts.is_empty() { &whole } else { &t.sched.parts };
     let (mut total, mut before) = (0.0, 0.0);
     for &(a, b) in parts {
         total += len(a, b.min(end));
@@ -199,7 +199,7 @@ fn done_share_by(t: &Task, at: NaiveDateTime, wc: &WorkCal) -> f64 {
     (before / total).clamp(0.0, 1.0)
 }
 
-pub fn earned_value(p: &Project, at: NaiveDateTime) -> Option<EarnedValue> {
+pub fn earned_value(p: &Project, at: DateTime) -> Option<EarnedValue> {
     let leaves = p.tasks.iter().filter(|t| !t.sched.is_summary && t.active);
     let mut ev = EarnedValue::default();
     let mut any_baseline = false;

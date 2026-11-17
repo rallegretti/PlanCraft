@@ -1,7 +1,6 @@
 //! Workload: utilization of every resource plus a resource graph of the
 //! selected resource's load against its capacity.
 
-use chrono::Duration;
 use egui::{Align2, FontId, Rect, Sense, Stroke, Ui, pos2, vec2};
 use plancraft_core::prelude::*;
 use plancraft_core::workload::workload;
@@ -22,7 +21,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
     for _ in 0..nper {
         to = step(st.granularity, to, 1);
     }
-    let report = workload(p, from, to - Duration::days(1), st.granularity);
+    let report = workload(p, from, to - plancraft_core::dates::days(1), st.granularity);
 
     let area = Rect::from_min_max(pos2(rect.left() + 8.0, rect.top() + 34.0), pos2(rect.right() - 8.0, rect.bottom() - 6.0));
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area));
@@ -33,7 +32,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
         egui::RichText::new(format!(
             "Planned work against available capacity from {} to {}. Capacity follows each resource's calendar, time off and availability.",
             format::day(from),
-            format::day(to - Duration::days(1))
+            format::day(to - plancraft_core::dates::days(1))
         ))
         .color(theme::pal().TEXT_WEAK),
     );

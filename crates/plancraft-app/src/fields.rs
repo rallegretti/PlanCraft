@@ -3,8 +3,8 @@
 
 use std::cmp::Ordering;
 
-use chrono::NaiveDateTime;
 use plancraft_core::custom::{self, CustomFieldKind, CustomValue};
+use plancraft_core::dates::prelude::*;
 use plancraft_core::prelude::*;
 
 use crate::columns::{self, BlField, CellCtx, TaskCol, TaskTable};
@@ -85,7 +85,7 @@ const BUILTIN: [(TaskCol, &str); 55] = [
 #[derive(Clone, Debug, PartialEq)]
 pub enum SortKey {
     Num(f64),
-    Time(NaiveDateTime),
+    Time(DateTime),
     Text(String),
     Missing,
 }
@@ -213,7 +213,7 @@ impl Field {
         let s = &t.sched;
         let num = |v: f64| SortKey::Num(v);
         let mins = |m: Minutes| SortKey::Num(m as f64);
-        let time = |d: Option<NaiveDateTime>| d.map_or(SortKey::Missing, SortKey::Time);
+        let time = |d: Option<DateTime>| d.map_or(SortKey::Missing, SortKey::Time);
         let Field::Builtin(col) = self else {
             let Field::Custom(id) = self else { return SortKey::Missing };
             return match t.custom.get(id) {
@@ -350,7 +350,7 @@ mod tests {
 
     #[test]
     fn keys_round_trip_and_are_unique() {
-        let p = plancraft_core::sample::demo_project(chrono::NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let p = plancraft_core::sample::demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap());
         let fields = all_fields(&p);
         let keys: std::collections::HashSet<String> = fields.iter().map(Field::key).collect();
         assert_eq!(keys.len(), fields.len(), "every field has its own key");

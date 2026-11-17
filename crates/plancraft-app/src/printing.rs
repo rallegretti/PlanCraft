@@ -10,7 +10,7 @@ use std::process::{Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
-use chrono::NaiveDate;
+use plancraft_core::dates::prelude::*;
 
 use plancraft_core::prelude::*;
 use plancraft_core::print::layout::Palette;
@@ -231,8 +231,8 @@ pub fn document(
     st: &UiState,
     view: PrintView,
     setup: &print::PageSetup,
-    from: Option<NaiveDate>,
-    to: Option<NaiveDate>,
+    from: Option<Date>,
+    to: Option<Date>,
 ) -> print::Document {
     if view.is_drawing() {
         let (items, width, height) = drawing(p, st, view);
@@ -243,7 +243,7 @@ pub fn document(
             width,
             height,
             items,
-            printed: chrono::Local::now().naive_local(),
+            printed: plancraft_core::dates::now(),
         });
     }
     let (sheet, chart) = sheet(p, st, view, setup.print_all_columns);
@@ -254,7 +254,7 @@ pub fn document(
         chart,
         from,
         to,
-        printed: chrono::Local::now().naive_local(),
+        printed: plancraft_core::dates::now(),
         palette: Palette::default(),
     })
 }
@@ -365,7 +365,7 @@ fn spool_file(pdf: &[u8]) -> Result<PathBuf, String> {
     let dir = plancraft_core::paths::print_spool_dir().ok_or("no folder for print files (HOME is not set)")?;
     plancraft_core::io::create_private_dir(&dir).map_err(|e| e.to_string())?;
     clean_spool(&dir);
-    let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S%3f");
+    let stamp = plancraft_core::dates::format("%Y%m%d-%H%M%S%3f", plancraft_core::dates::now());
     let path = dir.join(format!("print-{}-{stamp}.pdf", std::process::id()));
     plancraft_core::io::write_atomic(&path, pdf, plancraft_core::io::Privacy::OwnerOnly).map_err(|e| e.to_string())?;
     Ok(path)
@@ -430,7 +430,7 @@ mod tests {
 
     #[test]
     fn the_printed_sheet_follows_the_view() {
-        let mut p = plancraft_core::sample::demo_project(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap());
+        let mut p = plancraft_core::sample::demo_project(plancraft_core::dates::ymd(2026, 11, 2).unwrap());
         recalculate(&mut p);
         let mut st = UiState::default();
         let (sheet, chart) = sheet(&p, &st, PrintView::Gantt, true);
@@ -474,7 +474,7 @@ mod tests {
 
     #[test]
     fn the_network_diagram_and_task_board_print_themselves() {
-        let mut p = plancraft_core::sample::demo_project(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap());
+        let mut p = plancraft_core::sample::demo_project(plancraft_core::dates::ymd(2026, 11, 2).unwrap());
         recalculate(&mut p);
         let mut st = UiState::default();
         assert_eq!(PrintView::for_view(ViewKind::NetworkDiagram), PrintView::Network);

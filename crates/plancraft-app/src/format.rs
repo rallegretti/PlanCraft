@@ -1,25 +1,25 @@
 //! Display formatting helpers.
 
-use chrono::{NaiveDate, NaiveDateTime};
+use plancraft_core::dates::prelude::*;
 use plancraft_core::prelude::*;
 
-pub fn date(dt: Option<NaiveDateTime>) -> String {
+pub fn date(dt: Option<DateTime>) -> String {
     dt.map(|d| d.format("%a %m/%d/%y").to_string()).unwrap_or_else(|| "NA".into())
 }
 
-pub fn date_long(dt: Option<NaiveDateTime>) -> String {
+pub fn date_long(dt: Option<DateTime>) -> String {
     dt.map(|d| d.format("%a %b %-d, %Y %H:%M").to_string()).unwrap_or_else(|| "NA".into())
 }
 
-pub fn day(d: NaiveDate) -> String {
+pub fn day(d: Date) -> String {
     d.format("%a %m/%d/%y").to_string()
 }
 
-pub fn iso(dt: Option<NaiveDateTime>) -> String {
+pub fn iso(dt: Option<DateTime>) -> String {
     dt.map(|d| d.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default()
 }
 
-pub fn iso_date(dt: Option<NaiveDateTime>) -> String {
+pub fn iso_date(dt: Option<DateTime>) -> String {
     dt.map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default()
 }
 
@@ -87,7 +87,7 @@ mod tests {
             assert_eq!(parse_units(bad), None, "{bad}");
         }
         assert_eq!(parse_money("$1,200.50"), Some(1200.5));
-        let p = Project::new("x", chrono::NaiveDate::from_ymd_opt(2026, 1, 5).unwrap());
+        let p = Project::new("x", plancraft_core::dates::ymd(2026, 1, 5).unwrap());
         assert_eq!(money(&p, 1234567.891), "$1,234,567.89");
         assert_eq!(money(&p, -5.0), "-$5.00");
     }

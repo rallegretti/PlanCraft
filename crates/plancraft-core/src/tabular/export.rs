@@ -1,6 +1,7 @@
 //! A plan's task list as CSV, for spreadsheets. Reading the file back with this module's import
 //! gives the same tasks, outline, durations, links, resources and progress.
 
+use crate::dates::prelude::*;
 use crate::model::Project;
 
 /// The fixed columns, before the plan's custom fields.
@@ -16,7 +17,7 @@ fn quote(v: &str) -> String {
     format!("\"{}\"", guarded.replace('"', "\"\""))
 }
 
-fn iso(dt: Option<chrono::NaiveDateTime>) -> String {
+fn iso(dt: Option<DateTime>) -> String {
     dt.map(|d| d.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default()
 }
 

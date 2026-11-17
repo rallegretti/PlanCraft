@@ -1,7 +1,7 @@
 //! Working-time calendar tools.
 
-use chrono::{Datelike, Weekday};
 use plancraft_core::calendar::{WEEKDAYS, WorkCal};
+use plancraft_core::dates::prelude::*;
 use plancraft_core::ids::CalendarId;
 use plancraft_core::model::Project;
 use serde_json::{Map, Value, json};
@@ -149,12 +149,12 @@ fn get_calendar(ctx: &Ctx, a: &Args) -> ToolResult {
             };
             let to = match a.get("to") {
                 Some(x) => parse_date(x, "to")?,
-                None => from + chrono::Duration::days(13),
+                None => from + plancraft_core::dates::days(13),
             };
             if to < from {
                 return err("'to' is before 'from'");
             }
-            if (to - from).num_days() > 400 {
+            if to.signed_duration_since(from).num_days() > 400 {
                 return err("date range too long (max 400 days)");
             }
             let wc = WorkCal::single(cal);
@@ -171,7 +171,7 @@ fn get_calendar(ctx: &Ctx, a: &Args) -> ToolResult {
                     "hours": hours(r.iter().map(|x| x.len() as f64).sum::<f64>()),
                     "exception": exc,
                 }));
-                d += chrono::Duration::days(1);
+                d += plancraft_core::dates::days(1);
             }
             set(&mut v, "days", Value::Array(days));
         }
@@ -188,10 +188,10 @@ fn parse_days(v: &Value) -> ToolResult<Vec<Weekday>> {
     for it in items {
         let s = it.as_str().ok_or_else(|| ToolError("'days' must contain weekday names".into()))?.trim().to_ascii_lowercase();
         let add: Vec<Weekday> = match s.as_str() {
-            "weekdays" | "workdays" => vec![Weekday::Mon, Weekday::Tue, Weekday::Wed, Weekday::Thu, Weekday::Fri],
-            "weekend" | "weekends" => vec![Weekday::Sat, Weekday::Sun],
+            "weekdays" | "workdays" => vec![Weekday::Monday, Weekday::Tuesday, Weekday::Wednesday, Weekday::Thursday, Weekday::Friday],
+            "weekend" | "weekends" => vec![Weekday::Saturday, Weekday::Sunday],
             "all" | "every day" | "everyday" => WEEKDAYS.to_vec(),
-            other => vec![other.parse::<Weekday>().map_err(|_| ToolError(format!("unknown weekday '{other}'")))?],
+            other => vec![plancraft_core::dates::parse_weekday(other).ok_or_else(|| ToolError(format!("unknown weekday '{other}'")))?],
         };
         for d in add {
             if !out.contains(&d) {
@@ -205,7 +205,7 @@ fn parse_days(v: &Value) -> ToolResult<Vec<Weekday>> {
 fn apply_week(p: &mut Project, id: CalendarId, week: &Args) -> ToolResult<()> {
     let mut updates = Vec::new();
     for (k, v) in week.map() {
-        let wd: Weekday = k.parse().map_err(|_| ToolError(format!("unknown weekday '{k}' in 'week'")))?;
+        let wd: Weekday = plancraft_core::dates::parse_weekday(k).ok_or_else(|| ToolError(format!("unknown weekday '{k}' in 'week'")))?;
         updates.push((wd, parse_time_ranges(Some(v), k)?));
     }
     let cal = p.calendars.iter_mut().find(|c| c.id == id).ok_or_else(|| missing("resolved"))?;

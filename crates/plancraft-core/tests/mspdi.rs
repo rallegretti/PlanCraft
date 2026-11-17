@@ -2,16 +2,16 @@
 //! Microsoft Project XML (MSPDI) import and export: round trips, hand-written files and hostile
 //! input. Parity with the published schema reference is in `ms_parity.rs`.
 
-use chrono::{NaiveDate, NaiveDateTime};
+use plancraft_core::dates::prelude::*;
 use plancraft_core::mspdi;
 use plancraft_core::prelude::*;
 use plancraft_core::sample::demo_project;
 
-fn d(y: i32, m: u32, day: u32) -> NaiveDate {
-    NaiveDate::from_ymd_opt(y, m, day).unwrap()
+fn d(y: i32, m: u32, day: u32) -> Date {
+    plancraft_core::dates::ymd(y, m, day).unwrap()
 }
 
-fn dt(y: i32, m: u32, day: u32, h: u32) -> NaiveDateTime {
+fn dt(y: i32, m: u32, day: u32, h: u32) -> DateTime {
     d(y, m, day).and_hms_opt(h, 0, 0).unwrap()
 }
 

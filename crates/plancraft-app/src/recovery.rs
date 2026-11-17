@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, Local};
+use plancraft_core::dates::prelude::*;
 use plancraft_core::io::{self, FileResult, Privacy, create_private_dir, write_atomic};
 use plancraft_core::model::{FILE_EXTENSION, Project};
 use plancraft_core::workspace::{Document, SharedWorkspace, Workspace};
@@ -29,7 +29,7 @@ struct Sidecar {
     name: String,
     #[serde(default)]
     original_path: Option<PathBuf>,
-    saved_at: DateTime<Local>,
+    saved_at: Timestamp,
 }
 
 /// A recovery copy found on disk.
@@ -41,7 +41,7 @@ pub struct RecoveredItem {
     pub name: String,
     /// The file the document was opened from or last saved to, if any.
     pub original_path: Option<PathBuf>,
-    pub saved_at: Option<DateTime<Local>>,
+    pub saved_at: Option<Timestamp>,
 }
 
 /// The directory holding recovery copies (injectable so tests never touch the real one).
@@ -73,7 +73,7 @@ impl RecoveryStore {
         create_private_dir(&self.dir)?;
         let text = io::to_json(&doc.project).map_err(std::io::Error::other)?;
         write_atomic(&self.file(stem), text.as_bytes(), Privacy::OwnerOnly)?;
-        let meta = Sidecar { name: doc.project.name.clone(), original_path: doc.path.clone(), saved_at: Local::now() };
+        let meta = Sidecar { name: doc.project.name.clone(), original_path: doc.path.clone(), saved_at: Timestamp::now() };
         let meta = serde_json::to_vec_pretty(&meta).map_err(std::io::Error::other)?;
         write_atomic(&self.sidecar(stem), &meta, Privacy::OwnerOnly)
     }
@@ -119,7 +119,7 @@ impl RecoveryStore {
             None => RecoveredItem {
                 name: stem.clone(),
                 original_path: None,
-                saved_at: std::fs::metadata(file).and_then(|m| m.modified()).ok().map(DateTime::<Local>::from),
+                saved_at: std::fs::metadata(file).and_then(|m| m.modified()).ok().and_then(plancraft_core::dates::timestamp),
                 stem,
             },
         }
@@ -335,7 +335,7 @@ pub mod tests {
     fn workspace_with_edit() -> Workspace {
         let mut ws = Workspace::default();
         ws.add(
-            Project::new("Recovered Plan", chrono::NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()),
+            Project::new("Recovered Plan", plancraft_core::dates::ymd(2026, 10, 19).unwrap()),
             Some(PathBuf::from("/plans/x.plancraft")),
         );
         ws.active_doc_mut().unwrap().edit("Add", |p| p.add_task("Unsaved task", None)).unwrap();

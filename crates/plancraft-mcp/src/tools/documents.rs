@@ -1,5 +1,6 @@
 //! Document-level tools: open, create, save, close, select and project settings.
 
+use plancraft_core::dates::prelude::*;
 use std::path::PathBuf;
 
 use plancraft_core::duration::DurationUnit;
@@ -158,8 +159,8 @@ fn list_documents(ctx: &Ctx, _a: &Args) -> ToolResult {
     })
 }
 
-fn today() -> chrono::NaiveDate {
-    chrono::Local::now().date_naive()
+fn today() -> Date {
+    plancraft_core::dates::today()
 }
 
 /// Adds the `.plancraft` extension when missing and makes the path absolute.

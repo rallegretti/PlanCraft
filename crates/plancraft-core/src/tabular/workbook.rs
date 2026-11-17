@@ -148,9 +148,12 @@ fn text(cell: &DataRef<'_>) -> String {
             if !serial.is_finite() || !(-1.0..=200_000.0).contains(&serial) {
                 return String::new();
             }
-            match dt.as_datetime() {
-                Some(t) if t.time() == chrono::NaiveTime::MIN => t.format("%Y-%m-%d").to_string(),
-                Some(t) => t.format("%Y-%m-%d %H:%M").to_string(),
+            // Calamine's own conversion follows Excel's calendar (including its 1900 leap-year
+            // quirk); a day that doesn't exist (Excel's 29 February 1900) reads as no date.
+            let (y, mo, d, h, mi, s, _) = dt.to_ymd_hms_milli();
+            match crate::dates::ymd_hm(i32::from(y), u32::from(mo), u32::from(d), u32::from(h), u32::from(mi)) {
+                Some(t) if h == 0 && mi == 0 && s == 0 => crate::dates::format("%Y-%m-%d", t),
+                Some(t) => crate::dates::format("%Y-%m-%d %H:%M", t),
                 None => String::new(),
             }
         }
