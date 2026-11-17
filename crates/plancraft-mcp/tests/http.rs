@@ -268,17 +268,28 @@ fn slow_unauthenticated_and_excess_clients_are_cut_off() {
 
     // A client that drips one byte at a time (each read in time) still has to finish by the deadline.
     let mut drip = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    drip.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     let started = std::time::Instant::now();
     let head = format!("POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\nContent-Length: 1000\r\n\r\n");
     drip.write_all(head.as_bytes()).unwrap();
+    // Drip until the reply comes, then stop (writing on after the server has closed resets the
+    // connection, and Windows then drops the reply before it is read).
+    drip.set_read_timeout(Some(Duration::from_millis(100))).unwrap();
+    let mut raw = Vec::new();
+    let mut chunk = [0u8; 512];
     while started.elapsed() < Duration::from_secs(4) {
+        match drip.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                raw.extend_from_slice(&chunk[..n]);
+                break;
+            }
+            Err(_) => {}
+        }
         if drip.write_all(b" ").is_err() {
             break;
         }
-        std::thread::sleep(Duration::from_millis(100));
     }
-    let mut raw = Vec::new();
+    drip.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     let _ = drip.read_to_end(&mut raw);
     assert!(String::from_utf8_lossy(&raw).starts_with("HTTP/1.1 408"), "{}", String::from_utf8_lossy(&raw));
 
