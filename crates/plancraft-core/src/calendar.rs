@@ -6,7 +6,7 @@
 //! days).  [`WorkCal`] combines one or more such layers; when several layers are
 //! combined only the time where *all* layers are working counts as working time.
 
-use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, NaiveTime, Weekday};
+use crate::dates::prelude::*;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -118,25 +118,25 @@ impl WorkWeek {
 
     pub fn day(&self, wd: Weekday) -> &Vec<TimeRange> {
         match wd {
-            Weekday::Mon => &self.monday,
-            Weekday::Tue => &self.tuesday,
-            Weekday::Wed => &self.wednesday,
-            Weekday::Thu => &self.thursday,
-            Weekday::Fri => &self.friday,
-            Weekday::Sat => &self.saturday,
-            Weekday::Sun => &self.sunday,
+            Weekday::Monday => &self.monday,
+            Weekday::Tuesday => &self.tuesday,
+            Weekday::Wednesday => &self.wednesday,
+            Weekday::Thursday => &self.thursday,
+            Weekday::Friday => &self.friday,
+            Weekday::Saturday => &self.saturday,
+            Weekday::Sunday => &self.sunday,
         }
     }
 
     pub fn day_mut(&mut self, wd: Weekday) -> &mut Vec<TimeRange> {
         match wd {
-            Weekday::Mon => &mut self.monday,
-            Weekday::Tue => &mut self.tuesday,
-            Weekday::Wed => &mut self.wednesday,
-            Weekday::Thu => &mut self.thursday,
-            Weekday::Fri => &mut self.friday,
-            Weekday::Sat => &mut self.saturday,
-            Weekday::Sun => &mut self.sunday,
+            Weekday::Monday => &mut self.monday,
+            Weekday::Tuesday => &mut self.tuesday,
+            Weekday::Wednesday => &mut self.wednesday,
+            Weekday::Thursday => &mut self.thursday,
+            Weekday::Friday => &mut self.friday,
+            Weekday::Saturday => &mut self.saturday,
+            Weekday::Sunday => &mut self.sunday,
         }
     }
 
@@ -145,7 +145,8 @@ impl WorkWeek {
     }
 }
 
-pub const WEEKDAYS: [Weekday; 7] = [Weekday::Mon, Weekday::Tue, Weekday::Wed, Weekday::Thu, Weekday::Fri, Weekday::Sat, Weekday::Sun];
+pub const WEEKDAYS: [Weekday; 7] =
+    [Weekday::Monday, Weekday::Tuesday, Weekday::Wednesday, Weekday::Thursday, Weekday::Friday, Weekday::Saturday, Weekday::Sunday];
 
 /// A dated deviation from the regular work week.
 ///
@@ -154,8 +155,8 @@ pub const WEEKDAYS: [Weekday; 7] = [Weekday::Mon, Weekday::Tue, Weekday::Wed, We
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct CalendarException {
     pub name: String,
-    pub start: NaiveDate,
-    pub end: NaiveDate,
+    pub start: Date,
+    pub end: Date,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub working: Vec<TimeRange>,
     /// Repeat every year on the same month/day span (e.g. public holidays).
@@ -164,15 +165,15 @@ pub struct CalendarException {
 }
 
 impl CalendarException {
-    pub fn non_working(name: impl Into<String>, start: NaiveDate, end: NaiveDate) -> Self {
+    pub fn non_working(name: impl Into<String>, start: Date, end: Date) -> Self {
         Self { name: name.into(), start, end, working: Vec::new(), yearly: false }
     }
 
-    pub fn covers(&self, d: NaiveDate) -> bool {
+    pub fn covers(&self, d: Date) -> bool {
         if !self.yearly {
             return d >= self.start && d <= self.end;
         }
-        let key = |x: NaiveDate| (x.month(), x.day());
+        let key = |x: Date| (x.month32(), x.day32());
         let (s, e, k) = (key(self.start), key(self.end), key(d));
         if s <= e { k >= s && k <= e } else { k >= s || k <= e }
     }
@@ -211,7 +212,7 @@ impl Calendar {
         let night_start = [TimeRange::hours(23, 24)];
         let night_end = [TimeRange::hours(0, 3), TimeRange::hours(4, 8)];
         week.monday = night_start.to_vec();
-        for wd in [Weekday::Tue, Weekday::Wed, Weekday::Thu, Weekday::Fri] {
+        for wd in [Weekday::Tuesday, Weekday::Wednesday, Weekday::Thursday, Weekday::Friday] {
             let mut v = night_end.to_vec();
             v.extend_from_slice(&night_start);
             *week.day_mut(wd) = v;
@@ -221,7 +222,7 @@ impl Calendar {
     }
 }
 
-fn exception_ranges(exceptions: &[CalendarException], d: NaiveDate) -> Option<&[TimeRange]> {
+fn exception_ranges(exceptions: &[CalendarException], d: Date) -> Option<&[TimeRange]> {
     // Later exceptions win, so users can override an earlier broad exception.
     exceptions.iter().rev().find(|e| e.covers(d)).map(|e| e.working.as_slice())
 }
@@ -238,7 +239,7 @@ impl<'a> CalLayer<'a> {
         Self { calendar, personal }
     }
 
-    pub fn ranges(&self, d: NaiveDate) -> Vec<TimeRange> {
+    pub fn ranges(&self, d: Date) -> Vec<TimeRange> {
         let r = exception_ranges(self.personal, d)
             .or_else(|| exception_ranges(&self.calendar.exceptions, d))
             .unwrap_or_else(|| self.calendar.week.day(d.weekday()).as_slice());
@@ -296,50 +297,56 @@ impl Span {
 }
 
 /// `minute` minutes after midnight on `d` (1440 is the next midnight; clamped at the end of time).
-fn at(d: NaiveDate, minute: u32) -> NaiveDateTime {
-    shift(d.and_time(NaiveTime::MIN), Minutes::from(minute.min(1440)))
+fn at(d: Date, minute: u32) -> DateTime {
+    let m = minute.min(1440);
+    // Building the time of day directly is much cheaper than adding minutes to midnight; minute
+    // 1440 (24:00) is the next day's midnight.
+    match crate::dates::hm(m / 60, m % 60) {
+        Some(t) => d.to_datetime(t),
+        None => shift(d.and_time(Time::MIN), 1440),
+    }
 }
 
 /// `dt` moved by `mins` elapsed minutes, saturating at chrono's representable range.
-pub fn shift(dt: NaiveDateTime, mins: Minutes) -> NaiveDateTime {
-    let delta = Duration::try_minutes(mins).unwrap_or(if mins < 0 { Duration::MIN } else { Duration::MAX });
-    dt.checked_add_signed(delta).unwrap_or(if mins < 0 { NaiveDateTime::MIN } else { NaiveDateTime::MAX })
+pub fn shift(dt: DateTime, mins: Minutes) -> DateTime {
+    let delta = SignedDuration::try_from_mins(mins).unwrap_or(if mins < 0 { SignedDuration::MIN } else { SignedDuration::MAX });
+    dt.checked_add_signed(delta).unwrap_or(if mins < 0 { DateTime::MIN } else { DateTime::MAX })
 }
 
 /// The last day of `d`'s year.
-fn year_last_day(d: NaiveDate) -> Option<NaiveDate> {
-    NaiveDate::from_ymd_opt(d.year(), 12, 31)
+fn year_last_day(d: Date) -> Option<Date> {
+    crate::dates::ymd(d.year32(), 12, 31)
 }
 
 /// The last day of `d`'s month.
-fn month_last_day(d: NaiveDate) -> Option<NaiveDate> {
-    let (y, m) = if d.month() == 12 { (d.year().checked_add(1)?, 1) } else { (d.year(), d.month() + 1) };
-    NaiveDate::from_ymd_opt(y, m, 1).and_then(|first| first.pred_opt())
+fn month_last_day(d: Date) -> Option<Date> {
+    let (y, m) = if d.month32() == 12 { (d.year32().checked_add(1)?, 1) } else { (d.year32(), d.month32() + 1) };
+    crate::dates::ymd(y, m, 1).and_then(|first| first.pred_opt())
 }
 
 /// Last day date arithmetic walks to: computed dates beyond it are clamped (hostile durations
 /// can't make the scheduler walk to the year 200,000).
-pub fn horizon_end() -> NaiveDate {
-    NaiveDate::from_ymd_opt(2500, 12, 31).unwrap_or(NaiveDate::MAX)
+pub fn horizon_end() -> Date {
+    crate::dates::ymd(2500, 12, 31).unwrap_or(Date::MAX)
 }
 
 /// First day date arithmetic walks back to.
-pub fn horizon_start() -> NaiveDate {
-    NaiveDate::from_ymd_opt(1800, 1, 1).unwrap_or(NaiveDate::MIN)
+pub fn horizon_start() -> Date {
+    crate::dates::ymd(1800, 1, 1).unwrap_or(Date::MIN)
 }
 
-fn next_day(d: NaiveDate) -> Option<NaiveDate> {
+fn next_day(d: Date) -> Option<Date> {
     d.succ_opt().filter(|n| *n <= horizon_end())
 }
 
-fn prev_day(d: NaiveDate) -> Option<NaiveDate> {
+fn prev_day(d: Date) -> Option<Date> {
     d.pred_opt().filter(|n| *n >= horizon_start())
 }
 
-fn minute_of_day(dt: NaiveDateTime) -> u32 {
+fn minute_of_day(dt: DateTime) -> u32 {
     let t = dt.time();
-    use chrono::Timelike;
-    t.hour() * 60 + t.minute()
+    use crate::dates::prelude::*;
+    t.hour32() * 60 + t.minute32()
 }
 
 impl<'a> WorkCal<'a> {
@@ -357,7 +364,7 @@ impl<'a> WorkCal<'a> {
     }
 
     /// Working ranges on a date.
-    pub fn ranges(&self, d: NaiveDate) -> Vec<TimeRange> {
+    pub fn ranges(&self, d: Date) -> Vec<TimeRange> {
         let mut it = self.layers.iter();
         let mut acc = it.next().map(|l| l.ranges(d)).unwrap_or_default();
         for l in it {
@@ -369,16 +376,16 @@ impl<'a> WorkCal<'a> {
         acc
     }
 
-    pub fn is_working_day(&self, d: NaiveDate) -> bool {
+    pub fn is_working_day(&self, d: Date) -> bool {
         !self.ranges(d).is_empty()
     }
 
-    pub fn working_minutes_on(&self, d: NaiveDate) -> Minutes {
+    pub fn working_minutes_on(&self, d: Date) -> Minutes {
         self.ranges(d).iter().map(|r| r.len() as Minutes).sum()
     }
 
     /// Start of the working day `d` (first working minute), or 08:00 equivalent if non-working.
-    pub fn day_start(&self, d: NaiveDate) -> NaiveDateTime {
+    pub fn day_start(&self, d: Date) -> DateTime {
         match self.ranges(d).first() {
             Some(r) => at(d, r.start),
             None => self.snap_forward(at(d, 0)),
@@ -386,7 +393,7 @@ impl<'a> WorkCal<'a> {
     }
 
     /// End of the working day `d` (last working minute), or the previous working end if non-working.
-    pub fn day_finish(&self, d: NaiveDate) -> NaiveDateTime {
+    pub fn day_finish(&self, d: Date) -> DateTime {
         match self.ranges(d).last() {
             Some(r) => at(d, r.end),
             None => self.snap_backward(at(d, 0)),
@@ -394,7 +401,7 @@ impl<'a> WorkCal<'a> {
     }
 
     /// First working instant at or after `dt`.
-    pub fn snap_forward(&self, dt: NaiveDateTime) -> NaiveDateTime {
+    pub fn snap_forward(&self, dt: DateTime) -> DateTime {
         let mut d = dt.date();
         let mut m = minute_of_day(dt);
         for _ in 0..MAX_IDLE_SCAN_DAYS {
@@ -411,7 +418,7 @@ impl<'a> WorkCal<'a> {
     }
 
     /// Last working instant at or before `dt` (a range end counts as working).
-    pub fn snap_backward(&self, dt: NaiveDateTime) -> NaiveDateTime {
+    pub fn snap_backward(&self, dt: DateTime) -> DateTime {
         let mut d = dt.date();
         let mut m = minute_of_day(dt);
         if m == 0 {
@@ -433,7 +440,7 @@ impl<'a> WorkCal<'a> {
     }
 
     /// Placement of a zero-length event: kept at the end of a working range, otherwise snapped forward.
-    pub fn snap_event(&self, dt: NaiveDateTime) -> NaiveDateTime {
+    pub fn snap_event(&self, dt: DateTime) -> DateTime {
         let m = minute_of_day(dt);
         let (d, m) = match dt.date().pred_opt() {
             Some(prev) if m == 0 => (prev, 1440),
@@ -449,7 +456,7 @@ impl<'a> WorkCal<'a> {
     ///
     /// A positive result ends exactly at the end of the last consumed working
     /// minute (e.g. 17:00), not at the start of the next working period.
-    pub fn add(&self, dt: NaiveDateTime, mins: Minutes) -> NaiveDateTime {
+    pub fn add(&self, dt: DateTime, mins: Minutes) -> DateTime {
         if mins < 0 {
             // Saturating: `-i64::MIN` does not exist.
             return self.sub(dt, mins.saturating_neg());
@@ -468,10 +475,10 @@ impl<'a> WorkCal<'a> {
             if m == 0 {
                 for (first, last) in [(d, year_last_day(d)), (d, month_last_day(d))] {
                     let Some(last) = last.filter(|l| *l <= horizon_end()) else { continue };
-                    let span = if first.ordinal() == 1 && last.month() == 12 && last.day() == 31 {
-                        self.span(first.year(), 0)
-                    } else if first.day() == 1 && Some(last) == month_last_day(first) {
-                        self.span(first.year(), first.month())
+                    let span = if first.ordinal() == 1 && last.month32() == 12 && last.day32() == 31 {
+                        self.span(first.year32(), 0)
+                    } else if first.day32() == 1 && Some(last) == month_last_day(first) {
+                        self.span(first.year32(), first.month32())
                     } else {
                         continue;
                     };
@@ -521,7 +528,7 @@ impl<'a> WorkCal<'a> {
     }
 
     /// Subtracts working minutes from `dt`; the result is the start of the earliest consumed minute.
-    pub fn sub(&self, dt: NaiveDateTime, mins: Minutes) -> NaiveDateTime {
+    pub fn sub(&self, dt: DateTime, mins: Minutes) -> DateTime {
         if mins < 0 {
             return self.add(dt, mins.saturating_neg());
         }
@@ -542,12 +549,12 @@ impl<'a> WorkCal<'a> {
             // At the end of a year or month that starts after the time runs out, step over it
             // whole (as walking it back day by day would, idle-day limit included).
             if m == 1440 {
-                for first in [NaiveDate::from_ymd_opt(d.year(), 1, 1), NaiveDate::from_ymd_opt(d.year(), d.month(), 1)] {
+                for first in [crate::dates::ymd(d.year32(), 1, 1), crate::dates::ymd(d.year32(), d.month32(), 1)] {
                     let Some(first) = first.filter(|f| *f >= horizon_start()) else { continue };
                     let span = if first.ordinal() == 1 && year_last_day(first) == Some(d) {
-                        self.span(first.year(), 0)
-                    } else if first.day() == 1 && month_last_day(first) == Some(d) {
-                        self.span(first.year(), first.month())
+                        self.span(first.year32(), 0)
+                    } else if first.day32() == 1 && month_last_day(first) == Some(d) {
+                        self.span(first.year32(), first.month32())
                     } else {
                         continue;
                     };
@@ -597,7 +604,7 @@ impl<'a> WorkCal<'a> {
     }
 
     /// Working minutes in `[a, b)`; negative if `b < a`.
-    pub fn between(&self, a: NaiveDateTime, b: NaiveDateTime) -> Minutes {
+    pub fn between(&self, a: DateTime, b: DateTime) -> Minutes {
         if b < a {
             return self.between(b, a).saturating_neg();
         }
@@ -622,7 +629,7 @@ impl<'a> WorkCal<'a> {
     }
 
     /// Working minutes on `d` between minute `lo` and minute `hi` of the day.
-    fn minutes_in_day(&self, d: NaiveDate, lo: u32, hi: u32) -> Minutes {
+    fn minutes_in_day(&self, d: Date, lo: u32, hi: u32) -> Minutes {
         if hi <= lo {
             return 0;
         }
@@ -637,16 +644,16 @@ impl<'a> WorkCal<'a> {
 
     /// Working minutes of the whole days `from..=to`, stepping by cached years and months where
     /// they fit and by days only up to the next month boundary.
-    fn whole_days(&self, from: NaiveDate, to: NaiveDate) -> Minutes {
+    fn whole_days(&self, from: Date, to: Date) -> Minutes {
         let mut total: Minutes = 0;
         let mut d = from;
         while d <= to {
-            let year_end = NaiveDate::from_ymd_opt(d.year(), 12, 31);
+            let year_end = crate::dates::ymd(d.year32(), 12, 31);
             let month_end = month_last_day(d);
             let (minutes, next) = if d.ordinal() == 1 && year_end.is_some_and(|e| e <= to) {
-                (self.cached_span(d.year(), 0), year_end.and_then(next_day))
-            } else if d.day() == 1 && month_end.is_some_and(|e| e <= to) {
-                (self.cached_span(d.year(), d.month()), month_end.and_then(next_day))
+                (self.cached_span(d.year32(), 0), year_end.and_then(next_day))
+            } else if d.day32() == 1 && month_end.is_some_and(|e| e <= to) {
+                (self.cached_span(d.year32(), d.month32()), month_end.and_then(next_day))
             } else {
                 (self.working_minutes_on(d), next_day(d))
             };
@@ -673,10 +680,10 @@ impl<'a> WorkCal<'a> {
         let span = if month == 0 {
             (1..=12).map(|m| self.span(year, m)).fold(empty, Span::then)
         } else {
-            match NaiveDate::from_ymd_opt(year, month, 1) {
+            match crate::dates::ymd(year, month, 1) {
                 Some(first) => first
                     .iter_days()
-                    .take_while(|d| d.month() == month)
+                    .take_while(|d| d.month32() == month)
                     .map(|d| {
                         let minutes = self.working_minutes_on(d);
                         let idle = i64::from(minutes == 0);
@@ -691,7 +698,7 @@ impl<'a> WorkCal<'a> {
     }
 
     /// Working minutes on day `d` that fall inside `[a, b)`.
-    pub fn working_minutes_within(&self, d: NaiveDate, a: NaiveDateTime, b: NaiveDateTime) -> Minutes {
+    pub fn working_minutes_within(&self, d: Date, a: DateTime, b: DateTime) -> Minutes {
         let day_start = at(d, 0);
         let day_end = at(d, 1440);
         let lo = a.max(day_start);
@@ -704,8 +711,8 @@ impl<'a> WorkCal<'a> {
 mod tests {
     use super::*;
 
-    fn dt(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> NaiveDateTime {
-        NaiveDate::from_ymd_opt(y, mo, d).unwrap().and_hms_opt(h, mi, 0).unwrap()
+    fn dt(y: i32, mo: u32, d: u32, h: u32, mi: u32) -> DateTime {
+        crate::dates::ymd(y, mo, d).unwrap().and_hms_opt(h, mi, 0).unwrap()
     }
 
     #[test]
@@ -719,7 +726,7 @@ mod tests {
 
     /// `add` and `sub` as they were before they stepped over whole months and years: one day at a
     /// time. The stepping must give exactly these results.
-    fn walk_add(wc: &WorkCal, dt: NaiveDateTime, mins: Minutes) -> NaiveDateTime {
+    fn walk_add(wc: &WorkCal, dt: DateTime, mins: Minutes) -> DateTime {
         if mins <= 0 {
             return if mins == 0 { wc.snap_forward(dt) } else { walk_sub(wc, dt, mins.saturating_neg()) };
         }
@@ -748,7 +755,7 @@ mod tests {
         shift(dt, mins)
     }
 
-    fn walk_sub(wc: &WorkCal, dt: NaiveDateTime, mins: Minutes) -> NaiveDateTime {
+    fn walk_sub(wc: &WorkCal, dt: DateTime, mins: Minutes) -> DateTime {
         if mins <= 0 {
             return if mins == 0 { wc.snap_backward(dt) } else { walk_add(wc, dt, mins.saturating_neg()) };
         }
@@ -800,31 +807,20 @@ mod tests {
     #[test]
     fn add_and_sub_match_a_day_by_day_walk() {
         let mut cal = Calendar::standard(CalendarId(1));
-        let mut xmas = CalendarException::non_working(
-            "Christmas",
-            NaiveDate::from_ymd_opt(2026, 12, 24).unwrap(),
-            NaiveDate::from_ymd_opt(2026, 12, 26).unwrap(),
-        );
+        let mut xmas =
+            CalendarException::non_working("Christmas", crate::dates::ymd(2026, 12, 24).unwrap(), crate::dates::ymd(2026, 12, 26).unwrap());
         xmas.yearly = true;
         cal.exceptions.push(xmas);
         cal.exceptions.push(CalendarException::non_working(
             "Shutdown",
-            NaiveDate::from_ymd_opt(2027, 7, 1).unwrap(),
-            NaiveDate::from_ymd_opt(2027, 7, 31).unwrap(),
+            crate::dates::ymd(2027, 7, 1).unwrap(),
+            crate::dates::ymd(2027, 7, 31).unwrap(),
         ));
         let other = Calendar::standard(CalendarId(2));
         let leave = [
-            CalendarException::non_working(
-                "Leave",
-                NaiveDate::from_ymd_opt(2026, 11, 2).unwrap(),
-                NaiveDate::from_ymd_opt(2027, 2, 15).unwrap(),
-            ),
+            CalendarException::non_working("Leave", crate::dates::ymd(2026, 11, 2).unwrap(), crate::dates::ymd(2027, 2, 15).unwrap()),
             // Longer than the idle-day limit: date math gives up inside it.
-            CalendarException::non_working(
-                "Sabbatical",
-                NaiveDate::from_ymd_opt(2030, 1, 1).unwrap(),
-                NaiveDate::from_ymd_opt(2035, 3, 1).unwrap(),
-            ),
+            CalendarException::non_working("Sabbatical", crate::dates::ymd(2030, 1, 1).unwrap(), crate::dates::ymd(2035, 3, 1).unwrap()),
         ];
         let wcs = [WorkCal::single(&cal), WorkCal::from_layers(vec![CalLayer::new(&cal, &[]), CalLayer::new(&other, &leave)])];
         let points = [
@@ -880,7 +876,7 @@ mod tests {
             minute in 0u32..1440,
             mins in -(2 * crate::limits::MAX_MINUTES)..(2 * crate::limits::MAX_MINUTES),
         ) {
-            let base = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+            let base = crate::dates::ymd(2024, 1, 1).unwrap();
             let mut cal = match week {
                 0 => Calendar::standard(CalendarId(1)),
                 1 => Calendar::twenty_four_hours(CalendarId(1)),
@@ -895,23 +891,23 @@ mod tests {
                 }
             };
             for (from, len, yearly) in holidays {
-                let a = base + chrono::Duration::days(from);
-                let mut h = CalendarException::non_working("Off", a, a + chrono::Duration::days(len));
+                let a = base + crate::dates::days(from);
+                let mut h = CalendarException::non_working("Off", a, a + crate::dates::days(len));
                 h.yearly = yearly && len < 30;
                 cal.exceptions.push(h);
             }
             let other = Calendar::standard(CalendarId(2));
             let personal: Vec<CalendarException> = leave
                 .map(|(from, len)| {
-                    let a = base + chrono::Duration::days(from);
-                    CalendarException::non_working("Leave", a, a + chrono::Duration::days(len))
+                    let a = base + crate::dates::days(from);
+                    CalendarException::non_working("Leave", a, a + crate::dates::days(len))
                 })
                 .into_iter()
                 .collect();
             let single = WorkCal::single(&cal);
             let layered = WorkCal::from_layers(vec![CalLayer::new(&cal, &[]), CalLayer::new(&other, &personal)]);
             let wc = if leave.is_some() { layered } else { single };
-            let p = at(base + chrono::Duration::days(start_day), minute);
+            let p = at(base + crate::dates::days(start_day), minute);
             proptest::prop_assert_eq!(wc.add(p, mins), walk_add(&wc, p, mins));
             proptest::prop_assert_eq!(wc.sub(p, mins), walk_sub(&wc, p, mins));
         }
@@ -922,26 +918,20 @@ mod tests {
     #[test]
     fn between_matches_a_day_by_day_count() {
         let mut cal = Calendar::standard(CalendarId(1));
-        let mut xmas = CalendarException::non_working(
-            "Christmas",
-            NaiveDate::from_ymd_opt(2026, 12, 24).unwrap(),
-            NaiveDate::from_ymd_opt(2026, 12, 26).unwrap(),
-        );
+        let mut xmas =
+            CalendarException::non_working("Christmas", crate::dates::ymd(2026, 12, 24).unwrap(), crate::dates::ymd(2026, 12, 26).unwrap());
         xmas.yearly = true;
         cal.exceptions.push(xmas);
         cal.exceptions.push(CalendarException::non_working(
             "Shutdown",
-            NaiveDate::from_ymd_opt(2027, 7, 1).unwrap(),
-            NaiveDate::from_ymd_opt(2027, 7, 31).unwrap(),
+            crate::dates::ymd(2027, 7, 1).unwrap(),
+            crate::dates::ymd(2027, 7, 31).unwrap(),
         ));
-        let leave = [CalendarException::non_working(
-            "Leave",
-            NaiveDate::from_ymd_opt(2026, 11, 2).unwrap(),
-            NaiveDate::from_ymd_opt(2027, 2, 15).unwrap(),
-        )];
+        let leave =
+            [CalendarException::non_working("Leave", crate::dates::ymd(2026, 11, 2).unwrap(), crate::dates::ymd(2027, 2, 15).unwrap())];
         let other = Calendar::standard(CalendarId(2));
         let wcs = [WorkCal::single(&cal), WorkCal::from_layers(vec![CalLayer::new(&cal, &[]), CalLayer::new(&other, &leave)])];
-        let naive = |wc: &WorkCal, a: NaiveDateTime, b: NaiveDateTime| -> Minutes {
+        let naive = |wc: &WorkCal, a: DateTime, b: DateTime| -> Minutes {
             let mut total = 0;
             let mut d = a.date();
             while d <= b.date() {
@@ -996,25 +986,25 @@ mod tests {
     #[test]
     fn exceptions_and_layers() {
         let mut cal = Calendar::standard(CalendarId(1));
-        let wed = NaiveDate::from_ymd_opt(2026, 10, 21).unwrap();
+        let wed = crate::dates::ymd(2026, 10, 21).unwrap();
         cal.exceptions.push(CalendarException::non_working("Holiday", wed, wed));
         let wc = WorkCal::single(&cal);
         // Tue 08:00 + 2 days skips Wednesday
         assert_eq!(wc.add(dt(2026, 10, 20, 8, 0), 960), dt(2026, 10, 22, 17, 0));
 
-        let thu = NaiveDate::from_ymd_opt(2026, 10, 22).unwrap();
+        let thu = crate::dates::ymd(2026, 10, 22).unwrap();
         let vacation = [CalendarException::non_working("Vacation", thu, thu)];
         let both = WorkCal::from_layers(vec![CalLayer::new(&cal, &[]), CalLayer::new(&cal, &vacation)]);
         assert_eq!(both.add(dt(2026, 10, 20, 8, 0), 960), dt(2026, 10, 23, 17, 0));
 
         let xmas = CalendarException {
             name: "Christmas".into(),
-            start: NaiveDate::from_ymd_opt(2020, 12, 25).unwrap(),
-            end: NaiveDate::from_ymd_opt(2020, 12, 25).unwrap(),
+            start: crate::dates::ymd(2020, 12, 25).unwrap(),
+            end: crate::dates::ymd(2020, 12, 25).unwrap(),
             working: vec![],
             yearly: true,
         };
-        assert!(xmas.covers(NaiveDate::from_ymd_opt(2031, 12, 25).unwrap()));
+        assert!(xmas.covers(crate::dates::ymd(2031, 12, 25).unwrap()));
     }
 
     #[test]
@@ -1032,6 +1022,6 @@ mod tests {
         cal.week = WorkWeek::default();
         let wc = WorkCal::single(&cal);
         let start = dt(2026, 10, 19, 8, 0);
-        assert_eq!(wc.add(start, 60), start + Duration::minutes(60));
+        assert_eq!(wc.add(start, 60), start + SignedDuration::from_mins(60));
     }
 }

@@ -8,7 +8,7 @@
 //! going to every occurrence. Where the pages say nothing (an occurrence on a non-working day,
 //! days past a month's end), the choices are documented on the functions below.
 
-use chrono::{Datelike, Days, Months, NaiveDate, Weekday};
+use crate::dates::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::calendar::WorkCal;
@@ -75,7 +75,7 @@ pub enum RecurEnd {
     /// After this many occurrences.
     After(u16),
     /// On or before this date.
-    By(NaiveDate),
+    By(Date),
 }
 
 /// A recurring task's definition (kept on its summary task).
@@ -83,7 +83,7 @@ pub enum RecurEnd {
 pub struct Recurrence {
     pub pattern: Pattern,
     /// First day the pattern may fall on.
-    pub start: NaiveDate,
+    pub start: Date,
     pub end: RecurEnd,
     /// Duration of each occurrence (0: a milestone).
     pub duration: Minutes,
@@ -99,15 +99,16 @@ fn invalid<T>(msg: impl Into<String>) -> PlanResult<T> {
     Err(PlanError::Invalid(msg.into()))
 }
 
+/// Weekday `n` (Monday = 0 … Sunday = 6).
 fn weekday(n: u8) -> Option<Weekday> {
-    Weekday::try_from(n).ok()
+    (n < 7).then(|| crate::dates::weekday_from_index(u32::from(n)))
 }
 
 /// The date of `on` in the month of `first` (the month's first day), or `None` when out of range.
-fn in_month(first: NaiveDate, on: MonthDay) -> Option<NaiveDate> {
+fn in_month(first: Date, on: MonthDay) -> Option<Date> {
     let last = first.checked_add_months(Months::new(1))?.pred_opt()?;
     match on {
-        MonthDay::Day(d) => first.with_day(u32::from(d).clamp(1, last.day())),
+        MonthDay::Day(d) => first.with_day(u32::from(d).clamp(1, last.day32())),
         MonthDay::Weekday { nth, weekday: w } => {
             let w = weekday(w)?;
             match nth {
@@ -168,18 +169,18 @@ impl Recurrence {
     /// The occurrence dates, in order: the days the pattern falls on, each moved off non-working
     /// days of `cal` to the next working day; one that lands on the same day as the previous one
     /// doesn't count.
-    fn pattern_dates(&self, cal: &WorkCal) -> PlanResult<Vec<NaiveDate>> {
+    fn pattern_dates(&self, cal: &WorkCal) -> PlanResult<Vec<Date>> {
         let limit = match self.end {
             RecurEnd::After(n) => usize::from(n.min(MAX_OCCURRENCES)),
             RecurEnd::By(_) => usize::from(MAX_OCCURRENCES),
         };
         let last_day = match self.end {
             RecurEnd::By(d) => clamp_date(d),
-            RecurEnd::After(_) => clamp_date(NaiveDate::MAX),
+            RecurEnd::After(_) => clamp_date(Date::MAX),
         };
-        let mut out: Vec<NaiveDate> = Vec::new();
+        let mut out: Vec<Date> = Vec::new();
         let mut problem: Option<String> = None;
-        let mut push = |d: NaiveDate| -> bool {
+        let mut push = |d: Date| -> bool {
             if d > last_day {
                 return false;
             }
@@ -262,7 +263,7 @@ impl Recurrence {
                 }
             }
             Pattern::Yearly { month, on } => {
-                let Some(mut first) = NaiveDate::from_ymd_opt(start.year(), u32::from(month), 1) else { return Ok(out) };
+                let Some(mut first) = crate::dates::ymd(start.year32(), u32::from(month), 1) else { return Ok(out) };
                 while first <= last_day {
                     if let Some(d) = in_month(first, on)
                         && !push(d)
@@ -288,7 +289,7 @@ impl Recurrence {
     /// The occurrence dates. An occurrence that falls on a non-working day of `cal` moves to the
     /// next working day; when that is the day of the previous occurrence it doesn't count, so the
     /// series still has the number of occurrences asked for.
-    pub fn dates(&self, cal: &WorkCal) -> PlanResult<Vec<NaiveDate>> {
+    pub fn dates(&self, cal: &WorkCal) -> PlanResult<Vec<Date>> {
         self.validate()?;
         let out = self.pattern_dates(cal)?;
         if out.is_empty() {
@@ -342,7 +343,7 @@ impl Project {
         at
     }
 
-    fn occurrence_dates(&self, rec: &Recurrence) -> PlanResult<Vec<NaiveDate>> {
+    fn occurrence_dates(&self, rec: &Recurrence) -> PlanResult<Vec<Date>> {
         if let Some(c) = rec.calendar
             && self.calendar(c).is_none()
         {
@@ -353,7 +354,7 @@ impl Project {
     }
 
     /// Sets occurrence `k` (1-based) of a recurring task named `name` to fall on `date`.
-    fn shape_occurrence(&self, t: &mut Task, name: &str, k: usize, date: NaiveDate, rec: &Recurrence) {
+    fn shape_occurrence(&self, t: &mut Task, name: &str, k: usize, date: Date, rec: &Recurrence) {
         let cal = rec.calendar.and_then(|c| self.calendar(c)).unwrap_or_else(|| self.base_calendar());
         t.name = format!("{name} {k}");
         t.kind = if rec.duration == 0 { TaskKind::Milestone } else { TaskKind::Task };
@@ -480,15 +481,15 @@ mod tests {
     use super::*;
     use crate::calendar::Calendar;
 
-    fn d(y: i32, m: u32, day: u32) -> NaiveDate {
-        NaiveDate::from_ymd_opt(y, m, day).unwrap()
+    fn d(y: i32, m: u32, day: u32) -> Date {
+        crate::dates::ymd(y, m, day).unwrap()
     }
 
-    fn rec(pattern: Pattern, start: NaiveDate, end: RecurEnd) -> Recurrence {
+    fn rec(pattern: Pattern, start: Date, end: RecurEnd) -> Recurrence {
         Recurrence { pattern, start, end, duration: 60, calendar: None, ignore_resource_calendars: false }
     }
 
-    fn dates(r: Recurrence) -> Vec<NaiveDate> {
+    fn dates(r: Recurrence) -> Vec<Date> {
         let cal = Calendar::standard(CalendarId(1));
         r.dates(&WorkCal::single(&cal)).unwrap()
     }
@@ -623,6 +624,6 @@ mod tests {
     fn far_dates_stop_at_the_date_limit() {
         let r = rec(Pattern::Yearly { month: 2, on: MonthDay::Day(29) }, d(2290, 1, 1), RecurEnd::By(d(2400, 1, 1)));
         let v = dates(r);
-        assert!(v.len() <= 11 && v.iter().all(|x| x.year() <= 2300), "{v:?}");
+        assert!(v.len() <= 11 && v.iter().all(|x| x.year32() <= 2300), "{v:?}");
     }
 }

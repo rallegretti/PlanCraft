@@ -112,7 +112,7 @@ pub fn workspace_from_files<P: AsRef<Path>>(paths: &[P]) -> Result<SharedWorkspa
             }
             let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "New Project".into());
             let abs = if path.is_absolute() { path } else { std::env::current_dir().map(|c| c.join(&path)).unwrap_or(path) };
-            let handle = ws.add(Project::new(name, chrono::Local::now().date_naive()), Some(abs));
+            let handle = ws.add(Project::new(name, plancraft_core::dates::today()), Some(abs));
             if let Some(doc) = ws.index_of(handle).and_then(|i| ws.docs.get_mut(i)) {
                 // A brand-new document has unsaved content.
                 doc.dirty = true;

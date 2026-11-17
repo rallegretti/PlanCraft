@@ -1,14 +1,14 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
-use chrono::{NaiveDate, NaiveDateTime};
+use plancraft_core::dates::prelude::*;
 use plancraft_core::leveling::{LevelingOptions, level_resources};
 use plancraft_core::prelude::*;
 
 const DAY: Minutes = 480;
 
-fn d(y: i32, m: u32, day: u32) -> NaiveDate {
-    NaiveDate::from_ymd_opt(y, m, day).unwrap()
+fn d(y: i32, m: u32, day: u32) -> Date {
+    plancraft_core::dates::ymd(y, m, day).unwrap()
 }
-fn dt(y: i32, m: u32, day: u32, h: u32) -> NaiveDateTime {
+fn dt(y: i32, m: u32, day: u32, h: u32) -> DateTime {
     d(y, m, day).and_hms_opt(h, 0, 0).unwrap()
 }
 
@@ -23,10 +23,10 @@ fn task(p: &mut Project, name: &str, days: i64) -> TaskId {
     id
 }
 
-fn start(p: &Project, id: TaskId) -> NaiveDateTime {
+fn start(p: &Project, id: TaskId) -> DateTime {
     p.task(id).unwrap().sched.start.unwrap()
 }
-fn finish(p: &Project, id: TaskId) -> NaiveDateTime {
+fn finish(p: &Project, id: TaskId) -> DateTime {
     p.task(id).unwrap().sched.finish.unwrap()
 }
 

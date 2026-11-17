@@ -5,9 +5,8 @@
 //!
 //! ```
 //! use plancraft_core::prelude::*;
-//! use chrono::NaiveDate;
 //!
-//! let mut p = Project::new("Example", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+//! let mut p = Project::new("Example", plancraft_core::dates::ymd(2026, 10, 19).unwrap());
 //! let a = p.add_task("Design", None);
 //! let b = p.add_task("Build", None);
 //! p.link(a.into(), b, LinkType::FS, Lag::None).unwrap();
@@ -20,6 +19,7 @@ pub mod bidi;
 pub mod board;
 pub mod calendar;
 pub mod custom;
+pub mod dates;
 pub mod duration;
 pub mod guard;
 pub mod ids;
@@ -46,6 +46,7 @@ pub mod prelude {
     pub use crate::baseline::{PlanSlot, Scope};
     pub use crate::calendar::{Calendar, CalendarException, TimeRange, WorkCal, WorkWeek};
     pub use crate::custom::{CustomFieldDef, CustomFieldKind, CustomValue, TableLayout};
+    pub use crate::dates::{Date, DateTime, Time, Weekday};
     pub use crate::duration::{
         DurationUnit, Lag, Minutes, TimeSettings, TypedDuration, format_duration, format_elapsed, format_work, parse_duration,
         parse_task_duration, parse_work,

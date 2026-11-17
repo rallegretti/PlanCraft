@@ -7,8 +7,8 @@
 
 use std::path::Path;
 
-use chrono::NaiveDate;
 use plancraft_core::calendar::{TimeRange, shift};
+use plancraft_core::dates::prelude::*;
 use plancraft_core::duration::{DurationUnit, Lag, TimeSettings, best_unit, format_duration, parse_duration};
 use plancraft_core::io::{from_json_with_notes, to_json};
 use plancraft_core::limits::{self, MAX_MINUTES};
@@ -17,8 +17,8 @@ use plancraft_core::sample::demo_project;
 use plancraft_core::workspace::{ChangeSource, Document};
 use proptest::prelude::*;
 
-fn start() -> NaiveDate {
-    NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()
+fn start() -> Date {
+    plancraft_core::dates::ymd(2026, 10, 19).unwrap()
 }
 
 fn units() -> impl Strategy<Value = DurationUnit> {
@@ -449,7 +449,7 @@ fn apply(p: &mut Project, op: &Op) -> PlanResult<()> {
         }
         Op::Log(i, r, m, days) => {
             let rid = p.resources.get(r % p.resources.len().max(1)).map_or(ResourceId(999), |r| r.id);
-            let date = start().checked_add_signed(chrono::Duration::days(days)).unwrap_or(start());
+            let date = start().checked_add_signed(plancraft_core::dates::days(days)).unwrap_or(start());
             p.log_time(task_at(p, i), rid, date, m, "junk")?;
         }
         Op::Names(i, text) => p.apply_resource_names(task_at(p, i), &text)?,
@@ -710,9 +710,7 @@ fn hostile_baselines_in_a_file_are_clamped_on_open() {
     assert_eq!(t.baselines.keys().copied().collect::<Vec<_>>(), [3], "only Baseline1–10 are kept");
     assert_eq!(t.interim.keys().copied().collect::<Vec<_>>(), [10]);
     let b3 = t.baseline_in(3).unwrap();
-    assert!(
-        b3.start.date() >= chrono::NaiveDate::from_ymd_opt(1900, 1, 1).unwrap() && b3.work <= limits::MAX_TOTAL_MINUTES && b3.duration >= 0
-    );
+    assert!(b3.start.date() >= plancraft_core::dates::ymd(1900, 1, 1).unwrap() && b3.work <= limits::MAX_TOTAL_MINUTES && b3.duration >= 0);
     assert!(b3.cost.abs() <= limits::MAX_TOTAL_MONEY);
     assert_eq!(loaded.settings.earned_value_baseline, 0);
     assert!(limits::sanitize(&mut loaded).is_empty(), "loading left nothing out of range");
@@ -782,7 +780,7 @@ fn hostile_planned_splits_and_recurrences_in_a_file_are_clamped_on_open() {
     assert!(limits::sanitize(&mut loaded).is_empty());
     let report = recalculate(&mut loaded);
     assert!(!report.warnings.iter().any(|w| w.contains("internal error")), "{:?}", report.warnings);
-    assert!(loaded.tasks[1].sched.finish.is_some_and(|f| f.date() <= chrono::NaiveDate::from_ymd_opt(2300, 12, 31).unwrap()));
+    assert!(loaded.tasks[1].sched.finish.is_some_and(|f| f.date() <= plancraft_core::dates::ymd(2300, 12, 31).unwrap()));
 }
 
 #[test]

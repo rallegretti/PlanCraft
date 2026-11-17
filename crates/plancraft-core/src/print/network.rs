@@ -4,6 +4,7 @@
 
 use super::layout::Palette;
 use super::{Item, Pt, Rect, Rgb, Stroke, font, pt};
+use crate::dates::prelude::*;
 use crate::model::Project;
 use crate::network::{Diagram, NetLinkKind};
 
@@ -23,7 +24,7 @@ pub struct NetPrintOptions {
 }
 
 /// A date as the app shows it.
-pub(crate) fn date(d: Option<chrono::NaiveDateTime>) -> String {
+pub(crate) fn date(d: Option<DateTime>) -> String {
     d.map(|d| d.format("%a %m/%d/%y").to_string()).unwrap_or_else(|| "NA".into())
 }
 
@@ -177,7 +178,7 @@ mod tests {
 
     #[test]
     fn prints_every_box_with_its_details() {
-        let mut p = crate::sample::demo_project(chrono::NaiveDate::from_ymd_opt(2026, 11, 2).unwrap());
+        let mut p = crate::sample::demo_project(crate::dates::ymd(2026, 11, 2).unwrap());
         crate::schedule::recalculate(&mut p);
         let boxes: Vec<Option<usize>> = (0..p.tasks.len()).map(Some).collect();
         let d = layout(&p, &boxes, NetworkOptions::default());
@@ -202,7 +203,7 @@ mod tests {
 
     #[test]
     fn an_empty_diagram_says_so() {
-        let p = Project::new("Plan", chrono::NaiveDate::from_ymd_opt(2026, 11, 2).unwrap());
+        let p = Project::new("Plan", crate::dates::ymd(2026, 11, 2).unwrap());
         let d = layout(&p, &[], NetworkOptions::default());
         let (items, w, h) = items(&p, &d, NetPrintOptions::default(), &Palette::default());
         assert_eq!(texts(&items), vec!["No tasks to show".to_string()]);

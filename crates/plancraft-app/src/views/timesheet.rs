@@ -3,8 +3,8 @@
 //! Each cell holds the total tracked time for (task, resource, day); editing a
 //! cell replaces the time entries for that day.
 
-use chrono::{Datelike, Duration, NaiveDate};
 use egui::{Rect, Ui, pos2, vec2};
+use plancraft_core::dates::prelude::*;
 use plancraft_core::prelude::*;
 use plancraft_core::workspace::{ChangeSource, Document};
 
@@ -22,7 +22,7 @@ struct Line {
 }
 
 /// Replaces the tracked time of (task, resource) on `date` with `minutes`.
-fn set_day(p: &mut Project, task: TaskId, resource: ResourceId, date: NaiveDate, minutes: Minutes) -> Result<(), PlanError> {
+fn set_day(p: &mut Project, task: TaskId, resource: ResourceId, date: Date, minutes: Minutes) -> Result<(), PlanError> {
     p.time_entries.retain(|e| !(e.task == task && e.resource == resource && e.date == date));
     if minutes > 0 {
         p.log_time(task, resource, date, minutes, "")?;
@@ -31,7 +31,7 @@ fn set_day(p: &mut Project, task: TaskId, resource: ResourceId, date: NaiveDate,
 }
 
 pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
-    let week = st.timesheet_week - Duration::days(st.timesheet_week.weekday().num_days_from_monday() as i64);
+    let week = st.timesheet_week - plancraft_core::dates::days(st.timesheet_week.weekday().num_days_from_monday() as i64);
     st.timesheet_week = week;
     let mut bar =
         ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(rect.min + vec2(8.0, 4.0), vec2(rect.width() - 16.0, 26.0))));
@@ -39,15 +39,15 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
         ui.label(egui::RichText::new("Timesheet").strong().size(15.0));
         ui.separator();
         if ui.button("⏴").on_hover_text("Previous week").clicked() {
-            st.timesheet_week = week - Duration::days(7);
+            st.timesheet_week = week - plancraft_core::dates::days(7);
         }
         ui.label(format!("Week of {}", week.format("%b %-d, %Y")));
         if ui.button("⏵").on_hover_text("Next week").clicked() {
-            st.timesheet_week = week + Duration::days(7);
+            st.timesheet_week = week + plancraft_core::dates::days(7);
         }
         if ui.button("This Week").clicked() {
-            let today = chrono::Local::now().date_naive();
-            st.timesheet_week = today - Duration::days(today.weekday().num_days_from_monday() as i64);
+            let today = plancraft_core::dates::today();
+            st.timesheet_week = today - plancraft_core::dates::days(today.weekday().num_days_from_monday() as i64);
         }
         ui.separator();
         ui.label("Resource:");
@@ -75,7 +75,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
     let rect = Rect::from_min_max(pos2(rect.left(), rect.top() + 34.0), rect.max);
 
     let p = &doc.project;
-    let days: [NaiveDate; 7] = std::array::from_fn(|i| week + Duration::days(i as i64));
+    let days: [Date; 7] = std::array::from_fn(|i| week + plancraft_core::dates::days(i as i64));
     let mut lines: Vec<Line> = Vec::new();
     for a in &p.assignments {
         if st.timesheet_resource.is_some_and(|r| r != a.resource) {
@@ -103,7 +103,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
     defs.push(ColumnDef::new("Week Total", 84.0).right().read_only());
     defs.push(ColumnDef::new("Actual / Planned", 140.0).right().read_only());
 
-    let tracked = |task: TaskId, res: ResourceId, d: NaiveDate| -> Minutes {
+    let tracked = |task: TaskId, res: ResourceId, d: Date| -> Minutes {
         p.time_entries.iter().filter(|e| e.task == task && e.resource == res && e.date == d).map(|e| e.minutes).sum()
     };
     let cfg = GridConfig {

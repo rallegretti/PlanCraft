@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use chrono::NaiveDateTime;
+use crate::dates::prelude::*;
 
 use super::layout::{Frame, MAX_PAGE_VISITS, MAX_PAGES, Palette, scale_item};
 use super::{Document, Item, PageSetup, Rect, TimescaleFit, font};
@@ -33,7 +33,7 @@ pub struct CanvasJob<'a> {
     /// The drawing, with the origin at its top-left corner.
     pub items: Vec<Item>,
     /// When it was printed, for `[Date]`.
-    pub printed: NaiveDateTime,
+    pub printed: DateTime,
 }
 
 fn size(v: f32) -> f32 {
@@ -154,13 +154,12 @@ pub fn layout_canvas(job: &CanvasJob) -> Document {
 
 #[cfg(test)]
 mod tests {
-    use chrono::NaiveDate;
 
     use super::super::{Rgb, Stroke, pt};
     use super::*;
 
-    fn when() -> NaiveDateTime {
-        NaiveDate::from_ymd_opt(2026, 11, 14).unwrap().and_hms_opt(9, 0, 0).unwrap()
+    fn when() -> DateTime {
+        crate::dates::ymd(2026, 11, 14).unwrap().and_hms_opt(9, 0, 0).unwrap()
     }
 
     fn boxes(w: f32, h: f32, step: f32) -> Vec<Item> {
@@ -178,7 +177,7 @@ mod tests {
     }
 
     fn run(setup: &PageSetup, w: f32, h: f32, items: Vec<Item>) -> Document {
-        let p = Project::new("Plan", chrono::NaiveDate::from_ymd_opt(2026, 11, 2).unwrap());
+        let p = Project::new("Plan", crate::dates::ymd(2026, 11, 2).unwrap());
         layout_canvas(&CanvasJob { project: &p, setup, title: "Network Diagram", width: w, height: h, items, printed: when() })
     }
 

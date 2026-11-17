@@ -132,7 +132,7 @@ mod tests {
 
     #[test]
     fn prints_every_column_and_card() {
-        let mut p = crate::sample::demo_project(chrono::NaiveDate::from_ymd_opt(2026, 11, 2).unwrap());
+        let mut p = crate::sample::demo_project(crate::dates::ymd(2026, 11, 2).unwrap());
         crate::schedule::recalculate(&mut p);
         let cols: Vec<BoardColumnPrint> =
             p.board().into_iter().map(|(c, rows)| BoardColumnPrint { name: c.name.clone(), percent: c.percent_complete, rows }).collect();
@@ -154,7 +154,7 @@ mod tests {
 
     #[test]
     fn an_empty_board_prints_without_panicking() {
-        let p = Project::new("Plan", chrono::NaiveDate::from_ymd_opt(2026, 11, 2).unwrap());
+        let p = Project::new("Plan", crate::dates::ymd(2026, 11, 2).unwrap());
         let (items, w, h) = items(&p, &[], &Palette::default());
         assert!(!items.is_empty() && w > 0.0 && h > 0.0);
         // Rows that don't exist are skipped.

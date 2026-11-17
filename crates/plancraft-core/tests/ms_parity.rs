@@ -17,17 +17,17 @@
 //! Where PlanCraft deliberately or accidentally differs from the documented
 //! behaviour, the test is kept but marked `#[ignore = "parity gap: ..."]`.
 
-use chrono::{NaiveDate, NaiveDateTime};
+use plancraft_core::dates::prelude::*;
 use plancraft_core::prelude::*;
 
 const HOUR: Minutes = 60;
 const DAY: Minutes = 8 * HOUR;
 
-fn d(y: i32, m: u32, day: u32) -> NaiveDate {
-    NaiveDate::from_ymd_opt(y, m, day).unwrap()
+fn d(y: i32, m: u32, day: u32) -> Date {
+    plancraft_core::dates::ymd(y, m, day).unwrap()
 }
 
-fn dt(y: i32, m: u32, day: u32, h: u32) -> NaiveDateTime {
+fn dt(y: i32, m: u32, day: u32, h: u32) -> DateTime {
     d(y, m, day).and_hms_opt(h, 0, 0).unwrap()
 }
 
@@ -42,11 +42,11 @@ fn task(p: &mut Project, name: &str, duration: Minutes) -> TaskId {
     id
 }
 
-fn start(p: &Project, id: TaskId) -> NaiveDateTime {
+fn start(p: &Project, id: TaskId) -> DateTime {
     p.task(id).unwrap().sched.start.unwrap()
 }
 
-fn finish(p: &Project, id: TaskId) -> NaiveDateTime {
+fn finish(p: &Project, id: TaskId) -> DateTime {
     p.task(id).unwrap().sched.finish.unwrap()
 }
 
@@ -95,7 +95,7 @@ fn add_second_person(p: &mut Project, t: TaskId) -> AssignmentId {
 }
 
 /// Sets a constraint directly on the task (the UI and MCP tools do the same).
-fn constrain(p: &mut Project, id: TaskId, kind: ConstraintKind, date: NaiveDateTime) {
+fn constrain(p: &mut Project, id: TaskId, kind: ConstraintKind, date: DateTime) {
     p.task_mut(id).unwrap().constraint = Constraint { kind, date: Some(date) };
 }
 
@@ -1550,7 +1550,7 @@ fn mspdi_calendar_day_types_and_weekly_exceptions() {
     let c = p.base_calendar();
     assert_eq!(c.week.saturday, vec![TimeRange::hours(9, 13)]);
     assert!(c.week.sunday.is_empty());
-    let off: Vec<NaiveDate> = c.exceptions.iter().map(|e| e.start).collect();
+    let off: Vec<Date> = c.exceptions.iter().map(|e| e.start).collect();
     assert_eq!(off, [d(2026, 10, 20), d(2026, 10, 27)]);
     // Monday, then Tuesday is off: Wednesday and Thursday finish the three days.
     assert_eq!(p.tasks[0].sched.finish, Some(dt(2026, 10, 22, 17)));

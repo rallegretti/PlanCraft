@@ -10,7 +10,7 @@ publish = false
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-chrono.workspace = true
+jiff.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
 # Printing: font metrics, the bundled UI font (embedded in PDFs), PDF stream compression. All pure Rust.
@@ -25,7 +25,7 @@ miniz_oxide = "0.8"
 quick-xml = { version = "0.41", default-features = false }
 # Spreadsheet import (CSV and workbooks: .xlsx, .xls, .xlsb, .ods). All pure Rust. `zip` reads a
 # workbook's declared sizes before calamine unpacks it; `encoding_rs` decodes Windows-1252 CSV.
-calamine = { version = "0.38", default-features = false, features = ["chrono"] }
+calamine = { version = "0.38", default-features = false }
 zip = { version = "9", default-features = false }
 encoding_rs = "0.8"
 

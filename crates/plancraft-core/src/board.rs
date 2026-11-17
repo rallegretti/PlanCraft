@@ -234,12 +234,11 @@ impl Project {
 
 #[cfg(test)]
 mod tests {
-    use chrono::NaiveDate;
 
     use crate::prelude::*;
 
     fn plan() -> (Project, TaskId, TaskId) {
-        let mut p = Project::new("B", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let mut p = Project::new("B", crate::dates::ymd(2026, 10, 19).unwrap());
         let a = p.add_task("A", None);
         let b = p.add_task("B", None);
         crate::schedule::recalculate(&mut p);

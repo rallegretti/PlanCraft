@@ -220,7 +220,7 @@ mod tests {
         pass(&ctx);
         assert!(ctx.fonts_mut(|f| f.has_glyph(&FontId::proportional(13.0), '設')));
         // A plan's text is looked at once per revision.
-        let mut p = Project::new("計画", chrono::NaiveDate::from_ymd_opt(2026, 11, 2).unwrap());
+        let mut p = Project::new("計画", plancraft_core::dates::ymd(2026, 11, 2).unwrap());
         p.add_task("תכנון", None);
         let mut seen = Vec::new();
         each_text(&p, &mut |s| seen.push(s.to_string()));

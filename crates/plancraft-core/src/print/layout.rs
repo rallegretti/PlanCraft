@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use crate::dates::prelude::*;
 
 use super::{Document, Item, LegendPlacement, Page, PageSetup, Pt, Rect, Rgb, Stroke, TimescaleFit, font, pt};
 use crate::calendar::shift;
@@ -70,7 +70,7 @@ pub enum RowKind {
     /// A task row: its bar prints in the chart.
     Task(TaskId),
     /// A group header: a bar spanning its tasks.
-    Group { start: Option<NaiveDateTime>, finish: Option<NaiveDateTime> },
+    Group { start: Option<DateTime>, finish: Option<DateTime> },
     /// Any other row (resources): no bar.
     Other,
 }
@@ -235,10 +235,10 @@ pub struct PrintJob<'a> {
     /// Print a Gantt chart beside the table.
     pub chart: Option<ChartOptions>,
     /// Dates to print (inclusive); `None` = the whole project.
-    pub from: Option<NaiveDate>,
-    pub to: Option<NaiveDate>,
+    pub from: Option<Date>,
+    pub to: Option<Date>,
     /// When it was printed, for `[Date]`.
-    pub printed: NaiveDateTime,
+    pub printed: DateTime,
     pub palette: Palette,
 }
 
@@ -291,7 +291,7 @@ fn arrow(out: &mut Vec<Item>, tip: Pt, dx: f32, dy: f32, fill: Rgb) {
 }
 
 /// The timescale range: the requested dates, or the project's dates with a little room.
-fn date_range(job: &PrintJob) -> (NaiveDateTime, NaiveDateTime) {
+fn date_range(job: &PrintJob) -> (DateTime, DateTime) {
     let p = job.project;
     let mut start = p.sched.start.unwrap_or(p.start);
     let mut finish = p.sched.finish.unwrap_or(start);
@@ -300,20 +300,20 @@ fn date_range(job: &PrintJob) -> (NaiveDateTime, NaiveDateTime) {
         start = start.min(b.start);
         finish = finish.max(b.finish);
     }
-    let from = job.from.map(|d| d.and_time(NaiveTime::MIN));
-    let to = job.to.map(|d| shift(d.and_time(NaiveTime::MIN), 1440));
-    let days = (finish - start).num_days().max(1);
+    let from = job.from.map(|d| d.and_time(Time::MIN));
+    let to = job.to.map(|d| shift(d.and_time(Time::MIN), 1440));
+    let days = finish.signed_duration_since(start).num_days().max(1);
     // A little room before the start, more after the finish for labels beside the last bars.
     let before = (days / 30).clamp(1, 30) * 1440;
     let after = (days / 6).clamp(3, 120) * 1440;
-    let a = from.unwrap_or_else(|| shift(start.date().and_time(NaiveTime::MIN), -before));
-    let b = to.unwrap_or_else(|| shift(finish.date().and_time(NaiveTime::MIN), after + 1440));
+    let a = from.unwrap_or_else(|| shift(start.date().and_time(Time::MIN), -before));
+    let b = to.unwrap_or_else(|| shift(finish.date().and_time(Time::MIN), after + 1440));
     if b > a { (a, b) } else { (a, shift(a, 1440)) }
 }
 
 /// Replaces header and footer codes.
-pub(crate) fn fill_codes(s: &str, p: &Project, view: &str, printed: NaiveDateTime, page: usize, pages: usize) -> String {
-    let day = |d: Option<NaiveDateTime>| d.map(|d| d.format("%a %m/%d/%y").to_string()).unwrap_or_default();
+pub(crate) fn fill_codes(s: &str, p: &Project, view: &str, printed: DateTime, page: usize, pages: usize) -> String {
+    let day = |d: Option<DateTime>| d.map(|d| d.format("%a %m/%d/%y").to_string()).unwrap_or_default();
     let value = |code: &str| -> Option<String> {
         Some(match code {
             "Project" => p.name.clone(),
@@ -354,7 +354,7 @@ pub(crate) fn fill_codes(s: &str, p: &Project, view: &str, printed: NaiveDateTim
 struct Chart<'a> {
     job: &'a PrintJob<'a>,
     opts: ChartOptions,
-    start: NaiveDateTime,
+    start: DateTime,
     per_day: f32,
     /// Index in the project of each task (lookups by id are linear otherwise).
     index_of: HashMap<TaskId, usize>,
@@ -395,12 +395,12 @@ impl Chart<'_> {
         by_succ.iter().copied().chain(by_pred.iter().copied().filter(move |l| !rows.contains(&l.succ_row)))
     }
 
-    fn x(&self, x0: f32, offset: f32, t: NaiveDateTime) -> f32 {
-        let mins = (t - self.start).num_minutes() as f32;
+    fn x(&self, x0: f32, offset: f32, t: DateTime) -> f32 {
+        let mins = t.signed_duration_since(self.start).num_minutes() as f32;
         x0 - offset + mins / 1440.0 * self.per_day
     }
 
-    fn time_at(&self, offset: f32) -> NaiveDateTime {
+    fn time_at(&self, offset: f32) -> DateTime {
         let mins = (offset / self.per_day * 1440.0) as i64;
         shift(self.start, mins)
     }
@@ -409,7 +409,7 @@ impl Chart<'_> {
     fn has_bars(&self, rows: std::ops::Range<usize>, off: f32, w: f32) -> bool {
         let (a, b) = (self.time_at(off), self.time_at(off + w));
         let slots = self.opts.baseline_slots();
-        let shows = |s: NaiveDateTime, f: NaiveDateTime| s <= b && f >= a;
+        let shows = |s: DateTime, f: DateTime| s <= b && f >= a;
         self.job.sheet.rows.get(rows).unwrap_or_default().iter().any(|r| match &r.kind {
             RowKind::Task(id) => self.task(*id).is_some_and(|t| {
                 // The Multiple Baselines Gantt draws only baseline bars; the others draw the
@@ -462,7 +462,7 @@ impl Chart<'_> {
                     break;
                 }
                 if !cal.is_working_day(d) {
-                    let t0 = d.and_time(NaiveTime::MIN);
+                    let t0 = d.and_time(Time::MIN);
                     let (x0, x1) = (self.x(body.x, off, t0), self.x(body.x, off, shift(t0, 1440)));
                     out.push(Item::Rect { rect: Rect::new(x0, body.y, x1 - x0, body.h), fill: Some(pal.nonworking), stroke: None });
                 }
@@ -498,7 +498,7 @@ impl Chart<'_> {
         let o = &self.opts;
         let first = rows.start;
         let y_of = |r: usize| body.y + (r as f32 - first as f32) * ROW_H + ROW_H / 2.0;
-        let xs = |t: NaiveDateTime| self.x(body.x, off, t);
+        let xs = |t: DateTime| self.x(body.x, off, t);
         // Slack lines need each task's calendar: one per distinct calendar for the page.
         let mut cals = o.slack.then(|| TaskCalendars::new(p));
 
@@ -971,7 +971,7 @@ pub fn layout(job: &PrintJob) -> Document {
     let mut strips_cut = false;
     if let Some(opts) = chart_opts {
         let (start, end) = date_range(job);
-        let days = ((end - start).num_minutes() as f32 / 1440.0).max(1.0);
+        let days = (end.signed_duration_since(start).num_minutes() as f32 / 1440.0).max(1.0);
         let mut first_w = w - x;
         if first_w < MIN_CHART_W && !cur.cols.is_empty() {
             strips.push(std::mem::replace(&mut cur, Strip { cols: repeat.clone(), chart: None }));
@@ -1148,7 +1148,7 @@ impl Frame {
         setup: &PageSetup,
         p: &Project,
         view: &str,
-        printed: NaiveDateTime,
+        printed: DateTime,
         pal: &Palette,
     ) -> Vec<Page> {
         if pages.is_empty() {
@@ -1183,7 +1183,7 @@ impl Frame {
 
 /// The default printed task table: what agents print with `export_pdf`.
 pub fn task_sheet(p: &Project, with_chart: bool) -> Sheet {
-    let day = |d: Option<NaiveDateTime>| d.map(|d| d.format("%a %m/%d/%y").to_string()).unwrap_or_else(|| "NA".into());
+    let day = |d: Option<DateTime>| d.map(|d| d.format("%a %m/%d/%y").to_string()).unwrap_or_else(|| "NA".into());
     let mut columns = vec![
         PrintColumn { title: "ID".into(), width: 24.0, align: Align::Right },
         PrintColumn { title: "Task Name".into(), width: if with_chart { 180.0 } else { 220.0 }, align: Align::Left },
@@ -1235,7 +1235,7 @@ mod tests {
             chart: chart.then(ChartOptions::default),
             from: None,
             to: None,
-            printed: NaiveDate::from_ymd_opt(2026, 11, 12).unwrap().and_hms_opt(9, 0, 0).unwrap(),
+            printed: crate::dates::ymd(2026, 11, 12).unwrap().and_hms_opt(9, 0, 0).unwrap(),
             palette: Palette::default(),
         }
     }
@@ -1257,7 +1257,7 @@ mod tests {
 
     #[test]
     fn a_gantt_chart_fits_one_page_wide_with_headers_and_legend() {
-        let p = sample::demo_project(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap());
+        let p = sample::demo_project(crate::dates::ymd(2026, 11, 2).unwrap());
         let setup = PageSetup::default();
         let sheet = task_sheet(&p, true);
         let doc = layout(&job(&p, &setup, &sheet, true));
@@ -1290,7 +1290,7 @@ mod tests {
     /// contained a code was expanded again; nested names could grow a header to gigabytes.
     #[test]
     fn header_codes_are_filled_in_once() {
-        let mut p = Project::new("[Manager] plan", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let mut p = Project::new("[Manager] plan", crate::dates::ymd(2026, 10, 19).unwrap());
         p.manager = "[Company]".repeat(50);
         p.company = "x".repeat(1000);
         let setup =
@@ -1307,15 +1307,15 @@ mod tests {
     /// cut, and a legend page could make it 2,001 pages.
     #[test]
     fn the_page_limit_is_kept_and_reported() {
-        let mut p = Project::new("Long", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let mut p = Project::new("Long", crate::dates::ymd(2026, 10, 19).unwrap());
         p.add_task("A", None);
         crate::schedule::recalculate(&mut p);
         let setup = PageSetup { timescale: TimescaleFit::AsShown, legend: LegendPlacement::LegendPage, ..Default::default() };
         let sheet = task_sheet(&p, true);
         let mut j = job(&p, &setup, &sheet, true);
         j.chart = Some(ChartOptions { per_day: 2000.0, ..Default::default() });
-        j.from = NaiveDate::from_ymd_opt(1950, 1, 1);
-        j.to = NaiveDate::from_ymd_opt(2250, 1, 1);
+        j.from = crate::dates::ymd(1950, 1, 1);
+        j.to = crate::dates::ymd(2250, 1, 1);
         let doc = layout(&j);
         assert!(doc.pages.len() <= MAX_PAGES, "{}", doc.pages.len());
         assert!(doc.truncated, "the cut timescale is reported");
@@ -1326,7 +1326,7 @@ mod tests {
     /// without pages.
     #[test]
     fn everything_prints_inside_the_paper() {
-        let p = sample::demo_project(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap());
+        let p = sample::demo_project(crate::dates::ymd(2026, 11, 2).unwrap());
         let mut sheet = task_sheet(&p, false);
         sheet.columns.push(PrintColumn { title: "Notes".into(), width: 600.0, align: Align::Left });
         for row in &mut sheet.rows {
@@ -1358,7 +1358,7 @@ mod tests {
     /// Regression: links from a row on an earlier page were drawn across the timescale.
     #[test]
     fn bars_and_links_are_clipped_below_the_timescale() {
-        let p = sample::demo_project(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap());
+        let p = sample::demo_project(crate::dates::ymd(2026, 11, 2).unwrap());
         let sheet = task_sheet(&p, true);
         let setup = PageSetup::default();
         let doc = layout(&job(&p, &setup, &sheet, true));
@@ -1380,7 +1380,7 @@ mod tests {
                 })
                 .sum()
         }
-        let mut p = Project::new("Split", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let mut p = Project::new("Split", crate::dates::ymd(2026, 10, 19).unwrap());
         let t = p.add_task("Build", None);
         p.set_duration(t, 4 * 480, false).unwrap();
         crate::schedule::recalculate(&mut p);
@@ -1394,14 +1394,14 @@ mod tests {
         crate::schedule::recalculate(&mut p);
         // Regression: the stop at 17:00 and the resume the next morning drew a gap overnight.
         assert_eq!(count(&p), none, "progress alone does not split the bar");
-        p.set_resume(t, NaiveDate::from_ymd_opt(2026, 10, 26).and_then(|d| d.and_hms_opt(8, 0, 0))).unwrap();
+        p.set_resume(t, crate::dates::ymd(2026, 10, 26).and_then(|d| d.and_hms_opt(8, 0, 0))).unwrap();
         crate::schedule::recalculate(&mut p);
         assert_eq!(count(&p), none + 1, "one dotted gap between the done and remaining parts");
     }
 
     #[test]
     fn rows_continue_on_following_pages_in_order() {
-        let p = sample::demo_project(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap());
+        let p = sample::demo_project(crate::dates::ymd(2026, 11, 2).unwrap());
         let setup = PageSetup { orientation: Orientation::Landscape, scale_percent: 400, ..Default::default() };
         let sheet = task_sheet(&p, false);
         let doc = layout(&job(&p, &setup, &sheet, false));
@@ -1421,7 +1421,7 @@ mod tests {
 
     #[test]
     fn more_pages_wide_spread_the_timescale() {
-        let p = sample::demo_project(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap());
+        let p = sample::demo_project(crate::dates::ymd(2026, 11, 2).unwrap());
         let sheet = task_sheet(&p, true);
         let one = PageSetup::default();
         let three = PageSetup { timescale: TimescaleFit::PagesWide(3), ..Default::default() };
@@ -1432,11 +1432,11 @@ mod tests {
 
     #[test]
     fn blank_pages_can_be_skipped() {
-        let p = sample::demo_project(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap());
+        let p = sample::demo_project(crate::dates::ymd(2026, 11, 2).unwrap());
         let sheet = task_sheet(&p, true);
         let mut setup = PageSetup { timescale: TimescaleFit::PagesWide(MAX_PAGES_WIDE_TEST), ..Default::default() };
         // Print a year past the end of the plan: the pages after the last bar are blank.
-        let to = p.sched.finish.map(|f| f.date()).and_then(|d| d.checked_add_days(chrono::Days::new(365)));
+        let to = p.sched.finish.map(|f| f.date()).and_then(|d| d.checked_add_days(Days::new(365)));
         let all = layout(&PrintJob { to, ..job(&p, &setup, &sheet, true) }).pages.len();
         setup.print_blank_pages = false;
         let some = layout(&PrintJob { to, ..job(&p, &setup, &sheet, true) }).pages.len();
@@ -1458,11 +1458,11 @@ mod tests {
                 })
                 .sum()
         }
-        let mut p = sample::demo_project(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap());
+        let mut p = sample::demo_project(crate::dates::ymd(2026, 11, 2).unwrap());
         // Baseline1: the whole plan as it stood two years earlier, far from every scheduled bar.
         for t in &mut p.tasks {
             if let Some(b) = t.baseline {
-                let back = |d: NaiveDateTime| crate::calendar::shift(d, -2 * 365 * 1440);
+                let back = |d: DateTime| crate::calendar::shift(d, -2 * 365 * 1440);
                 t.baselines.insert(1, crate::model::Baseline { start: back(b.start), finish: back(b.finish), ..b });
             }
         }
@@ -1479,7 +1479,7 @@ mod tests {
 
     #[test]
     fn hostile_input_never_panics_and_stays_bounded() {
-        let mut p = sample::demo_project(NaiveDate::from_ymd_opt(2026, 11, 2).unwrap());
+        let mut p = sample::demo_project(crate::dates::ymd(2026, 11, 2).unwrap());
         p.name = "x".repeat(10_000);
         let sheet = Sheet {
             title: String::new(),
@@ -1497,8 +1497,8 @@ mod tests {
         let setup = PageSetup { margin_mm: 1e9, scale_percent: u16::MAX, timescale: TimescaleFit::AsShown, ..Default::default() };
         let mut j = job(&p, &setup, &sheet, true);
         j.chart = Some(ChartOptions { per_day: f32::INFINITY, critical: true, baseline: true, slack: true, ..Default::default() });
-        j.from = NaiveDate::from_ymd_opt(1900, 1, 1);
-        j.to = NaiveDate::from_ymd_opt(2300, 1, 1);
+        j.from = crate::dates::ymd(1900, 1, 1);
+        j.to = crate::dates::ymd(2300, 1, 1);
         let doc = layout(&j);
         assert!(doc.pages.len() <= MAX_PAGES);
         let pdf = super::super::pdf::write(&doc);

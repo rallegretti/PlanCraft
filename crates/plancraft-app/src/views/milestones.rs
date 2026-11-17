@@ -24,7 +24,7 @@ fn progress_bar(ui: &mut Ui, frac: f32, width: f32, color: Color32) {
 
 /// The milestones the view lists (those passing its filter and search, as in the Gantt Chart),
 /// and how many the plan has.
-pub(crate) fn shown(p: &Project, st: &UiState, at: chrono::NaiveDateTime) -> (Vec<report::MilestoneStatus>, usize) {
+pub(crate) fn shown(p: &Project, st: &UiState, at: DateTime) -> (Vec<report::MilestoneStatus>, usize) {
     let all = report::milestone_status(p, at);
     let total = all.len();
     (all.into_iter().filter(|ms| p.task(ms.id).is_some_and(|t| super::task_matches(p, st, t))).collect(), total)
@@ -197,6 +197,6 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     }
 }
 
-fn continue_label() -> (String, f32, Option<chrono::NaiveDateTime>) {
+fn continue_label() -> (String, f32, Option<DateTime>) {
     ("<deleted task>".into(), 0.0, None)
 }

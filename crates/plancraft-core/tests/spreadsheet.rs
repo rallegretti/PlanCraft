@@ -3,7 +3,6 @@
 
 use std::io::Write as _;
 
-use chrono::NaiveDate;
 use plancraft_core::model::{Project, TaskRef};
 use plancraft_core::tabular::{self, Field, ImportOptions};
 
@@ -34,7 +33,7 @@ fn links_by_name(p: &Project) -> Vec<(String, Vec<String>)> {
 /// Exporting the demo plan and importing the CSV gives the same plan structure back.
 #[test]
 fn a_plan_exported_to_csv_imports_back_the_same() {
-    let original = plancraft_core::sample::demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+    let original = plancraft_core::sample::demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap());
     let mut original = original;
     plancraft_core::schedule::recalculate(&mut original);
     let (back, notes) = import_csv(&tabular::to_csv(&original));
@@ -150,10 +149,10 @@ fn an_excel_workbook_imports_with_its_dates_and_numbers() {
     assert_eq!(options.columns[..4], [Some(Field::Name), Some(Field::Duration), Some(Field::Start), Some(Field::Predecessors)]);
     let (p, notes) = tabular::build(grid, &options).unwrap();
     assert_eq!(p.tasks.len(), 3, "{notes:?}");
-    assert_eq!(p.start.date(), NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+    assert_eq!(p.start.date(), plancraft_core::dates::ymd(2026, 10, 19).unwrap());
     assert_eq!(p.tasks[0].duration, 3 * 480);
-    assert_eq!(p.tasks[1].sched.start.unwrap().date(), NaiveDate::from_ymd_opt(2026, 10, 22).unwrap());
-    assert_eq!(p.tasks[2].sched.start.unwrap().date(), NaiveDate::from_ymd_opt(2026, 10, 26).unwrap());
+    assert_eq!(p.tasks[1].sched.start.unwrap().date(), plancraft_core::dates::ymd(2026, 10, 22).unwrap());
+    assert_eq!(p.tasks[2].sched.start.unwrap().date(), plancraft_core::dates::ymd(2026, 10, 26).unwrap());
 }
 
 /// A workbook whose archive claims to unpack to gigabytes is refused before anything is

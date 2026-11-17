@@ -2,7 +2,7 @@
 //! uncompleted work) and Mark on Track. The status date itself is set with
 //! `update_project`.
 
-use chrono::NaiveDate;
+use plancraft_core::dates::prelude::*;
 use plancraft_core::ops::{ProgressUpdate, TrackingReport};
 use plancraft_core::prelude::*;
 use serde_json::{Value, json};
@@ -52,10 +52,10 @@ pub fn tools() -> Vec<Tool> {
 }
 
 /// The date argument, defaulting to the status date or today.
-fn date_or_status(p: &Project, a: &Args) -> ToolResult<NaiveDate> {
+fn date_or_status(p: &Project, a: &Args) -> ToolResult<Date> {
     match a.get("date").filter(|v| !v.is_null()) {
         Some(v) => parse_date(v, "date"),
-        None => Ok(p.status_date.unwrap_or_else(|| chrono::Local::now().date_naive())),
+        None => Ok(p.status_date.unwrap_or_else(plancraft_core::dates::today)),
     }
 }
 

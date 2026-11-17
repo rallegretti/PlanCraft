@@ -2,8 +2,8 @@
 //! highlighted tasks and milestones, and a draggable window showing the part of
 //! the Gantt chart currently in view.
 
-use chrono::{Duration, NaiveDateTime};
 use egui::{Align2, Color32, CursorIcon, FontId, Rect, Sense, Shape, Stroke, StrokeKind, Ui, pos2, vec2};
+use plancraft_core::dates::prelude::*;
 use plancraft_core::prelude::*;
 
 use crate::state::GanttState;
@@ -34,10 +34,10 @@ pub fn show(ui: &mut Ui, rect: Rect, p: &Project, shown: &[bool], g: &mut GanttS
         );
         return;
     };
-    let span = (finish - start).num_minutes().max(60) as f32;
+    let span = finish.signed_duration_since(start).num_minutes().max(60) as f32;
     let bar = Rect::from_min_max(pos2(rect.left() + 90.0, rect.top() + 30.0), pos2(rect.right() - 90.0, rect.top() + 52.0));
-    let x_of = |t: NaiveDateTime| bar.left() + (t - start).num_minutes() as f32 / span * bar.width();
-    let t_of = |x: f32| start + Duration::minutes(((x - bar.left()) / bar.width() * span) as i64);
+    let x_of = |t: DateTime| bar.left() + t.signed_duration_since(start).num_minutes() as f32 / span * bar.width();
+    let t_of = |x: f32| start + SignedDuration::from_mins(((x - bar.left()) / bar.width() * span) as i64);
 
     // Start/finish labels.
     painter.text(
@@ -74,8 +74,11 @@ pub fn show(ui: &mut Ui, rect: Rect, p: &Project, shown: &[bool], g: &mut GanttS
 
     // Month ticks.
     let mut m = crate::widgets::timescale::Unit::Month.floor(start);
-    let unit =
-        if (finish - start).num_days() > 400 { crate::widgets::timescale::Unit::Quarter } else { crate::widgets::timescale::Unit::Month };
+    let unit = if finish.signed_duration_since(start).num_days() > 400 {
+        crate::widgets::timescale::Unit::Quarter
+    } else {
+        crate::widgets::timescale::Unit::Month
+    };
     let mut guard = 0;
     while m <= finish && guard < 200 {
         guard += 1;
@@ -138,7 +141,7 @@ pub fn show(ui: &mut Ui, rect: Rect, p: &Project, shown: &[bool], g: &mut GanttS
     }
 
     // Today marker.
-    let now = chrono::Local::now().naive_local();
+    let now = plancraft_core::dates::now();
     if now >= start && now <= finish {
         let x = x_of(now);
         painter.vline(x, (bar.top() - 4.0)..=(bar.bottom() + 2.0), Stroke::new(2.0, theme::pal().TODAY));
@@ -162,7 +165,7 @@ pub fn show(ui: &mut Ui, rect: Rect, p: &Project, shown: &[bool], g: &mut GanttS
     if (resp.dragged() || resp.clicked())
         && let Some(pp) = resp.interact_pointer_pos()
     {
-        let half = (view_end - view_start) / 2;
+        let half = SignedDuration::from_mins(view_end.signed_duration_since(view_start).num_minutes() / 2);
         g.left = t_of(pp.x) - half;
     }
 }

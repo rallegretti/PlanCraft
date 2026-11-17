@@ -2,8 +2,8 @@
 
 use std::collections::HashMap;
 
-use chrono::{Duration, NaiveDateTime, NaiveTime};
 use egui::{Align2, Color32, CursorIcon, FontId, Painter, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, Ui, pos2, vec2};
+use plancraft_core::dates::prelude::*;
 use plancraft_core::prelude::*;
 use plancraft_core::schedule::{TaskCalendars, project_calendar, task_calendar};
 
@@ -24,11 +24,11 @@ pub enum ChartAction {
     Open(TaskId),
     MoveTo {
         task: TaskId,
-        start: NaiveDateTime,
+        start: DateTime,
     },
     SetFinish {
         task: TaskId,
-        finish: NaiveDateTime,
+        finish: DateTime,
     },
     SetProgress {
         task: TaskId,
@@ -41,19 +41,19 @@ pub enum ChartAction {
     /// Split Task: split the task at this moment.
     Split {
         task: TaskId,
-        at: NaiveDateTime,
+        at: DateTime,
     },
     /// Part `k` (from 1) of a split task now starts at `start`.
     MovePart {
         task: TaskId,
         k: usize,
-        start: NaiveDateTime,
+        start: DateTime,
     },
     /// Part `k` (from 0, not the last) of a split task now ends at `finish`.
     SetPartFinish {
         task: TaskId,
         k: usize,
-        finish: NaiveDateTime,
+        finish: DateTime,
     },
     Command(Command),
 }
@@ -197,11 +197,11 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
             }
         } else if shift {
             let dx = scroll.y + scroll.x;
-            g.left -= Duration::minutes((dx / g.px_per_day * 1440.0) as i64);
+            g.left -= SignedDuration::from_mins((dx / g.px_per_day * 1440.0) as i64);
         } else {
             *scroll_y -= scroll.y;
             if scroll.x.abs() > 0.0 {
-                g.left -= Duration::minutes((scroll.x / g.px_per_day * 1440.0) as i64);
+                g.left -= SignedDuration::from_mins((scroll.x / g.px_per_day * 1440.0) as i64);
             }
         }
     }
@@ -221,12 +221,12 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
         let end = g.time_at(chart_left, body.right()).date();
         while d <= end {
             if !proj_cal.is_working_day(d) {
-                let t0 = d.and_time(NaiveTime::MIN);
+                let t0 = d.and_time(Time::MIN);
                 let x0 = g.x_of(chart_left, t0);
-                let x1 = g.x_of(chart_left, t0 + Duration::days(1));
+                let x1 = g.x_of(chart_left, t0 + plancraft_core::dates::days(1));
                 bp.rect_filled(Rect::from_x_y_ranges(x0..=x1, body.y_range()), 0.0, theme::pal().NONWORKING);
             }
-            d += Duration::days(1);
+            d += plancraft_core::dates::days(1);
         }
     }
     let (_, bottom_unit) = timescale::tiers(g.px_per_day);
@@ -246,7 +246,7 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
     }
 
     // Today & status date & project start.
-    let now = chrono::Local::now().naive_local();
+    let now = plancraft_core::dates::now();
     let xt = g.x_of(chart_left, now);
     if body.x_range().contains(xt) {
         dashed_vline(&bp, xt, body.top(), body.bottom(), theme::pal().TODAY);
@@ -690,12 +690,12 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
             },
         });
     }
-    let snap = |t: NaiveDateTime| -> NaiveDateTime {
+    let snap = |t: DateTime| -> DateTime {
         if g.px_per_day >= 72.0 {
-            let midnight = t.date().and_time(NaiveTime::MIN);
-            midnight + Duration::minutes(((t - midnight).num_minutes() + 30) / 60 * 60)
+            let midnight = t.date().and_time(Time::MIN);
+            midnight + SignedDuration::from_mins((t.signed_duration_since(midnight).num_minutes() + 30) / 60 * 60)
         } else {
-            (t + Duration::hours(12)).date().and_time(NaiveTime::MIN)
+            (t + SignedDuration::from_hours(12)).date().and_time(Time::MIN)
         }
     };
     if let (Some(drag), Some(pp)) = (g.drag.clone(), ui.input(|i| i.pointer.interact_pos())) {
@@ -914,13 +914,13 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
     );
     let hs = Rect::from_min_max(pos2(body.left(), body.bottom()), pos2(body.right(), rect.bottom()));
     // Horizontal range: project span with margins.
-    let span_start = p.sched.start.unwrap_or(p.start) - Duration::days(30);
-    let span_end = p.sched.finish.unwrap_or(p.start).max(now) + Duration::days(60);
-    let total_px = ((span_end - span_start).num_minutes() as f32 / 1440.0 * g.px_per_day).max(body.width() + 1.0);
-    let cur = ((g.left - span_start).num_minutes() as f32 / 1440.0 * g.px_per_day).clamp(0.0, total_px - body.width());
+    let span_start = p.sched.start.unwrap_or(p.start) - plancraft_core::dates::days(30);
+    let span_end = p.sched.finish.unwrap_or(p.start).max(now) + plancraft_core::dates::days(60);
+    let total_px = (span_end.signed_duration_since(span_start).num_minutes() as f32 / 1440.0 * g.px_per_day).max(body.width() + 1.0);
+    let cur = (g.left.signed_duration_since(span_start).num_minutes() as f32 / 1440.0 * g.px_per_day).clamp(0.0, total_px - body.width());
     let new = scrollbar(ui, ui.id().with("gantt_hs"), hs, false, cur, total_px, body.width());
     if (new - cur).abs() > 0.5 {
-        g.left = span_start + Duration::minutes((new / g.px_per_day * 1440.0) as i64);
+        g.left = span_start + SignedDuration::from_mins((new / g.px_per_day * 1440.0) as i64);
     }
     painter.rect_filled(Rect::from_min_max(pos2(rect.right() - 12.0, body.bottom()), rect.max), 0.0, theme::pal().PANEL_BG);
     painter.vline(rect.left() + 0.5, rect.y_range(), Stroke::new(1.0, theme::pal().GRID_LINE_STRONG));

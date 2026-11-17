@@ -115,8 +115,9 @@ fn main() -> anyhow::Result<()> {
         }
     }
     if args.iter().any(|a| a == "--demo") {
-        let today = chrono::Local::now().date_naive();
-        let monday = today - chrono::Duration::days(chrono::Datelike::weekday(&today).num_days_from_monday() as i64 + 14);
+        let today = plancraft_core::dates::today();
+        let back = i64::from(plancraft_core::dates::weekday_index(today.weekday())) + 14;
+        let monday = plancraft_core::dates::add_days(today, -back).unwrap_or(today);
         ws.add(plancraft_core::sample::demo_project(monday), None);
     }
     let shared = ws.shared();

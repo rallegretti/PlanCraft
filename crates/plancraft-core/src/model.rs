@@ -11,7 +11,7 @@
 //! without re-running the engine, but they are always overwritten on
 //! recalculation.
 
-use chrono::{NaiveDate, NaiveDateTime};
+use crate::dates::prelude::*;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -137,7 +137,7 @@ impl ConstraintKind {
 pub struct Constraint {
     pub kind: ConstraintKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub date: Option<NaiveDateTime>,
+    pub date: Option<DateTime>,
 }
 
 /// Dependency type between a predecessor and a successor.
@@ -264,7 +264,7 @@ impl Estimate {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Split {
     pub work: Minutes,
-    pub resume: NaiveDateTime,
+    pub resume: DateTime,
 }
 
 /// A split planned in a task: after `work` working minutes of the task, work pauses for `length`
@@ -279,31 +279,31 @@ pub struct Gap {
 /// A snapshot of planned values used to measure variance.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Baseline {
-    pub start: NaiveDateTime,
-    pub finish: NaiveDateTime,
+    pub start: DateTime,
+    pub finish: DateTime,
     pub duration: Minutes,
     pub work: Minutes,
     pub cost: f64,
-    pub saved: NaiveDateTime,
+    pub saved: DateTime,
 }
 
 /// Start and finish dates saved as an interim plan (the Start1–10 and Finish1–10 fields).
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Interim {
-    pub start: NaiveDateTime,
-    pub finish: NaiveDateTime,
+    pub start: DateTime,
+    pub finish: DateTime,
 }
 
 /// Values computed by the scheduler. Never edit directly.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
 pub struct TaskSchedule {
-    pub start: Option<NaiveDateTime>,
-    pub finish: Option<NaiveDateTime>,
-    pub early_start: Option<NaiveDateTime>,
-    pub early_finish: Option<NaiveDateTime>,
-    pub late_start: Option<NaiveDateTime>,
-    pub late_finish: Option<NaiveDateTime>,
+    pub start: Option<DateTime>,
+    pub finish: Option<DateTime>,
+    pub early_start: Option<DateTime>,
+    pub early_finish: Option<DateTime>,
+    pub late_start: Option<DateTime>,
+    pub late_finish: Option<DateTime>,
     /// Working minutes the task can slip without delaying the project.
     pub total_slack: Minutes,
     /// Working minutes the task can slip without delaying any successor.
@@ -319,20 +319,20 @@ pub struct TaskSchedule {
     pub percent_complete: f32,
     /// End of the completed part of an in-progress task (Microsoft Project's Stop field).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stop: Option<NaiveDateTime>,
+    pub stop: Option<DateTime>,
     /// Start of the remaining part of an in-progress task: the next working moment after the stop,
     /// or the start of the next part when the task pauses at its stop (Microsoft Project's Resume).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub resume: Option<NaiveDateTime>,
+    pub resume: Option<DateTime>,
     /// The working parts (start, finish) of a split task, in order; empty when it is not split.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub parts: Vec<(NaiveDateTime, NaiveDateTime)>,
+    pub parts: Vec<(DateTime, DateTime)>,
     /// The span of a manually scheduled summary's subtasks (its own dates are `start` and
     /// `finish`); `None` for every other task.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rollup_start: Option<NaiveDateTime>,
+    pub rollup_start: Option<DateTime>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rollup_finish: Option<NaiveDateTime>,
+    pub rollup_finish: Option<DateTime>,
     /// Human-readable scheduling problems (constraint conflicts, missed deadlines...).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
@@ -367,7 +367,7 @@ pub struct Task {
     #[serde(default)]
     pub constraint: Constraint,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub deadline: Option<NaiveDateTime>,
+    pub deadline: Option<DateTime>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calendar: Option<CalendarId>,
     #[serde(default, skip_serializing_if = "is_false")]
@@ -387,14 +387,14 @@ pub struct Task {
     #[serde(default)]
     pub percent_complete: u8,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub actual_start: Option<NaiveDateTime>,
+    pub actual_start: Option<DateTime>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub actual_finish: Option<NaiveDateTime>,
+    pub actual_finish: Option<DateTime>,
     /// Manually scheduled start (manual mode) or user-typed start.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub manual_start: Option<NaiveDateTime>,
+    pub manual_start: Option<DateTime>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub manual_finish: Option<NaiveDateTime>,
+    pub manual_finish: Option<DateTime>,
     /// Pauses in an in-progress task (set with a later Resume date, or by rescheduling uncompleted
     /// work): the task's working time is laid out from its actual start, and after each split's
     /// `work` it stops until that split's `resume`.
@@ -620,9 +620,9 @@ impl ResourceCategory {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 pub struct AvailabilityPeriod {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub from: Option<NaiveDate>,
+    pub from: Option<Date>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub to: Option<NaiveDate>,
+    pub to: Option<Date>,
     /// 1.0 = 100%.
     pub units: f64,
 }
@@ -692,7 +692,7 @@ impl Resource {
     }
 
     /// Maximum units available on a date, honoring availability periods.
-    pub fn units_on(&self, d: NaiveDate) -> f64 {
+    pub fn units_on(&self, d: Date) -> f64 {
         self.availability
             .iter()
             .rev()
@@ -767,7 +767,7 @@ pub struct TimeEntry {
     pub id: TimeEntryId,
     pub task: TaskId,
     pub resource: ResourceId,
-    pub date: NaiveDate,
+    pub date: Date,
     pub minutes: Minutes,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub note: String,
@@ -782,8 +782,8 @@ pub struct TimeEntry {
 pub struct ExternalTaskSnapshot {
     pub id: TaskId,
     pub name: String,
-    pub start: Option<NaiveDateTime>,
-    pub finish: Option<NaiveDateTime>,
+    pub start: Option<DateTime>,
+    pub finish: Option<DateTime>,
     #[serde(default)]
     pub percent_complete: u8,
     #[serde(default)]
@@ -804,7 +804,7 @@ pub struct ExternalProject {
     #[serde(default)]
     pub tasks: Vec<ExternalTaskSnapshot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_sync: Option<NaiveDateTime>,
+    pub last_sync: Option<DateTime>,
 }
 
 impl ExternalProject {
@@ -859,15 +859,15 @@ impl Default for ProjectSettings {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 #[serde(default)]
 pub struct ProjectSchedule {
-    pub start: Option<NaiveDateTime>,
-    pub finish: Option<NaiveDateTime>,
+    pub start: Option<DateTime>,
+    pub finish: Option<DateTime>,
     pub work: Minutes,
     pub actual_work: Minutes,
     pub cost: f64,
     pub percent_complete: f32,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub warnings: Vec<String>,
-    pub calculated_at: Option<NaiveDateTime>,
+    pub calculated_at: Option<DateTime>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -884,9 +884,9 @@ pub struct Project {
     pub company: String,
     #[serde(default)]
     pub notes: String,
-    pub start: NaiveDateTime,
+    pub start: DateTime,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub status_date: Option<NaiveDate>,
+    pub status_date: Option<Date>,
     pub calendar: CalendarId,
     #[serde(default)]
     pub settings: ProjectSettings,
@@ -921,13 +921,13 @@ pub struct Project {
 
 impl Project {
     /// Creates an empty project starting at 08:00 on `start`.
-    pub fn new(name: impl Into<String>, start: NaiveDate) -> Self {
+    pub fn new(name: impl Into<String>, start: Date) -> Self {
         let mut ids = IdCounters::default();
         let std_id = ids.next_calendar();
         let h24 = ids.next_calendar();
         let night = ids.next_calendar();
         let settings = ProjectSettings::default();
-        let start_time = crate::calendar::shift(start.and_time(chrono::NaiveTime::MIN), Minutes::from(settings.time.default_start_time));
+        let start_time = crate::calendar::shift(start.and_time(Time::MIN), Minutes::from(settings.time.default_start_time));
         let board_columns = crate::board::default_columns(&mut ids);
         Self {
             format: FILE_FORMAT.into(),

@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use chrono::{NaiveDate, NaiveDateTime, NaiveTime};
+use crate::dates::prelude::*;
 
 use super::{DateOrder, Field, Grid, ImportOptions};
 use crate::calendar::WorkCal;
@@ -61,9 +61,9 @@ fn build_plan(grid: &Grid, options: &ImportOptions) -> Result<(Project, Vec<Stri
     }
 
     let name = options.name.trim();
-    let mut p = Project::new(if name.is_empty() { "Imported plan" } else { name }, chrono::Local::now().date_naive());
+    let mut p = Project::new(if name.is_empty() { "Imported plan" } else { name }, crate::dates::today());
     let order = options.date_order;
-    let read_dates = |field: Field, finish: bool, notes: &mut Notes| -> Vec<Option<NaiveDateTime>> {
+    let read_dates = |field: Field, finish: bool, notes: &mut Notes| -> Vec<Option<DateTime>> {
         rows.iter()
             .map(|&r| {
                 let text = get(r, field)?;
@@ -136,7 +136,7 @@ fn build_plan(grid: &Grid, options: &ImportOptions) -> Result<(Project, Vec<Stri
                 // Durations stop at 5 years of work, which 25 years of calendar always holds on a
                 // working week; counting further would only take time.
                 (Some(s), Some(f)) if f >= s => {
-                    let f = s.checked_add_signed(chrono::Duration::days(25 * 366)).map_or(f, |cap| f.min(cap));
+                    let f = s.checked_add_signed(crate::dates::days(25 * 366)).map_or(f, |cap| f.min(cap));
                     Some(TypedDuration { minutes: cal.between(s, f), estimated: false, elapsed: false })
                 }
                 _ => None,
@@ -244,8 +244,8 @@ fn build_plan(grid: &Grid, options: &ImportOptions) -> Result<(Project, Vec<Stri
 /// would pin every later task that has a date too.
 fn date_constraints(
     p: &mut Project,
-    starts: &[Option<NaiveDateTime>],
-    finishes: &[Option<NaiveDateTime>],
+    starts: &[Option<DateTime>],
+    finishes: &[Option<DateTime>],
     summary: &[bool],
     notes: &mut Notes,
     schedule: &dyn Fn(&mut Project) -> Result<(), String>,
@@ -276,7 +276,7 @@ fn date_constraints(
         }
         stack.push((i, t.outline_level));
     }
-    let date = |list: &[Option<NaiveDateTime>], i: usize| list.get(i).copied().flatten();
+    let date = |list: &[Option<DateTime>], i: usize| list.get(i).copied().flatten();
     let is_summary = |i: usize| summary.get(i).copied().unwrap_or(false);
     // A summary's date usually comes from its subtasks; it is the summary's own (and kept as a
     // constraint) only when no subtask starts on or before it in the file.
@@ -610,14 +610,14 @@ fn is_weekday(word: &str) -> bool {
 }
 
 /// A time of day after a date (`13:30`, `1:30 PM`).
-fn time_of_day(text: &str) -> Option<NaiveTime> {
+fn time_of_day(text: &str) -> Option<Time> {
     let t = text.trim().to_uppercase();
-    ["%H:%M", "%H:%M:%S", "%I:%M %p", "%I:%M:%S %p", "%I:%M%p"].iter().find_map(|f| NaiveTime::parse_from_str(&t, f).ok())
+    ["%H:%M", "%H:%M:%S", "%I:%M %p", "%I:%M:%S %p", "%I:%M%p"].iter().find_map(|f| Time::parse_from_str(&t, f).ok())
 }
 
 /// Reads a date, with `order` for dates written as three numbers. A date without a time starts
 /// at the start of the working day (or, for a finish, ends at its end).
-pub(crate) fn parse_date(p: &Project, text: &str, order: DateOrder, finish: bool) -> Option<NaiveDateTime> {
+pub(crate) fn parse_date(p: &Project, text: &str, order: DateOrder, finish: bool) -> Option<DateTime> {
     let mut t = text.trim();
     // A weekday in front, as Microsoft Project writes dates ("Mon 10/19/26", "Monday, 19 Oct 2026").
     if let Some((word, rest)) = t.split_once(' ')
@@ -630,7 +630,7 @@ pub(crate) fn parse_date(p: &Project, text: &str, order: DateOrder, finish: bool
             DateOrder::MonthFirst => (a, b),
             DateOrder::DayFirst => (b, a),
         };
-        let date = NaiveDate::from_ymd_opt(year, month, day)?;
+        let date = crate::dates::ymd(year, month, day)?;
         let time = t.split_once([' ', 'T']).and_then(|(_, rest)| time_of_day(rest));
         Some(match time {
             Some(time) => date.and_time(time),
@@ -644,7 +644,7 @@ pub(crate) fn parse_date(p: &Project, text: &str, order: DateOrder, finish: bool
         // type in PlanCraft.
         ["%B %d, %Y", "%B %d %Y", "%d %B %Y", "%d %B, %Y"]
             .iter()
-            .find_map(|f| NaiveDate::parse_from_str(t, f).ok())
+            .find_map(|f| Date::parse_from_str(t, f).ok())
             .map(|date| {
                 let wc = WorkCal::single(p.base_calendar());
                 if finish { wc.day_finish(date) } else { wc.day_start(date) }
@@ -688,8 +688,8 @@ mod tests {
         assert_eq!(limits::sanitize(&mut copy), Vec::<String>::new());
     }
 
-    fn day(y: i32, m: u32, d: u32) -> NaiveDate {
-        NaiveDate::from_ymd_opt(y, m, d).unwrap()
+    fn day(y: i32, m: u32, d: u32) -> Date {
+        crate::dates::ymd(y, m, d).unwrap()
     }
 
     #[test]

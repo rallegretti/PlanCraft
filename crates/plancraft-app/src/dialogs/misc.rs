@@ -426,7 +426,6 @@ pub fn config_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::NaiveDate;
     use egui_kittest::kittest::Queryable;
     use plancraft_core::workspace::Workspace;
 
@@ -435,7 +434,7 @@ mod tests {
     #[test]
     fn bad_units_text_reports_an_error_and_keeps_the_assignment() {
         let mut ws = Workspace::default();
-        ws.add(plancraft_core::sample::demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+        ws.add(plancraft_core::sample::demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap()), None);
         let (task, res, name) = {
             let p = &ws.docs[0].project;
             let a = p.assignments.first().unwrap();
@@ -466,7 +465,7 @@ mod tests {
     #[test]
     fn add_project_file_asks_the_app_for_the_picker() {
         let mut ws = Workspace::default();
-        ws.add(plancraft_core::sample::demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+        ws.add(plancraft_core::sample::demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap()), None);
         let state = (ws, ExternalLinks::default(), UiState::default());
         let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1000.0, 800.0)).build_ui_state(
             |ui, (ws, dialog, st): &mut (Workspace, ExternalLinks, UiState)| {

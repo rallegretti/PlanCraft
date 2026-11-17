@@ -1,7 +1,7 @@
 //! Project Information and Options dialog.
 
-use chrono::NaiveDate;
 use egui::{Context, RichText};
+use plancraft_core::dates::prelude::*;
 use plancraft_core::prelude::*;
 use plancraft_core::workspace::Document;
 
@@ -93,7 +93,7 @@ impl ProjectInfo {
             p.status_date = if self.status_date.trim().is_empty() || self.status_date.trim().eq_ignore_ascii_case("na") {
                 None
             } else {
-                Some(NaiveDate::parse_from_str(self.status_date.trim(), "%Y-%m-%d").map_err(|_| "Status date must look like YYYY-MM-DD")?)
+                Some(Date::parse_from_str(self.status_date.trim(), "%Y-%m-%d").map_err(|_| "Status date must look like YYYY-MM-DD")?)
             };
         }
         if self.calendar != o.calendar {
@@ -258,14 +258,14 @@ mod tests {
     /// Regression: OK wrote every field back as the dialog opened, undoing an agent's changes.
     #[test]
     fn ok_keeps_what_an_agent_changed_while_the_dialog_was_open() {
-        let mut p = Project::new("Plan", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let mut p = Project::new("Plan", plancraft_core::dates::ymd(2026, 10, 19).unwrap());
         let mut info = ProjectInfo::new(&p);
-        p.status_date = NaiveDate::from_ymd_opt(2026, 11, 2);
+        p.status_date = plancraft_core::dates::ymd(2026, 11, 2);
         p.manager = "Set by the agent".into();
         info.company = "Acme".into();
         info.apply(&mut p).unwrap();
         assert_eq!(p.company, "Acme");
         assert_eq!(p.manager, "Set by the agent");
-        assert_eq!(p.status_date, NaiveDate::from_ymd_opt(2026, 11, 2));
+        assert_eq!(p.status_date, plancraft_core::dates::ymd(2026, 11, 2));
     }
 }

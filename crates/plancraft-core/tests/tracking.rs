@@ -4,16 +4,16 @@
 //!
 //! Default calendar: Mon–Fri, 08:00–12:00 and 13:00–17:00, from Monday 2026-10-19.
 
-use chrono::{NaiveDate, NaiveDateTime};
+use plancraft_core::dates::prelude::*;
 use plancraft_core::prelude::*;
 
 const DAY: Minutes = 8 * 60;
 
-fn d(m: u32, day: u32) -> NaiveDate {
-    NaiveDate::from_ymd_opt(2026, m, day).unwrap()
+fn d(m: u32, day: u32) -> Date {
+    plancraft_core::dates::ymd(2026, m, day).unwrap()
 }
 
-fn dt(m: u32, day: u32, h: u32) -> NaiveDateTime {
+fn dt(m: u32, day: u32, h: u32) -> DateTime {
     d(m, day).and_hms_opt(h, 0, 0).unwrap()
 }
 
@@ -172,7 +172,7 @@ fn a_paused_task_puts_no_work_in_its_pause() {
     p.set_resume(t, Some(dt(11, 2, 8))).unwrap();
     recalculate(&mut p);
     let a = p.assignments.iter().find(|a| a.task == t).unwrap().clone();
-    let days: Vec<(NaiveDate, i64)> =
+    let days: Vec<(Date, i64)> =
         plancraft_core::workload::assignment_daily_work(&p, &a).into_iter().map(|(d, w)| (d, w.round() as i64)).collect();
     assert_eq!(days, vec![(d(10, 19), DAY), (d(11, 2), DAY)]);
 }
@@ -198,7 +198,7 @@ fn rescheduling_leaves_successors_of_a_paused_task_to_their_links() {
 #[test]
 fn rescheduling_after_the_last_date_says_why() {
     let (mut p, _) = paused_task();
-    let last = p.end_of_working_day(NaiveDate::from_ymd_opt(2300, 12, 31).unwrap());
+    let last = p.end_of_working_day(plancraft_core::dates::ymd(2300, 12, 31).unwrap());
     let err = p.reschedule_uncompleted_work(&[], last).unwrap_err().to_string();
     assert!(err.contains("2300"), "{err}");
 }

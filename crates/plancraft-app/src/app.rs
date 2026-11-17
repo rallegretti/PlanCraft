@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration as StdDuration, Instant};
 
-use chrono::{Duration, NaiveDate};
 use egui::{Align, Align2, Color32, FontId, Key, KeyboardShortcut, Layout, Modifiers, Rect, RichText, Sense, Stroke, Ui, pos2, vec2};
+use plancraft_core::dates::prelude::*;
 use plancraft_core::leveling::{LevelingOptions, clear_leveling, level_resources};
 use plancraft_core::prelude::*;
 use plancraft_core::workspace::{ChangeSource, Document, SharedWorkspace, Workspace};
@@ -481,7 +481,7 @@ impl PlanCraftApp {
     fn exec(&mut self, ctx: &egui::Context, cmd: Command) {
         match cmd {
             Command::NewProject => {
-                let start = chrono::Local::now().date_naive();
+                let start = plancraft_core::dates::today();
                 let mut ws = lock(&self.ws);
                 let n = ws.docs.len() + 1;
                 ws.add(Project::new(format!("Project{n}"), start), None);
@@ -491,8 +491,9 @@ impl PlanCraftApp {
                 self.st.view = ViewKind::Gantt;
             }
             Command::NewDemo => {
-                let today = chrono::Local::now().date_naive();
-                let monday = today - Duration::days(chrono::Datelike::weekday(&today).num_days_from_monday() as i64) - Duration::days(7);
+                let today = plancraft_core::dates::today();
+                let back = i64::from(today.weekday().num_days_from_monday()) + 7;
+                let monday = plancraft_core::dates::add_days(today, -back).unwrap_or(today);
                 lock(&self.ws).add(plancraft_core::sample::demo_project(monday), None);
                 self.st.start_page = false;
                 self.st.sel = Default::default();
@@ -1028,7 +1029,7 @@ impl PlanCraftApp {
                     sel.iter().filter_map(|id| doc.project.task(*id)).collect()
                 };
                 // The Multiple Baselines Gantt shows baseline bars, which can lie far from the schedule.
-                let spans: Vec<(chrono::NaiveDateTime, chrono::NaiveDateTime)> = if st.view == ViewKind::MultipleBaselines {
+                let spans: Vec<(DateTime, DateTime)> = if st.view == ViewKind::MultipleBaselines {
                     let slots: Vec<u8> = views::gantt_chart::baseline_slots(st.gantt.multi_baselines).collect();
                     ts.iter().flat_map(|t| slots.iter().filter_map(|&n| t.baseline_in(n)).map(|b| (b.start, b.finish))).collect()
                 } else {
@@ -1037,9 +1038,9 @@ impl PlanCraftApp {
                 let (s, f) = (spans.iter().map(|x| x.0).min(), spans.iter().map(|x| x.1).max());
                 if let (Some(s), Some(f)) = (s, f) {
                     let width = (ctx.content_rect().width() - st.table_width - 80.0).max(200.0);
-                    let days = ((f - s).num_minutes() as f32 / 1440.0).max(1.0) * 1.1 + 2.0;
+                    let days = (f.signed_duration_since(s).num_minutes() as f32 / 1440.0).max(1.0) * 1.1 + 2.0;
                     st.gantt.px_per_day = (width / days).clamp(0.5, 140.0);
-                    st.gantt.left = s - Duration::days(1);
+                    st.gantt.left = s - plancraft_core::dates::days(1);
                 }
             }
             Command::CollapseAll => {
@@ -2028,7 +2029,6 @@ impl PlanCraftApp {
         for c in out {
             self.exec(&ctx, c);
         }
-        let _ = NaiveDate::MIN;
     }
 }
 
@@ -2062,7 +2062,7 @@ mod ui_tests {
 
     fn harness() -> Harness<'static, PlanCraftApp> {
         let mut ws = Workspace::default();
-        ws.add(plancraft_core::sample::demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+        ws.add(plancraft_core::sample::demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap()), None);
         let shared = ws.shared();
         let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).build_eframe(move |cc| PlanCraftApp::new(cc, shared));
         h.run_steps(3);
@@ -2185,8 +2185,8 @@ mod ui_tests {
     #[test]
     fn each_open_plan_keeps_its_own_sort_and_grouping() {
         let mut ws = Workspace::default();
-        let a = ws.add(plancraft_core::sample::demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
-        let b = ws.add(Project::new("Other plan", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+        let a = ws.add(plancraft_core::sample::demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap()), None);
+        let b = ws.add(Project::new("Other plan", plancraft_core::dates::ymd(2026, 10, 19).unwrap()), None);
         ws.active = ws.index_of(a);
         let shared = ws.shared();
         let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).build_eframe(move |cc| PlanCraftApp::new(cc, shared));
@@ -2487,7 +2487,7 @@ mod ui_tests {
             let ws = h.state().ws.lock().unwrap();
             let p = &ws.active_doc().unwrap().project;
             let t = p.tasks.iter().find(|t| !t.sched.is_summary && t.duration >= 3 * 480 && t.percent_complete == 0).unwrap();
-            (t.id, t.sched.start.unwrap() + chrono::Duration::hours(2))
+            (t.id, t.sched.start.unwrap() + SignedDuration::from_hours(2))
         };
         let parts = |h: &mut Harness<'static, PlanCraftApp>, action: views::gantt_chart::ChartAction| {
             let app = h.state_mut();
@@ -2515,8 +2515,8 @@ mod ui_tests {
         use egui_kittest::kittest::Queryable;
         use plancraft_core::print::Orientation;
         let mut ws = Workspace::default();
-        let a = ws.add(plancraft_core::sample::demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
-        let b = ws.add(Project::new("Other plan", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+        let a = ws.add(plancraft_core::sample::demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap()), None);
+        let b = ws.add(Project::new("Other plan", plancraft_core::dates::ymd(2026, 10, 19).unwrap()), None);
         ws.active = ws.index_of(a);
         let shared = ws.shared();
         let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).build_eframe(move |cc| PlanCraftApp::new(cc, shared));
@@ -2685,7 +2685,7 @@ mod ui_tests {
         h.state_mut().st.board.edit = Some(crate::state::ColumnEdit::new_column());
         {
             let mut ws = h.state().ws.lock().unwrap();
-            let other = ws.add(Project::new("Other plan", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+            let other = ws.add(Project::new("Other plan", plancraft_core::dates::ymd(2026, 10, 19).unwrap()), None);
             ws.active = ws.index_of(other);
         }
         h.run_steps(2);
@@ -2843,7 +2843,7 @@ mod ui_tests {
         {
             let mut ws = h.state().ws.lock().unwrap();
             let doc = ws.active_doc_mut().unwrap();
-            doc.edit("Status date", |p| p.set_status_date(NaiveDate::from_ymd_opt(2026, 10, 30))).unwrap();
+            doc.edit("Status date", |p| p.set_status_date(plancraft_core::dates::ymd(2026, 10, 30))).unwrap();
         }
         let before = complete(&h);
         // Defaults: update work as complete through the status date, as scheduled.
@@ -2863,7 +2863,7 @@ mod ui_tests {
         h.run_steps(3);
         let ws = h.state().ws.lock().unwrap();
         let p = &ws.active_doc().unwrap().project;
-        let after = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap().and_hms_opt(17, 0, 0).unwrap();
+        let after = plancraft_core::dates::ymd(2026, 10, 30).unwrap().and_hms_opt(17, 0, 0).unwrap();
         for t in p.tasks.iter().filter(|t| !t.sched.is_summary && t.active && !t.is_complete()) {
             let left_from = t.sched.resume.or(t.sched.start).unwrap();
             assert!(
@@ -2900,8 +2900,8 @@ mod ui_tests {
     fn dialogs_stay_with_the_document_they_were_opened_for() {
         use egui_kittest::kittest::Queryable;
         let mut ws = Workspace::default();
-        let a = ws.add(plancraft_core::sample::demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
-        let mut other = Project::new("Other plan", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let a = ws.add(plancraft_core::sample::demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap()), None);
+        let mut other = Project::new("Other plan", plancraft_core::dates::ymd(2026, 10, 19).unwrap());
         for k in 0..30 {
             other.add_task(format!("Other {k}"), None);
         }
@@ -2945,7 +2945,7 @@ mod ui_tests {
     fn files_the_system_asks_to_open_are_opened_on_the_next_frame() {
         let tmp = crate::recovery::tests::TempDir::new("open-requests");
         let path = tmp.0.join("From Finder.plancraft");
-        plancraft_core::io::save(&Project::new("From Finder", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), &path).unwrap();
+        plancraft_core::io::save(&Project::new("From Finder", plancraft_core::dates::ymd(2026, 10, 19).unwrap()), &path).unwrap();
         let mut h = harness();
         // Tests never touch the app-wide inbox; each gets its own.
         let inbox = Arc::new(crate::open_requests::Inbox::default());
@@ -2979,12 +2979,12 @@ mod ui_tests {
         let store = RecoveryStore::new(tmp.0.join("recovery"));
         {
             let mut ws = Workspace::default();
-            ws.add(Project::new("Crashed Plan", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+            ws.add(Project::new("Crashed Plan", plancraft_core::dates::ymd(2026, 10, 19).unwrap()), None);
             ws.docs[0].edit("Add", |p| p.add_task("Recovered task", None)).unwrap();
             Recovery::new(Some(store.clone())).write_dirty(&ws).unwrap();
         }
         let path = tmp.0.join("From Finder.plancraft");
-        plancraft_core::io::save(&Project::new("From Finder", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), &path).unwrap();
+        plancraft_core::io::save(&Project::new("From Finder", plancraft_core::dates::ymd(2026, 10, 19).unwrap()), &path).unwrap();
         let shared = Workspace::default().shared();
         let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).build_eframe(move |cc| PlanCraftApp::new(cc, shared));
         *h.state().rec() = Recovery::new(Some(store));
@@ -3005,7 +3005,7 @@ mod ui_tests {
         use egui_kittest::kittest::Queryable;
         let tmp = crate::recovery::tests::TempDir::new("overwrite");
         let path = tmp.0.join("plan.plancraft");
-        plancraft_core::io::save(&Project::new("Plan", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), &path).unwrap();
+        plancraft_core::io::save(&Project::new("Plan", plancraft_core::dates::ymd(2026, 10, 19).unwrap()), &path).unwrap();
         let mut ws = Workspace::default();
         ws.open(&path).unwrap();
         let shared = ws.shared();
@@ -3099,7 +3099,7 @@ mod ui_tests {
     fn opening_microsoft_project_xml_imports_it() {
         let tmp = crate::recovery::tests::TempDir::new("mspdi");
         let path = tmp.0.join("from project.xml");
-        let mut plan = Project::new("Exchange", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let mut plan = Project::new("Exchange", plancraft_core::dates::ymd(2026, 10, 19).unwrap());
         plan.add_task("Design", None);
         plancraft_core::mspdi::save(&plan, &path).unwrap();
         // A link to a task that is not in the file: the import leaves it out and says so.
@@ -3256,8 +3256,8 @@ mod ui_tests {
     #[test]
     fn switching_plans_drops_an_open_cell_edit() {
         let mut ws = Workspace::default();
-        let a = ws.add(plancraft_core::sample::demo_project(NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
-        let mut other = Project::new("Other plan", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let a = ws.add(plancraft_core::sample::demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap()), None);
+        let mut other = Project::new("Other plan", plancraft_core::dates::ymd(2026, 10, 19).unwrap());
         for k in 0..30 {
             other.add_task(format!("Other {k}"), None);
         }
@@ -3482,10 +3482,10 @@ mod ui_tests {
         {
             let mut ws = Workspace::default();
             ws.add(
-                Project::new("Crashed Plan", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()),
+                Project::new("Crashed Plan", plancraft_core::dates::ymd(2026, 10, 19).unwrap()),
                 Some(PathBuf::from("/plans/crashed.plancraft")),
             );
-            ws.add(Project::new("Scratch", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+            ws.add(Project::new("Scratch", plancraft_core::dates::ymd(2026, 10, 19).unwrap()), None);
             for d in &mut ws.docs {
                 d.edit("Add", |p| p.add_task("Recovered task", None)).unwrap();
             }

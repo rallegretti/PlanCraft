@@ -87,7 +87,19 @@ pub fn from_json_with_notes(text: &str, path: &Path) -> FileResult<(Project, Vec
     if version > FILE_VERSION {
         return Err(FileError::TooNew { path: path.into(), version });
     }
-    let mut p: Project = serde_json::from_str(text).map_err(|source| FileError::Parse { path: path.into(), source })?;
+    let mut p: Project = match serde_json::from_str(text) {
+        Ok(p) => p,
+        // Dates are limited to years −9999…9999; a file with a date beyond that (only a damaged or
+        // hostile one) is read with those dates pulled to the end of the range, and `sanitize`
+        // below then clamps them into 1900–2300 with a note, instead of the plan being refused.
+        Err(source) => {
+            let mut value: serde_json::Value = serde_json::from_str(text).map_err(|e| FileError::Parse { path: path.into(), source: e })?;
+            if !clamp_extended_years(&mut value) {
+                return Err(FileError::Parse { path: path.into(), source });
+            }
+            serde_json::from_value(value).map_err(|source| FileError::Parse { path: path.into(), source })?
+        }
+    };
     limits::check_counts(&p).map_err(|e| FileError::Limit { path: path.into(), message: e.to_string() })?;
     p.version = FILE_VERSION;
     // Keep id counters ahead of every stored id (hand-edited files may lag behind).
@@ -110,6 +122,49 @@ pub fn from_json_with_notes(text: &str, path: &Path) -> FileResult<(Project, Vec
     }
     let notes = limits::sanitize(&mut p);
     Ok((p, notes))
+}
+
+/// Rewrites the dates in `v` that `jiff` can't read but plan files may hold (`chrono` read them):
+/// a signed year not written with six digits (`+2026-…`, `-0001-…`) is re-padded, and a year
+/// beyond ±9999 becomes the last (or first) day `jiff` holds, keeping any time of day. Only a
+/// string that is a whole date or date-time changes, never a name or note that starts like one.
+/// Returns whether anything changed.
+fn clamp_extended_years(v: &mut serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::String(s) => match normalized_signed_date(s) {
+            Some(fixed) => {
+                *s = fixed;
+                true
+            }
+            None => false,
+        },
+        serde_json::Value::Array(items) => items.iter_mut().fold(false, |changed, x| clamp_extended_years(x) | changed),
+        serde_json::Value::Object(map) => map.values_mut().fold(false, |changed, x| clamp_extended_years(x) | changed),
+        _ => false,
+    }
+}
+
+/// See [`clamp_extended_years`]: the rewritten text, or `None` to leave `s` as it is.
+fn normalized_signed_date(s: &str) -> Option<String> {
+    let sign = s.chars().next().filter(|c| matches!(c, '+' | '-'))?;
+    let digits = s.get(1..)?.bytes().take_while(u8::is_ascii_digit).count();
+    let year_text = s.get(1..1 + digits)?;
+    let month_day = s.get(1 + digits..digits + 7)?;
+    let rest = s.get(digits + 7..)?;
+    let date_shaped =
+        digits > 0 && matches!(month_day.as_bytes(), [b'-', m1, m2, b'-', d1, d2] if [m1, m2, d1, d2].iter().all(|c| c.is_ascii_digit()));
+    // A date alone, or with a time of day: nothing else may follow.
+    let time_shaped =
+        rest.is_empty() || rest.strip_prefix('T').is_some_and(|t| t.bytes().all(|c| c.is_ascii_digit() || c == b':' || c == b'.'));
+    if !date_shaped || !time_shaped {
+        return None;
+    }
+    let fixed = match year_text.parse::<u32>() {
+        Ok(year) if year <= 9999 => format!("{sign}{year:06}{month_day}{rest}"),
+        _ if sign == '+' => format!("9999-12-31{rest}"),
+        _ => format!("-009999-01-01{rest}"),
+    };
+    (fixed != s).then_some(fixed)
 }
 
 /// Loads a project document and recalculates it.
@@ -357,7 +412,7 @@ pub fn add_loaded_external_project(p: &mut Project, doc_path: Option<&Path>, abs
         name: other_project.name.clone(),
         path: stored,
         tasks: Vec::new(),
-        last_sync: Some(chrono::Local::now().naive_local()),
+        last_sync: Some(crate::dates::now()),
     });
     other_project.id
 }
@@ -466,7 +521,7 @@ pub fn read_external_projects(links: &[ExternalProject], doc_path: Option<&Path>
 /// [`read_external_projects`]. Returns warnings.
 pub fn apply_external_projects(p: &mut Project, reads: ExternalReads) -> Vec<String> {
     let mut warnings = reads.skipped;
-    let now = chrono::Local::now().naive_local();
+    let now = crate::dates::now();
     for (id, path, loaded) in reads.docs {
         let wanted = referenced_external_tasks(p, id);
         let Some(ext) = p.external_projects.iter_mut().find(|e| e.id == id) else { continue };
@@ -509,7 +564,7 @@ mod tests {
     #[test]
     fn a_link_to_a_replaced_file_is_refused() {
         let dir = tempfile::tempdir().unwrap();
-        let start = chrono::NaiveDate::from_ymd_opt(2026, 10, 19).unwrap();
+        let start = crate::dates::ymd(2026, 10, 19).unwrap();
         let other_path = dir.path().join("other.plancraft");
         let mut other = Project::new("Other", start);
         let t = other.add_task("API", None);
@@ -542,7 +597,7 @@ mod tests {
         }
 
         let dir = tempfile::tempdir().unwrap();
-        let mut p = Project::new("A", chrono::NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let mut p = Project::new("A", crate::dates::ymd(2026, 10, 19).unwrap());
         p.external_projects.push(ExternalProject {
             id: Uuid::new_v4(),
             name: "Remote".into(),
@@ -572,7 +627,7 @@ mod tests {
     fn atomic_save_replaces_and_leaves_no_temp_files() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("plan.plancraft");
-        let mut p = Project::new("A", chrono::NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let mut p = Project::new("A", crate::dates::ymd(2026, 10, 19).unwrap());
         save(&p, &path).unwrap();
         p.name = "B".into();
         save(&p, &path).unwrap();
@@ -596,7 +651,7 @@ mod tests {
     fn hostile_files_are_refused_or_clamped() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("x.plancraft");
-        let mut p = Project::new("A", chrono::NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let mut p = Project::new("A", crate::dates::ymd(2026, 10, 19).unwrap());
         let a = p.add_task("A", None);
         let mut json: serde_json::Value = serde_json::from_str(&to_json(&p).unwrap()).unwrap();
         json["tasks"][0]["duration"] = serde_json::json!(i64::MAX);
@@ -608,6 +663,22 @@ mod tests {
         assert_eq!(q.task(a).unwrap().percent_complete, 100);
         assert_eq!(q.start.date(), limits::max_date());
         assert!(!notes.is_empty());
+        // Years `jiff` can't read as written open too, clamped into range (as with `chrono`), and
+        // only whole dates are touched: a name that starts like one keeps its text.
+        for (start, day) in [
+            ("-200000-01-01T08:00:00", limits::min_date()),
+            ("-10000-01-01T08:00:00", limits::min_date()),
+            ("-0001-01-01T08:00:00", limits::min_date()),
+            ("+2026-10-19T08:00:00", crate::dates::ymd(2026, 10, 19).unwrap()),
+            ("+10000-01-01", limits::max_date()),
+        ] {
+            json["start"] = serde_json::json!(start);
+            json["name"] = serde_json::json!("+123456-01-01 launch");
+            std::fs::write(&path, json.to_string()).unwrap();
+            let (q, _) = load_with_notes(&path).unwrap_or_else(|e| panic!("{start}: {e}"));
+            assert_eq!(q.start.date(), day, "{start}");
+            assert_eq!(q.name, "+123456-01-01 launch", "{start}");
+        }
 
         json["version"] = serde_json::json!(u64::from(u32::MAX) + 1);
         std::fs::write(&path, json.to_string()).unwrap();

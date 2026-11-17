@@ -11,7 +11,7 @@
 
 use std::collections::HashSet;
 
-use chrono::NaiveDateTime;
+use crate::dates::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::duration::Minutes;
@@ -92,7 +92,7 @@ pub enum CustomValue {
     Text(String),
     /// Number and cost fields.
     Number(f64),
-    Date(NaiveDateTime),
+    Date(DateTime),
     Duration(Minutes),
     Flag(bool),
 }
@@ -386,10 +386,9 @@ impl Project {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::NaiveDate;
 
     fn project() -> Project {
-        Project::new("Custom", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap())
+        Project::new("Custom", crate::dates::ymd(2026, 10, 19).unwrap())
     }
 
     #[test]

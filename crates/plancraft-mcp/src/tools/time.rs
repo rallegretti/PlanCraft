@@ -84,7 +84,7 @@ fn log_time(ctx: &Ctx, a: &Args) -> ToolResult {
             };
             let date = match a.get("date") {
                 Some(v) => parse_date(v, "date")?,
-                None => chrono::Local::now().date_naive(),
+                None => plancraft_core::dates::today(),
             };
             let minutes: Minutes = match (a.f64("hours")?, a.get("duration")) {
                 (Some(h), _) => (h * 60.0).round() as Minutes,

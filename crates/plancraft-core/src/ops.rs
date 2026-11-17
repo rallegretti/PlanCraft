@@ -4,7 +4,7 @@
 //! structure, referential integrity, duration/work/units relationships) live
 //! here.  Callers should run [`crate::schedule::recalculate`] afterwards.
 
-use chrono::{NaiveDate, NaiveDateTime};
+use crate::dates::prelude::*;
 use std::collections::{HashMap, HashSet};
 
 use crate::duration::{DurationUnit, Lag, Minutes, TypedDuration, parse_duration};
@@ -620,7 +620,7 @@ impl Project {
     /// Types a start (keeping the task's length) or a finish for a manually scheduled task. A
     /// summary task becomes manually scheduled first, keeping its current dates, like typing dates
     /// on a summary in Microsoft Project.
-    pub fn set_manual_date(&mut self, id: TaskId, date: NaiveDateTime, finish: bool) -> PlanResult<()> {
+    pub fn set_manual_date(&mut self, id: TaskId, date: DateTime, finish: bool) -> PlanResult<()> {
         let idx = self.require_task(id)?;
         let summary = self.has_children(idx);
         let mode = self.row(idx)?.mode;
@@ -1034,12 +1034,12 @@ impl Project {
     }
 
     /// Sets the status date: the date progress is reported as of (`None` = today).
-    pub fn set_status_date(&mut self, date: Option<NaiveDate>) {
+    pub fn set_status_date(&mut self, date: Option<Date>) {
         self.status_date = date;
     }
 
     /// End of the working day `d` on the project calendar (17:00 on the standard calendar).
-    pub fn end_of_working_day(&self, d: NaiveDate) -> NaiveDateTime {
+    pub fn end_of_working_day(&self, d: Date) -> DateTime {
         crate::calendar::WorkCal::single(self.base_calendar()).day_finish(d)
     }
 
@@ -1065,7 +1065,7 @@ impl Project {
     /// where its schedule says it should be at `through` (`Scheduled`), or only marks the tasks
     /// that finish by then as 100% complete (`ZeroOrHundred`). Progress already entered is never
     /// lowered. `ids` empty = the entire project.
-    pub fn update_progress_through(&mut self, ids: &[TaskId], through: NaiveDateTime, how: ProgressUpdate) -> PlanResult<TrackingReport> {
+    pub fn update_progress_through(&mut self, ids: &[TaskId], through: DateTime, how: ProgressUpdate) -> PlanResult<TrackingReport> {
         crate::schedule::recalculate(self);
         let mut report = TrackingReport::default();
         for idx in self.tracking_rows(ids)? {
@@ -1105,7 +1105,7 @@ impl Project {
         if ids.is_empty() {
             return invalid("select the tasks to mark on track");
         }
-        let day = self.status_date.unwrap_or_else(|| chrono::Local::now().date_naive());
+        let day = self.status_date.unwrap_or_else(crate::dates::today);
         let at = self.end_of_working_day(day);
         self.update_progress_through(ids, at, ProgressUpdate::Scheduled)
     }
@@ -1114,7 +1114,7 @@ impl Project {
     /// moves to start after it, and actual dates stay where they are. A task in progress is split
     /// (its remaining part resumes after `after`); a task not started gets a Start No Earlier
     /// Than `after` constraint. `ids` empty = the entire project.
-    pub fn reschedule_uncompleted_work(&mut self, ids: &[TaskId], after: NaiveDateTime) -> PlanResult<TrackingReport> {
+    pub fn reschedule_uncompleted_work(&mut self, ids: &[TaskId], after: DateTime) -> PlanResult<TrackingReport> {
         if crate::limits::clamp_datetime(after) != after {
             return invalid("the date to reschedule after must be between 1900 and the end of 2300");
         }
@@ -1179,7 +1179,7 @@ impl Project {
 
     /// Makes the task at `idx` stop after the work done so far and resume at `resume`, replacing
     /// any pause still ahead of it (earlier pauses, in work already done, stay).
-    fn pause_at_stop(&mut self, idx: usize, resume: NaiveDateTime) -> PlanResult<()> {
+    fn pause_at_stop(&mut self, idx: usize, resume: DateTime) -> PlanResult<()> {
         let t = self.row_mut(idx)?;
         if t.elapsed {
             return invalid(format!("'{}' has an elapsed duration, which runs without pauses", t.name));
@@ -1265,7 +1265,7 @@ impl Project {
     /// Sets when the remaining work of an in-progress task resumes (Microsoft Project's Resume).
     /// A date later than the stop makes the task pause there and resume then (a split); `None`, or
     /// the next working moment after the stop, removes that pause.
-    pub fn set_resume(&mut self, id: TaskId, resume: Option<NaiveDateTime>) -> PlanResult<()> {
+    pub fn set_resume(&mut self, id: TaskId, resume: Option<DateTime>) -> PlanResult<()> {
         let idx = self.require_task(id)?;
         if resume.is_none() {
             let t = self.row_mut(idx)?;
@@ -1301,7 +1301,7 @@ impl Project {
         &mut self,
         task: TaskId,
         resource: ResourceId,
-        date: NaiveDate,
+        date: Date,
         minutes: Minutes,
         note: impl Into<String>,
     ) -> PlanResult<TimeEntryId> {
@@ -1327,7 +1327,7 @@ impl Project {
         Ok(id)
     }
 
-    fn base_cal_day_start(&self, date: NaiveDate) -> NaiveDateTime {
+    fn base_cal_day_start(&self, date: Date) -> DateTime {
         crate::calendar::WorkCal::single(self.base_calendar()).day_start(date)
     }
 
@@ -1355,9 +1355,7 @@ impl Project {
 
     /// Saves the current schedule as baseline (all tasks when `ids` is empty).
     pub fn set_baseline(&mut self, ids: &[TaskId]) {
-        use chrono::Timelike;
-        let now = chrono::Local::now().naive_local();
-        let now = now.with_second(0).and_then(|n| n.with_nanosecond(0)).unwrap_or(now);
+        let now = crate::dates::now_minute();
         for t in &mut self.tasks {
             if !ids.is_empty() && !ids.contains(&t.id) {
                 continue;
@@ -1419,16 +1417,16 @@ impl Project {
     /// Parses a date or date-time entered by a user: `2026-10-19`, `2026-10-19 13:00`, `10/19/2026`.
     ///
     /// Dates without time use the start (or end when `finish` is set) of the project's working day.
-    pub fn parse_datetime(&self, text: &str, finish: bool) -> Option<NaiveDateTime> {
+    pub fn parse_datetime(&self, text: &str, finish: bool) -> Option<DateTime> {
         let t = text.trim();
         for f in ["%Y-%m-%d %H:%M", "%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S", "%Y-%m-%d %H:%M:%S", "%m/%d/%Y %H:%M"] {
-            if let Ok(dt) = NaiveDateTime::parse_from_str(t, f) {
+            if let Ok(dt) = DateTime::parse_from_str(t, f) {
                 return Some(dt);
             }
         }
         let date = ["%Y-%m-%d", "%m/%d/%Y", "%m/%d/%y", "%a %m/%d/%y", "%d %b %Y", "%b %d %Y", "%b %d, %Y"]
             .iter()
-            .find_map(|f| NaiveDate::parse_from_str(t, f).ok())?;
+            .find_map(|f| Date::parse_from_str(t, f).ok())?;
         let wc = crate::calendar::WorkCal::single(self.base_calendar());
         Some(if finish { wc.day_finish(date) } else { wc.day_start(date) })
     }

@@ -42,7 +42,7 @@ fn approx_bytes(p: &Project) -> usize {
                 + t.gaps.len() * size_of::<crate::model::Gap>()
                 + t.baselines.len() * (size_of::<crate::model::Baseline>() + 32)
                 + t.interim.len() * (size_of::<crate::model::Interim>() + 32)
-                + t.sched.parts.len() * size_of::<(chrono::NaiveDateTime, chrono::NaiveDateTime)>()
+                + t.sched.parts.len() * size_of::<(crate::dates::DateTime, crate::dates::DateTime)>()
                 + t.sched.warnings.iter().map(|w| size_of::<String>() + w.len()).sum::<usize>()
                 + t.custom.values().map(custom_value).sum::<usize>()
         })
@@ -616,12 +616,11 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::NaiveDate;
 
     #[test]
     fn undo_redo_and_failed_edits() {
         let mut ws = Workspace::default();
-        let h = ws.add(Project::new("P", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+        let h = ws.add(Project::new("P", crate::dates::ymd(2026, 10, 19).unwrap()), None);
         let i = ws.index_of(h).unwrap();
         let doc = &mut ws.docs[i];
         doc.edit("Add task", |p| p.add_task("A", None)).unwrap();
@@ -642,7 +641,7 @@ mod tests {
     #[test]
     fn panicking_and_out_of_range_edits_roll_back() {
         let mut ws = Workspace::default();
-        let h = ws.add(Project::new("P", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), None);
+        let h = ws.add(Project::new("P", crate::dates::ymd(2026, 10, 19).unwrap()), None);
         let i = ws.index_of(h).unwrap();
         let doc = &mut ws.docs[i];
         let id = doc.edit("Add task", |p| p.add_task("A", None)).unwrap();
@@ -667,7 +666,7 @@ mod tests {
     #[test]
     fn undo_history_stays_within_its_memory_budget() {
         let mut ws = Workspace::default();
-        let mut p = Project::new("Big", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let mut p = Project::new("Big", crate::dates::ymd(2026, 10, 19).unwrap());
         // About 64 KB per snapshot by the estimate; the test budget holds about 64 of them.
         for i in 0..32 {
             let id = p.add_task(format!("Task {i}"), None);
@@ -684,7 +683,8 @@ mod tests {
         let kept = doc.history().len();
         let total: usize = doc.undo.iter().map(|s| s.bytes).sum();
         assert!(total <= UNDO_BUDGET_BYTES, "{total}");
-        assert!((50..120).contains(&kept), "kept {kept} steps");
+        // About 50 snapshots fit (the exact number depends on the size of the model types).
+        assert!((40..120).contains(&kept), "kept {kept} steps");
         // The most recent steps are the ones kept.
         assert_eq!(doc.history()[0].0, "Rename");
         assert!(doc.undo());
@@ -695,7 +695,7 @@ mod tests {
     /// estimate, so an agent could fill undo history with huge snapshots counted as tiny.
     #[test]
     fn undo_estimate_counts_custom_fields_and_resource_text() {
-        let mut p = Project::new("Big", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let mut p = Project::new("Big", crate::dates::ymd(2026, 10, 19).unwrap());
         let base = approx_bytes(&p);
         let choices: Vec<String> = (0..100).map(|i| format!("{i}{}", "c".repeat(900))).collect();
         p.add_custom_field("Status", crate::custom::CustomFieldKind::Text, &choices).unwrap();
@@ -714,7 +714,7 @@ mod tests {
         let path = dir.join("plan.plancraft");
         std::fs::write(&path, "newer work").unwrap();
         let mut ws = Workspace::default();
-        let h = ws.add(Project::new("Restored", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap()), Some(path.clone()));
+        let h = ws.add(Project::new("Restored", crate::dates::ymd(2026, 10, 19).unwrap()), Some(path.clone()));
         let i = ws.index_of(h).unwrap();
         let doc = &mut ws.docs[i];
         assert!(doc.changed_on_disk());
@@ -732,7 +732,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("plancraft-saveas-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("plans")).unwrap();
         let mut ws = Workspace::default();
-        let mut p = Project::new("P", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let mut p = Project::new("P", crate::dates::ymd(2026, 10, 19).unwrap());
         p.external_projects.push(crate::model::ExternalProject {
             id: uuid::Uuid::new_v4(),
             name: "Other".into(),

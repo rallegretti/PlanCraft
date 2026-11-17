@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use chrono::Datelike;
+use crate::dates::prelude::*;
 
 use super::codes::{self, Slot};
 use super::xml::Writer;
@@ -76,7 +76,7 @@ pub fn export(p: &Project) -> (String, Vec<String>) {
     w.leaf("WeekStartDay", 1);
     w.leaf("BaselineForEarnedValue", p.settings.earned_value_baseline);
     if let Some(d) = p.status_date {
-        w.leaf("StatusDate", codes::datetime_text(d.and_time(chrono::NaiveTime::MIN)));
+        w.leaf("StatusDate", codes::datetime_text(d.and_time(Time::MIN)));
     }
 
     // Custom fields: the first fields of each kind take Text1, Text2, … (and Number1, …).
@@ -205,10 +205,10 @@ pub fn export(p: &Project) -> (String, Vec<String>) {
             for a in &r.availability {
                 w.open("AvailabilityPeriod");
                 if let Some(f) = a.from {
-                    w.leaf("AvailableFrom", codes::datetime_text(f.and_time(chrono::NaiveTime::MIN)));
+                    w.leaf("AvailableFrom", codes::datetime_text(f.and_time(Time::MIN)));
                 }
                 if let Some(t) = a.to {
-                    w.leaf("AvailableTo", codes::datetime_text(t.and_hms_opt(23, 59, 0).unwrap_or(t.and_time(chrono::NaiveTime::MIN))));
+                    w.leaf("AvailableTo", codes::datetime_text(t.and_hms_opt(23, 59, 0).unwrap_or(t.and_time(Time::MIN))));
                 }
                 // AvailableUnits is a percentage.
                 w.leaf("AvailableUnits", a.units * 100.0);
@@ -303,9 +303,9 @@ fn leveling_delay(minutes: Minutes, minutes_per_day: Minutes) -> (Minutes, i64) 
 }
 
 fn week(w: &mut Writer, week: &WorkWeek, note: &mut impl FnMut(&'static str)) {
-    use chrono::Weekday::*;
+    use crate::dates::Weekday::*;
     w.open("WeekDays");
-    for d in [Sun, Mon, Tue, Wed, Thu, Fri, Sat] {
+    for d in [Sunday, Monday, Tuesday, Wednesday, Thursday, Friday, Saturday] {
         w.open("WeekDay");
         w.leaf("DayType", codes::weekday_code(d));
         times(w, week.day(d), note);
@@ -359,16 +359,16 @@ fn exceptions(w: &mut Writer, list: &[CalendarException], note: &mut impl FnMut(
             w.open("Exception");
             w.leaf("EnteredByOccurrences", 1);
             w.open("TimePeriod");
-            w.leaf("FromDate", codes::datetime_text(e.start.and_time(chrono::NaiveTime::MIN)));
+            w.leaf("FromDate", codes::datetime_text(e.start.and_time(Time::MIN)));
             let last = shift_year(e.start, YEARLY_OCCURRENCES - 1).unwrap_or(e.end);
-            w.leaf("ToDate", codes::datetime_text(last.and_hms_opt(23, 59, 0).unwrap_or(last.and_time(chrono::NaiveTime::MIN))));
+            w.leaf("ToDate", codes::datetime_text(last.and_hms_opt(23, 59, 0).unwrap_or(last.and_time(Time::MIN))));
             w.close("TimePeriod");
             w.leaf("Occurrences", YEARLY_OCCURRENCES);
             w.leaf("Name", &e.name);
             w.leaf("Type", 2);
             w.leaf("Period", 1);
             w.leaf("Month", e.start.month0());
-            w.leaf("MonthDay", e.start.day());
+            w.leaf("MonthDay", e.start.day32());
             times(w, &e.working, note);
             w.close("Exception");
             continue;
@@ -384,8 +384,8 @@ fn exceptions(w: &mut Writer, list: &[CalendarException], note: &mut impl FnMut(
             w.open("Exception");
             w.leaf("EnteredByOccurrences", 0);
             w.open("TimePeriod");
-            w.leaf("FromDate", codes::datetime_text(start.and_time(chrono::NaiveTime::MIN)));
-            w.leaf("ToDate", codes::datetime_text(end.and_hms_opt(23, 59, 0).unwrap_or(end.and_time(chrono::NaiveTime::MIN))));
+            w.leaf("FromDate", codes::datetime_text(start.and_time(Time::MIN)));
+            w.leaf("ToDate", codes::datetime_text(end.and_hms_opt(23, 59, 0).unwrap_or(end.and_time(Time::MIN))));
             w.close("TimePeriod");
             w.leaf("Occurrences", 1);
             w.leaf("Name", &e.name);
@@ -398,9 +398,9 @@ fn exceptions(w: &mut Writer, list: &[CalendarException], note: &mut impl FnMut(
     w.close("Exceptions");
 }
 
-fn shift_year(d: chrono::NaiveDate, years: i32) -> Option<chrono::NaiveDate> {
-    let y = d.year().checked_add(years)?;
-    d.with_year(y).or_else(|| chrono::NaiveDate::from_ymd_opt(y, d.month(), 28))
+fn shift_year(d: Date, years: i32) -> Option<Date> {
+    let y = d.year32().checked_add(years)?;
+    d.with_year(y).or_else(|| crate::dates::ymd(y, d.month32(), 28))
 }
 
 fn task(

@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use chrono::{Datelike, Days, Months, NaiveDate, NaiveDateTime, Weekday};
+use crate::dates::prelude::*;
 
 use super::codes::{self, Slot};
 use super::xml::{self, Element, Item};
@@ -89,7 +89,7 @@ fn num(e: &Element, name: &str) -> Option<f64> {
 fn flag(e: &Element, name: &str) -> Option<bool> {
     e.text_of(name).and_then(codes::bool_of)
 }
-fn when(e: &Element, name: &str) -> Option<NaiveDateTime> {
+fn when(e: &Element, name: &str) -> Option<DateTime> {
     e.text_of(name).and_then(codes::datetime_of)
 }
 fn span(e: &Element, name: &str) -> Option<Minutes> {
@@ -107,7 +107,7 @@ pub fn import(text: &str, fallback_name: &str) -> Result<(Project, Vec<String>),
 
     let name = sc("Title").or(sc("Name")).unwrap_or(fallback_name).to_string();
     let first_task_start = r.tasks.iter().filter_map(|t| when(t, "Start")).min();
-    let start = sc("StartDate").and_then(codes::datetime_of).or(first_task_start).unwrap_or_else(|| chrono::Local::now().naive_local());
+    let start = sc("StartDate").and_then(codes::datetime_of).or(first_task_start).unwrap_or_else(crate::dates::now);
     let mut p = Project::new(name, limits::clamp_date(start.date()));
     p.start = limits::clamp_datetime(start);
     p.author = sc("Author").unwrap_or_default().to_string();
@@ -257,7 +257,8 @@ fn standard_day(d: Weekday) -> Vec<TimeRange> {
     Calendar::standard(CalendarId(0)).week.day(d).clone()
 }
 
-const WEEK: [Weekday; 7] = [Weekday::Mon, Weekday::Tue, Weekday::Wed, Weekday::Thu, Weekday::Fri, Weekday::Sat, Weekday::Sun];
+const WEEK: [Weekday; 7] =
+    [Weekday::Monday, Weekday::Tuesday, Weekday::Wednesday, Weekday::Thursday, Weekday::Friday, Weekday::Saturday, Weekday::Sunday];
 
 /// The working times of a `WorkingTimes` element; `None` when it has none.
 fn working_times(e: &Element, notes: &mut Notes) -> Option<Vec<TimeRange>> {
@@ -368,7 +369,7 @@ fn read_week(c: &Element, week: &mut WorkWeek, exceptions: &mut Vec<CalendarExce
     }
     // Work weeks change the week for a period: written as dated exceptions on the days that differ.
     if let Some(weeks) = c.child("WorkWeeks") {
-        let mut days: Vec<(NaiveDate, Vec<TimeRange>, String)> = Vec::new();
+        let mut days: Vec<(Date, Vec<TimeRange>, String)> = Vec::new();
         for ww in weeks.all("WorkWeek") {
             let Some(period) = ww.child("TimePeriod") else { continue };
             let (Some(from), Some(to)) = (when(period, "FromDate"), when(period, "ToDate")) else { continue };
@@ -409,7 +410,7 @@ fn read_week(c: &Element, week: &mut WorkWeek, exceptions: &mut Vec<CalendarExce
 }
 
 /// Joins consecutive days with the same name and working time into one exception each.
-fn merge_days(mut days: Vec<(NaiveDate, Vec<TimeRange>, String)>) -> Vec<CalendarException> {
+fn merge_days(mut days: Vec<(Date, Vec<TimeRange>, String)>) -> Vec<CalendarException> {
     days.sort_by_key(|(d, _, _)| *d);
     let mut out: Vec<CalendarException> = Vec::new();
     for (d, working, name) in days {
@@ -427,17 +428,19 @@ fn merge_days(mut days: Vec<(NaiveDate, Vec<TimeRange>, String)>) -> Vec<Calenda
 }
 
 /// The nth (0–3) or last (4) given weekday of a month.
-fn nth_weekday(year: i32, month: u32, nth: i64, weekday: Weekday) -> Option<NaiveDate> {
+fn nth_weekday(year: i32, month: u32, nth: i64, weekday: Weekday) -> Option<Date> {
     if nth >= 4 {
-        let first_next =
-            if month == 12 { NaiveDate::from_ymd_opt(year.checked_add(1)?, 1, 1)? } else { NaiveDate::from_ymd_opt(year, month + 1, 1)? };
+        let first_next = if month == 12 { crate::dates::ymd(year.checked_add(1)?, 1, 1)? } else { crate::dates::ymd(year, month + 1, 1)? };
         let mut d = first_next.pred_opt()?;
         while d.weekday() != weekday {
             d = d.pred_opt()?;
         }
         return Some(d);
     }
-    NaiveDate::from_weekday_of_month_opt(year, month, weekday, u8::try_from(nth.checked_add(1)?).ok()?)
+    // MonthPosition 0–3 is the first to fourth (4, the last, is handled above); a negative one
+    // is no position at all (jiff would count it from the end of the month).
+    let nth = i8::try_from(nth.checked_add(1)?).ok().filter(|n| *n >= 1)?;
+    crate::dates::ymd(year, month, 1)?.nth_weekday_of_month(nth, weekday).ok()
 }
 
 /// `MonthItem` 3–9 is Sunday–Saturday.
@@ -450,7 +453,7 @@ fn month_item_weekday(code: i64) -> Option<Weekday> {
 fn exception_ranges(e: &Element, notes: &mut Notes) -> Vec<TimeRange> {
     match (flag(e, "DayWorking"), day_ranges(e, notes)) {
         (_, Some(r)) => r,
-        (Some(true), None) => standard_day(Weekday::Mon),
+        (Some(true), None) => standard_day(Weekday::Monday),
         (_, None) => Vec::new(),
     }
 }
@@ -477,20 +480,20 @@ fn read_exceptions(c: &Element, out: &mut Vec<CalendarException>, budget: &mut B
         };
         // A yearly exception repeating for decades is kept as "every year".
         if kind == 2 {
-            let years = if by_count { count.unwrap_or(1) } else { i64::from(to.year() - from.year()) + 1 };
+            let years = if by_count { count.unwrap_or(1) } else { i64::from(to.year32() - from.year32()) + 1 };
             if years >= YEARLY_FOREVER && period_n == 1 {
                 // On its Month and MonthDay (Month counts from 0), from the first year it falls in.
-                let month = int(ex, "Month").and_then(|m| u32::try_from(m).ok()).filter(|m| *m < 12).map_or(from.month(), |m| m + 1);
-                let day = int(ex, "MonthDay").and_then(|d| u32::try_from(d).ok()).unwrap_or(from.day());
-                let on = |y: i32| NaiveDate::from_ymd_opt(y, month, day);
-                let start = on(from.year()).filter(|d| *d >= from).or_else(|| from.year().checked_add(1).and_then(on)).unwrap_or(from);
+                let month = int(ex, "Month").and_then(|m| u32::try_from(m).ok()).filter(|m| *m < 12).map_or(from.month32(), |m| m + 1);
+                let day = int(ex, "MonthDay").and_then(|d| u32::try_from(d).ok()).unwrap_or(from.day32());
+                let on = |y: i32| crate::dates::ymd(y, month, day);
+                let start = on(from.year32()).filter(|d| *d >= from).or_else(|| from.year32().checked_add(1).and_then(on)).unwrap_or(from);
                 out.push(CalendarException { name, start, end: start, working, yearly: true });
                 continue;
             }
         }
         let limit = if by_count { usize::try_from(count.unwrap_or(1)).unwrap_or(MAX_EXPANDED) } else { MAX_EXPANDED };
-        let mut dates: Vec<NaiveDate> = Vec::new();
-        let in_range = |d: NaiveDate, n: usize| if by_count { n < limit } else { d <= to };
+        let mut dates: Vec<Date> = Vec::new();
+        let in_range = |d: Date, n: usize| if by_count { n < limit } else { d <= to };
         match kind {
             // Daily every `Period` days (one day a time, or the whole period when daily).
             1 | 7 | 8 | 9 => {
@@ -539,11 +542,11 @@ fn read_exceptions(c: &Element, out: &mut Vec<CalendarException>, budget: &mut B
                 let by_day = kind == 2 || kind == 4;
                 let step = if yearly { 12 * period_n } else { period_n };
                 let month0 = if yearly {
-                    int(ex, "Month").and_then(|m| u32::try_from(m).ok()).filter(|m| *m < 12).map_or(from.month(), |m| m + 1)
+                    int(ex, "Month").and_then(|m| u32::try_from(m).ok()).filter(|m| *m < 12).map_or(from.month32(), |m| m + 1)
                 } else {
-                    from.month()
+                    from.month32()
                 };
-                let Some(mut first) = NaiveDate::from_ymd_opt(from.year(), month0, 1) else { continue };
+                let Some(mut first) = crate::dates::ymd(from.year32(), month0, 1) else { continue };
                 let item = int(ex, "MonthItem").unwrap_or(0);
                 let weekday = month_item_weekday(item);
                 if !by_day && weekday.is_none() && item != 0 {
@@ -557,11 +560,11 @@ fn read_exceptions(c: &Element, out: &mut Vec<CalendarException>, budget: &mut B
                     let d = if by_day {
                         int(ex, "MonthDay")
                             .and_then(|md| u32::try_from(md).ok())
-                            .and_then(|md| NaiveDate::from_ymd_opt(first.year(), first.month(), md))
+                            .and_then(|md| crate::dates::ymd(first.year32(), first.month32(), md))
                     } else {
                         let pos = int(ex, "MonthPosition").unwrap_or(0);
                         match weekday {
-                            Some(w) => nth_weekday(first.year(), first.month(), pos, w),
+                            Some(w) => nth_weekday(first.year32(), first.month32(), pos, w),
                             // MonthItem 0: the nth day of the month (last: the month's last day).
                             None => {
                                 if pos >= 4 {
@@ -603,7 +606,7 @@ fn read_exceptions(c: &Element, out: &mut Vec<CalendarException>, budget: &mut B
     }
 }
 
-fn last_day(first: NaiveDate) -> Option<NaiveDate> {
+fn last_day(first: Date) -> Option<Date> {
     first.checked_add_months(Months::new(1))?.pred_opt()
 }
 
@@ -727,7 +730,7 @@ fn tasks(p: &mut Project, records: &[Element], cals: &Calendars, mut fields: Fie
     let (ids, map) = assign_ids(&uids);
     let mut links = Vec::new();
     let mut prev_level = 0u16;
-    let now = chrono::Local::now().naive_local();
+    let now = crate::dates::now();
     let mpd = p.settings.time.minutes_per_day;
     for (t, id) in rows.iter().zip(ids) {
         let id = TaskId(id);
@@ -800,7 +803,7 @@ fn tasks(p: &mut Project, records: &[Element], cals: &Calendars, mut fields: Fie
         }
 
         // Baselines (Number 0–10) and interim plans.
-        let mut interim: BTreeMap<u8, (Option<NaiveDateTime>, Option<NaiveDateTime>)> = BTreeMap::new();
+        let mut interim: BTreeMap<u8, (Option<DateTime>, Option<DateTime>)> = BTreeMap::new();
         for b in t.all("Baseline") {
             let Some(n) = int(b, "Number").and_then(|n| u8::try_from(n).ok()).filter(|n| *n <= 10) else { continue };
             let (start, finish) = (when(b, "Start"), when(b, "Finish"));

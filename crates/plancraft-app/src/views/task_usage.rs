@@ -2,8 +2,8 @@
 
 use std::collections::BTreeMap;
 
-use chrono::{Duration, NaiveDate};
 use egui::{Align2, FontId, Rect, Stroke, Ui, pos2, vec2};
+use plancraft_core::dates::prelude::*;
 use plancraft_core::prelude::*;
 use plancraft_core::workload::assignment_daily_work;
 use plancraft_core::workspace::Document;
@@ -39,14 +39,14 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     let left_w = 380.0f32.min(rect.width() * 0.45);
     let right = Rect::from_min_max(pos2(rect.left() + left_w + 4.0, rect.top()), rect.max);
     let nper = ((right.width() - 12.0) / PERIOD_W).ceil().max(1.0) as usize;
-    let mut periods: Vec<NaiveDate> = Vec::with_capacity(nper);
+    let mut periods: Vec<Date> = Vec::with_capacity(nper);
     let mut d = from;
     for _ in 0..nper {
         periods.push(d);
         d = step(st.granularity, d, 1);
     }
     let end = d;
-    let bucket = |day: NaiveDate| -> Option<usize> {
+    let bucket = |day: Date| -> Option<usize> {
         if day < from || day >= end {
             return None;
         }
@@ -217,5 +217,4 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
         let dlt = ui.input(|i| i.smooth_scroll_delta.y);
         st.usage_grid.scroll_y = (st.usage_grid.scroll_y - dlt).clamp(0.0, (rows.len() as f32 * rh - body.height() + rh).max(0.0));
     }
-    let _ = Duration::days(0);
 }

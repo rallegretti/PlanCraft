@@ -1,6 +1,6 @@
 //! Split Task and recurring task tools.
 
-use chrono::Datelike;
+use plancraft_core::dates::prelude::*;
 use plancraft_core::prelude::*;
 use plancraft_core::recurring::{MonthDay, Nth, Pattern, RecurEnd, Recurrence};
 use plancraft_core::schedule::planned_gaps;
@@ -232,7 +232,7 @@ fn parse_recurrence(p: &Project, a: &Args, base: Option<Recurrence>) -> ToolResu
                 };
                 Ok(MonthDay::Weekday { nth, weekday })
             }
-            _ => Ok(old.unwrap_or(MonthDay::Day(start.day() as u8))),
+            _ => Ok(old.unwrap_or(MonthDay::Day(start.day32() as u8))),
         }
     };
     let kind = match a.str("pattern")? {
@@ -295,7 +295,7 @@ fn parse_recurrence(p: &Project, a: &Args, base: Option<Recurrence>) -> ToolResu
         _ => {
             let (m, on) = match old {
                 Some(Pattern::Yearly { month, on }) => (month, Some(on)),
-                _ => (start.month() as u8, old_on),
+                _ => (start.month32() as u8, old_on),
             };
             let month = match a.get("month").filter(|v| !v.is_null()) {
                 Some(Value::String(s)) if s.trim().parse::<u8>().is_err() => named(&json!(s), "month", &MONTHS)? as u8 + 1,

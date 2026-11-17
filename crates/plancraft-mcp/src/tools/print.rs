@@ -229,7 +229,7 @@ fn export_pdf(ctx: &Ctx, a: &Args) -> ToolResult {
             chart,
             from,
             to,
-            printed: chrono::Local::now().naive_local(),
+            printed: plancraft_core::dates::now(),
             palette: print::layout::Palette::default(),
         });
         (print::pdf::write(&out), out.pages.len(), out.truncated)
@@ -264,5 +264,5 @@ fn drawing(p: &plancraft_core::model::Project, setup: &PageSetup, view: &str) ->
         let (items, w, h) = print::network::items(p, &d, opts, &pal);
         (items, w, h, "Network Diagram")
     };
-    print::layout_canvas(&print::CanvasJob { project: p, setup, title, width, height, items, printed: chrono::Local::now().naive_local() })
+    print::layout_canvas(&print::CanvasJob { project: p, setup, title, width, height, items, printed: plancraft_core::dates::now() })
 }

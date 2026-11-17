@@ -9,7 +9,7 @@
 //! A pause in work already under way (Update Project, a later Resume date) is a [`crate::model::Split`]
 //! instead: it ends on a fixed date.
 
-use chrono::NaiveDateTime;
+use crate::dates::prelude::*;
 
 use crate::duration::Minutes;
 use crate::ids::TaskId;
@@ -61,7 +61,7 @@ impl Project {
 
     /// The task's working parts laid out from its (actual or scheduled) start with the splits it
     /// has now, so several splits in one edit see each other.
-    fn parts_now(&self, idx: usize) -> Vec<(NaiveDateTime, NaiveDateTime)> {
+    fn parts_now(&self, idx: usize) -> Vec<(DateTime, DateTime)> {
         let Some(t) = self.tasks.get(idx) else { return Vec::new() };
         let Some(start) = t.actual_start.or(t.sched.start) else { return Vec::new() };
         let cal = task_calendar(self, idx);
@@ -72,7 +72,7 @@ impl Project {
     ///
     /// The split moves with the task, so the pause keeps its length when the task's dates change.
     /// Splitting inside an existing pause lengthens that pause. Work already done can't be split.
-    pub fn split_task(&mut self, id: TaskId, at: NaiveDateTime, resume: NaiveDateTime) -> PlanResult<()> {
+    pub fn split_task(&mut self, id: TaskId, at: DateTime, resume: DateTime) -> PlanResult<()> {
         let idx = self.splittable(id)?;
         if crate::limits::clamp_datetime(at) != at || crate::limits::clamp_datetime(resume) != resume {
             return invalid("a split's dates must be between 1900 and 2300");
@@ -197,17 +197,17 @@ impl Project {
 
 #[cfg(test)]
 mod tests {
-    use chrono::NaiveDate;
+    use crate::dates::prelude::*;
 
     use crate::prelude::*;
 
-    fn dt(m: u32, d: u32, h: u32) -> chrono::NaiveDateTime {
-        NaiveDate::from_ymd_opt(2026, m, d).unwrap().and_hms_opt(h, 0, 0).unwrap()
+    fn dt(m: u32, d: u32, h: u32) -> DateTime {
+        crate::dates::ymd(2026, m, d).unwrap().and_hms_opt(h, 0, 0).unwrap()
     }
 
     /// A (4 days, Mon 10/19 – Thu 10/22) → B (1 day).
     fn plan() -> (Project, TaskId, TaskId) {
-        let mut p = Project::new("S", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let mut p = Project::new("S", crate::dates::ymd(2026, 10, 19).unwrap());
         let a = p.add_task("A", None);
         p.set_duration(a, 4 * 480, false).unwrap();
         let b = p.add_task("B", None);
@@ -270,7 +270,7 @@ mod tests {
     #[test]
     fn split_dates_stay_in_range() {
         let (mut p, a, _) = plan();
-        let far = NaiveDate::from_ymd_opt(9999, 1, 1).unwrap().and_hms_opt(8, 0, 0).unwrap();
+        let far = crate::dates::ymd(9999, 1, 1).unwrap().and_hms_opt(8, 0, 0).unwrap();
         assert!(p.split_task(a, dt(10, 20, 17), far).is_err());
     }
 
@@ -278,7 +278,7 @@ mod tests {
     /// left an overallocation it then didn't report.
     #[test]
     fn leveling_moves_planned_splits_with_the_task() {
-        let mut p = Project::new("L", NaiveDate::from_ymd_opt(2026, 10, 19).unwrap());
+        let mut p = Project::new("L", crate::dates::ymd(2026, 10, 19).unwrap());
         let r = p.add_resource("R");
         let x = p.add_task("X", None);
         p.task_mut(x).unwrap().priority = 900;

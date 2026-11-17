@@ -197,7 +197,7 @@ impl TaskInfo {
         // Nothing to compare with means nothing was changed here.
         let Some(o) = self.orig.as_deref() else { return Ok(()) };
         let err = |e: PlanError| e.to_string();
-        let opt_date = |p: &Project, s: &str, finish: bool| -> Result<Option<chrono::NaiveDateTime>, String> {
+        let opt_date = |p: &Project, s: &str, finish: bool| -> Result<Option<DateTime>, String> {
             if s.trim().is_empty() || s.trim().eq_ignore_ascii_case("na") {
                 Ok(None)
             } else {
@@ -867,7 +867,7 @@ mod tests {
     use super::*;
 
     fn demo() -> Project {
-        plancraft_core::sample::demo_project(chrono::NaiveDate::from_ymd_opt(2026, 10, 19).unwrap())
+        plancraft_core::sample::demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap())
     }
 
     /// Regression: OK wrote every field back as the dialog opened, undoing what an agent changed
