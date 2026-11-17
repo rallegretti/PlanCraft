@@ -210,7 +210,7 @@ fn a_file_with_only_a_heading_row_or_nothing_is_reported() {
     assert!(tabular::build(grid, &ImportOptions::guess(grid, "x")).is_err());
 }
 
-/// Review item 3: resources, assignments and logged time export as CSV too, each with a row per
+/// Review (Files, CSV export): resources, assignments and logged time export as CSV too, each with a row per
 /// item, work in hours, the same costs as the plan, and formulas kept as text.
 #[test]
 fn resources_assignments_and_logged_time_export_as_csv() {

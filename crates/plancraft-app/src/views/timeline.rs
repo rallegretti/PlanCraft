@@ -165,7 +165,7 @@ pub fn show(ui: &mut Ui, rect: Rect, p: &Project, shown: &[bool], g: &mut GanttS
     if (resp.dragged() || resp.clicked())
         && let Some(pp) = resp.interact_pointer_pos()
     {
-        let half = SignedDuration::from_mins(view_end.signed_duration_since(view_start).num_minutes() / 2);
-        g.left = t_of(pp.x) - half;
+        let half = view_end.signed_duration_since(view_start).num_minutes() / 2;
+        g.left = plancraft_core::dates::add_minutes(t_of(pp.x), -half);
     }
 }

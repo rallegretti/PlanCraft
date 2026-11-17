@@ -3830,7 +3830,7 @@ mod ui_tests {
         h.run_steps(2);
     }
 
-    /// Review item 24: views scrolled to the first or last representable day draw, scroll and zoom
+    /// Review (P2, app date arithmetic): views scrolled to the first or last representable day draw, scroll and zoom
     /// without overflowing a date (the Gantt Chart's non-working-day loop added a day past the
     /// last one and panicked).
     #[test]
@@ -3860,6 +3860,16 @@ mod ui_tests {
                         });
                         h.run_steps(1);
                     }
+                }
+                // The Calendar's month buttons stay on the first or last month.
+                if v == ViewKind::Calendar {
+                    use egui_kittest::kittest::Queryable;
+                    for button in ["⏴", "⏵", "⏵", "⏴", "⏴"] {
+                        h.get_by_label(button).click();
+                        h.run_steps(1);
+                    }
+                    let month = h.state().st.calendar_month;
+                    assert_eq!((month.year32(), month.day32()), (day.year32(), 1), "{month}");
                 }
                 assert!(h.state().crash.is_none(), "{v:?} at {left}: {:?}", h.state().crash);
             }

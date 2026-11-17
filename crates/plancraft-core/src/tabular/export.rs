@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::dates::prelude::*;
 use crate::ids::{ResourceId, TaskId};
-use crate::model::{Project, ResourceType};
+use crate::model::{Project, Resource, ResourceType, Task};
 
 /// Which of a plan's tables to export.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -151,9 +151,15 @@ fn logged(p: &Project) -> HashMap<(TaskId, ResourceId), i64> {
     m
 }
 
-/// Row numbers (the ID column of the task export) by task.
-fn task_rows(p: &Project) -> HashMap<TaskId, usize> {
-    p.tasks.iter().enumerate().map(|(i, t)| (t.id, i.saturating_add(1))).collect()
+/// Each task with its row number (the ID column of the task export), by id: one lookup per row
+/// instead of a search, so a plan at the size limits exports in linear time.
+fn task_rows(p: &Project) -> HashMap<TaskId, (usize, &Task)> {
+    p.tasks.iter().enumerate().map(|(i, t)| (t.id, (i.saturating_add(1), t))).collect()
+}
+
+/// The resources by id.
+fn resources_by_id(p: &Project) -> HashMap<ResourceId, &Resource> {
+    p.resources.iter().map(|r| (r.id, r)).collect()
 }
 
 const RESOURCE_HEADINGS: &str = "ID,Unique ID,Name,Type,Category,Initials,Group,Email,Material Label,Max Units (%),Std. Rate,Ovt. Rate,Cost/Use,Calendar,Work (h),Actual Work (h),Cost,Overallocated,Notes";
@@ -163,10 +169,11 @@ const RESOURCE_HEADINGS: &str = "ID,Unique ID,Name,Type,Category,Initials,Group,
 fn resources_csv(p: &Project) -> String {
     let logged = logged(p);
     let over: HashSet<ResourceId> = crate::workload::overallocations(p).into_iter().map(|(r, _)| r).collect();
+    let resources = resources_by_id(p);
     // (work, actual work, cost) per resource.
     let mut totals: HashMap<ResourceId, (i64, i64, f64)> = HashMap::new();
     for a in &p.assignments {
-        let Some(r) = p.resource(a.resource) else {
+        let Some(r) = resources.get(&a.resource) else {
             continue;
         };
         let e = totals.entry(a.resource).or_default();
@@ -217,12 +224,13 @@ const ASSIGNMENT_HEADINGS: &str =
 fn assignments_csv(p: &Project) -> String {
     let logged = logged(p);
     let rows = task_rows(p);
+    let resources = resources_by_id(p);
     let mut list: Vec<_> = p.assignments.iter().collect();
-    list.sort_by_key(|a| rows.get(&a.task).copied().unwrap_or(usize::MAX));
+    list.sort_by_key(|a| rows.get(&a.task).map_or(usize::MAX, |r| r.0));
     let mut s = format!("\u{feff}{ASSIGNMENT_HEADINGS}\n");
     for a in list {
-        let task = p.task(a.task);
-        let r = p.resource(a.resource);
+        let task = rows.get(&a.task).map(|r| r.1);
+        let r = resources.get(&a.resource).copied();
         let units = match r.map(|r| r.kind) {
             Some(ResourceType::Work) | None => {
                 if a.units.is_finite() {
@@ -237,7 +245,7 @@ fn assignments_csv(p: &Project) -> String {
         let actual = a.actual_work.saturating_add(logged.get(&(a.task, a.resource)).copied().unwrap_or(0));
         s += &format!(
             "{},{},{},{},{},{},{},{},{},{},{},{}\n",
-            rows.get(&a.task).map(|n| n.to_string()).unwrap_or_default(),
+            rows.get(&a.task).map(|r| r.0.to_string()).unwrap_or_default(),
             a.task.0,
             quote(task.map(|t| t.name.as_str()).unwrap_or("")),
             a.resource.0,
@@ -259,18 +267,19 @@ const TIME_HEADINGS: &str = "Date,Task ID,Task Unique ID,Task,Resource Unique ID
 /// The timesheet as CSV: a row per logged entry, by date.
 fn time_csv(p: &Project) -> String {
     let rows = task_rows(p);
+    let resources = resources_by_id(p);
     let mut list: Vec<_> = p.time_entries.iter().collect();
-    list.sort_by_key(|e| (e.date, rows.get(&e.task).copied().unwrap_or(usize::MAX)));
+    list.sort_by_key(|e| (e.date, rows.get(&e.task).map_or(usize::MAX, |r| r.0)));
     let mut s = format!("\u{feff}{TIME_HEADINGS}\n");
     for e in list {
         s += &format!(
             "{},{},{},{},{},{},{},{}\n",
             e.date.format("%Y-%m-%d"),
-            rows.get(&e.task).map(|n| n.to_string()).unwrap_or_default(),
+            rows.get(&e.task).map(|r| r.0.to_string()).unwrap_or_default(),
             e.task.0,
-            quote(p.task(e.task).map(|t| t.name.as_str()).unwrap_or("")),
+            quote(rows.get(&e.task).map(|r| r.1.name.as_str()).unwrap_or("")),
             e.resource.0,
-            quote(p.resource(e.resource).map(|r| r.name.as_str()).unwrap_or("")),
+            quote(resources.get(&e.resource).map(|r| r.name.as_str()).unwrap_or("")),
             hours(e.minutes),
             quote(&e.note),
         );
