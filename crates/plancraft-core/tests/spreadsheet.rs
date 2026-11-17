@@ -209,3 +209,77 @@ fn a_file_with_only_a_heading_row_or_nothing_is_reported() {
     let (_, grid) = &sheets.sheets[0];
     assert!(tabular::build(grid, &ImportOptions::guess(grid, "x")).is_err());
 }
+
+/// Review item 3: resources, assignments and logged time export as CSV too, each with a row per
+/// item, work in hours, the same costs as the plan, and formulas kept as text.
+#[test]
+fn resources_assignments_and_logged_time_export_as_csv() {
+    use plancraft_core::tabular::CsvTable;
+    let mut p = plancraft_core::sample::demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap());
+    plancraft_core::schedule::recalculate(&mut p);
+    let a = p.assignments[0].clone();
+    let day = plancraft_core::dates::ymd(2026, 10, 20).unwrap();
+    p.log_time(a.task, a.resource, day, 90, "=HYPERLINK(\"x\")").unwrap();
+    plancraft_core::schedule::recalculate(&mut p);
+    let read = |table: CsvTable| {
+        let csv = tabular::table_to_csv(&p, table);
+        assert!(csv.starts_with('\u{feff}'), "{table:?} starts with a byte order mark");
+        let sheets = tabular::read_bytes(csv.as_bytes(), "csv").unwrap();
+        sheets.sheets[0].1.clone()
+    };
+    let col =
+        |g: &tabular::Grid, name: &str| g.headers.iter().position(|h| h == name).unwrap_or_else(|| panic!("no {name} in {:?}", g.headers));
+
+    // Resources: one row each; work and cost add up to the plan's.
+    let g = read(CsvTable::Resources);
+    assert_eq!(g.rows.len(), p.resources.len());
+    let r = &p.resources[0];
+    let row = g.rows.iter().position(|row| row[col(&g, "Name")] == r.name).unwrap();
+    assert_eq!(g.cell(row, col(&g, "Unique ID")), r.id.0.to_string());
+    let work: f64 = (0..g.rows.len()).map(|i| g.cell(i, col(&g, "Work (h)")).parse::<f64>().unwrap()).sum();
+    let task_work: i64 = p.tasks.iter().filter(|t| !t.sched.is_summary).map(|t| t.sched.work).sum();
+    assert!((work - task_work as f64 / 60.0).abs() < 0.1, "{work} h against {task_work} min");
+    let cost: f64 = (0..g.rows.len()).map(|i| g.cell(i, col(&g, "Cost")).parse::<f64>().unwrap()).sum();
+    let task_cost: f64 = p.tasks.iter().filter(|t| !t.sched.is_summary).map(|t| t.sched.cost - t.fixed_cost).sum();
+    assert!((cost - task_cost).abs() < 1.0, "{cost} against {task_cost}");
+    let row = g.rows.iter().position(|row| row[col(&g, "Unique ID")] == a.resource.0.to_string()).unwrap();
+    assert!(g.cell(row, col(&g, "Actual Work (h)")).parse::<f64>().unwrap() >= 1.5);
+
+    // Assignments: one row each, with the task and resource by name and the logged time.
+    let g = read(CsvTable::Assignments);
+    assert_eq!(g.rows.len(), p.assignments.len());
+    let task = p.task(a.task).unwrap();
+    let row = (0..g.rows.len())
+        .find(|&i| {
+            g.cell(i, col(&g, "Task Unique ID")) == a.task.0.to_string()
+                && g.cell(i, col(&g, "Resource Unique ID")) == a.resource.0.to_string()
+        })
+        .unwrap();
+    assert_eq!(g.cell(row, col(&g, "Task")), task.name);
+    assert_eq!(g.cell(row, col(&g, "Resource")), p.resource(a.resource).unwrap().name);
+    assert_eq!(g.cell(row, col(&g, "Work (h)")), format!("{:.2}", a.work as f64 / 60.0));
+    let logged: i64 = p.time_entries.iter().filter(|e| (e.task, e.resource) == (a.task, a.resource)).map(|e| e.minutes).sum();
+    assert_eq!(g.cell(row, col(&g, "Actual Work (h)")), format!("{:.2}", (a.actual_work + logged) as f64 / 60.0));
+    let id = p.task_index(a.task).unwrap() + 1;
+    assert_eq!(g.cell(row, col(&g, "Task ID")), id.to_string());
+
+    // Logged time: the entry, its hours, and the note kept as text.
+    let g = read(CsvTable::Time);
+    assert_eq!(g.rows.len(), p.time_entries.len());
+    let dates: Vec<&str> = (0..g.rows.len()).map(|i| g.cell(i, col(&g, "Date"))).collect();
+    assert!(dates.windows(2).all(|w| w[0] <= w[1]), "by date: {dates:?}");
+    let row = (0..g.rows.len()).find(|&i| g.cell(i, col(&g, "Hours")) == "1.50").unwrap();
+    assert_eq!(g.cell(row, col(&g, "Date")), "2026-10-20");
+    assert_eq!(g.cell(row, col(&g, "Task")), task.name);
+    assert_eq!(g.cell(row, col(&g, "Note")), "=HYPERLINK(\"x\")", "reads back as the note");
+    assert!(tabular::table_to_csv(&p, CsvTable::Time).contains("\"'=HYPERLINK(\"\"x\"\")\""), "a spreadsheet sees text, not a formula");
+
+    // An empty plan exports just the headings.
+    let empty = Project::new("Empty", plancraft_core::dates::ymd(2026, 10, 19).unwrap());
+    for table in CsvTable::ALL {
+        let csv = tabular::table_to_csv(&empty, table);
+        assert_eq!(csv.lines().count(), 1, "{table:?}: {csv}");
+    }
+    assert_eq!(CsvTable::from_key(" Time "), Some(CsvTable::Time));
+    assert_eq!(CsvTable::from_key("people"), None);
+}

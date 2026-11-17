@@ -23,11 +23,11 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
         ui.new_child(egui::UiBuilder::new().max_rect(Rect::from_min_size(rect.min + vec2(8.0, 4.0), vec2(rect.width() - 16.0, 26.0))));
     bar.horizontal(|ui| {
         if ui.button("⏴").clicked() {
-            st.calendar_month = (month - plancraft_core::dates::days(1)).with_day(1).unwrap_or(month);
+            st.calendar_month = (plancraft_core::dates::shift_days(month, -1)).with_day(1).unwrap_or(month);
         }
         ui.label(egui::RichText::new(month.format("%B %Y").to_string()).size(16.0).strong());
         if ui.button("⏵").clicked() {
-            st.calendar_month = (month + plancraft_core::dates::days(32)).with_day(1).unwrap_or(month);
+            st.calendar_month = (plancraft_core::dates::shift_days(month, 32)).with_day(1).unwrap_or(month);
         }
         if ui.button("Today").clicked() {
             st.calendar_month = plancraft_core::dates::today().with_day(1).unwrap_or(month);
@@ -39,7 +39,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     let area = Rect::from_min_max(pos2(rect.left() + 8.0, rect.top() + 36.0), rect.max - vec2(8.0, 8.0));
     let painter = ui.painter_at(area);
     let header_h = 22.0;
-    let first = month - plancraft_core::dates::days(month.weekday().num_days_from_monday() as i64);
+    let first = plancraft_core::dates::shift_days(month, -(month.weekday().num_days_from_monday() as i64));
     let weeks = 6;
     let cell_w = area.width() / 7.0;
     let cell_h = (area.height() - header_h) / weeks as f32;
@@ -53,10 +53,10 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
     let pointer = ui.input(|i| i.pointer.hover_pos());
     let mut clicked_task: Option<(TaskId, bool)> = None;
     for w in 0..weeks {
-        let week_start = first + plancraft_core::dates::days(7 * w as i64);
+        let week_start = plancraft_core::dates::shift_days(first, 7 * w as i64);
         let wy = area.top() + header_h + w as f32 * cell_h;
         for dcol in 0..7 {
-            let day = week_start + plancraft_core::dates::days(dcol);
+            let day = plancraft_core::dates::shift_days(week_start, dcol);
             let r = Rect::from_min_size(pos2(area.left() + dcol as f32 * cell_w, wy), vec2(cell_w, cell_h));
             let fill = if !cal.is_working_day(day) { theme::pal().NONWORKING } else { theme::pal().BG };
             painter.rect_filled(r, 0.0, fill);
@@ -71,7 +71,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
             }
         }
         // Task bars for this week, stacked.
-        let week_end = week_start + plancraft_core::dates::days(7);
+        let week_end = plancraft_core::dates::shift_days(week_start, 7);
         let mut lane = 0usize;
         let max_lanes = ((cell_h - 24.0) / 18.0).floor().max(0.0) as usize;
         let mut hidden = 0;
@@ -79,7 +79,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
             let (Some(s), Some(f)) = (t.sched.start, t.sched.finish) else {
                 continue;
             };
-            let (sd, fd) = (s.date(), if t.is_milestone() { s.date() } else { (f - SignedDuration::from_mins(1)).date() });
+            let (sd, fd) = (s.date(), if t.is_milestone() { s.date() } else { plancraft_core::dates::add_minutes(f, -1).date() });
             if fd < week_start || sd >= week_end {
                 continue;
             }
@@ -88,7 +88,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                 continue;
             }
             let c0 = sd.max(week_start).signed_duration_since(week_start).num_days() as f32;
-            let c1 = (fd.min(week_end - plancraft_core::dates::days(1))).signed_duration_since(week_start).num_days() as f32 + 1.0;
+            let c1 = (fd.min(plancraft_core::dates::shift_days(week_end, -1))).signed_duration_since(week_start).num_days() as f32 + 1.0;
             let y = wy + 22.0 + lane as f32 * 18.0;
             let r = Rect::from_min_max(pos2(area.left() + c0 * cell_w + 3.0, y), pos2(area.left() + c1 * cell_w - 3.0, y + 15.0));
             let selected = st.sel.tasks.contains(&t.id);

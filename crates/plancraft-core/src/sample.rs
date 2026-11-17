@@ -36,7 +36,11 @@ fn build(start: Date) -> PlanResult<Project> {
         r.group = "Product".into();
         r.standard_rate = 85.0;
         r.email = "ana@example.com".into();
-        r.exceptions.push(CalendarException::non_working("Vacation", start + crate::dates::days(23), start + crate::dates::days(25)));
+        r.exceptions.push(CalendarException::non_working(
+            "Vacation",
+            crate::dates::shift_days(start, 23),
+            crate::dates::shift_days(start, 25),
+        ));
     }
     {
         let r = p.resource_mut(ben).ok_or(PlanError::ResourceNotFound(ben))?;
@@ -133,7 +137,7 @@ fn build(start: Date) -> PlanResult<Project> {
     p.task_mut(beta).ok_or(PlanError::TaskNotFound(beta))?.deliverable = "Feature-complete beta build".into();
     p.task_mut(golive).ok_or(PlanError::TaskNotFound(golive))?.deliverable = "Public release".into();
     p.task_mut(golive).ok_or(PlanError::TaskNotFound(golive))?.deadline =
-        p.parse_datetime(&(start + crate::dates::days(70)).to_string(), true);
+        p.parse_datetime(&crate::dates::shift_days(start, 70).to_string(), true);
     for id in [plan_ok, design_ok, beta, golive] {
         p.task_mut(id).ok_or(PlanError::TaskNotFound(id))?.show_on_timeline = true;
     }
@@ -166,7 +170,7 @@ fn build(start: Date) -> PlanResult<Project> {
     p.set_percent_complete(scope, 100)?;
     let s = p.task(scope).and_then(|t| t.sched.start).map_or(start, |s| s.date());
     for i in 0..3 {
-        let _ = p.log_time(scope, ana, s + crate::dates::days(i), 8 * 60, "Scoping workshop");
+        let _ = p.log_time(scope, ana, crate::dates::shift_days(s, i), 8 * 60, "Scoping workshop");
     }
     p.set_percent_complete(research, 40)?;
 

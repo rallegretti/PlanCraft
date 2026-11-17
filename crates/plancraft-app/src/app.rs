@@ -737,11 +737,14 @@ impl PlanCraftApp {
         }
     }
 
-    fn export_csv(&mut self) {
-        let Some((name, csv)) = self.with_doc(|doc, _| (doc.project.name.clone(), plancraft_core::tabular::to_csv(&doc.project))) else {
+    fn export_csv(&mut self, table: plancraft_core::tabular::CsvTable) {
+        let Some((name, csv)) =
+            self.with_doc(|doc, _| (doc.project.name.clone(), plancraft_core::tabular::table_to_csv(&doc.project, table)))
+        else {
             return;
         };
-        if let Some(path) = rfd::FileDialog::new().add_filter("CSV", &["csv"]).set_file_name(format!("{name}.csv")).save_file() {
+        let file = format!("{name}{}.csv", table.file_suffix());
+        if let Some(path) = rfd::FileDialog::new().add_filter("CSV", &["csv"]).set_file_name(file).save_file() {
             match plancraft_core::io::write_atomic(&path, csv.as_bytes(), plancraft_core::io::Privacy::KeepExisting) {
                 Ok(()) => self.set_status(format!("Exported {}", path.display())),
                 Err(e) => self.st.toast(ToastKind::Error, format!("Could not save the CSV file: {e}")),
@@ -817,7 +820,7 @@ impl PlanCraftApp {
                 self.rec().discard(&stem);
                 self.set_status("Recovery copy discarded");
             }
-            Command::ExportCsv => self.export_csv(),
+            Command::ExportCsv(table) => self.export_csv(table),
             Command::Print => {
                 let ws = self.ws.clone();
                 let ws = lock(&ws);
@@ -1334,7 +1337,7 @@ impl PlanCraftApp {
                     let width = (ctx.content_rect().width() - st.table_width - 80.0).max(200.0);
                     let days = (f.signed_duration_since(s).num_minutes() as f32 / 1440.0).max(1.0) * 1.1 + 2.0;
                     st.gantt.px_per_day = (width / days).clamp(0.5, 140.0);
-                    st.gantt.left = s - plancraft_core::dates::days(1);
+                    st.gantt.left = plancraft_core::dates::add_minutes(s, -1440);
                 }
             }
             Command::CollapseAll => {
@@ -3825,6 +3828,42 @@ mod ui_tests {
         }
         h.state_mut().st.start_page = true;
         h.run_steps(2);
+    }
+
+    /// Review item 24: views scrolled to the first or last representable day draw, scroll and zoom
+    /// without overflowing a date (the Gantt Chart's non-working-day loop added a day past the
+    /// last one and panicked).
+    #[test]
+    fn every_view_draws_at_the_ends_of_the_date_range() {
+        use plancraft_core::dates::DateTime;
+        let mut h = harness();
+        let id = h.state().ws.lock().unwrap().active_doc().unwrap().project.id;
+        for (left, day) in [(DateTime::MAX, Date::MAX), (DateTime::MIN, Date::MIN)] {
+            for v in ViewKind::ALL {
+                let st = &mut h.state_mut().st;
+                st.view = v;
+                st.gantt.left = left;
+                st.gantt.initialized_for = Some(id);
+                st.calendar_month = day.with_day(1).unwrap_or(day);
+                st.timesheet_week = day;
+                st.usage_from = Some(day);
+                h.run_steps(2);
+                // Scroll both ways, plain and with Shift (which pans the time axis), and zoom.
+                for modifiers in [Modifiers::NONE, Modifiers::SHIFT, Modifiers::COMMAND] {
+                    for delta in [vec2(-4000.0, -4000.0), vec2(4000.0, 4000.0)] {
+                        h.event(egui::Event::PointerMoved(pos2(900.0, 500.0)));
+                        h.event(egui::Event::MouseWheel {
+                            unit: egui::MouseWheelUnit::Point,
+                            delta,
+                            modifiers,
+                            phase: egui::TouchPhase::Move,
+                        });
+                        h.run_steps(1);
+                    }
+                }
+                assert!(h.state().crash.is_none(), "{v:?} at {left}: {:?}", h.state().crash);
+            }
+        }
     }
 
     fn harness_with(ws: Workspace) -> Harness<'static, PlanCraftApp> {

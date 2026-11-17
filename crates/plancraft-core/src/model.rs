@@ -761,6 +761,18 @@ pub struct Assignment {
     pub contour: WorkContour,
 }
 
+impl Assignment {
+    /// What the assignment costs with this resource: work hours at the standard rate, material
+    /// units at the unit price (each plus the cost per use), or a cost resource's fixed amount.
+    pub fn cost_with(&self, r: &Resource) -> f64 {
+        match r.kind {
+            ResourceType::Work => self.work as f64 / 60.0 * r.standard_rate + r.cost_per_use,
+            ResourceType::Material => self.units * r.standard_rate + r.cost_per_use,
+            ResourceType::Cost => self.cost,
+        }
+    }
+}
+
 /// Time spent by a resource on a task, as entered on a timesheet.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct TimeEntry {

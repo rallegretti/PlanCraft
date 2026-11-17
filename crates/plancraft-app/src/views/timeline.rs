@@ -37,7 +37,7 @@ pub fn show(ui: &mut Ui, rect: Rect, p: &Project, shown: &[bool], g: &mut GanttS
     let span = finish.signed_duration_since(start).num_minutes().max(60) as f32;
     let bar = Rect::from_min_max(pos2(rect.left() + 90.0, rect.top() + 30.0), pos2(rect.right() - 90.0, rect.top() + 52.0));
     let x_of = |t: DateTime| bar.left() + t.signed_duration_since(start).num_minutes() as f32 / span * bar.width();
-    let t_of = |x: f32| start + SignedDuration::from_mins(((x - bar.left()) / bar.width() * span) as i64);
+    let t_of = |x: f32| plancraft_core::dates::add_minutes(start, ((x - bar.left()) / bar.width() * span) as i64);
 
     // Start/finish labels.
     painter.text(

@@ -54,11 +54,11 @@ impl WorkingTime {
         let wc = WorkCal::single(cal);
         ui.horizontal(|ui| {
             if ui.small_button("⏴").clicked() {
-                self.month = (self.month - plancraft_core::dates::days(1)).with_day(1).unwrap_or(self.month);
+                self.month = (plancraft_core::dates::shift_days(self.month, -1)).with_day(1).unwrap_or(self.month);
             }
             ui.label(RichText::new(self.month.format("%B %Y").to_string()).strong());
             if ui.small_button("⏵").clicked() {
-                self.month = (self.month + plancraft_core::dates::days(32)).with_day(1).unwrap_or(self.month);
+                self.month = (plancraft_core::dates::shift_days(self.month, 32)).with_day(1).unwrap_or(self.month);
             }
         });
         let cell = 30.0;
@@ -73,9 +73,9 @@ impl WorkingTime {
                 theme::pal().TEXT_WEAK,
             );
         }
-        let first = self.month - plancraft_core::dates::days(self.month.weekday().num_days_from_monday() as i64);
+        let first = plancraft_core::dates::shift_days(self.month, -(self.month.weekday().num_days_from_monday() as i64));
         for k in 0..42 {
-            let day = first + plancraft_core::dates::days(k);
+            let day = plancraft_core::dates::shift_days(first, k);
             let r = Rect::from_min_size(
                 pos2(rect.left() + (k % 7) as f32 * cell, rect.top() + (k / 7 + 1) as f32 * cell),
                 vec2(cell - 2.0, cell - 2.0),

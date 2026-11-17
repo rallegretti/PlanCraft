@@ -959,8 +959,22 @@ fn spreadsheet_import_and_csv_export() {
 
     let out = dir.path().join("again.csv");
     let exported = c.call("export_csv", json!({ "path": out.to_str().unwrap() }));
-    assert_eq!(exported["tasks"], 3);
+    assert_eq!((exported["table"].as_str(), exported["rows"].as_u64()), (Some("tasks"), Some(3)));
     assert!(c.call_err("export_csv", json!({ "path": out.to_str().unwrap() })).contains("already exists"));
+    // The other tables.
+    let people = dir.path().join("people.csv");
+    let exported = c.call("export_csv", json!({ "path": people.to_str().unwrap(), "table": "resources" }));
+    assert_eq!((exported["table"].as_str(), exported["rows"].as_u64()), (Some("resources"), Some(2)));
+    let text = std::fs::read_to_string(&people).unwrap();
+    assert!(text.starts_with("\u{feff}ID,Unique ID,Name,Type") && text.contains("\"Ana\"") && text.contains("\"Ben\""), "{text}");
+    let who = dir.path().join("who.csv");
+    let exported = c.call("export_csv", json!({ "path": who.to_str().unwrap(), "table": "assignments" }));
+    assert_eq!(exported["rows"], 3, "Ana on Design, Ana and Ben on Build");
+    let text = std::fs::read_to_string(&who).unwrap();
+    let rows: Vec<&str> = text.lines().skip(1).collect();
+    assert!(rows[0].contains("\"Design\"") && rows[1..].iter().all(|l| l.contains("\"Build\"")), "in task order: {text}");
+    let wrong = c.call_err("export_csv", json!({ "path": dir.path().join("x.csv").to_str().unwrap(), "table": "people" }));
+    assert!(wrong.contains("unknown table"), "{wrong}");
     let back = c.call("import_spreadsheet", json!({ "path": out.to_str().unwrap() }));
     assert_eq!(back["project"]["name"], "again");
     assert_eq!(task(&c.call("list_tasks", json!({})), "Build")["predecessors"], "1");

@@ -323,7 +323,7 @@ impl GanttState {
 
     pub fn time_at(&self, chart_left: f32, x: f32) -> DateTime {
         let days = (x - chart_left) / self.px_per_day;
-        self.left + SignedDuration::from_mins((days * 1440.0) as i64)
+        plancraft_core::dates::add_minutes(self.left, (days * 1440.0) as i64)
     }
 
     /// Zoom presets (px per day), from years to hours.
@@ -336,7 +336,7 @@ impl GanttState {
         self.px_per_day = Self::ZOOMS.get(n).copied().unwrap_or(self.px_per_day);
         // Keep the anchor time under the cursor.
         let days = (anchor_x - chart_left) / self.px_per_day;
-        self.left = anchor_t - SignedDuration::from_mins((days * 1440.0) as i64);
+        self.left = plancraft_core::dates::add_minutes(anchor_t, -((days * 1440.0) as i64));
     }
 
     /// Continuous zoom by a factor, keeping the time under `anchor_x` fixed.
@@ -344,11 +344,11 @@ impl GanttState {
         let anchor_t = self.time_at(chart_left, anchor_x);
         self.px_per_day = (self.px_per_day * factor).clamp(0.5, 160.0);
         let days = (anchor_x - chart_left) / self.px_per_day;
-        self.left = anchor_t - SignedDuration::from_mins((days * 1440.0) as i64);
+        self.left = plancraft_core::dates::add_minutes(anchor_t, -((days * 1440.0) as i64));
     }
 
     pub fn scroll_to(&mut self, t: DateTime) {
-        self.left = t - plancraft_core::dates::days(2);
+        self.left = plancraft_core::dates::add_minutes(t, -2 * 1440);
     }
 }
 
@@ -449,7 +449,7 @@ pub struct UiState {
 impl Default for UiState {
     fn default() -> Self {
         let today = plancraft_core::dates::today();
-        let monday = today - plancraft_core::dates::days(today.weekday().num_days_from_monday() as i64);
+        let monday = plancraft_core::dates::shift_days(today, -(today.weekday().num_days_from_monday() as i64));
         Self {
             view: ViewKind::Gantt,
             menu_tab: MenuTab::Task,

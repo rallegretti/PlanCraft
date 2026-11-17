@@ -79,7 +79,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState) {
         }
         if ui.button("This Week").clicked() {
             let today = plancraft_core::dates::today();
-            st.timesheet_week = today - plancraft_core::dates::days(today.weekday().num_days_from_monday() as i64);
+            st.timesheet_week = plancraft_core::dates::shift_days(today, -(today.weekday().num_days_from_monday() as i64));
         }
         ui.separator();
         ui.label("Resource:");

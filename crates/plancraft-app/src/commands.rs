@@ -17,7 +17,8 @@ pub enum Command {
     Close,
     Undo,
     Redo,
-    ExportCsv,
+    /// Save one of the plan's tables (tasks, resources, assignments, logged time) as CSV.
+    ExportCsv(plancraft_core::tabular::CsvTable),
     /// Pick a CSV or spreadsheet file to import as a new plan.
     ImportSpreadsheet,
     /// The Print window (preview, page setup, print, save as PDF).
