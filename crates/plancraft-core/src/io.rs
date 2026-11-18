@@ -40,7 +40,13 @@ pub enum FileError {
 }
 
 /// What a file looked like on disk (modification time and size), to notice when another program
-/// rewrites a document between our load or save and the next save.
+/// rewrites a document between our load or save and the next save, and to watch open documents
+/// for changes ([`crate::watch`]).
+///
+/// The file's identity (inode) is deliberately left out: FUSE file systems (sshfs) and some
+/// network mounts make up inode numbers that change while the file does not, which would report
+/// changes that never happened. A rewrite of the same size within one tick of a coarse clock
+/// (FAT counts in two-second steps) can go unnoticed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DiskStamp {
     modified: Option<std::time::SystemTime>,

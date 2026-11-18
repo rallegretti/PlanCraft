@@ -33,7 +33,8 @@
   - Microsoft Project XML (MSPDI) import and export, following Microsoft's published schema (under its Open Specification Promise), with notes on anything the other side has no place for.
   - Task lists from spreadsheets: CSV and tab-separated text and Excel (`.xlsx`, `.xlsm`, `.xlsb`), all pure Rust, read cell by cell within limits. The Import Spreadsheet window guesses what each column holds from its heading and lets you change it. The task list's CSV export reads back in.
 - **Packages:** a universal macOS disk image (Developer ID signed and notarized), a portable Windows zip, and a Linux AppImage and installable tarball for x86_64 and arm64, each tested on a clean system before release.
-- **MCP server:** 91 tools, resources and prompts over stdio and Streamable HTTP. A live mode works inside the running app (bearer token per session, `plancraft mcp --attach` bridge), and the app binary has a headless `plancraft mcp` mode.
+- **MCP server:** 92 tools, resources and prompts over stdio and Streamable HTTP. A live mode works inside the running app (bearer token per session, `plancraft mcp --attach` bridge), and the app binary has a headless `plancraft mcp` mode.
+- **Changes on disk:** open plans are watched (plain polling, pure Rust, works on network shares). When another PlanCraft, the headless MCP server, an agent, git or a sync tool writes the file, a plan without unsaved changes reloads by itself (one undo step, with a notice); a plan with unsaved changes shows a bar to Reload, Keep Mine (the next save asks before overwriting), Compare or Save As. A deleted or moved file keeps the plan open as unsaved work, and links to other plans refresh when those files change. MCP tools report a changed or missing file (`disk_notice`), and `reload_project` reloads it without ever discarding the user's unsaved changes.
 - **Robustness:** no panics in shipped code (clippy-enforced), guarded edits with rollback, limits on hostile files and arguments, atomic saves, recovery copies, owner-only files.
 - **Quality gates:** `cargo xtask ci`, run locally on Linux, macOS and Windows (fmt, clippy, tests, cargo deny), a scheduler speed gate, hostile-input sweeps and parity tests against Microsoft's published scheduling examples.
 
@@ -45,7 +46,7 @@
 - **Leveling options:** level within slack only, a priority-driven order, splitting, and a leveling preview (MS Project's "Leveling Gantt").
 - **Resource pool shared across projects:** one resources file that several projects link to.
 - **Overtime work and cost-rate tables:** effective-dated rates and cost accrual.
-- **Collaboration:** file watching, so the app reloads when another tool or agent saves the file. A merge-friendly JSON layout already exists.
+- **Collaboration:** a warning when the same plan is open in another PlanCraft (a lock file next to the plan), and merging two versions of a plan instead of choosing one. File watching is done (see above); a merge-friendly JSON layout already exists.
 - **MCP:**
   - `notifications/resources/updated` subscriptions
   - per-tool read-only mode

@@ -7,7 +7,7 @@ use plancraft_core::duration::DurationUnit;
 use plancraft_core::limits::MAX_MINUTES;
 use plancraft_core::model::{FILE_EXTENSION, Project};
 use plancraft_core::report;
-use plancraft_core::workspace::Document;
+use plancraft_core::workspace::{ChangeSource, Document};
 use serde_json::{Value, json};
 
 use super::*;
@@ -90,6 +90,17 @@ pub fn tools() -> Vec<Tool> {
             "Close a document. Fails when it has unsaved changes unless discard_changes is true. Unsaved changes the user made in the app are never discarded: ask the user to save or close the document.",
             schema(json!({ "discard_changes": boolean("Close even if there are unsaved changes made by agents (default false). Never discards the user's own unsaved changes.") }), &[]),
             close_project,
+        )
+        .destructive(),
+        Tool::new(
+            "reload_project",
+            "Reload a project from disk",
+            "Read the document's file again and replace the open version with it, for example after another program, PlanCraft instance or git changed the file (results then carry a 'disk_notice', and 'disk' in list_documents is \"changed\"). The reload is one undoable step. Refused while the user has unsaved changes in PlanCraft: they choose in the app (Reload or Keep Mine), or save. Unsaved changes made by agents are discarded only with discard_changes: true. 'changes' summarizes how the file differed from the open version.",
+            schema(
+                json!({ "discard_changes": boolean("Discard unsaved changes made by agents (default false). Never discards the user's own unsaved changes.") }),
+                &[],
+            ),
+            reload_project,
         )
         .destructive(),
         Tool::new(
@@ -338,6 +349,63 @@ fn close_project(ctx: &Ctx, a: &Args) -> ToolResult {
             "active": ws.active_doc().map(|d| d.handle),
             "remaining": ws.docs.len(),
         }))
+    })?;
+    ctx.mark_changed();
+    Ok(out)
+}
+
+/// Whether an agent may replace the document's open version (see `reload_project`).
+fn may_reload(doc: &Document, discard: bool) -> ToolResult<()> {
+    if doc.user_changes {
+        // The user's unsaved work is theirs to keep or throw away, not an agent's.
+        return err(format!(
+            "'{}' has unsaved changes made by the user in PlanCraft, and reloading would discard them; ask the user to choose in PlanCraft (Reload or Keep Mine) or to save the plan",
+            doc.title()
+        ));
+    }
+    if doc.dirty && !discard {
+        return err(format!(
+            "'{}' has unsaved changes made by agents; pass discard_changes: true to discard them, or call save_project first",
+            doc.title()
+        ));
+    }
+    Ok(())
+}
+
+fn reload_project(ctx: &Ctx, a: &Args) -> ToolResult {
+    let discard = a.bool("discard_changes")?.unwrap_or(false);
+    let (handle, path) = ctx.read(a, |doc| {
+        let Some(path) = doc.path.clone() else {
+            return err("the document has never been saved, so it has no file to reload");
+        };
+        may_reload(doc, discard)?;
+        Ok((doc.handle, path))
+    })?;
+    // Read without holding the workspace, so a slow disk never stalls the app.
+    let (project, notes, stamp) = plancraft_core::workspace::read_for_reload(&path)?;
+    let out = ctx.with_workspace(|ws| {
+        let i = ws.index_of(handle).ok_or_else(|| ToolError("the document was closed while its file was being read".into()))?;
+        let doc = doc_at_mut(ws, i)?;
+        // The user may have edited or saved it meanwhile.
+        may_reload(doc, discard)?;
+        if doc.path.as_ref() != Some(&path) {
+            return err("the document was saved under another name while its file was being read; call reload_project again");
+        }
+        if !doc.dirty && stamp.is_some() && doc.disk_stamp() == stamp {
+            let mut out = project_overview(doc);
+            set(&mut out, "reloaded", json!(false));
+            set(&mut out, "message", json!("the document already matches its file"));
+            return Ok(out);
+        }
+        let changes = plancraft_core::watch::compare(&doc.project, &project);
+        doc.reload_from(project, notes.clone(), stamp, ChangeSource::Agent)?;
+        let mut out = project_overview(doc);
+        set(&mut out, "reloaded", json!(true));
+        set(&mut out, "changes", json!(changes));
+        if !notes.is_empty() {
+            set(&mut out, "load_notes", json!(notes));
+        }
+        Ok(out)
     })?;
     ctx.mark_changed();
     Ok(out)

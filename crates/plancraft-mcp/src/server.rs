@@ -7,7 +7,7 @@ use std::path::Path;
 use std::sync::{Arc, MutexGuard};
 
 use plancraft_core::model::Project;
-use plancraft_core::workspace::{ChangeSource, Document, SharedWorkspace, Workspace};
+use plancraft_core::workspace::{ChangeSource, DiskStatus, Document, SharedWorkspace, Workspace};
 use serde_json::{Map, Value, json};
 
 use crate::args::{Args, ToolError, ToolResult, err};
@@ -285,7 +285,10 @@ impl McpServer {
             self.notify_change();
         }
         match outcome {
-            Ok(Ok(value)) => tool_success_result(tool, value),
+            Ok(Ok(value)) => {
+                let notice = catch_unwind(AssertUnwindSafe(|| self.disk_notice(&args))).ok().flatten();
+                tool_success_result(tool, value, notice)
+            }
             Ok(Err(e)) => tool_error_result(e.0),
             Err(panic) => {
                 let msg = panic
@@ -299,18 +302,49 @@ impl McpServer {
     }
 }
 
+impl McpServer {
+    /// A note for the agent when the file of the document the call worked on (or the active one)
+    /// changed on disk since it was opened or saved, or is gone. The file is checked without
+    /// holding the workspace lock (a slow network share must not stall the app).
+    fn disk_notice(&self, args: &Args) -> Option<String> {
+        let (handle, path, known) = {
+            let ws = self.lock();
+            let doc = Ctx::doc_index(&ws, args).ok().and_then(|i| ws.docs.get(i))?;
+            (doc.handle, doc.path.clone()?, doc.disk_stamp())
+        };
+        match plancraft_core::workspace::disk_status(Some(&path), known) {
+            DiskStatus::Changed => Some(format!(
+                "The file of document {handle} ({}) was changed on disk by another program since it was opened or last saved. \
+                 reload_project loads it (refused while the user has unsaved changes); save_project will not overwrite it unless overwrite is true (check with the user first).",
+                path.display()
+            )),
+            DiskStatus::Missing => Some(format!(
+                "The file of document {handle} ({}) was deleted or moved. The document stays open: save_project writes it again, or pass 'path' to save it elsewhere.",
+                path.display()
+            )),
+            DiskStatus::InSync | DiskStatus::NoFile => None,
+        }
+    }
+}
+
 fn render_text(v: &Value) -> String {
     let compact = serde_json::to_string(v).unwrap_or_default();
     if compact.len() > 24_000 { compact } else { serde_json::to_string_pretty(v).unwrap_or(compact) }
 }
 
-fn tool_success_result(tool: &Tool, value: Value) -> Value {
-    let structured = match value {
+fn tool_success_result(tool: &Tool, value: Value, disk_notice: Option<String>) -> Value {
+    let mut structured = match value {
         Value::Object(_) => value,
         other => json!({ "result": other }),
     };
+    if let (Some(notice), Value::Object(m)) = (&disk_notice, &mut structured) {
+        m.insert("disk_notice".into(), json!(notice));
+    }
     let text = match tool.text_field.and_then(|f| structured.get(f)).and_then(Value::as_str) {
-        Some(t) => t.to_string(),
+        Some(t) => match &disk_notice {
+            Some(notice) => format!("{t}\n\nNote: {notice}"),
+            None => t.to_string(),
+        },
         None => render_text(&structured),
     };
     json!({

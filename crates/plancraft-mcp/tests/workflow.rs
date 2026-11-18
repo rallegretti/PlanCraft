@@ -552,6 +552,71 @@ fn agents_cannot_discard_the_users_unsaved_work() {
     assert_eq!(c.call("get_project", json!({}))["project"]["name"], "Shared");
 }
 
+/// Tools say when the document's file changed on disk or is gone, and reload_project loads it
+/// again, as an undoable step, without ever discarding the user's unsaved changes.
+#[test]
+fn tools_report_files_changed_on_disk_and_reload_them() {
+    use plancraft_core::workspace::ChangeSource;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("plan.plancraft");
+    let c = Client::new();
+    c.call("new_project", json!({ "name": "Plan", "start": "2026-10-19", "path": path.to_str().unwrap() }));
+    let r = c.call("get_project", json!({}));
+    assert!(r.get("disk_notice").is_none(), "{r}");
+    assert_eq!(r["project"]["disk"], "in_sync");
+    let e = c.call_err("reload_project", json!({ "document": "nope" }));
+    assert!(e.contains("no open document"), "{e}");
+
+    let mut other = plancraft_core::io::load(&path).unwrap();
+    other.add_task("Written elsewhere", None);
+    plancraft_core::io::save(&other, &path).unwrap();
+    let r = c.call("list_tasks", json!({}));
+    assert!(r["disk_notice"].as_str().unwrap().contains("changed on disk"), "{r}");
+    assert_eq!(c.call("list_documents", json!({}))["documents"][0]["disk"], "changed");
+
+    // The user's unsaved changes are never discarded, even when asked.
+    {
+        let mut ws = c.server.workspace().lock().unwrap();
+        ws.active_doc_mut().unwrap().edit_as("Add", ChangeSource::User, |p| p.add_task("User task", None)).unwrap();
+    }
+    let e = c.call_err("reload_project", json!({ "discard_changes": true }));
+    assert!(e.contains("made by the user"), "{e}");
+    c.call("undo", json!({}));
+    {
+        // The user's change was undone in the app (as the user), so the rest is the agent's.
+        let mut ws = c.server.workspace().lock().unwrap();
+        ws.active_doc_mut().unwrap().user_changes = false;
+    }
+    c.call("create_task", json!({ "name": "Agent draft" }));
+    let e = c.call_err("reload_project", json!({}));
+    assert!(e.contains("discard_changes"), "{e}");
+
+    let r = c.call("reload_project", json!({ "discard_changes": true }));
+    assert_eq!(r["reloaded"], true);
+    assert!(r["changes"].as_array().unwrap().iter().any(|l| l.as_str().unwrap().contains("Written elsewhere")), "{r}");
+    assert!(r.get("disk_notice").is_none(), "{r}");
+    assert_eq!(r["project"]["dirty"], false);
+    let tasks = c.call("list_tasks", json!({}));
+    assert_eq!(task(&tasks, "Written elsewhere")["name"], "Written elsewhere");
+    assert_eq!(c.call("reload_project", json!({}))["reloaded"], false, "nothing new on disk");
+    // The reload is one undoable step: undo brings back the agent's draft.
+    c.call("undo", json!({}));
+    assert_eq!(task(&c.call("list_tasks", json!({})), "Agent draft")["name"], "Agent draft");
+
+    // A file replaced by garbage fails to reload and changes nothing.
+    std::fs::write(&path, "{ not a plan").unwrap();
+    let e = c.call_err("reload_project", json!({ "discard_changes": true }));
+    assert!(e.contains("not a valid PlanCraft document"), "{e}");
+    assert_eq!(task(&c.call("list_tasks", json!({})), "Agent draft")["name"], "Agent draft");
+
+    // A deleted file is reported; saving writes it again.
+    std::fs::remove_file(&path).unwrap();
+    let r = c.call_raw("get_schedule", json!({}));
+    assert!(r["content"][0]["text"].as_str().unwrap().contains("deleted or moved"), "{r}");
+    c.call("save_project", json!({}));
+    assert!(c.call("get_project", json!({})).get("disk_notice").is_none());
+}
+
 /// Regression: saving overwrote a file another program (a second PlanCraft, a standalone MCP
 /// server, a sync tool) had changed since it was opened, silently losing that program's work.
 #[test]

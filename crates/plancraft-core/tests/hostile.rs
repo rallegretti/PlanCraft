@@ -577,6 +577,50 @@ fn apply(p: &mut Project, op: &Op) -> PlanResult<()> {
     Ok(())
 }
 
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(cases(64)))]
+
+    /// An open plan whose file is replaced by any bytes (or a mutated plan) is reported by the
+    /// file watcher and reloads as an error or a clamped plan, never a panic.
+    #[test]
+    fn files_replaced_on_disk_reload_or_fail_cleanly(
+        bytes in prop::collection::vec(any::<u8>(), 0..400),
+        cut in 0usize..4000,
+        mutate: bool,
+    ) {
+        count_panics();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plan.plancraft");
+        plancraft_core::io::save(&demo_project(start()), &path).unwrap();
+        let mut ws = plancraft_core::workspace::Workspace::default();
+        ws.open(&path).unwrap();
+        let mut watcher = plancraft_core::watch::Watcher::new();
+        watcher.poll(&plancraft_core::watch::targets(&ws));
+        // Random bytes, or a valid plan cut short with the bytes spliced in (a torn write).
+        let content = if mutate {
+            let text = to_json(&demo_project(start())).unwrap().into_bytes();
+            let at = cut.min(text.len());
+            [text.get(..at).unwrap_or_default(), &bytes].concat()
+        } else {
+            bytes
+        };
+        std::fs::write(&path, &content).unwrap();
+        let before = panics();
+        let mut changes = watcher.poll(&plancraft_core::watch::targets(&ws));
+        changes.extend(watcher.poll(&plancraft_core::watch::targets(&ws)));
+        let doc = ws.active_doc_mut().unwrap();
+        for c in changes {
+            if let plancraft_core::watch::Change::Modified { stamp, read, .. } = c
+                && let Ok((p, notes)) = *read
+            {
+                prop_assert!(doc.reload_from(p, notes, stamp, ChangeSource::User).is_ok());
+            }
+        }
+        let _ = doc.reload(ChangeSource::User);
+        prop_assert_eq!(panics(), before);
+    }
+}
+
 #[test]
 fn deep_and_huge_documents_are_refused() {
     let deep = format!("{{\"format\":\"plancraft\",\"tasks\":{}{}}}", "[".repeat(50_000), "]".repeat(50_000));
