@@ -86,6 +86,11 @@ These are conflicts, and the later change is not applied:
 `Conflict::describe` turns each one into a sentence, e.g. *"Ana changed the duration of task
 'Pour slab' at the same time"*. A value both people set to the same thing is no conflict.
 
+Merging works field by field, and a field holding a list counts as one value. Two people adding
+different predecessors to the same task at the same time is a conflict (`BothChanged` on
+`predecessors`), not a merge. That is safe but coarse; finer merges of such lists can come later
+if they turn out to matter.
+
 ### Host and replicas
 
 `Host` holds the agreed plan, its `Version` and the last 1,000 accepted changes. `submit`:
@@ -134,8 +139,9 @@ would take the same id. To prevent that:
 
 - the host leases each replica a block of 1,000 ids of every kind (`Host::lease`), and moves its
   own counters past the block;
-- the replica counts from its lease (`Replica::ids`) and asks for another block when it runs low
-  (phase 3);
+- the replica counts from its lease (`Replica::ids`) and asks for another block when
+  `Replica::ids_left` runs low (phase 3). Its cursor never goes back, not even when an undo
+  restores older counters;
 - if a block runs out anyway, a clashing id is refused (`SameNewKey`, or `Exists` on apply), and
   two items are never merged into one;
 - a lease past `limits::MAX_ID` is refused.

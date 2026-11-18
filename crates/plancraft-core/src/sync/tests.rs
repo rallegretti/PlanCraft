@@ -410,3 +410,28 @@ fn an_order_naming_no_items_keeps_every_item_and_stays_fast() {
     assert_eq!(reversed.tasks.iter().map(|t| t.id).rev().collect::<Vec<_>>(), ids);
     assert!(started.elapsed() < std::time::Duration::from_secs(20), "took {:?}", started.elapsed());
 }
+
+#[test]
+fn an_undo_never_hands_out_an_id_again() {
+    let mut host = Host::new(plan());
+    let mut ana = join(&mut host);
+    assert_eq!(ana.ids_left(), LEASE_SIZE);
+    let before_add = ana.local().clone();
+    let mut first = TaskId(0);
+    local_edit(&mut ana, |p| first = p.add_task("First", None));
+    send(&mut host, &mut ana, "Ana");
+    assert_eq!(ana.ids_left(), LEASE_SIZE - 1);
+    // Undo restores the snapshot from before the task was added, older id counters included.
+    let mut undone = before_add;
+    recalculate(&mut undone);
+    ana.edited(undone).unwrap();
+    let mut second = TaskId(0);
+    local_edit(&mut ana, |p| second = p.add_task("Second", None));
+    assert_ne!(first, second);
+    let o = send(&mut host, &mut ana, "Ana");
+    assert!(matches!(o, Outcome::Applied(_)), "{o:?}");
+    assert!(same(ana.local(), host.project()));
+    let ids = host.lease().unwrap();
+    ana.lease(ids);
+    assert_eq!(ana.ids_left(), LEASE_SIZE);
+}

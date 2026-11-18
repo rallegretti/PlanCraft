@@ -2,7 +2,7 @@
 
 use super::host::{Change, Entry, settle};
 use super::patch::{apply, diff, rebase};
-use super::{ChangeId, Collection, Conflict, ConflictKind, ListPatch, Patch, SyncError, Version};
+use super::{ChangeId, Collection, Conflict, ConflictKind, LEASE_SIZE, ListPatch, Patch, SyncError, Version};
 use crate::ids::IdCounters;
 use crate::model::Project;
 
@@ -33,6 +33,8 @@ pub struct Replica {
     in_flight: Option<(ChangeId, Patch)>,
     /// Where this replica's leased ids continue (see [`super::Host::lease`]).
     ids: IdCounters,
+    /// Where the current lease started (it holds [`LEASE_SIZE`] ids of each kind).
+    lease_start: IdCounters,
 }
 
 impl Replica {
@@ -40,7 +42,7 @@ impl Replica {
     pub fn new(project: Project, version: Version, ids: IdCounters) -> Self {
         let mut local = project.clone();
         local.ids = ids.clone();
-        Self { confirmed: project, version, local, pending: Patch::default(), in_flight: None, ids }
+        Self { confirmed: project, version, local, pending: Patch::default(), in_flight: None, lease_start: ids.clone(), ids }
     }
 
     /// The plan as this person sees it.
@@ -72,15 +74,49 @@ impl Replica {
         &self.ids
     }
 
+    /// How many new ids of the scarcest kind are left in the lease (ask for another when low).
+    pub fn ids_left(&self) -> u32 {
+        let (start, now) = (&self.lease_start, &self.ids);
+        [
+            (start.task, now.task),
+            (start.resource, now.resource),
+            (start.calendar, now.calendar),
+            (start.assignment, now.assignment),
+            (start.time_entry, now.time_entry),
+            (start.custom_field, now.custom_field),
+            (start.board_column, now.board_column),
+        ]
+        .into_iter()
+        .map(|(s, n)| s.saturating_add(LEASE_SIZE).saturating_sub(n))
+        .min()
+        .unwrap_or(0)
+    }
+
     /// Takes a new block of ids from the host.
     pub fn lease(&mut self, ids: IdCounters) {
         self.local.ids = ids.clone();
+        self.lease_start = ids.clone();
         self.ids = ids;
     }
 
     /// Takes the plan after a local edit (already checked and recalculated by `Document::edit`).
-    pub fn edited(&mut self, local: Project) -> Result<(), SyncError> {
+    ///
+    /// The id cursor never goes back: an undo restores a snapshot with older counters, and
+    /// counting from those again would hand out ids this replica already used.
+    pub fn edited(&mut self, mut local: Project) -> Result<(), SyncError> {
         self.pending = diff(&self.confirmed, &local)?;
+        let (ids, seen) = (&mut local.ids, &self.ids);
+        for (c, s) in [
+            (&mut ids.task, seen.task),
+            (&mut ids.resource, seen.resource),
+            (&mut ids.calendar, seen.calendar),
+            (&mut ids.assignment, seen.assignment),
+            (&mut ids.time_entry, seen.time_entry),
+            (&mut ids.custom_field, seen.custom_field),
+            (&mut ids.board_column, seen.board_column),
+        ] {
+            *c = (*c).max(s);
+        }
         self.ids = local.ids.clone();
         self.local = local;
         Ok(())
