@@ -272,6 +272,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
         header_height: 30.0,
         row_height: theme::ROW_HEIGHT,
         row_key: Some(&row_key),
+        row_drag: false,
     };
     let output = {
         let p = &doc.project;
@@ -341,6 +342,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
             },
             GridEvent::EditLost => st.toast(ToastKind::Warning, "The resource you were editing was deleted, so your typing was not saved."),
             GridEvent::InsertKey => out.push(Command::InsertResource),
+            GridEvent::MoveRows { .. } => {}
             GridEvent::ContextMenu { row, .. } => {
                 if let Some(id) = resource_at(doc, row) {
                     st.sel.select_resource(id);

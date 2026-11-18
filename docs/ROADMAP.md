@@ -17,7 +17,7 @@
 - **Split tasks:** Split Task on the Gantt Chart (click a bar), as many parts as needed; drag a later part to move it or back to rejoin, drag a part's end to change its work. Splits move with the task.
 - **Task Board:** tasks as cards in status columns (Not Started, Next up, In progress, Done by default); drag cards between columns, rename, add, move and delete columns, Set % Complete per column, Show on Board, the Board Status column in tables.
 - **Recurring tasks:** daily, weekly, monthly and yearly patterns, ending after a number of occurrences or by a date; an occurrence on a non-working day moves to the next working day; own calendar; resources assigned to the recurring task work every occurrence; leveling never delays occurrences.
-- **Desktop app:** two-row command bar, thirteen views, the major dialogs, undo/redo with history, multiple open documents, CSV export (tasks, resources, assignments, logged time)
+- **Desktop app:** two-row command bar, thirteen views, the major dialogs, undo/redo with history, multiple open documents, CSV export (tasks, resources, assignments, logged time); in the task table, rows dragged by their number, Fill Down (Ctrl+D), Find and Replace (Ctrl+F, Ctrl+H), Go To (F5) and Multiple Task Information
 - **Network Diagram:** a box per task, laid out automatically (each path along its own row, optionally critical path first), summaries beside their subtasks, collapsed summaries as one box, critical boxes and links highlighted, in-progress and complete marks, link labels, ID-only boxes, drag-to-link.
 - **Custom fields and tables:**
   - Custom task fields: text with an optional pick-list, number, cost, date, duration and flag.

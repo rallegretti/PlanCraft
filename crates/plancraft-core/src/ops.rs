@@ -297,6 +297,74 @@ impl Project {
         Ok(())
     }
 
+    /// Moves tasks (each with its subtasks) to just above task `before`, or to the end of the plan
+    /// (`None`), keeping their order: what dragging rows in the task table does. The moved tasks
+    /// take `before`'s outline level, so they become its siblings and the outline around them
+    /// keeps its shape (at the end, they become top-level tasks). Selected subtasks of a selected
+    /// summary travel with it. Moving tasks above one of their own subtasks is refused.
+    pub fn move_tasks_before(&mut self, ids: &[TaskId], before: Option<TaskId>) -> PlanResult<()> {
+        let mut roots: Vec<usize> = Vec::new();
+        for id in ids {
+            let idx = self.require_task(*id)?;
+            roots.push(idx);
+        }
+        roots.sort_unstable();
+        roots.dedup();
+        // Only the outermost of the tasks given: a subtask moves with its summary.
+        let mut blocks: Vec<std::ops::Range<usize>> = Vec::new();
+        for idx in roots {
+            if blocks.last().is_some_and(|b| b.contains(&idx)) {
+                continue;
+            }
+            blocks.push(idx..self.descendants_range(idx).end);
+        }
+        let target = match before {
+            Some(b) => {
+                let bi = self.require_task(b)?;
+                if let Some(block) = blocks.iter().find(|r| r.contains(&bi)) {
+                    if block.start == bi {
+                        // Dropped onto its own first task: nothing moves.
+                        return Ok(());
+                    }
+                    return invalid("tasks cannot be moved inside themselves");
+                }
+                Some((b, self.row(bi)?.outline_level))
+            }
+            None => None,
+        };
+        let level = target.map_or(1, |(_, l)| l);
+        let relevel = |t: &Task, base: u16| i32::from(t.outline_level) - i32::from(base) + i32::from(level);
+        for r in &blocks {
+            let block = self.tasks.get(r.clone()).unwrap_or_default();
+            let base = block.first().map_or(level, |t| t.outline_level);
+            if block.iter().any(|t| relevel(t, base) > i32::from(MAX_OUTLINE_LEVEL)) {
+                return invalid(format!("tasks can be nested at most {MAX_OUTLINE_LEVEL} levels deep"));
+            }
+        }
+        // Take the blocks out, last first so the earlier ranges stay valid.
+        let mut moved: Vec<Task> = Vec::new();
+        for r in blocks.iter().rev() {
+            let block: Vec<Task> = self.tasks.drain(r.clone()).collect();
+            let base = block.first().map_or(level, |t| t.outline_level);
+            let shifted: Vec<Task> = block
+                .into_iter()
+                .map(|mut t| {
+                    t.outline_level = u16::try_from(relevel(&t, base).max(1)).unwrap_or(1);
+                    t
+                })
+                .collect();
+            moved.splice(0..0, shifted);
+        }
+        let at = match target {
+            Some((b, _)) => self.task_index(b).unwrap_or(self.tasks.len()),
+            None => self.tasks.len(),
+        };
+        let at = at.min(self.tasks.len());
+        self.tasks.splice(at..at, moved);
+        self.normalize_outline();
+        Ok(())
+    }
+
     /// Moves a task block one row up or down among its siblings.
     pub fn shift_task(&mut self, id: TaskId, up: bool) -> PlanResult<()> {
         let idx = self.require_task(id)?;

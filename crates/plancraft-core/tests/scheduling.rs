@@ -305,6 +305,39 @@ fn move_and_shift_tasks() {
     let _ = b;
 }
 
+/// Dragging rows: the moved tasks keep their order and subtasks, and become siblings of the task
+/// they were dropped above.
+#[test]
+fn tasks_dragged_above_another_task() {
+    let mut p = project();
+    let a = task(&mut p, "A", 1);
+    let s = task(&mut p, "S", 1);
+    let s1 = task(&mut p, "S1", 1);
+    let s2 = task(&mut p, "S2", 1);
+    let b = task(&mut p, "B", 1);
+    let c = task(&mut p, "C", 1);
+    p.indent(s1).unwrap();
+    p.indent(s2).unwrap();
+    let outline =
+        |p: &Project| p.tasks.iter().map(|t| format!("{}{}", " ".repeat(usize::from(t.outline_level - 1)), t.name)).collect::<Vec<_>>();
+
+    // Two top-level tasks dropped among subtasks become subtasks, in their outline order.
+    p.move_tasks_before(&[c, a], Some(s2)).unwrap();
+    assert_eq!(outline(&p), ["S", " S1", " A", " C", " S2", "B"]);
+
+    // A summary moves with its subtasks; a selected subtask of it does not move apart.
+    p.move_tasks_before(&[s, s1], None).unwrap();
+    assert_eq!(outline(&p), ["B", "S", " S1", " A", " C", " S2"]);
+    p.move_tasks_before(&[s], Some(b)).unwrap();
+    assert_eq!(outline(&p), ["S", " S1", " A", " C", " S2", "B"]);
+
+    // Dropped on itself: nothing changes; inside itself: refused.
+    p.move_tasks_before(&[s], Some(s)).unwrap();
+    assert!(p.move_tasks_before(&[s], Some(a)).is_err());
+    assert_eq!(outline(&p), ["S", " S1", " A", " C", " S2", "B"]);
+    assert!(p.move_tasks_before(&[TaskId(9999)], None).is_err());
+}
+
 #[test]
 fn save_load_and_external_links() {
     let dir = tempfile::tempdir().unwrap();

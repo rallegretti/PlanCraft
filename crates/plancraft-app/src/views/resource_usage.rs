@@ -111,6 +111,7 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
         header_height: theme::HEADER_HEIGHT,
         row_height: theme::ROW_HEIGHT,
         row_key: None,
+        row_drag: false,
     };
     let left = Rect::from_min_size(rect.min, vec2(left_w, rect.height()));
     let output = {

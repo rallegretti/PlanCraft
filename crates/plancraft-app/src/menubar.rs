@@ -518,6 +518,8 @@ fn toolbar(ui: &mut Ui, st: &mut UiState, info: &MenuInfo, settings: &AppSetting
                 }
             });
             ui.add(egui::TextEdit::singleline(&mut st.search).desired_width(130.0).hint_text("🔍 Search tasks"));
+            b(ui, "🔦", None, "Find and replace in the task table (Ctrl+F, Ctrl+H)", doc, Command::Find(false));
+            b(ui, "↪", None, "Go to a task ID or a date (F5)", doc, Command::GoTo);
             sep(ui);
             b(ui, "⊟", None, "Collapse all summaries", doc, Command::CollapseAll);
             b(ui, "⊞", None, "Expand all summaries", doc, Command::ExpandAll);

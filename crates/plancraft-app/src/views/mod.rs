@@ -243,6 +243,45 @@ pub fn overallocated_tasks(p: &Project, over: &HashSet<ResourceId>) -> HashSet<T
     p.assignments.iter().filter(|a| over.contains(&a.resource)).map(|a| a.task).collect()
 }
 
+/// Task indices in the order the task table shows them, as if every summary and group were
+/// expanded (what Find searches): filtered-out tasks are left out.
+pub fn search_order(p: &Project, st: &mut UiState) -> Vec<usize> {
+    let collapsed = std::mem::take(&mut st.collapsed);
+    let groups = std::mem::take(&mut st.collapsed_groups);
+    let rows = visible_rows(p, st);
+    st.collapsed = collapsed;
+    st.collapsed_groups = groups;
+    rows.iter().filter_map(Row::task).collect()
+}
+
+/// Shows task `id` in the task table: expands the summaries (and the group) hiding it, selects it,
+/// moves the grid cursor to it (column `col`, or the cursor's column) and scrolls the table and
+/// the chart to it. Returns false when the filter or search hides it.
+pub fn reveal_task(p: &Project, st: &mut UiState, id: TaskId, col: Option<usize>) -> bool {
+    let Some(idx) = p.task_index(id) else { return false };
+    let mut a = p.parent_index(idx);
+    while let Some(ai) = a {
+        if let Some(t) = p.tasks.get(ai) {
+            st.collapsed.remove(&t.id);
+        }
+        a = p.parent_index(ai);
+    }
+    if let Some(group) = st.group.as_ref().and_then(|k| Field::from_key(p, k)) {
+        st.collapsed_groups.remove(&group.group_label(p, idx));
+    }
+    let rows = visible_rows(p, st);
+    let Some(row) = row_of_task(&rows, idx) else { return false };
+    st.sel.select_task(id);
+    let col = col.or(st.task_grid.cursor.map(|(_, c)| c)).unwrap_or(1);
+    st.task_grid.cursor = Some((row, col));
+    st.task_grid.whole_row = false;
+    st.task_grid.scroll_to = Some(row);
+    if let Some(start) = p.tasks.get(idx).and_then(|t| t.sched.start) {
+        st.gantt.scroll_to(start);
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

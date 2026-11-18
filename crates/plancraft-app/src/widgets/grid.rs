@@ -125,6 +125,10 @@ pub struct GridState {
     /// agent's change, a re-sort), the cursor and an open editor follow it, so typing never lands
     /// on another row's item.
     anchor: Option<(usize, RowKey)>,
+    /// The row being dragged by its row number.
+    row_drag: Option<usize>,
+    /// Where the rows were drawn last frame (for tests that point at a row).
+    pub body: Option<Rect>,
 }
 
 impl GridState {
@@ -246,6 +250,12 @@ pub enum GridEvent {
     },
     /// The row being edited was deleted or hidden by someone else, so the edit was dropped.
     EditLost,
+    /// Row `from` was dragged by its row number and dropped above row `to` (`to` == the row count:
+    /// below the last row). Only with [`GridConfig::row_drag`].
+    MoveRows {
+        from: usize,
+        to: usize,
+    },
 }
 
 pub struct GridConfig<'a> {
@@ -263,6 +273,8 @@ pub struct GridConfig<'a> {
     /// A stable key for the item on each data row (`None` for rows that are not items, like
     /// group headers). With it the cursor and an open editor follow their item when rows move.
     pub row_key: Option<&'a dyn Fn(usize) -> Option<u64>>,
+    /// Rows can be dragged by their row number to move them ([`GridEvent::MoveRows`]).
+    pub row_drag: bool,
 }
 
 pub struct GridOutput {
@@ -326,6 +338,7 @@ pub fn show(
     let header = Rect::from_min_size(rect.min, vec2(rect.width() - vs_w, cfg.header_height));
     let body = Rect::from_min_max(pos2(rect.left(), header.bottom()), pos2(rect.right() - vs_w, rect.bottom() - HSCROLL_H));
     let cols_view_w = (body.width() - rn_w).max(0.0);
+    state.body = Some(body);
     let total_rows = cfg.row_count + cfg.blank_rows;
     let content_h = total_rows as f32 * cfg.row_height;
     if state.follow_anchor(cfg) {
@@ -614,6 +627,60 @@ pub fn show(
         }
     }
 
+    // ---- Dragging rows by their number ----
+    let on_numbers = |p: Pos2| cfg.row_drag && cfg.row_numbers && body.contains(p) && p.x < body.left() + rn_w;
+    if cfg.row_drag && pointer.is_some_and(on_numbers) && state.row_drag.is_none() {
+        ui.ctx().set_cursor_icon(CursorIcon::Grab);
+    }
+    let row_under = |p: Pos2, scroll: f32| {
+        let r = ((p.y - body.top() + scroll) / cfg.row_height).floor();
+        (r.is_finite() && r >= 0.0).then_some(r as usize)
+    };
+    if body_resp.drag_started()
+        && let Some(origin) = ui.input(|i| i.pointer.press_origin())
+        && on_numbers(origin)
+        && let Some(row) = row_under(origin, state.scroll_y)
+        && row < cfg.row_count
+        && state.editing.is_none()
+    {
+        state.row_drag = Some(row);
+        if !is_selected(row) {
+            events.push(GridEvent::Select { row, shift: false, ctrl: false });
+        }
+    }
+    if let Some(from) = state.row_drag {
+        let latest = ui.input(|i| i.pointer.latest_pos());
+        // The boundary between rows nearest the pointer: the dragged rows go above that row.
+        let drop_at = |p: Pos2, scroll: f32| {
+            let b = ((p.y - body.top() + scroll) / cfg.row_height).round();
+            if b.is_finite() { (b.max(0.0) as usize).min(cfg.row_count) } else { from }
+        };
+        if body_resp.dragged() {
+            ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
+            if let Some(p) = latest {
+                // Near the top or bottom edge, scroll to reach rows out of view.
+                if p.y < body.top() + cfg.row_height {
+                    state.scroll_y = (state.scroll_y - cfg.row_height / 2.0).max(0.0);
+                    ui.ctx().request_repaint();
+                } else if p.y > body.bottom() - cfg.row_height {
+                    state.scroll_y = (state.scroll_y + cfg.row_height / 2.0).min((content_h - body.height() + cfg.row_height).max(0.0));
+                    ui.ctx().request_repaint();
+                }
+                let y = body.top() + drop_at(p, state.scroll_y) as f32 * cfg.row_height - state.scroll_y;
+                body_painter.hline(body.x_range(), y, Stroke::new(2.0, theme::pal().ACCENT_MID));
+            }
+        }
+        if !body_resp.dragged() {
+            state.row_drag = None;
+            if let Some(to) = latest.map(|p| drop_at(p, state.scroll_y))
+                && to != from
+                && to != from.saturating_add(1)
+            {
+                events.push(GridEvent::MoveRows { from, to });
+            }
+        }
+    }
+
     // ---- Editing ----
     let mut finished: Option<(bool, Option<(isize, isize)>)> = None; // (commit, move)
     if let Some((r, _, c)) = edit_rect
@@ -872,6 +939,7 @@ mod tests {
                     header_height: 24.0,
                     row_height: 22.0,
                     row_key: None,
+                    row_drag: false,
                 };
                 let ro = *read_only_row;
                 let mut cell = |r: usize, c: usize| Cell { text: format!("{r}:{c}"), read_only: Some(r) == ro, ..Default::default() };
