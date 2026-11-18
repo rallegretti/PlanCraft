@@ -161,6 +161,10 @@ These are also sent to the client as `instructions` in the `initialize` result.
   `get_project` show `disk`: `in_sync`, `changed`, `missing` or `no_file`. `reload_project` reads the file again;
   `save_project` refuses to overwrite a changed file unless `overwrite` is true. In the desktop app, a plan without
   unsaved changes reloads by itself.
+* **Open in another PlanCraft** — when the plan is also open in another PlanCraft (another window, another
+  server, someone on a shared folder; its lock file `.NAME.lock` says who), `open_project`, `list_documents` and
+  `get_project` show `open_elsewhere` ("ana in PlanCraft 0.7.0 on studio-pc since 2026-11-18 09:15") and results
+  carry a `disk_notice`. The server holds the lock of each plan it has open and gives it back on close or exit.
 * **Errors** — tool failures are returned as results with `isError: true` and an explanation (unknown
   arguments are reported with the list of valid ones); nothing is changed when a tool fails.
 

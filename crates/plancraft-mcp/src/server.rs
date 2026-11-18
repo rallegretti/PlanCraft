@@ -307,12 +307,12 @@ impl McpServer {
     /// changed on disk since it was opened or saved, or is gone. The file is checked without
     /// holding the workspace lock (a slow network share must not stall the app).
     fn disk_notice(&self, args: &Args) -> Option<String> {
-        let (handle, path, known) = {
+        let (handle, path, known, elsewhere) = {
             let ws = self.lock();
             let doc = Ctx::doc_index(&ws, args).ok().and_then(|i| ws.docs.get(i))?;
-            (doc.handle, doc.path.clone()?, doc.disk_stamp())
+            (doc.handle, doc.path.clone()?, doc.disk_stamp(), doc.lock.elsewhere().map(|o| o.describe()))
         };
-        match plancraft_core::workspace::disk_status(Some(&path), known) {
+        let disk = match plancraft_core::workspace::disk_status(Some(&path), known) {
             DiskStatus::Changed => Some(format!(
                 "The file of document {handle} ({}) was changed on disk by another program since it was opened or last saved. \
                  reload_project loads it (refused while the user has unsaved changes); save_project will not overwrite it unless overwrite is true (check with the user first).",
@@ -323,6 +323,16 @@ impl McpServer {
                 path.display()
             )),
             DiskStatus::InSync | DiskStatus::NoFile => None,
+        };
+        let elsewhere = elsewhere.map(|who| {
+            format!(
+                "Document {handle} ({}) is also open by {who}. Changes saved there are noticed here; tell the user before making large changes, since only one version can be kept.",
+                path.display()
+            )
+        });
+        match (disk, elsewhere) {
+            (Some(a), Some(b)) => Some(format!("{a} {b}")),
+            (a, b) => a.or(b),
         }
     }
 }

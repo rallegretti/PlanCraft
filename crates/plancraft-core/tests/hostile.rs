@@ -38,6 +38,28 @@ fn cell_text() -> impl Strategy<Value = String> {
 proptest! {
     #![proptest_config(ProptestConfig { cases: cases(512), ..ProptestConfig::default() })]
 
+    /// Whatever another program left in a plan's lock file, opening the plan neither panics nor
+    /// writes through it, and a lock that is not ours is never removed.
+    #[test]
+    fn lock_files_with_any_content_never_break_opening(bytes in proptest::collection::vec(any::<u8>(), 0..6000)) {
+        use plancraft_core::lock::{self, LockState};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("plan.plancraft");
+        plancraft_core::io::save(&Project::new("Plan", plancraft_core::dates::ymd(2026, 11, 18).unwrap()), &path).unwrap();
+        let lock_file = lock::lock_path(&path).unwrap();
+        std::fs::write(&lock_file, &bytes).unwrap();
+        let mut ws = plancraft_core::workspace::Workspace::default();
+        ws.open(&path).unwrap();
+        let state = ws.active_doc().unwrap().lock.clone();
+        prop_assert!(matches!(state, LockState::OpenElsewhere(_)), "{state:?}");
+        if let LockState::OpenElsewhere(o) = &state {
+            let shown = o.describe();
+            prop_assert!(!shown.chars().any(char::is_control), "{shown:?}");
+        }
+        drop(ws);
+        prop_assert_eq!(std::fs::read(&lock_file).unwrap(), bytes);
+    }
+
     #[test]
     fn durations_parse_in_range(text in cell_text(), unit in units()) {
         let s = TimeSettings::default();

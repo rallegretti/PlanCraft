@@ -62,7 +62,8 @@ Documents: every tool takes an optional `document` (handle number from list_docu
 by default the active document is used. Start with list_documents / get_project / get_schedule. If nothing is open, call new_project or open_project. \
 Changes are kept in memory: call save_project to write them to disk. When the document's file was changed on disk by another program \
 (another PlanCraft, git, a sync tool) or deleted, results carry a `disk_notice`: reload_project reads the file again (never discarding the user's \
-unsaved changes), and save_project refuses to overwrite a changed file unless overwrite is true (check with the user first).
+unsaved changes), and save_project refuses to overwrite a changed file unless overwrite is true (check with the user first). When the plan is also open in another PlanCraft \
+(its lock file says who), `open_elsewhere` and a `disk_notice` say so: tell the user before large changes.
 
 References: tasks are referenced by their unique `id` (a number, stable for the task's lifetime; preferred), by exact name, or by \"#N\" for row N. \
 `row` is the current 1-based position in the outline and changes when tasks move. Resources and calendars accept id or name.

@@ -68,6 +68,8 @@ pub struct PlanCraftApp {
     disk_bars: HashMap<u64, DiskBar>,
     /// A button of the disk bar was clicked: acted on once the workspace is unlocked.
     disk_action: Option<(u64, DiskAction)>,
+    /// "Open in another PlanCraft" bars dismissed: the plan's handle and the other instance.
+    lock_dismissed: HashSet<(u64, String)>,
 }
 
 /// Why a plan's file needs the user's attention (see [`PlanCraftApp::disk_bar`]).
@@ -368,6 +370,7 @@ impl PlanCraftApp {
             disk: Default::default(),
             disk_bars: HashMap::new(),
             disk_action: None,
+            lock_dismissed: HashSet::new(),
             allow_exit: false,
             last_title: String::new(),
             shot: std::env::var_os("PLANCRAFT_SCREENSHOT").map(|p| (PathBuf::from(p), 0)),
@@ -388,6 +391,8 @@ impl PlanCraftApp {
         // Tests poll the files themselves (`DiskWatch::poll_now`).
         if !cfg!(test) {
             app.disk.spawn(&app.ws, cc.egui_ctx.clone());
+            let ctx = cc.egui_ctx.clone();
+            plancraft_core::lock::spawn_keeper(Arc::downgrade(&app.ws), move || ctx.request_repaint());
         }
         if !app.rec().found.is_empty() && !app.st.start_page {
             app.st.toast(ToastKind::Info, RECOVERY_FOUND);
@@ -1513,7 +1518,7 @@ impl PlanCraftApp {
         let mut close = None;
         for (i, d) in ws.docs.iter().enumerate() {
             let active = ws.active == Some(i);
-            let mark = if self.disk_bars.contains_key(&d.handle) { "⚠ " } else { "" };
+            let mark = if self.disk_bars.contains_key(&d.handle) || d.lock.elsewhere().is_some() { "⚠ " } else { "" };
             let resp = child.selectable_label(active, format!("📄 {mark}{}", d.title()));
             if resp.clicked() {
                 switch = Some(i);
@@ -2042,6 +2047,7 @@ impl PlanCraftApp {
         }
         self.mcp.stop();
         self.disk.stop();
+        lock(&self.ws).release_locks();
         self.rec().forget_all();
     }
 
@@ -2223,7 +2229,10 @@ impl PlanCraftApp {
     fn disk_bar(&mut self, ui: &mut Ui, ws: &Workspace) {
         let Some(doc) = ws.active_doc() else { return };
         let handle = doc.handle;
-        let Some(bar) = self.disk_bars.get_mut(&handle) else { return };
+        let Some(bar) = self.disk_bars.get_mut(&handle) else {
+            self.lock_bar(ui, doc);
+            return;
+        };
         let name = file_name_of(doc);
         let (message, buttons): (String, &[(DiskAction, &str, &str)]) = match &bar.kind {
             DiskBarKind::Changed { .. } => (
@@ -2288,6 +2297,47 @@ impl PlanCraftApp {
             };
         } else if let Some(action) = clicked {
             self.disk_action = Some((handle, action));
+        }
+    }
+
+    /// The bar above the active plan while it is open in another PlanCraft too (its lock file
+    /// says so): changes saved there reach this window, but both editing at once means choosing
+    /// one version later.
+    fn lock_bar(&mut self, ui: &mut Ui, doc: &Document) {
+        let Some(owner) = doc.lock.elsewhere() else { return };
+        let key = (doc.handle, owner.instance.clone());
+        if self.lock_dismissed.contains(&key) {
+            return;
+        }
+        let message = format!(
+            "{} is also open by {}. Changes saved there show up here; if you both edit it, you will have to choose one version.",
+            file_name_of(doc),
+            owner.describe()
+        );
+        let mut clicked = None;
+        egui::Frame::new()
+            .fill(theme::pal().PANEL_BG)
+            .stroke(Stroke::new(1.0, theme::pal().WARN))
+            .inner_margin(egui::Margin::symmetric(10, 5))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("⚠").color(theme::pal().WARN).size(15.0));
+                    ui.label(RichText::new(message).color(theme::pal().TEXT));
+                    if ui.button("Save As…").on_hover_text("Work on a copy of the plan under another name").clicked() {
+                        clicked = Some(DiskAction::SaveAs);
+                    }
+                    if ui.button("Dismiss").on_hover_text("Hide this message").clicked() {
+                        clicked = Some(DiskAction::KeepMine);
+                    }
+                });
+            });
+        match clicked {
+            Some(DiskAction::KeepMine) => {
+                self.lock_dismissed.insert(key);
+            }
+            Some(action) => self.disk_action = Some((doc.handle, action)),
+            None => {}
         }
     }
 
@@ -3941,6 +3991,33 @@ mod ui_tests {
         h.state_mut().exec(&ctx, Command::TaskInfo);
         h.run_steps(2);
         h.get_by_label_contains("Multiple Task Information (3 tasks)");
+    }
+
+    /// A plan open in another PlanCraft opens with a bar saying who has it; Dismiss hides it.
+    #[test]
+    fn a_plan_open_in_another_plancraft_shows_who_has_it() {
+        use egui_kittest::kittest::Queryable;
+        let tmp = crate::recovery::tests::TempDir::new("locked");
+        let path = tmp.0.join("plan.plancraft");
+        plancraft_core::io::save(&Project::new("Plan", plancraft_core::dates::ymd(2026, 10, 19).unwrap()), &path).unwrap();
+        let owner = plancraft_core::lock::Owner {
+            user: "ana".into(),
+            host: "studio-pc".into(),
+            pid: 7,
+            instance: "another-plancraft".into(),
+            opened: "2026-11-18 09:15".into(),
+            app: "PlanCraft 0.6.0".into(),
+        };
+        let lock_file = plancraft_core::lock::lock_path(&path).unwrap();
+        std::fs::write(&lock_file, serde_json::to_vec(&owner).unwrap()).unwrap();
+        let mut h = harness_on(&path);
+        h.run_steps(2);
+        h.get_by_label_contains("is also open by ana in PlanCraft 0.6.0 on studio-pc since 2026-11-18 09:15");
+        h.get_by_label("Dismiss").click();
+        h.run_steps(2);
+        assert!(h.query_by_label_contains("is also open by ana").is_none());
+        drop(h);
+        assert!(lock_file.is_file(), "their lock is never removed");
     }
 
     /// A file replaced by garbage is reported, never loaded, and the plan stays as it was.

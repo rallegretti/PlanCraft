@@ -84,6 +84,7 @@ fn main() -> anyhow::Result<()> {
         let code = plancraft_mcp::cli::run(args.iter().skip(1).cloned().collect());
         std::process::exit(if code == std::process::ExitCode::SUCCESS { 0 } else { 1 });
     }
+    plancraft_core::lock::set_app_name(format!("PlanCraft {}", env!("CARGO_PKG_VERSION")));
     if args.first().map(String::as_str) == Some("--version") {
         println!("plancraft {}", env!("CARGO_PKG_VERSION"));
         return Ok(());

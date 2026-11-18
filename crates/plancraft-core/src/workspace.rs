@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use crate::guard;
 use crate::io::{self, FileResult};
 use crate::limits;
+use crate::lock::{self, LockState};
 use crate::model::Project;
 use crate::ops::{PlanError, PlanResult};
 use crate::schedule::{recalculate, try_recalculate};
@@ -216,6 +217,9 @@ pub struct Document {
     /// The file as it was when last loaded or saved; `save` refuses to overwrite a file that has
     /// changed since (another program or PlanCraft instance wrote it).
     disk_stamp: Option<io::DiskStamp>,
+    /// Whether this PlanCraft holds the plan's lock file, or another one has the plan open
+    /// ([`crate::lock`]).
+    pub lock: LockState,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
 }
@@ -234,6 +238,7 @@ impl Document {
             imported: false,
             imported_from: None,
             disk_stamp: None,
+            lock: LockState::None,
             undo: Vec::new(),
             redo: Vec::new(),
         }
@@ -494,7 +499,28 @@ impl Document {
         self.disk_stamp = io::disk_stamp(&path);
         self.dirty = false;
         self.user_changes = false;
+        // The first save of a plan bound to a new file, or a lock file someone removed.
+        self.claim_lock();
         Ok(())
+    }
+
+    /// Takes (or keeps) the lock of the document's file, if the file exists (see [`lock::claim`]).
+    pub fn claim_lock(&mut self) {
+        if let Some(path) = &self.path
+            && path.is_file()
+        {
+            self.lock = lock::claim(path);
+        }
+    }
+
+    /// Gives back the document's lock, if this PlanCraft holds it.
+    pub fn release_lock(&mut self) {
+        if self.lock == LockState::Held
+            && let Some(path) = &self.path
+        {
+            lock::release(path);
+        }
+        self.lock = LockState::None;
     }
 
     /// Saves to a new path, rewriting relative external links so they still resolve. A `.xml`
@@ -523,11 +549,16 @@ impl Document {
             e.path = io::relative_path(&abs, &new_dir).to_string_lossy().replace('\\', "/");
         }
         io::save(&saved, &path)?;
+        let same_file = old.as_ref().is_some_and(|o| o == &path || std::fs::canonicalize(o).ok() == std::fs::canonicalize(&path).ok());
+        if !same_file {
+            self.release_lock();
+        }
         self.disk_stamp = io::disk_stamp(&path);
         self.project.external_projects = saved.external_projects;
         self.path = Some(path);
         self.dirty = false;
         self.user_changes = false;
+        self.claim_lock();
         Ok(())
     }
 
@@ -594,6 +625,13 @@ pub struct Workspace {
 
 pub type SharedWorkspace = Arc<Mutex<Workspace>>;
 
+impl Drop for Workspace {
+    /// Closing the workspace (the app or the MCP server quitting) gives back its lock files.
+    fn drop(&mut self) {
+        self.release_locks();
+    }
+}
+
 impl Workspace {
     pub fn shared(self) -> SharedWorkspace {
         Arc::new(Mutex::new(self))
@@ -604,6 +642,9 @@ impl Workspace {
         self.next_handle = self.next_handle.saturating_add(1);
         recalculate(&mut project);
         let mut doc = Document::new(self.next_handle, project, path);
+        // A plan opened from its file, or a recovery copy bound to one (a path that does not
+        // exist yet is locked when first saved).
+        doc.claim_lock();
         let _ = doc.refresh_external_on_open();
         self.docs.push(doc);
         self.active = self.docs.len().checked_sub(1);
@@ -705,7 +746,8 @@ impl Workspace {
         let Some(i) = self.index_of(handle) else {
             return false;
         };
-        self.docs.remove(i);
+        let mut doc = self.docs.remove(i);
+        doc.release_lock();
         self.active = match self.active {
             _ if self.docs.is_empty() => None,
             Some(a) if a > i => Some(a - 1),
@@ -713,6 +755,13 @@ impl Workspace {
             other => other,
         };
         true
+    }
+
+    /// Gives back every lock file this workspace holds (when quitting).
+    pub fn release_locks(&mut self) {
+        for doc in &mut self.docs {
+            doc.release_lock();
+        }
     }
 
     pub fn index_of(&self, handle: u64) -> Option<usize> {

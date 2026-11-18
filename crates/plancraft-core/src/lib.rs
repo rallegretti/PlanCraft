@@ -26,6 +26,7 @@ pub mod ids;
 pub mod io;
 pub mod leveling;
 pub mod limits;
+pub mod lock;
 pub mod model;
 pub mod mspdi;
 pub mod network;
