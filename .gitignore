@@ -6,3 +6,4 @@
 /dist-hosts.toml
 /target-*/
 /.claude/worktrees/
+.*.plancraft.lock
