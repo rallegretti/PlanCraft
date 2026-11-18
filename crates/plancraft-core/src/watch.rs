@@ -1,7 +1,7 @@
 //! Noticing when open plans change on disk: another PlanCraft instance, the headless MCP server,
 //! an agent, git or a sync tool wrote the file, or deleted or moved it.
 //!
-//! Plain polling of each file's [`DiskStamp`] (modification time, size and file identity), with
+//! Plain polling of each file's [`DiskStamp`] (modification time and size, no inode), with
 //! the standard library only: it works the same on every platform and on network shares, where
 //! change notifications are unreliable. [`Watcher::poll`] is meant to run every second or so on a
 //! background thread, never while holding the workspace lock: [`targets`] copies what it needs
