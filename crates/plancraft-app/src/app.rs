@@ -456,6 +456,10 @@ impl PlanCraftApp {
             (KeyboardShortcut::new(cmd, Key::C), Command::Copy, false),
             (KeyboardShortcut::new(cmd, Key::X), Command::Cut, false),
             (KeyboardShortcut::new(cmd, Key::V), Command::Paste, false),
+            (KeyboardShortcut::new(cmd, Key::D), Command::FillDown, false),
+            (KeyboardShortcut::new(cmd, Key::F), Command::Find(false), false),
+            (KeyboardShortcut::new(cmd, Key::H), Command::Find(true), false),
+            (KeyboardShortcut::new(Modifiers::NONE, Key::F5), Command::GoTo, false),
         ];
         for (sc, c, global) in map {
             // New and Open belong on the Start Page; behind a save prompt nothing may act.
@@ -1177,11 +1181,12 @@ impl PlanCraftApp {
             }
             // A recurring task opens its Recurring Task Information instead.
             Command::TaskInfo
-                if let Some(d) = st
-                    .sel
-                    .single_task()
-                    .or(sel.first().copied())
-                    .and_then(|id| dialogs::recurring::RecurringTask::edit(&doc.project, id)) =>
+                if sel.len() <= 1
+                    && let Some(d) = st
+                        .sel
+                        .single_task()
+                        .or(sel.first().copied())
+                        .and_then(|id| dialogs::recurring::RecurringTask::edit(&doc.project, id)) =>
             {
                 self.dialogs.recurring = Some(Bound::new(doc, d));
             }
@@ -1212,12 +1217,25 @@ impl PlanCraftApp {
                     Err(e) => st.toast(ToastKind::Warning, e.to_string()),
                 }
             }
+            // Several tasks selected: Multiple Task Information.
+            Command::TaskInfo if sel.len() > 1 => {
+                self.dialogs.task_info = dialogs::task_info::TaskInfo::new_multi(&doc.project, &sel).map(|d| Bound::new(doc, d));
+            }
             Command::TaskInfo | Command::TaskNotes => {
                 if let Some(id) = st.sel.single_task().or(sel.first().copied()) {
                     self.dialogs.task_info =
                         dialogs::task_info::TaskInfo::new(&doc.project, id, cmd == Command::TaskNotes).map(|d| Bound::new(doc, d));
                 }
             }
+            Command::FillDown => match dialogs::find::fill_down(doc, st) {
+                Ok(msg) => self.status = Some((msg, Instant::now())),
+                Err(e) => st.toast(ToastKind::Info, e),
+            },
+            Command::Find(replacing) => match self.dialogs.find.as_mut().filter(|b| b.doc == doc.handle) {
+                Some(b) => b.dialog.reopen(replacing),
+                None => self.dialogs.find = Some(Bound::new(doc, dialogs::find::FindReplace::new(replacing))),
+            },
+            Command::GoTo => self.dialogs.goto = Some(Bound::new(doc, dialogs::find::GoTo::new())),
             Command::ToggleTimeline => {
                 if !sel.is_empty() {
                     let r = doc.edit("Add to Timeline", |p| {
@@ -1878,6 +1896,8 @@ impl PlanCraftApp {
                         continue;
                     }
                     "CustomFields" => Command::CustomFields,
+                    "Find" => Command::Find(true),
+                    "GoTo" => Command::GoTo,
                     "Print" => Command::Print,
                     "UpdateProject" => Command::UpdateProject,
                     "SetBaseline" => Command::SetBaseline,
@@ -2584,6 +2604,8 @@ impl PlanCraftApp {
             dialogs::show_bound(&mut self.dialogs.set_baseline, &mut ws, |d, doc| d.show(&ctx, doc, st));
             dialogs::show_bound(&mut self.dialogs.clear_baseline, &mut ws, |d, doc| d.show(&ctx, doc, st));
             dialogs::show_bound(&mut self.dialogs.recurring, &mut ws, |d, doc| d.show(&ctx, doc, st));
+            dialogs::show_bound(&mut self.dialogs.find, &mut ws, |d, doc| d.show(&ctx, doc, st));
+            dialogs::show_bound(&mut self.dialogs.goto, &mut ws, |d, doc| d.show(&ctx, doc, st));
             let st = &*st;
             dialogs::show_bound(&mut self.dialogs.print, &mut ws, |d, doc| d.show(&ctx, doc, st));
         }
@@ -3806,6 +3828,169 @@ mod ui_tests {
         watch(&mut h);
         assert!(!lock(&h.state().ws).active_doc().unwrap().dirty);
         assert!(h.state().disk_bars.is_empty());
+    }
+
+    /// The middle of row `row`'s row number in the task table (where rows are dragged).
+    fn row_number_at(h: &Harness<'static, PlanCraftApp>, row: usize) -> egui::Pos2 {
+        let g = &h.state().st.task_grid;
+        let body = g.body.unwrap();
+        egui::pos2(body.left() + crate::widgets::grid::ROW_NUM_W / 2.0, body.top() + (row as f32 + 0.5) * theme::ROW_HEIGHT - g.scroll_y)
+    }
+
+    fn drag(h: &mut Harness<'static, PlanCraftApp>, from: egui::Pos2, to: egui::Pos2) {
+        let button =
+            |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        h.event(egui::Event::PointerMoved(from));
+        h.run_steps(1);
+        h.event(button(from, true));
+        h.run_steps(1);
+        for k in 1..=8 {
+            h.event(egui::Event::PointerMoved(from + (to - from) * (k as f32 / 8.0)));
+            h.run_steps(1);
+        }
+        h.event(button(to, false));
+        h.run_steps(3);
+    }
+
+    /// Dragging rows by their row number moves the selected tasks above the row they are dropped
+    /// on, as one undo step; sorted, the rows can't be dragged.
+    #[test]
+    fn rows_dragged_by_their_number_move_the_tasks() {
+        let mut h = harness();
+        let before = tasks(&h);
+        // Select rows 2 and 3 (two subtasks of the first summary), drag them below row 4.
+        let picked: std::collections::BTreeSet<TaskId> = {
+            let ws = lock(&h.state().ws);
+            let p = &ws.active_doc().unwrap().project;
+            [p.tasks[1].id, p.tasks[2].id].into_iter().collect()
+        };
+        h.state_mut().st.sel.tasks = picked;
+        h.run_steps(2);
+        let from = row_number_at(&h, 1);
+        let to = row_number_at(&h, 3) + vec2(0.0, theme::ROW_HEIGHT / 2.0);
+        drag(&mut h, from, to);
+        let after = tasks(&h);
+        let expected: Vec<String> = [&before[0], &before[3], &before[1], &before[2]].into_iter().chain(&before[4..]).cloned().collect();
+        assert_eq!(after, expected);
+        let ctx = h.ctx.clone();
+        h.state_mut().exec(&ctx, Command::Undo);
+        h.run_steps(2);
+        assert_eq!(tasks(&h), before, "one undo puts them back");
+
+        // Sorted rows have no outline order to drop into.
+        h.state_mut().exec(&ctx, Command::SortBy(Some(("name".into(), false))));
+        h.run_steps(2);
+        let (from, to) = (row_number_at(&h, 1), row_number_at(&h, 5));
+        drag(&mut h, from, to);
+        assert_eq!(tasks(&h), before);
+    }
+
+    /// Fill Down copies the top selected cell into the selected cells below it, in one undo step.
+    #[test]
+    fn fill_down_copies_the_top_cell_into_the_selected_rows() {
+        let mut h = harness();
+        let ctx = h.ctx.clone();
+        let table = h.state().st.table;
+        let (ids, dur_col, finish_col, first_duration) = {
+            let ws = lock(&h.state().ws);
+            let p = &ws.active_doc().unwrap().project;
+            let ids: Vec<TaskId> = p.tasks.iter().filter(|t| !t.sched.is_summary && !t.is_milestone()).take(3).map(|t| t.id).collect();
+            let shown = crate::fields::table_fields(p, table);
+            let col = |k: &str| shown.iter().position(|f| f.key() == k).unwrap();
+            (ids.clone(), col("duration"), col("finish"), p.task(ids[0]).unwrap().duration)
+        };
+        h.state_mut().st.sel.tasks = ids.iter().copied().collect();
+        h.state_mut().st.task_grid.cursor = Some((1, dur_col));
+        h.state_mut().exec(&ctx, Command::FillDown);
+        h.run_steps(2);
+        {
+            let ws = lock(&h.state().ws);
+            let doc = ws.active_doc().unwrap();
+            assert!(ids.iter().all(|id| doc.project.task(*id).unwrap().duration == first_duration));
+            assert_eq!(doc.undo_label(), Some("Fill Down Duration"));
+        }
+        // Finish fills like a typed date; one row has nothing below it to fill.
+        h.state_mut().st.task_grid.cursor = Some((1, finish_col));
+        assert!(h.state_mut().with_doc(dialogs::find::fill_down).unwrap().is_ok());
+        h.state_mut().st.sel.tasks = ids[..1].iter().copied().collect();
+        h.state_mut().st.task_grid.cursor = Some((1, dur_col));
+        let r = h.state_mut().with_doc(dialogs::find::fill_down).unwrap();
+        assert!(r.is_err_and(|e| e.contains("Select the rows below")));
+    }
+
+    /// Find selects the next task whose cell matches, expanding a collapsed summary; Replace All
+    /// replaces in every task as one undo step; Go To selects a task by its ID.
+    #[test]
+    fn find_replace_and_go_to() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = harness();
+        let ctx = h.ctx.clone();
+        let (target, summary, n) = {
+            let ws = lock(&h.state().ws);
+            let p = &ws.active_doc().unwrap().project;
+            let t = p.tasks.iter().find(|t| t.outline_level > 1).unwrap();
+            let summary = p.tasks[p.parent_index(p.task_index(t.id).unwrap()).unwrap()].id;
+            (t.clone(), summary, p.tasks.iter().filter(|t| t.name.to_lowercase().contains("design")).count())
+        };
+        h.state_mut().st.collapsed.insert(summary);
+        h.state_mut().exec(&ctx, Command::Find(false));
+        h.run_steps(2);
+        h.state_mut().dialogs.find.as_mut().unwrap().dialog.find = target.name.to_uppercase();
+        h.get_by_label("Find Next").click();
+        h.run_steps(2);
+        assert_eq!(h.state().st.sel.single_task(), Some(target.id));
+        assert!(!h.state().st.collapsed.contains(&summary), "its summary was expanded");
+
+        // Replace All, ignoring case, in the Task Name column.
+        h.state_mut().exec(&ctx, Command::Find(true));
+        h.run_steps(2);
+        {
+            let d = &mut h.state_mut().dialogs.find.as_mut().unwrap().dialog;
+            d.find = "design".into();
+            d.replace = "Layout".into();
+        }
+        h.get_by_label("Replace All").click();
+        h.run_steps(2);
+        assert!(n > 0);
+        assert!(tasks(&h).iter().all(|t| !t.to_lowercase().contains("design")), "{:?}", tasks(&h));
+        assert_eq!(lock(&h.state().ws).active_doc().unwrap().undo_label(), Some("Replace All"));
+        h.get_by_label_contains("Replaced");
+        h.state_mut().exec(&ctx, Command::Undo);
+        h.run_steps(2);
+        assert_eq!(tasks(&h).iter().filter(|t| t.to_lowercase().contains("design")).count(), n);
+
+        // Go To row 5; a row that doesn't exist says so.
+        h.state_mut().dialogs.find = None;
+        h.state_mut().exec(&ctx, Command::GoTo);
+        h.run_steps(2);
+        h.state_mut().dialogs.goto.as_mut().unwrap().dialog.id = "5".into();
+        h.get_by_label("Go").click();
+        h.run_steps(2);
+        let fifth = lock(&h.state().ws).active_doc().unwrap().project.tasks[4].id;
+        assert_eq!(h.state().st.sel.single_task(), Some(fifth));
+        assert!(h.state().dialogs.goto.is_none());
+        h.state_mut().exec(&ctx, Command::GoTo);
+        h.run_steps(2);
+        h.state_mut().dialogs.goto.as_mut().unwrap().dialog.id = "999".into();
+        h.get_by_label("Go").click();
+        h.run_steps(2);
+        h.get_by_label_contains("There is no task 999");
+    }
+
+    /// Several tasks selected: Task Information opens as Multiple Task Information.
+    #[test]
+    fn task_information_on_several_tasks_edits_them_all() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = harness();
+        let ctx = h.ctx.clone();
+        let ids: Vec<TaskId> = {
+            let ws = lock(&h.state().ws);
+            ws.active_doc().unwrap().project.tasks.iter().filter(|t| !t.sched.is_summary).take(3).map(|t| t.id).collect()
+        };
+        h.state_mut().st.sel.tasks = ids.iter().copied().collect();
+        h.state_mut().exec(&ctx, Command::TaskInfo);
+        h.run_steps(2);
+        h.get_by_label_contains("Multiple Task Information (3 tasks)");
     }
 
     /// A plan open in another PlanCraft opens with a bar saying who has it; Dismiss hides it.

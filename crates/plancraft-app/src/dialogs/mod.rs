@@ -2,6 +2,7 @@
 
 pub mod baseline;
 pub mod custom_fields;
+pub mod find;
 pub mod import;
 pub mod mcp_panel;
 pub mod misc;
@@ -45,6 +46,8 @@ pub fn show_bound<T>(slot: &mut Option<Bound<T>>, ws: &mut Workspace, show: impl
 #[derive(Default)]
 pub struct Dialogs {
     pub task_info: Option<Bound<task_info::TaskInfo>>,
+    pub find: Option<Bound<find::FindReplace>>,
+    pub goto: Option<Bound<find::GoTo>>,
     pub resource_info: Option<Bound<resource_info::ResourceInfo>>,
     pub project_info: Option<Bound<project_info::ProjectInfo>>,
     pub working_time: Option<Bound<working_time::WorkingTime>>,

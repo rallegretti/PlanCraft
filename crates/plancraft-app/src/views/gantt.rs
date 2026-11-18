@@ -73,6 +73,8 @@ pub fn task_table(
     let over_res: HashSet<ResourceId> = plancraft_core::workload::overallocations(&doc.project).into_iter().map(|(r, _)| r).collect();
     let over_tasks = super::overallocated_tasks(&doc.project, &over_res);
     let blank = blank_rows(st);
+    // Rows are dragged in the outline order only (not sorted or grouped).
+    let row_drag = st.sort.is_none() && st.group.is_none();
     let output = {
         let p = &doc.project;
         // Rows show the task's row number (what predecessors refer to), also when sorted or grouped.
@@ -91,6 +93,7 @@ pub fn task_table(
             header_height: theme::HEADER_HEIGHT,
             row_height: theme::ROW_HEIGHT,
             row_key: Some(&row_key),
+            row_drag,
         };
         let sel = &st.sel;
         let collapsed = &st.collapsed;
@@ -206,6 +209,7 @@ pub fn task_table(
             GridEvent::EditLost => {
                 st.toast(ToastKind::Warning, "The task you were editing was deleted or is no longer shown, so your typing was not saved.")
             }
+            GridEvent::MoveRows { from, to } => move_rows(doc, st, rows, from, to),
             GridEvent::InsertKey => out.push(Command::InsertTask),
             GridEvent::ClickEmpty { .. } => {
                 st.sel.tasks.clear();
@@ -226,6 +230,22 @@ pub fn task_table(
         }
     }
     output
+}
+
+/// Rows dragged by their row number: the selected tasks (or the dragged one, if it isn't
+/// selected) move above the row they were dropped on, as one undo step.
+fn move_rows(doc: &mut Document, st: &mut UiState, rows: &[Row], from: usize, to: usize) {
+    let Some(at) = super::task_at(&doc.project, rows, from).map(|t| t.id) else { return };
+    let ids: Vec<TaskId> = if st.sel.tasks.contains(&at) { super::selected_in_order(&doc.project, &st.sel) } else { vec![at] };
+    // Below the last row (or onto a blank row): to the end of the plan.
+    let before = super::task_at(&doc.project, rows, to).map(|t| t.id);
+    match doc.try_edit("Move Tasks", ChangeSource::User, |p| p.move_tasks_before(&ids, before)) {
+        Ok(()) => {
+            st.sel.tasks = ids.iter().copied().collect();
+            st.sel.anchor = ids.first().copied();
+        }
+        Err(e) => st.toast(ToastKind::Warning, e.to_string()),
+    }
 }
 
 /// The Delete key on a cell other than the name: clears that field of the selected tasks (the

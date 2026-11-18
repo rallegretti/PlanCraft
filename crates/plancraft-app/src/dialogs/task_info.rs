@@ -57,6 +57,8 @@ pub struct TaskInfo {
     /// agent (or the table) made meanwhile are kept.
     orig: Option<Box<TaskInfo>>,
     id: TaskId,
+    /// Multiple Task Information: the other selected tasks, which get the same changes.
+    others: Vec<TaskId>,
     tab: Tab,
     name: String,
     duration: String,
@@ -131,6 +133,7 @@ impl TaskInfo {
         let mut info = Self {
             orig: None,
             id,
+            others: Vec::new(),
             tab: if notes_tab { Tab::Notes } else { Tab::General },
             name: t.name.clone(),
             duration: p.format_task_minutes(t, t.sched.duration, t.estimated),
@@ -186,6 +189,103 @@ impl TaskInfo {
         };
         info.orig = Some(Box::new(info.clone()));
         Some(info)
+    }
+
+    /// Multiple Task Information for `ids` (one task: plain Task Information). Text fields whose
+    /// value differs between the tasks start empty; OK writes only the fields changed in the
+    /// dialog, to every task, so the others keep their own values. Predecessors, resources and
+    /// milestone members are left out: they belong to one task.
+    pub fn new_multi(p: &Project, ids: &[TaskId]) -> Option<Self> {
+        let infos: Vec<TaskInfo> = ids.iter().filter_map(|id| Self::new(p, *id, false)).collect();
+        let (first, rest) = infos.split_first()?;
+        let mut base = first.clone();
+        if rest.is_empty() {
+            return Some(base);
+        }
+        macro_rules! mixed {
+            ($($field:ident),*) => {$(
+                if rest.iter().any(|o| o.$field != base.$field) {
+                    base.$field = String::new();
+                }
+            )*};
+        }
+        mixed!(
+            name,
+            duration,
+            percent,
+            priority,
+            start,
+            finish,
+            constraint_date,
+            deadline,
+            fixed_cost,
+            actual_start,
+            actual_finish,
+            points,
+            optimistic,
+            most_likely,
+            pessimistic,
+            est_work,
+            deliverable,
+            notes
+        );
+        if rest.iter().any(|o| o.resume != base.resume) {
+            base.resume = String::new();
+            base.resume_orig = String::new();
+        }
+        for (k, row) in base.custom.iter_mut().enumerate() {
+            if rest.iter().any(|o| o.custom.get(k).is_none_or(|r| r.text != row.text)) {
+                row.text = String::new();
+                row.original = String::new();
+            }
+        }
+        base.others = rest.iter().map(|i| i.id).collect();
+        base.summary = infos.iter().all(|i| i.summary);
+        if matches!(base.tab, Tab::Predecessors | Tab::Resources | Tab::Milestone) {
+            base.tab = Tab::General;
+        }
+        base.orig = None;
+        base.orig = Some(Box::new(base.clone()));
+        Some(base)
+    }
+
+    fn is_multi(&self) -> bool {
+        !self.others.is_empty()
+    }
+
+    /// Writes the fields changed since the dialog opened to its task, or to each of its tasks
+    /// (Multiple Task Information), in one edit.
+    fn apply_all(&self, p: &mut Project) -> Result<(), String> {
+        let Some(o) = self.orig.as_deref().filter(|_| self.is_multi()) else { return self.apply(p) };
+        for id in std::iter::once(self.id).chain(self.others.iter().copied()) {
+            // Deleted meanwhile (by an agent): nothing to change there.
+            let Some(t) = p.task(id) else { continue };
+            let mut one = self.clone();
+            let mut orig = o.clone();
+            one.id = id;
+            // What the dialog didn't change follows each task (its kind and schedule mode).
+            one.summary = t.sched.is_summary;
+            orig.summary = one.summary;
+            if self.mode == o.mode {
+                one.mode = t.mode;
+                orig.mode = t.mode;
+            }
+            if self.milestone == o.milestone {
+                one.milestone = t.is_milestone();
+                orig.milestone = one.milestone;
+            }
+            // Only "Estimated" ticked: each task keeps its own duration (the field may be empty
+            // because the durations differ).
+            if self.duration == o.duration {
+                let own = p.format_task_minutes(t, t.sched.duration, t.estimated);
+                one.duration = own.clone();
+                orig.duration = own;
+            }
+            let name = t.name.clone();
+            one.orig = Some(Box::new(orig));
+            one.apply(p).map_err(|e| format!("{name}: {e}"))?;
+        }
+        Ok(())
     }
 
     /// Writes the fields changed since the dialog opened, in one edit.
@@ -412,7 +512,10 @@ impl TaskInfo {
     pub fn show(&mut self, ctx: &Context, doc: &mut Document) -> bool {
         let mut open = true;
         let mut close = false;
-        let title = if self.milestone {
+        let multi = format!("Multiple Task Information ({} tasks)", self.others.len().saturating_add(1));
+        let title = if self.is_multi() {
+            multi.as_str()
+        } else if self.milestone {
             "Milestone Information"
         } else if self.summary {
             "Summary Task Information"
@@ -433,19 +536,26 @@ impl TaskInfo {
                     ui.label("Name:");
                     ui.add(egui::TextEdit::singleline(&mut self.name).desired_width(320.0));
                     ui.label("Duration:");
-                    ui.add_enabled(!self.milestone && !self.summary, egui::TextEdit::singleline(&mut self.duration).desired_width(80.0));
+                    // Several tasks: each milestone or summary among them keeps its own duration.
+                    let duration_editable = if self.is_multi() { !self.summary } else { !self.milestone && !self.summary };
+                    ui.add_enabled(duration_editable, egui::TextEdit::singleline(&mut self.duration).desired_width(80.0));
                     ui.checkbox(&mut self.estimated, "Estimated");
                 });
                 ui.add_space(4.0);
+                if self.is_multi() {
+                    ui.label(
+                        RichText::new("Empty fields differ between the tasks. Only the fields you change are applied, to every task.")
+                            .color(theme::pal().TEXT_WEAK),
+                    );
+                }
                 ui.horizontal(|ui| {
-                    let mut tabs = vec![
-                        (Tab::General, "General"),
-                        (Tab::Predecessors, "Predecessors"),
-                        (Tab::Resources, "Resources"),
-                        (Tab::Advanced, "Advanced"),
-                        (Tab::Estimate, "Estimate"),
-                    ];
-                    if self.milestone {
+                    let mut tabs = vec![(Tab::General, "General")];
+                    // Links, assignments and milestone members belong to one task.
+                    if !self.is_multi() {
+                        tabs.extend([(Tab::Predecessors, "Predecessors"), (Tab::Resources, "Resources")]);
+                    }
+                    tabs.extend([(Tab::Advanced, "Advanced"), (Tab::Estimate, "Estimate")]);
+                    if self.milestone && !self.is_multi() {
                         tabs.push((Tab::Milestone, "Milestone"));
                     }
                     if !self.custom.is_empty() {
@@ -478,8 +588,12 @@ impl TaskInfo {
                         close = true;
                     }
                     if ui.add(egui::Button::new(RichText::new("  OK  ").color(egui::Color32::WHITE)).fill(theme::pal().ACCENT)).clicked() {
-                        let label = format!("Task Information: {}", self.name);
-                        match doc.edit_msg(&label, |p| self.apply(p)) {
+                        let label = if self.is_multi() {
+                            "Multiple Task Information".to_string()
+                        } else {
+                            format!("Task Information: {}", self.name)
+                        };
+                        match doc.edit_msg(&label, |p| self.apply_all(p)) {
                             Ok(()) => close = true,
                             Err(e) => self.error = Some(e),
                         }
@@ -899,6 +1013,55 @@ mod tests {
         assert_eq!(t.percent_complete, 30);
         assert!(t.predecessors.is_empty(), "the agent's unlink stays, not {pred:?}");
         assert_eq!(t.priority, 900);
+    }
+
+    /// Multiple Task Information: fields that differ start empty, and only the fields changed are
+    /// written, to every selected task, which keep everything else of their own.
+    #[test]
+    fn multiple_task_information_changes_only_what_was_changed_in_every_task() {
+        let mut p = demo();
+        let picked: Vec<&Task> = p.tasks.iter().filter(|t| !t.sched.is_summary && !t.is_milestone()).take(3).collect();
+        let ids: Vec<TaskId> = picked.iter().map(|t| t.id).collect();
+        let before: Vec<(String, Minutes, Vec<Dependency>)> =
+            picked.iter().map(|t| (t.name.clone(), t.duration, t.predecessors.clone())).collect();
+        let milestone = p.tasks.iter().find(|t| t.is_milestone()).unwrap().id;
+        let summary = p.tasks.iter().find(|t| t.sched.is_summary).unwrap().id;
+        let mut all = ids.clone();
+        all.extend([milestone, summary]);
+        p.task_mut(ids[0]).unwrap().priority = 700;
+
+        let mut info = TaskInfo::new_multi(&p, &all).unwrap();
+        assert!(info.is_multi());
+        assert_eq!(info.name, "", "the names differ");
+        assert_eq!(info.priority, "", "one priority differs");
+        info.priority = "800".into();
+        info.notes = "Same note for all".into();
+        info.duration = "4d".into();
+        info.apply_all(&mut p).unwrap();
+
+        for (id, (name, _, preds)) in ids.iter().zip(&before) {
+            let t = p.task(*id).unwrap();
+            assert_eq!((t.priority, t.notes.as_str(), &t.name, &t.predecessors), (800, "Same note for all", name, preds));
+            assert_eq!(t.duration, 4 * 480);
+        }
+        let m = p.task(milestone).unwrap();
+        assert!(m.is_milestone() && m.notes == "Same note for all", "a milestone keeps no duration");
+        assert!(p.task(summary).unwrap().sched.is_summary);
+
+        // Only "Estimated" ticked, with durations that differ: each keeps its own, now estimated.
+        assert_eq!(TaskInfo::new_multi(&p, &ids).unwrap().duration, "4 days", "all 4 days now");
+        p.set_duration(ids[1], 2 * 480, false).unwrap();
+        plancraft_core::schedule::recalculate(&mut p);
+        let mut info = TaskInfo::new_multi(&p, &ids).unwrap();
+        assert_eq!(info.duration, "");
+        info.estimated = true;
+        info.apply_all(&mut p).unwrap();
+        assert_eq!(p.task(ids[1]).unwrap().duration, 2 * 480);
+        assert!(ids.iter().all(|id| p.task(*id).unwrap().estimated));
+
+        // One task: the plain dialog.
+        assert!(!TaskInfo::new_multi(&p, &ids[..1]).unwrap().is_multi());
+        assert!(TaskInfo::new_multi(&p, &[]).is_none());
     }
 
     #[test]

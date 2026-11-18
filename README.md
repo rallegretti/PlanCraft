@@ -140,7 +140,7 @@ cargo run --release -p plancraft-app
 
 ### Plan your project
 
-- Break work down into tasks and subtasks, typing straight into the task list like a spreadsheet.
+- Break work down into tasks and subtasks, typing straight into the task list like a spreadsheet: drag rows by their number to reorder them, fill a value down the selected rows, and find and replace text across the plan. Select several tasks to change them all at once in Task Information.
 - See everything on a **Gantt chart**: drag bars to reschedule, stretch them to change a duration, or drag one task onto another to link them.
 - Link tasks so one starts when another finishes, or overlap them with leads and lags. Dates update automatically when anything changes.
 - Mark the deadlines that matter and see the **critical path**, the chain of tasks that sets your finish date.
@@ -242,9 +242,12 @@ Started your plan in a spreadsheet? Open it with **File ▸ Open** (or **File �
 | `Delete` | Clear the selected cell; on a row number or in the Task Name column, remove the task |
 | `F2`, or just start typing | Edit the selected cell |
 | `Alt+Shift+→` / `Alt+Shift+←` | Indent / outdent |
-| `Alt+Shift+↑` / `Alt+Shift+↓` | Move a task up / down |
+| `Alt+Shift+↑` / `Alt+Shift+↓` | Move a task up / down (or drag its row number) |
+| `Ctrl+D` | Fill down: copy the top selected cell into the selected cells below it |
+| `Ctrl+F` / `Ctrl+H` | Find / replace |
+| `F5` | Go to a task ID or a date |
 | `Ctrl+F2` / `Ctrl+Shift+F2` | Link / unlink the selected tasks |
-| `Shift+F2` | Task Information |
+| `Shift+F2` | Task Information (several tasks selected: change them all at once) |
 | `Ctrl+Z` / `Ctrl+Y` | Undo / redo |
 | `Ctrl+S` | Save |
 | `Ctrl` + mouse wheel | Zoom the timeline in and out |

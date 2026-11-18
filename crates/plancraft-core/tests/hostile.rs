@@ -284,6 +284,8 @@ enum Op {
     Outdent(usize),
     Move(usize, usize),
     Shift(usize, bool),
+    /// Drag rows: tasks moved above another task (or to the end).
+    MoveBefore(Vec<usize>, Option<usize>),
     Delete(usize),
     Link(usize, usize, usize, i64),
     Unlink(usize),
@@ -343,6 +345,7 @@ fn edit_op() -> impl Strategy<Value = Op> {
         i().prop_map(Op::Outdent),
         (i(), any::<usize>()).prop_map(|(a, b)| Op::Move(a, b)),
         (i(), any::<bool>()).prop_map(|(a, b)| Op::Shift(a, b)),
+        (proptest::collection::vec(i(), 0..4), proptest::option::of(i())).prop_map(|(a, b)| Op::MoveBefore(a, b)),
         i().prop_map(Op::Delete),
         (i(), i(), 0usize..4, big()).prop_map(|(a, b, k, l)| Op::Link(a, b, k, l)),
         i().prop_map(Op::Unlink),
@@ -466,6 +469,11 @@ fn apply(p: &mut Project, op: &Op) -> PlanResult<()> {
         Op::Outdent(i) => p.outdent(task_at(p, i))?,
         Op::Move(i, to) => p.move_task(task_at(p, i), to)?,
         Op::Shift(i, up) => p.shift_task(task_at(p, i), up)?,
+        Op::MoveBefore(is, before) => {
+            let ids: Vec<TaskId> = is.iter().map(|i| task_at(p, *i)).collect();
+            let before = before.map(|i| task_at(p, i));
+            p.move_tasks_before(&ids, before)?
+        }
         Op::Delete(i) => {
             p.delete_tasks(&[task_at(p, i)])?;
         }

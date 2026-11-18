@@ -61,6 +61,12 @@ pub enum Command {
     Cut,
     Copy,
     Paste,
+    /// Copy the top selected cell's value into the selected cells below it (Ctrl+D).
+    FillDown,
+    /// The Find window (`true`: with Replace).
+    Find(bool),
+    /// Go To a task ID or a date (F5).
+    GoTo,
     // Resources
     InsertResource,
     DeleteResources,
@@ -141,4 +147,8 @@ pub fn task_context_menu(ui: &mut egui::Ui, emit: &mut dyn FnMut(Command)) {
     item(ui, "✂  Cut", Command::Cut);
     item(ui, "📋  Copy", Command::Copy);
     item(ui, "📥  Paste", Command::Paste);
+    item(ui, "⇩  Fill Down (Ctrl+D)", Command::FillDown);
+    ui.separator();
+    item(ui, "🔦  Find… (Ctrl+F)", Command::Find(false));
+    item(ui, "↪  Go To… (F5)", Command::GoTo);
 }
