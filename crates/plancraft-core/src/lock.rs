@@ -166,7 +166,7 @@ fn inspect(lock: &Path) -> Found {
         return Found::Unusable;
     }
     let mut bytes = Vec::new();
-    let read = fs::File::open(lock).and_then(|f| f.take(MAX_LOCK_BYTES).read_to_end(&mut bytes));
+    let read = crate::io::open_regular(lock, false, crate::io::Links::Refuse).and_then(|f| f.take(MAX_LOCK_BYTES).read_to_end(&mut bytes));
     match read {
         Ok(_) => {}
         Err(e) if e.kind() == ErrorKind::NotFound => return Found::Missing,
@@ -223,7 +223,7 @@ fn write_new(lock: &Path) -> std::io::Result<()> {
 
 /// Marks our lock file as still in use.
 fn touch(lock: &Path) {
-    if let Ok(f) = OpenOptions::new().write(true).open(lock) {
+    if let Ok(f) = crate::io::open_regular(lock, true, crate::io::Links::Refuse) {
         let _ = f.set_modified(SystemTime::now());
     }
 }

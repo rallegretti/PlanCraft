@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/plancraft-core", "crates/plancraft-mcp", "crates/plancraft-app", "xtask"]
+members = ["crates/plancraft-core", "crates/plancraft-mcp", "crates/plancraft-server", "crates/plancraft-app", "xtask"]
 
 [workspace.package]
 version = "0.6.0"
@@ -13,6 +13,7 @@ rust-version = "1.90"
 [workspace.dependencies]
 plancraft-core = { path = "crates/plancraft-core" }
 plancraft-mcp = { path = "crates/plancraft-mcp" }
+plancraft-server = { path = "crates/plancraft-server" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 # Dates and times (replacing chrono, which is unmaintained: RUSTSEC-2026-0543).

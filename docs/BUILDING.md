@@ -60,7 +60,7 @@ Runs every quality gate locally:
 
 - `cargo fmt --check`;
 - `cargo clippy --workspace --all-targets -- -D warnings`, including the never-crash lints (`unwrap`, `expect`, `panic!` and indexing are denied in shipped code);
-- `cargo test --workspace`: unit tests, the hostile-input sweeps (`crates/plancraft-core/tests/hostile.rs`, `crates/plancraft-mcp/tests/garbage.rs`) and the Microsoft Project parity tests (`crates/plancraft-core/tests/ms_parity.rs`);
+- `cargo test --workspace`: unit tests, the hostile-input sweeps (`crates/plancraft-core/tests/hostile.rs`, `crates/plancraft-mcp/tests/garbage.rs`, `crates/plancraft-server/tests/garbage.rs`) and the Microsoft Project parity tests (`crates/plancraft-core/tests/ms_parity.rs`);
 - the scheduler speed gate in release mode (200 tasks must recalculate in under 10 ms);
 - `cargo deny check`: licences, security advisories, banned crates (nothing that compiles C) and sources. Install it once with `cargo install --locked cargo-deny`.
 

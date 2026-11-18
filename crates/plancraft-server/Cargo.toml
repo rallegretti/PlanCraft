@@ -1,0 +1,38 @@
+[package]
+name = "plancraft-server"
+description = "PlanCraft Server: shares a folder of plans for several people to edit at once"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[[bin]]
+name = "plancraft-server"
+path = "src/main.rs"
+
+[dependencies]
+plancraft-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+snow = { version = "0.10", default-features = false, features = ["use-chacha20poly1305", "use-blake2", "use-curve25519", "use-getrandom"] }
+argon2 = "0.6"
+blake2 = "0.11"
+rpassword = "7.5"
+gethostname = "1.1"
+# Plan names compared in one Unicode form (macOS file systems store accented names decomposed).
+unicode-normalization = "0.1"
+# Stops cleanly on Ctrl+C and on the termination signal a service manager sends.
+ctrlc = { version = "3.5", features = ["termination"] }
+# Checks that a key file's public key belongs to its private key (already used by snow).
+curve25519-dalek = { version = "4.1", default-features = false }
+
+[dev-dependencies]
+uuid.workspace = true
+tempfile = "3"
+proptest = "1"
+
+[lints]
+workspace = true

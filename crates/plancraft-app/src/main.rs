@@ -3,6 +3,7 @@
 //! ```text
 //! plancraft [FILE.plancraft]          open the desktop app
 //! plancraft mcp [FILE...] [--http ADDR]  run the MCP server without a window
+//! plancraft serve FOLDER [...]          share a folder of plans (PlanCraft Server)
 //! ```
 
 // Release builds on Windows are GUI applications (no console window). Command-line
@@ -76,13 +77,17 @@ fn main() -> anyhow::Result<()> {
     let raw: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
     let args: Vec<String> = raw.iter().map(|a| a.to_string_lossy().into_owned()).collect();
     #[cfg(windows)]
-    if matches!(args.first().map(String::as_str), Some("mcp" | "--version" | "--write-icon")) {
+    if matches!(args.first().map(String::as_str), Some("mcp" | "serve" | "--version" | "--write-icon")) {
         attach_parent_console();
     }
     if args.first().map(String::as_str) == Some("mcp") {
         // Headless MCP server: `plancraft mcp [FILE...] [--http ADDR]`.
         let code = plancraft_mcp::cli::run(args.iter().skip(1).cloned().collect());
         std::process::exit(if code == std::process::ExitCode::SUCCESS { 0 } else { 1 });
+    }
+    if args.first().map(String::as_str) == Some("serve") {
+        // PlanCraft Server, built in: `plancraft serve FOLDER`, the same as `plancraft-server`.
+        std::process::exit(plancraft_server::cli::run(args.iter().skip(1).cloned().collect()));
     }
     plancraft_core::lock::set_app_name(format!("PlanCraft {}", env!("CARGO_PKG_VERSION")));
     if args.first().map(String::as_str) == Some("--version") {

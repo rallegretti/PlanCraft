@@ -12,3 +12,11 @@ fn a_file_name_that_is_not_utf8_does_not_crash() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     assert!(String::from_utf8_lossy(&out.stdout).starts_with("plancraft "));
 }
+
+/// `plancraft serve` runs PlanCraft Server from the app's own binary.
+#[test]
+fn plancraft_serve_is_the_server() {
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_plancraft")).args(["serve", "--help"]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(String::from_utf8_lossy(&out.stdout).contains("PlanCraft Server"));
+}

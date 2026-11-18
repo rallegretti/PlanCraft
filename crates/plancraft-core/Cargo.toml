@@ -31,6 +31,11 @@ encoding_rs = "0.8"
 # The computer's name for lock files (pure Rust, already used by the window system crates).
 gethostname = "1.1"
 
+# Opening a file without following a link or blocking on a FIFO (`io::open_regular`): only the
+# O_NOFOLLOW / O_NONBLOCK constants. Plain bindings, nothing compiled.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 # Builds workbooks for the import tests.
 zip = { version = "9", default-features = false }
