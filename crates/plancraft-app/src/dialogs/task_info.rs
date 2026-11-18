@@ -274,6 +274,13 @@ impl TaskInfo {
                 one.milestone = t.is_milestone();
                 orig.milestone = one.milestone;
             }
+            // Only "Estimated" ticked: each task keeps its own duration (the field may be empty
+            // because the durations differ).
+            if self.duration == o.duration {
+                let own = p.format_task_minutes(t, t.sched.duration, t.estimated);
+                one.duration = own.clone();
+                orig.duration = own;
+            }
             let name = t.name.clone();
             one.orig = Some(Box::new(orig));
             one.apply(p).map_err(|e| format!("{name}: {e}"))?;
@@ -1040,6 +1047,17 @@ mod tests {
         let m = p.task(milestone).unwrap();
         assert!(m.is_milestone() && m.notes == "Same note for all", "a milestone keeps no duration");
         assert!(p.task(summary).unwrap().sched.is_summary);
+
+        // Only "Estimated" ticked, with durations that differ: each keeps its own, now estimated.
+        assert_eq!(TaskInfo::new_multi(&p, &ids).unwrap().duration, "4 days", "all 4 days now");
+        p.set_duration(ids[1], 2 * 480, false).unwrap();
+        plancraft_core::schedule::recalculate(&mut p);
+        let mut info = TaskInfo::new_multi(&p, &ids).unwrap();
+        assert_eq!(info.duration, "");
+        info.estimated = true;
+        info.apply_all(&mut p).unwrap();
+        assert_eq!(p.task(ids[1]).unwrap().duration, 2 * 480);
+        assert!(ids.iter().all(|id| p.task(*id).unwrap().estimated));
 
         // One task: the plain dialog.
         assert!(!TaskInfo::new_multi(&p, &ids[..1]).unwrap().is_multi());
