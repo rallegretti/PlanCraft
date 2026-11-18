@@ -1386,3 +1386,160 @@ fn hostile_spreadsheets_are_bounded() {
         assert!(grid.rows.iter().flatten().all(|c| c.len() <= limits::MAX_NOTES_CHARS));
     }
 }
+
+mod shared_editing {
+    //! Three people editing one shared plan at random, with changes and replies delivered in any
+    //! order and connections dropped, always end up with the host's plan.
+    use super::*;
+    use plancraft_core::sync::{self, ChangeId, Entry, Host, Outcome, Replica, SyncError};
+    use std::collections::VecDeque;
+
+    const PEOPLE: usize = 3;
+
+    #[derive(Clone, Debug)]
+    enum Step {
+        Edit(usize, Op),
+        Send(usize),
+        Deliver(usize),
+        /// The connection drops (messages on their way are lost) and comes back.
+        Reconnect(usize),
+    }
+
+    fn step() -> impl Strategy<Value = Step> {
+        let who = || 0usize..PEOPLE;
+        prop_oneof![
+            // Edits outnumber sends, so changes often cross on their way.
+            6 => (who(), edit_op()).prop_map(|(i, op)| Step::Edit(i, op)),
+            1 => who().prop_map(Step::Send),
+            2 => who().prop_map(Step::Deliver),
+            1 => who().prop_map(Step::Reconnect),
+        ]
+    }
+
+    enum Msg {
+        Entry(Entry),
+        Rejected(ChangeId, Option<String>),
+        Resync,
+    }
+
+    struct Net {
+        host: Host,
+        people: Vec<Replica>,
+        inbox: Vec<VecDeque<Msg>>,
+    }
+
+    impl Net {
+        fn new() -> Self {
+            let mut doc = Document::new(1, demo_project(start()), None);
+            doc.edit("recalculate", |_| {}).unwrap();
+            let mut host = Host::new(doc.project);
+            let people = (0..PEOPLE)
+                .map(|_| {
+                    let ids = host.lease().unwrap();
+                    Replica::new(host.project().clone(), host.version(), ids)
+                })
+                .collect();
+            Self { host, people, inbox: (0..PEOPLE).map(|_| VecDeque::new()).collect() }
+        }
+
+        fn resync(&mut self, i: usize) -> Result<(), TestCaseError> {
+            let r = self.people[i].resync(self.host.project().clone(), self.host.version());
+            prop_assert!(r.is_ok(), "resync failed: {r:?}");
+            Ok(())
+        }
+
+        fn run(&mut self, step: &Step) -> Result<(), TestCaseError> {
+            match step {
+                Step::Edit(i, op) => {
+                    let mut doc = Document::new(1, self.people[*i].local().clone(), None);
+                    let r = doc.try_edit("junk", ChangeSource::User, |p| apply(p, op));
+                    prop_assert!(!matches!(r, Err(PlanError::Internal(_))), "{op:?} panicked: {r:?}");
+                    if r.is_ok() {
+                        prop_assert!(self.people[*i].edited(doc.project).is_ok());
+                    }
+                }
+                Step::Send(i) => {
+                    let Some(change) = self.people[*i].next_change("edit") else { return Ok(()) };
+                    match self.host.submit(&change, &format!("person {i}")) {
+                        Outcome::Applied(e) => {
+                            for inbox in &mut self.inbox {
+                                inbox.push_back(Msg::Entry(e.clone()));
+                            }
+                        }
+                        Outcome::Conflicts(_) => self.inbox[*i].push_back(Msg::Rejected(change.id, None)),
+                        Outcome::Refused(why) => self.inbox[*i].push_back(Msg::Rejected(change.id, Some(why))),
+                        Outcome::Resync => self.inbox[*i].push_back(Msg::Resync),
+                        Outcome::AlreadyApplied(_) => prop_assert!(false, "a change was sent twice"),
+                    }
+                    let mut copy = self.host.project().clone();
+                    prop_assert!(limits::sanitize(&mut copy).is_empty(), "the host's plan left the limits");
+                }
+                Step::Deliver(i) => match self.inbox[*i].pop_front() {
+                    None => {}
+                    Some(Msg::Entry(e)) => match self.people[*i].receive(&e) {
+                        Ok(_) => {}
+                        Err(SyncError::Gap) => self.resync(*i)?,
+                        Err(other) => prop_assert!(false, "an accepted change did not apply: {other}"),
+                    },
+                    Some(Msg::Rejected(id, why)) => {
+                        self.people[*i].rejected(id, why.as_deref());
+                    }
+                    Some(Msg::Resync) => self.resync(*i)?,
+                },
+                Step::Reconnect(i) => {
+                    self.inbox[*i].clear();
+                    self.resync(*i)?;
+                }
+            }
+            Ok(())
+        }
+
+        /// Delivers and sends until nothing is left on its way.
+        fn settle(&mut self) -> Result<(), TestCaseError> {
+            for _ in 0..20 {
+                for i in 0..PEOPLE {
+                    while !self.inbox[i].is_empty() {
+                        self.run(&Step::Deliver(i))?;
+                    }
+                }
+                let quiet = self.people.iter().all(|r| !r.waiting() && r.pending().is_empty());
+                if quiet {
+                    return Ok(());
+                }
+                for i in 0..PEOPLE {
+                    self.run(&Step::Send(i))?;
+                }
+            }
+            prop_assert!(false, "changes kept going back and forth");
+            Ok(())
+        }
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: cases(32), ..ProptestConfig::default() })]
+
+        #[test]
+        fn everyone_ends_up_with_the_hosts_plan(steps in prop::collection::vec(step(), 1..80)) {
+            let mut net = Net::new();
+            for s in &steps {
+                net.run(s)?;
+            }
+            net.settle()?;
+            let host = net.host.project();
+            for (i, r) in net.people.iter().enumerate() {
+                prop_assert_eq!(r.version(), net.host.version());
+                let local = sync::diff(host, r.local()).unwrap();
+                prop_assert!(local.is_empty(), "person {} differs from the host: {:?}", i, local);
+                prop_assert!(sync::diff(host, r.confirmed()).unwrap().is_empty());
+                // Schedules agree too: every copy recalculates the same plan to the same dates.
+                for (a, b) in host.tasks.iter().zip(&r.local().tasks) {
+                    prop_assert_eq!(a.sched.start, b.sched.start);
+                    prop_assert_eq!(a.sched.finish, b.sched.finish);
+                }
+            }
+            // The ids handed out never clashed: every task id is unique.
+            let ids: std::collections::HashSet<_> = host.tasks.iter().map(|t| t.id).collect();
+            prop_assert_eq!(ids.len(), host.tasks.len());
+        }
+    }
+}

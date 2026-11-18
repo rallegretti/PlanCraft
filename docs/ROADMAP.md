@@ -47,7 +47,7 @@
 - **Leveling options:** level within slack only, a priority-driven order, splitting, and a leveling preview (MS Project's "Leveling Gantt").
 - **Resource pool shared across projects:** one resources file that several projects link to.
 - **Overtime work and cost-rate tables:** effective-dated rates and cost accrual.
-- **Collaboration:** merging two versions of a plan instead of choosing one. File watching and lock files are done (see above); a merge-friendly JSON layout already exists.
+- **Shared editing** (opt-in; [design](COLLABORATION.md)): a host serves a folder of plans to 5–10 people over the office network, ordering and checking every change, with logins, a crash-safe journal, conflict reports and work kept through network drops. Phase 1, the sync engine (`plancraft_core::sync`), is done. Next: the server (`plancraft-server`), PlanCraft as a client, discovery and *Share Folder…*, then packaging and optional services.
 - **MCP:**
   - `notifications/resources/updated` subscriptions
   - per-tool read-only mode

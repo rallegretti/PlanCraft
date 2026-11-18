@@ -38,6 +38,7 @@ pub mod report;
 pub mod sample;
 pub mod schedule;
 pub mod split;
+pub mod sync;
 pub mod tabular;
 pub mod timescale;
 pub mod watch;

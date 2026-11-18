@@ -446,3 +446,32 @@ fn scheduling_long_tasks_with_many_resources_is_fast() {
     let limit = Duration::from_millis(1500);
     assert!(took < limit, "took {took:?}; the limit is {limit:?}");
 }
+
+/// Shared editing works out a diff on every local edit and the host checks and recalculates
+/// every change: on a 2,000-task plan one round (edit, diff, host submit, replica receive) must
+/// stay well under the time a keystroke can wait.
+#[test]
+#[cfg_attr(debug_assertions, ignore = "a timing test: `cargo xtask ci` runs it in release")]
+fn a_shared_edit_on_2000_tasks_is_fast() {
+    use plancraft_core::sync::{Host, Outcome, Replica};
+    let _serial = timed();
+    let mut p = project(2000);
+    recalculate(&mut p);
+    let mut host = Host::new(p);
+    let ids = host.lease().unwrap();
+    let mut replica = Replica::new(host.project().clone(), host.version(), ids);
+    let target = host.project().tasks[1001].id;
+    let mut n = 0;
+    let t = best_of(5, || {
+        n += 1;
+        let mut local = replica.local().clone();
+        local.task_mut(target).unwrap().name = format!("Renamed {n}");
+        recalculate(&mut local);
+        replica.edited(local).unwrap();
+        let change = replica.next_change("Rename").unwrap();
+        let Outcome::Applied(entry) = host.submit(&change, "Ana") else { panic!("not applied") };
+        replica.receive(&entry).unwrap();
+    });
+    eprintln!("shared edit (2,000 tasks): best of 5 = {t:?}");
+    assert!(t < Duration::from_millis(400), "a shared edit on 2,000 tasks took {t:?}");
+}

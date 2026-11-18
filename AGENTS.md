@@ -26,6 +26,10 @@
 ## Behaviour parity (clean-room)
 - Scheduling behaviour follows Microsoft's *published* documentation only (support.microsoft.com / learn.microsoft.com). `crates/plancraft-core/tests/ms_parity.rs` holds worked examples from those pages; every test cites its page and section (`// Source: <URL> — "<section>"`) and paraphrases (no copied text). A known difference is kept as a test marked `#[ignore = "parity gap: ..."]` until fixed. Never use Microsoft's code, files, binaries or product output.
 
+## Shared editing (docs/COLLABORATION.md)
+- Entirely optional and opt-in (owner's rule): out of the box nothing listens on the network, nothing announces itself or browses for servers (no mDNS until someone shares a folder or opens *Open from Server*), no service is installed, and plans opened from files behave as before. A host runs only when someone starts one; the app connects only when someone opens a plan from a server.
+- One host orders every change (`plancraft_core::sync::Host`); each client keeps a `Replica`. Changes are field-level patches with conflicts reported, never merged silently; ids come from per-replica leases. Extend `sync/tests.rs` and the `shared_editing` sweep in `tests/hostile.rs` with any change to the engine.
+
 ## MCP security
 - The HTTP server requires `Authorization: Bearer <token>` with a fresh random token per server start (`plancraft_mcp::session`), on top of the Origin/Host checks. The desktop app publishes URL + token in the owner-only `mcp-session.json`; `plancraft mcp --attach` relays stdio to the app using it (the recommended Claude Code setup). Never log the token or put it in a URL.
 
