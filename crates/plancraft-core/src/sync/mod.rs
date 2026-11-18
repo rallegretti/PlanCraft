@@ -110,6 +110,22 @@ impl Collection {
         }
     }
 
+    /// The most items the list may hold ([`crate::limits`]).
+    pub fn limit(self) -> usize {
+        use crate::limits::*;
+        match self {
+            Collection::Calendars => MAX_CALENDARS,
+            Collection::Tasks => MAX_TASKS,
+            Collection::Resources => MAX_RESOURCES,
+            Collection::Assignments => MAX_ASSIGNMENTS,
+            Collection::TimeEntries => MAX_TIME_ENTRIES,
+            Collection::ExternalProjects => MAX_EXTERNAL_PROJECTS,
+            Collection::CustomFields => crate::custom::MAX_CUSTOM_FIELDS,
+            Collection::Tables => crate::custom::MAX_TABLES,
+            Collection::BoardColumns => crate::board::MAX_BOARD_COLUMNS,
+        }
+    }
+
     /// What one item is called in messages.
     fn noun(self) -> &'static str {
         match self {
@@ -174,6 +190,9 @@ pub struct ListPatch {
     /// Items that were there before changed places (a move, not only additions and removals).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub moved: bool,
+    /// The summary each new task sits under, so a rebase can tell when someone deleted it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parents: BTreeMap<Key, Key>,
 }
 
 impl ListPatch {

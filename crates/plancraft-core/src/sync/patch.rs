@@ -85,6 +85,9 @@ fn diff_list(list: Collection, a: &[(Key, &Map<String, Value>)], b: &[(Key, &Map
         }
     }
     out.removed = a.iter().map(|(k, _)| k).filter(|k| !after.contains(k)).cloned().collect();
+    if list == Collection::Tasks && !out.added.is_empty() {
+        out.parents = summaries_of(b, &out.added);
+    }
     let old_order: Vec<&Key> = a.iter().map(|(k, _)| k).collect();
     let new_order: Vec<&Key> = b.iter().map(|(k, _)| k).collect();
     if old_order != new_order {
@@ -92,6 +95,26 @@ fn diff_list(list: Collection, a: &[(Key, &Map<String, Value>)], b: &[(Key, &Map
         let kept_after: Vec<&Key> = new_order.iter().copied().filter(|k| before.contains_key(k)).collect();
         out.moved = kept_before != kept_after;
         out.order = Some(new_order.into_iter().cloned().collect());
+    }
+    out
+}
+
+/// The summary each task of `wanted` sits under in the outline `tasks` (the nearest task above
+/// it with a lower outline level); top-level tasks have none.
+fn summaries_of(tasks: &[(Key, &Map<String, Value>)], wanted: &BTreeMap<Key, Value>) -> BTreeMap<Key, Key> {
+    let mut out = BTreeMap::new();
+    let mut open: Vec<(u64, &Key)> = Vec::new();
+    for (k, item) in tasks {
+        let level = item.get("outline_level").and_then(Value::as_u64).unwrap_or(1);
+        while open.last().is_some_and(|(l, _)| *l >= level) {
+            open.pop();
+        }
+        if wanted.contains_key(k)
+            && let Some((_, parent)) = open.last()
+        {
+            out.insert(k.clone(), (*parent).clone());
+        }
+        open.push((level, k));
     }
     out
 }
@@ -198,6 +221,26 @@ pub fn apply(p: &Project, patch: &Patch) -> Result<Project, SyncError> {
     serde_json::from_value(Value::Object(s)).map_err(|e| SyncError::Shape(e.to_string()))
 }
 
+/// Refuses a patch (from the network) whose lists are larger than any plan may hold, or whose
+/// order names an item twice: checked before the host rebases it, since rebasing costs time in
+/// proportion to them.
+pub fn check_size(patch: &Patch) -> Result<(), SyncError> {
+    for (list, lp) in &patch.lists {
+        let max = list.limit();
+        let sizes = [lp.added.len(), lp.changed.len(), lp.removed.len(), lp.parents.len(), lp.order.as_ref().map_or(0, Vec::len)];
+        if sizes.into_iter().any(|n| n > max) {
+            return Err(SyncError::Shape(format!("the change holds more {} than a plan may", list.field().replace('_', " "))));
+        }
+        if let Some(order) = &lp.order {
+            let mut seen = HashSet::with_capacity(order.len());
+            if !order.iter().all(|k| seen.insert(k)) {
+                return Err(SyncError::Shape(format!("the order of the {} names an item twice", list.field().replace('_', " "))));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Raises the plan's id counters above every id it uses, so new items never take a used id.
 pub fn fit_counters(p: &mut Project) {
     fn raise(counter: &mut u32, ids: impl Iterator<Item = u32>) {
@@ -300,12 +343,36 @@ pub fn rebase(mine: &Patch, theirs: &Patch, by: Option<&str>) -> Rebased {
             lp.removed.insert(k.clone());
         }
 
+        // A new task whose summary they deleted: placed after whatever is left, it would land
+        // under another summary.
+        for (k, parent) in &mlp.parents {
+            if !lp.added.contains_key(k) {
+                continue;
+            }
+            if tlp.removed.contains(parent) {
+                lp.added.remove(k);
+                out.conflicts.push(conflict(ConflictKind::NoLongerFits, Some(list), Some(k), None));
+            } else {
+                lp.parents.insert(k.clone(), parent.clone());
+            }
+        }
+
         if let Some(mo) = &mlp.order {
-            let both_moved = mlp.moved && tlp.moved && tlp.order.as_ref() != Some(mo);
+            // Only the items both had before count: the same move made by both is no conflict,
+            // whatever else each added or deleted.
+            let shared = |o: &[Key]| -> Vec<Key> {
+                o.iter()
+                    .filter(|k| {
+                        !mlp.added.contains_key(*k) && !tlp.added.contains_key(*k) && !mlp.removed.contains(*k) && !tlp.removed.contains(*k)
+                    })
+                    .cloned()
+                    .collect()
+            };
+            let both_moved = mlp.moved && tlp.moved && tlp.order.as_ref().is_some_and(|to| shared(to) != shared(mo));
             if both_moved {
                 out.conflicts.push(conflict(ConflictKind::BothMoved, Some(list), None, None));
             }
-            let my_moves = mlp.moved && !tlp.moved;
+            let my_moves = mlp.moved && !tlp.moved && !both_moved;
             // Gone after both changes: what either deleted, and my additions that clashed.
             let gone =
                 |k: &Key| lp.removed.contains(k) || tlp.removed.contains(k) || (mlp.added.contains_key(k) && !lp.added.contains_key(k));
@@ -331,8 +398,9 @@ pub fn rebase(mine: &Patch, theirs: &Patch, by: Option<&str>) -> Rebased {
 /// after the nearest key before it in `secondary` (or first). Keys of `insert` that `secondary`
 /// does not name go last, so no key is ever lost. Linear in the lengths.
 fn merge_orders(primary: &[Key], secondary: &[Key], insert: &BTreeSet<&Key>, gone: &dyn Fn(&Key) -> bool) -> Vec<Key> {
-    let base: Vec<&Key> = primary.iter().filter(|k| !gone(k) && !insert.contains(k)).collect();
-    let mut placed: HashSet<&Key> = base.iter().copied().collect();
+    // A key named twice counts once (a damaged order must not repeat what follows it).
+    let mut placed: HashSet<&Key> = HashSet::new();
+    let base: Vec<&Key> = primary.iter().filter(|k| !gone(k) && !insert.contains(k) && placed.insert(*k)).collect();
     // The inserted keys that follow each key (`None`: the start), in `secondary`'s order.
     let mut after: HashMap<Option<&Key>, Vec<&Key>> = HashMap::new();
     let mut anchor: Option<&Key> = None;

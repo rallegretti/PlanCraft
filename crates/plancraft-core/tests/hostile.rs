@@ -1443,7 +1443,8 @@ mod shared_editing {
         }
 
         fn resync(&mut self, i: usize) -> Result<(), TestCaseError> {
-            let r = self.people[i].resync(self.host.project().clone(), self.host.version());
+            let applied = self.people[i].in_flight().is_some_and(|id| self.host.was_applied(id));
+            let r = self.people[i].resync(self.host.project().clone(), self.host.version(), applied);
             prop_assert!(r.is_ok(), "resync failed: {r:?}");
             Ok(())
         }

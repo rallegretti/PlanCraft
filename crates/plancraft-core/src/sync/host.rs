@@ -1,13 +1,13 @@
 //! The host's copy of a shared plan: the one order of changes everyone follows.
 
-use super::patch::{apply, diff, fit_counters, rebase};
+use super::patch::{apply, check_size, diff, fit_counters, rebase};
 use super::{ChangeId, Conflict, LEASE_SIZE, LOG_LIMIT, Patch, SyncError, Version};
 use crate::ids::IdCounters;
-use crate::limits::{self, MAX_ID};
+use crate::limits::{self, MAX_ID, MAX_NAME_CHARS};
 use crate::model::Project;
 use crate::{guard, schedule};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 /// A change a replica sends to the host.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -41,7 +41,9 @@ pub struct Entry {
 pub enum Outcome {
     /// Accepted: send the entry to every replica, the author included.
     Applied(Entry),
-    /// The change was accepted before (it was sent twice) and made this version.
+    /// The change was accepted before (it was sent twice): at this version, or at or before it
+    /// when the entry is no longer kept. The replica's reply went missing: it resyncs with
+    /// `in_flight_applied` (see [`super::Replica::resync`]).
     AlreadyApplied(Version),
     /// It clashed with changes made since its base; nothing was applied.
     Conflicts(Vec<Conflict>),
@@ -57,13 +59,37 @@ pub struct Host {
     project: Project,
     version: Version,
     log: VecDeque<Entry>,
+    /// Ids of accepted changes, longer than the log keeps entries ([`APPLIED_MEMORY`]), so a
+    /// replica whose reply went missing can tell whether its change went in.
+    applied: HashSet<ChangeId>,
+    applied_order: VecDeque<ChangeId>,
 }
+
+/// Accepted change ids the host remembers (16 bytes each).
+pub const APPLIED_MEMORY: usize = 100_000;
 
 impl Host {
     /// Shares a plan (as opened and recalculated) at version 1.
-    pub fn new(mut project: Project) -> Self {
+    pub fn new(project: Project) -> Self {
+        Self::resume(project, 1, Vec::new())
+    }
+
+    /// Continues sharing a plan saved at `version`, with the ids of the changes accepted before
+    /// that save ([`Host::applied_ids`], saved with it). After a restart, replay the journal
+    /// written since, in order: entries with [`Host::replay`] and leases with
+    /// [`Host::replay_lease`]. Replicas that knew later versions resync.
+    pub fn resume(mut project: Project, version: Version, applied: Vec<ChangeId>) -> Self {
         fit_counters(&mut project);
-        Self { project, version: 1, log: VecDeque::new() }
+        let mut host = Self { project, version, log: VecDeque::new(), applied: HashSet::new(), applied_order: VecDeque::new() };
+        for id in applied {
+            host.note_applied(id);
+        }
+        host
+    }
+
+    /// The ids of the accepted changes the host remembers, oldest first (save them with the plan).
+    pub fn applied_ids(&self) -> Vec<ChangeId> {
+        self.applied_order.iter().copied().collect()
     }
 
     pub fn project(&self) -> &Project {
@@ -106,14 +132,40 @@ impl Host {
         Some(start)
     }
 
+    /// Whether the change was accepted (remembered for the last [`APPLIED_MEMORY`] changes).
+    pub fn was_applied(&self, change: ChangeId) -> bool {
+        self.applied.contains(&change)
+    }
+
+    /// Takes back a lease handed out before a restart (from the journal), so it is not handed
+    /// out again and the ids taken from it are accepted.
+    pub fn replay_lease(&mut self, start: &IdCounters) {
+        let ids = &mut self.project.ids;
+        for (counter, from) in [
+            (&mut ids.task, start.task),
+            (&mut ids.resource, start.resource),
+            (&mut ids.calendar, start.calendar),
+            (&mut ids.assignment, start.assignment),
+            (&mut ids.time_entry, start.time_entry),
+            (&mut ids.custom_field, start.custom_field),
+            (&mut ids.board_column, start.board_column),
+        ] {
+            *counter = (*counter).max(from.saturating_add(LEASE_SIZE).min(MAX_ID));
+        }
+    }
+
     /// Rebases, checks and applies a change from `author`.
     pub fn submit(&mut self, change: &Change, author: &str) -> Outcome {
-        if let Some(e) = self.log.iter().find(|e| e.change == change.id) {
-            return Outcome::AlreadyApplied(e.version);
+        if self.applied.contains(&change.id) {
+            let at = self.log.iter().find(|e| e.change == change.id).map_or(self.version, |e| e.version);
+            return Outcome::AlreadyApplied(at);
         }
         let Some(since) = self.since(change.base) else {
             return Outcome::Resync;
         };
+        if let Err(e) = check_size(&change.patch) {
+            return Outcome::Refused(e.to_string());
+        }
         let mut patch = change.patch.clone();
         let mut conflicts = Vec::new();
         for e in &since {
@@ -130,13 +182,18 @@ impl Host {
             Ok(Err(e)) => return Outcome::Refused(e),
             Err(p) => return Outcome::Refused(format!("a bug was caught: {}", p.message)),
         };
+        // New items take ids from leased blocks, all below the host's counters: an id above them
+        // was never handed out, and taking it would use up ids for good (up to `MAX_ID`).
+        if let Some(kind) = beyond_counters(&after, &before.ids) {
+            return Outcome::Refused(format!("a new {kind} has an id that was never handed out"));
+        }
         let effect = match diff(before, &after) {
             Ok(p) => p,
             Err(e) => return Outcome::Refused(e.to_string()),
         };
         self.version = self.version.saturating_add(1);
-        let entry =
-            Entry { version: self.version, change: change.id, author: author.to_string(), label: change.label.clone(), patch: effect };
+        let short = |s: &str| s.chars().take(MAX_NAME_CHARS).collect::<String>();
+        let entry = Entry { version: self.version, change: change.id, author: short(author), label: short(&change.label), patch: effect };
         self.project = after;
         self.remember(entry.clone());
         Outcome::Applied(entry)
@@ -154,12 +211,42 @@ impl Host {
         Ok(())
     }
 
+    fn note_applied(&mut self, id: ChangeId) {
+        if self.applied.insert(id) {
+            self.applied_order.push_back(id);
+        }
+        while self.applied_order.len() > APPLIED_MEMORY {
+            if let Some(old) = self.applied_order.pop_front() {
+                self.applied.remove(&old);
+            }
+        }
+    }
+
     fn remember(&mut self, entry: Entry) {
+        self.note_applied(entry.change);
         self.log.push_back(entry);
         while self.log.len() > LOG_LIMIT {
             self.log.pop_front();
         }
     }
+}
+
+/// The first kind of item whose ids go above `counters`, if any.
+fn beyond_counters(p: &Project, counters: &IdCounters) -> Option<&'static str> {
+    fn over(mut ids: impl Iterator<Item = u32>, max: u32) -> bool {
+        ids.any(|id| id > max)
+    }
+    [
+        ("task", over(p.tasks.iter().map(|t| t.id.0), counters.task)),
+        ("resource", over(p.resources.iter().map(|r| r.id.0), counters.resource)),
+        ("calendar", over(p.calendars.iter().map(|c| c.id.0), counters.calendar)),
+        ("assignment", over(p.assignments.iter().map(|a| a.id.0), counters.assignment)),
+        ("time entry", over(p.time_entries.iter().map(|e| e.id.0), counters.time_entry)),
+        ("custom field", over(p.custom_fields.iter().map(|f| f.id.0), counters.custom_field)),
+        ("board column", over(p.board_columns.iter().map(|c| c.id.0), counters.board_column)),
+    ]
+    .into_iter()
+    .find_map(|(kind, over)| over.then_some(kind))
 }
 
 /// Validates and recalculates a patched plan, the same way every edit is checked.
