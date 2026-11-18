@@ -98,6 +98,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
             }
         };
     }
+    plancraft_core::lock::set_app_name(format!("PlanCraft MCP server {}", env!("CARGO_PKG_VERSION")));
     let ws = match workspace_from_files(&cli.files) {
         Ok(ws) => ws,
         Err(e) => {
@@ -105,12 +106,25 @@ pub fn run(args: Vec<String>) -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // Lock files of the open plans stay fresh while the server runs, and are given back when it
+    // ends (the workspace is dropped with the server, or released below).
+    plancraft_core::lock::spawn_keeper(Arc::downgrade(&ws), || {});
+    let release = {
+        let ws = Arc::downgrade(&ws);
+        move || {
+            if let Some(ws) = ws.upgrade() {
+                ws.lock().unwrap_or_else(std::sync::PoisonError::into_inner).release_locks();
+            }
+        }
+    };
     let options = ServerOptions { allow_file_access: cli.file_access, ..ServerOptions::default() };
     let server = McpServer::with_options(ws, options);
     match cli.http {
         None => {
             eprintln!("plancraft-mcp {}: serving MCP on stdio ({} document(s) open)", env!("CARGO_PKG_VERSION"), cli.files.len());
-            if let Err(e) = run_stdio(&server) {
+            let result = run_stdio(&server);
+            release();
+            if let Err(e) = result {
                 eprintln!("plancraft-mcp: stdio error: {e}");
                 return ExitCode::FAILURE;
             }
@@ -142,6 +156,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
                         std::thread::sleep(std::time::Duration::from_millis(500));
                     }
                     crate::session::withdraw_http_token(&token_file, handle.token());
+                    release();
                     ExitCode::SUCCESS
                 }
                 Err(e) => {

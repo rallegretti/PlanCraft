@@ -284,11 +284,14 @@ AI assistants can also work on project files without the window open. The AI Age
 - **Recovery copies.** While you work, PlanCraft keeps a copy of unsaved changes. If it ever closes unexpectedly, the Start Page offers to restore them.
 - **Built not to crash.** If something goes wrong inside PlanCraft, the action that failed is undone and you get a message instead of losing your work.
 - **Files from others are checked.** A damaged or unusual file is opened as far as it safely can be: out-of-range values are corrected and PlanCraft tells you what it changed.
+- **Plans in shared folders.** If someone saves a plan you have open, PlanCraft notices within seconds: it reloads the plan (Undo brings back what you had), or, if you have unsaved changes, lets you choose which version to keep. A plan someone else already has open says who has it as soon as you open it.
 - **Private by default.** New plan files, settings and recovery copies are readable only by your user account on macOS and Linux, because plans hold people's names and rates.
 
 ## Your files
 
 Projects are saved as `.plancraft` files. They are plain text, so they work well with backup tools and version control, and you can open the same project on any computer running PlanCraft.
+
+While a plan is open, a small hidden file next to it (`.NAME.plancraft.lock`) tells other copies of PlanCraft who has it open. It is removed when the plan is closed; one left behind by a crash is ignored after a few minutes. With version control, ignore it (`.*.plancraft.lock` in `.gitignore`).
 
 To exchange plans with Microsoft Project, use Microsoft Project XML (`.xml`):
 

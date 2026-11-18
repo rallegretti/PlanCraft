@@ -2559,6 +2559,7 @@ dependencies = [
  "calamine",
  "encoding_rs",
  "epaint_default_fonts",
+ "gethostname",
  "jiff",
  "miniz_oxide 0.8.9",
  "proptest",

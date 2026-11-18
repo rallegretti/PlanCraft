@@ -617,6 +617,42 @@ fn tools_report_files_changed_on_disk_and_reload_them() {
     assert!(c.call("get_project", json!({})).get("disk_notice").is_none());
 }
 
+/// A plan open in another PlanCraft (its lock file says so) opens with a warning for the agent;
+/// once that PlanCraft closes it, the lock is taken and the warning goes.
+#[test]
+fn tools_warn_when_a_plan_is_open_in_another_plancraft() {
+    use plancraft_core::lock::{self, Owner};
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("plan.plancraft");
+    plancraft_core::io::save(&plancraft_core::model::Project::new("Plan", plancraft_core::dates::ymd(2026, 11, 18).unwrap()), &path)
+        .unwrap();
+    let owner = Owner {
+        user: "ana".into(),
+        host: "studio-pc".into(),
+        pid: 7,
+        instance: "another-plancraft".into(),
+        opened: "2026-11-18 09:15".into(),
+        app: "PlanCraft 0.6.0".into(),
+    };
+    let lock_file = lock::lock_path(&path).unwrap();
+    std::fs::write(&lock_file, serde_json::to_vec(&owner).unwrap()).unwrap();
+    let c = Client::new();
+    let r = c.call("open_project", json!({ "path": path.to_str().unwrap() }));
+    let notice = r["disk_notice"].as_str().unwrap();
+    assert!(notice.contains("also open by ana in PlanCraft 0.6.0 on studio-pc since 2026-11-18 09:15"), "{notice}");
+    assert_eq!(r["project"]["open_elsewhere"], "ana in PlanCraft 0.6.0 on studio-pc since 2026-11-18 09:15");
+    assert!(c.call("list_documents", json!({}))["documents"][0]["open_elsewhere"].is_string());
+
+    std::fs::remove_file(&lock_file).unwrap();
+    assert!(lock::maintain(c.server.workspace()));
+    let r = c.call("get_project", json!({}));
+    assert!(r.get("disk_notice").is_none(), "{r}");
+    assert!(r["project"]["open_elsewhere"].is_null());
+    assert!(lock_file.is_file(), "the lock is now this server's");
+    c.call("close_project", json!({}));
+    assert!(!lock_file.exists(), "and given back on close");
+}
+
 /// Regression: saving overwrote a file another program (a second PlanCraft, a standalone MCP
 /// server, a sync tool) had changed since it was opened, silently losing that program's work.
 #[test]
