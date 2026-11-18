@@ -92,17 +92,39 @@ impl Replica {
         .unwrap_or(0)
     }
 
-    /// Takes a new block of ids from the host.
-    pub fn lease(&mut self, ids: IdCounters) {
+    /// Takes a new block of ids from the host. A block starting below where this replica's ids
+    /// already are is refused (the host lost track of a lease, see `Host::replay_lease`):
+    /// counting from it would hand out ids this replica already used.
+    pub fn lease(&mut self, ids: IdCounters) -> Result<(), SyncError> {
+        let (new, now) = (&ids, &self.ids);
+        let behind = [
+            (new.task, now.task),
+            (new.resource, now.resource),
+            (new.calendar, now.calendar),
+            (new.assignment, now.assignment),
+            (new.time_entry, now.time_entry),
+            (new.custom_field, now.custom_field),
+            (new.board_column, now.board_column),
+        ]
+        .into_iter()
+        .any(|(n, c)| n < c);
+        if behind {
+            return Err(SyncError::Shape("the new block of ids starts below ids already used".into()));
+        }
         self.local.ids = ids.clone();
         self.lease_start = ids.clone();
         self.ids = ids;
+        Ok(())
     }
 
     /// Takes the plan after a local edit (already checked and recalculated by `Document::edit`).
     ///
     /// The id cursor never goes back: an undo restores a snapshot with older counters, and
     /// counting from those again would hand out ids this replica already used.
+    ///
+    /// Whatever plan comes in is taken as the person's intent: a whole-plan undo snapshot taken
+    /// before other people's changes arrived would undo theirs too. Shared plans must undo with
+    /// inverse patches instead (docs/COLLABORATION.md › Undo).
     pub fn edited(&mut self, mut local: Project) -> Result<(), SyncError> {
         self.pending = diff(&self.confirmed, &local)?;
         let (ids, seen) = (&mut local.ids, &self.ids);
@@ -150,6 +172,11 @@ impl Replica {
             self.pending = diff(&self.confirmed, &self.local)?;
             return Ok(Merged::default());
         }
+        // The host rebases the change on its way over this entry too: keep the copy in step, so a
+        // resync after a lost reply knows what the host applied.
+        if let Some((_, sent)) = &mut self.in_flight {
+            *sent = rebase(sent, &entry.patch, None).patch;
+        }
         let r = rebase(&self.pending, &entry.patch, Some(&entry.author));
         Ok(self.rebuild(r.patch, r.conflicts))
     }
@@ -173,14 +200,39 @@ impl Replica {
         }
     }
 
+    /// The change on its way to the host, if any (after a reconnection, ask the host whether it
+    /// went in: [`super::Host::was_applied`]).
+    pub fn in_flight(&self) -> Option<ChangeId> {
+        self.in_flight.as_ref().map(|(id, _)| *id)
+    }
+
     /// Starts again from the host's plan (after missed changes or a reconnection), keeping the
     /// unconfirmed work that does not clash with what changed meanwhile.
-    pub fn resync(&mut self, project: Project, version: Version) -> Result<Merged, SyncError> {
-        let theirs = diff(&self.confirmed, &project)?;
+    ///
+    /// `in_flight_applied` says whether the host accepted the change that was on its way (its
+    /// reply may have been lost). It matters: an accepted change that someone else then changed
+    /// back would otherwise look unconfirmed and be sent again, silently undoing their change.
+    /// Prefer catching up with [`super::Host::since`] when the host still has the entries: they
+    /// confirm the change by its id.
+    pub fn resync(&mut self, project: Project, version: Version, in_flight_applied: bool) -> Result<Merged, SyncError> {
+        // What the host's plan grew from: the confirmed plan, plus the change on its way if the
+        // host accepted it; and what is still unconfirmed on top of that.
+        let (base, pending) = match self.in_flight.take() {
+            Some((_, sent)) if in_flight_applied => match settle(apply(&self.confirmed, &sent)) {
+                Ok(with_sent) => {
+                    let rest = diff(&with_sent, &self.local)?;
+                    (with_sent, rest)
+                }
+                // It no longer applies to the old plan as it was sent: the host's plan has it,
+                // so whatever of it still differs is left to the comparison below.
+                Err(_) => (self.confirmed.clone(), self.pending.clone()),
+            },
+            _ => (self.confirmed.clone(), self.pending.clone()),
+        };
+        let theirs = diff(&base, &project)?;
         self.confirmed = project;
         self.version = version;
-        self.in_flight = None;
-        let r = rebase(&self.pending, &theirs, None);
+        let r = rebase(&pending, &theirs, None);
         Ok(self.rebuild(r.patch, r.conflicts))
     }
 
@@ -282,7 +334,8 @@ fn pieces(p: &Patch) -> Vec<(Patch, Conflict)> {
     for list in ADD_ORDER {
         let Some(lp) = p.lists.get(&list) else { continue };
         for (k, v) in &lp.added {
-            let piece = ListPatch { added: [(k.clone(), v.clone())].into(), ..ListPatch::default() };
+            let parents = lp.parents.get(k).map(|p| (k.clone(), p.clone())).into_iter().collect();
+            let piece = ListPatch { added: [(k.clone(), v.clone())].into(), parents, ..ListPatch::default() };
             out.push((one(list, piece), no_longer_fits(Some(list), Some(k), None)));
         }
     }
@@ -324,6 +377,7 @@ fn combine(a: &Patch, b: &Patch) -> Patch {
         to.added.extend(lp.added.iter().map(|(k, v)| (k.clone(), v.clone())));
         to.changed.extend(lp.changed.iter().map(|(k, v)| (k.clone(), v.clone())));
         to.removed.extend(lp.removed.iter().cloned());
+        to.parents.extend(lp.parents.iter().map(|(k, v)| (k.clone(), v.clone())));
         if lp.order.is_some() {
             to.order.clone_from(&lp.order);
             to.moved = lp.moved;

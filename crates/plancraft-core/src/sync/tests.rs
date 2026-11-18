@@ -284,7 +284,7 @@ fn work_done_while_disconnected_is_kept_after_a_resync() {
     }
     local_edit(&mut ben, |p| rename(p, b, "Ben offline"));
     local_edit(&mut ben, |p| rename(p, a, "Ben's name for it"));
-    let merged = ben.resync(host.project().clone(), host.version()).unwrap();
+    let merged = ben.resync(host.project().clone(), host.version(), false).unwrap();
     assert_eq!(merged.conflicts.len(), 1, "Ana renamed that task first");
     let done = send(&mut host, &mut ben, "Ben");
     ana.receive(entry(&done)).unwrap();
@@ -432,6 +432,277 @@ fn an_undo_never_hands_out_an_id_again() {
     assert!(matches!(o, Outcome::Applied(_)), "{o:?}");
     assert!(same(ana.local(), host.project()));
     let ids = host.lease().unwrap();
-    ana.lease(ids);
+    ana.lease(ids).unwrap();
     assert_eq!(ana.ids_left(), LEASE_SIZE);
+}
+
+#[test]
+fn a_restarted_host_resumes_at_its_saved_version_and_replays_the_journal() {
+    let mut host = Host::new(plan());
+    let mut ana = join(&mut host);
+    let t = leaf(host.project(), 0);
+    local_edit(&mut ana, |p| rename(p, t, "Saved"));
+    send(&mut host, &mut ana, "Ana");
+    // The plan is saved at version 2 and the journal cleared; then two more changes.
+    let (saved, saved_at) = (host.project().clone(), host.version());
+    let mut journal = Vec::new();
+    for name in ["After one", "After two"] {
+        local_edit(&mut ana, |p| rename(p, t, name));
+        journal.push(entry(&send(&mut host, &mut ana, "Ana")).clone());
+    }
+    let mut restarted = Host::resume(saved, saved_at, host.applied_ids());
+    for e in &journal {
+        restarted.replay(e).unwrap();
+    }
+    assert_eq!(restarted.version(), host.version());
+    assert!(same(restarted.project(), host.project()));
+    // Ana's copy carries on against the restarted host.
+    local_edit(&mut ana, |p| rename(p, t, "After restart"));
+    let o = send(&mut restarted, &mut ana, "Ana");
+    assert!(matches!(o, Outcome::Applied(_)), "{o:?}");
+}
+
+#[test]
+fn a_change_whose_reply_was_lost_is_not_sent_again_over_later_changes() {
+    let mut host = Host::new(plan());
+    let (mut ana, mut ben) = (join(&mut host), join(&mut host));
+    let t = leaf(host.project(), 2);
+    let original = task(host.project(), t).name.clone();
+    // Ana renames a task and adds one; the host accepts, but the reply never reaches her.
+    let mut added = TaskId(0);
+    local_edit(&mut ana, |p| {
+        rename(p, t, "Ana's name");
+        added = p.add_task("Ana's task", Some(3));
+    });
+    let change = ana.next_change("edit").unwrap();
+    let lost = host.submit(&change, "Ana");
+    ben.receive(entry(&lost)).unwrap();
+    // Ben puts the name back and deletes Ana's task.
+    local_edit(&mut ben, |p| {
+        rename(p, t, &original);
+        p.delete_tasks(&[added]).unwrap();
+    });
+    let undo = send(&mut host, &mut ben, "Ben");
+    // Ana reconnects: her change went in, so nothing of it is pending any more.
+    assert_eq!(ana.in_flight(), Some(change.id));
+    assert!(host.was_applied(change.id));
+    let merged = ana.resync(host.project().clone(), host.version(), true).unwrap();
+    assert!(merged.conflicts.is_empty() && merged.discarded.is_none(), "{merged:?}");
+    assert!(ana.pending().is_empty(), "{:?}", ana.pending());
+    assert!(ana.next_change("edit").is_none());
+    assert!(same(ana.local(), host.project()));
+    assert_eq!(task(host.project(), t).name, original);
+    assert!(!host.project().tasks.iter().any(|x| x.id == added));
+    // Sending it again anyway is recognised.
+    assert!(matches!(host.submit(&change, "Ana"), Outcome::AlreadyApplied(2)));
+    let _ = undo;
+}
+
+#[test]
+fn a_change_whose_reply_was_lost_and_others_came_first_resyncs_cleanly() {
+    let mut host = Host::new(plan());
+    let (mut ana, mut ben) = (join(&mut host), join(&mut host));
+    let (a, b) = (leaf(host.project(), 1), leaf(host.project(), 4));
+    local_edit(&mut ana, |p| rename(p, a, "Ana's"));
+    let change = ana.next_change("edit").unwrap();
+    // Ben's change gets in first and reaches Ana; then Ana's is accepted, reply lost.
+    local_edit(&mut ben, |p| rename(p, b, "Ben's"));
+    let first = send(&mut host, &mut ben, "Ben");
+    ana.receive(entry(&first)).unwrap();
+    let lost = host.submit(&change, "Ana");
+    ben.receive(entry(&lost)).unwrap();
+    local_edit(&mut ana, |p| rename(p, b, "Ana's too"));
+    let merged = ana.resync(host.project().clone(), host.version(), host.was_applied(change.id)).unwrap();
+    assert!(merged.conflicts.is_empty(), "{merged:?}");
+    // Only the edit made after the lost reply is still pending.
+    let pending = ana.pending().lists.get(&Collection::Tasks).unwrap();
+    assert_eq!(pending.changed.keys().cloned().collect::<Vec<_>>(), vec![Key(b.0.to_string())]);
+    let o = send(&mut host, &mut ana, "Ana");
+    ben.receive(entry(&o)).unwrap();
+    assert!(same(ana.local(), host.project()) && same(ben.local(), host.project()));
+}
+
+#[test]
+fn an_order_repeating_a_key_is_refused_before_it_can_grow() {
+    let mut host = Host::new(plan());
+    let mut ana = join(&mut host);
+    // Someone pastes tasks after the first one...
+    local_edit(&mut ana, |p| {
+        for i in 0..50 {
+            p.add_task(format!("Pasted {i}"), Some(1));
+        }
+    });
+    send(&mut host, &mut ana, "Ana");
+    // ...and a hostile change from before that names the first task over and over.
+    let first = Key(host.project().tasks[0].id.0.to_string());
+    let lp = ListPatch { order: Some(vec![first; 10_000]), moved: true, ..ListPatch::default() };
+    let change = Change {
+        id: ChangeId::new(),
+        base: 1,
+        label: String::new(),
+        patch: Patch { lists: [(Collection::Tasks, lp)].into(), ..Patch::default() },
+    };
+    assert!(matches!(host.submit(&change, "Mallory"), Outcome::Refused(_)));
+    assert_eq!(host.version(), 2);
+    // An order longer than any plan's list is refused too.
+    let long: Vec<Key> = (0..=crate::limits::MAX_TASKS).map(|i| Key(i.to_string())).collect();
+    let lp = ListPatch { order: Some(long), ..ListPatch::default() };
+    let change = Change {
+        id: ChangeId::new(),
+        base: 2,
+        label: String::new(),
+        patch: Patch { lists: [(Collection::Tasks, lp)].into(), ..Patch::default() },
+    };
+    assert!(matches!(host.submit(&change, "Mallory"), Outcome::Refused(_)));
+    // And rebasing such an order never repeats anything.
+    let mine = Patch {
+        lists: [(
+            Collection::Tasks,
+            ListPatch { order: Some(vec![Key("1".into()), Key("1".into()), Key("2".into())]), moved: true, ..ListPatch::default() },
+        )]
+        .into(),
+        ..Patch::default()
+    };
+    let mut added = ListPatch { order: Some(vec![Key("1".into()), Key("9".into()), Key("2".into())]), ..ListPatch::default() };
+    added.added.insert(Key("9".into()), serde_json::json!({"id": 9}));
+    let theirs = Patch { lists: [(Collection::Tasks, added)].into(), ..Patch::default() };
+    let r = rebase(&mine, &theirs, None);
+    let order = r.patch.lists[&Collection::Tasks].order.clone().unwrap();
+    assert_eq!(order, vec![Key("1".into()), Key("9".into()), Key("2".into())]);
+}
+
+#[test]
+fn a_new_id_that_was_never_handed_out_is_refused() {
+    let mut host = Host::new(plan());
+    let before = host.project().clone();
+    let mut item = serde_json::to_value(&before.tasks[0]).unwrap();
+    item["id"] = serde_json::json!(limits::MAX_ID);
+    let mut lp = ListPatch::default();
+    lp.added.insert(Key(limits::MAX_ID.to_string()), item);
+    let change = Change {
+        id: ChangeId::new(),
+        base: 1,
+        label: "x".repeat(5_000),
+        patch: Patch { lists: [(Collection::Tasks, lp)].into(), ..Patch::default() },
+    };
+    let o = host.submit(&change, "Mallory");
+    assert!(matches!(&o, Outcome::Refused(why) if why.contains("never handed out")), "{o:?}");
+    assert!(same(host.project(), &before));
+    assert!(host.lease().is_some(), "ids are not used up");
+    // Labels and names are kept to a sensible length.
+    let mut ana = join(&mut host);
+    local_edit(&mut ana, |p| rename(p, before.tasks[1].id, "Short"));
+    let mut change = ana.next_change("edit").unwrap();
+    change.label = "x".repeat(5_000);
+    let e = entry(&host.submit(&change, &"y".repeat(5_000))).clone();
+    assert_eq!(e.label.chars().count(), limits::MAX_NAME_CHARS);
+    assert_eq!(e.author.chars().count(), limits::MAX_NAME_CHARS);
+}
+
+#[test]
+fn a_subtask_added_under_a_summary_someone_deleted_is_a_conflict() {
+    let mut host = Host::new(plan());
+    let (mut ana, mut ben) = (join(&mut host), join(&mut host));
+    let p = host.project();
+    // A summary and its last subtask.
+    let (si, summary) =
+        p.tasks.iter().enumerate().find(|(_, t)| t.sched.is_summary && t.outline_level == 1).map(|(i, t)| (i, t.id)).unwrap();
+    let last_child = p.tasks.iter().skip(si + 1).take_while(|t| t.outline_level > 1).count() + si;
+    let mut added = TaskId(0);
+    local_edit(&mut ana, |p| {
+        added = p.add_task("Ana's subtask", Some(last_child + 1));
+        p.task_mut(added).unwrap().outline_level = 2;
+    });
+    assert_eq!(task(ana.local(), added).outline_level, 2);
+    local_edit(&mut ben, |p| {
+        p.delete_tasks(&[summary]).unwrap();
+    });
+    let first = send(&mut host, &mut ben, "Ben");
+    let merged = ana.receive(entry(&first)).unwrap();
+    assert!(merged.conflicts.iter().any(|c| c.kind == ConflictKind::NoLongerFits && c.key == Some(Key(added.0.to_string()))), "{merged:?}");
+    assert!(!ana.local().tasks.iter().any(|t| t.id == added));
+    assert!(same(ana.local(), host.project()));
+}
+
+#[test]
+fn the_same_move_made_by_both_is_not_a_conflict() {
+    let mut host = Host::new(plan());
+    let (mut ana, mut ben) = (join(&mut host), join(&mut host));
+    let x = leaf(host.project(), 3);
+    local_edit(&mut ana, |p| p.move_tasks_before(&[x], None).unwrap());
+    local_edit(&mut ben, |p| {
+        p.move_tasks_before(&[x], None).unwrap();
+        p.add_task("Ben's task", Some(2));
+    });
+    let first = send(&mut host, &mut ana, "Ana");
+    let merged = ben.receive(entry(&first)).unwrap();
+    assert!(merged.conflicts.is_empty(), "{merged:?}");
+    let second = send(&mut host, &mut ben, "Ben");
+    ana.receive(entry(&second)).unwrap();
+    assert_eq!(host.project().tasks.last().unwrap().id, x);
+    assert!(same(ana.local(), host.project()) && same(ben.local(), host.project()));
+}
+
+#[test]
+fn a_subtask_whose_neighbour_was_deleted_stays_under_its_summary() {
+    let mut host = Host::new(plan());
+    let (mut ana, mut ben) = (join(&mut host), join(&mut host));
+    let p = host.project();
+    // A summary with at least two subtasks: Ana adds one between the first two, Ben deletes
+    // only the first.
+    let (si, summary) = p
+        .tasks
+        .iter()
+        .enumerate()
+        .find(|(i, t)| t.sched.is_summary && p.tasks.get(i + 2).is_some_and(|c| c.outline_level > t.outline_level))
+        .map(|(i, t)| (i, t.id))
+        .unwrap();
+    let level = p.tasks[si + 1].outline_level;
+    let neighbour = p.tasks[si + 1].id;
+    let mut added = TaskId(0);
+    local_edit(&mut ana, |p| {
+        added = p.add_task("Ana's subtask", Some(si + 2));
+        p.task_mut(added).unwrap().outline_level = level;
+    });
+    local_edit(&mut ben, |p| {
+        p.delete_tasks(&[neighbour]).unwrap();
+    });
+    let first = send(&mut host, &mut ben, "Ben");
+    let merged = ana.receive(entry(&first)).unwrap();
+    assert!(merged.conflicts.is_empty(), "{merged:?}");
+    let second = send(&mut host, &mut ana, "Ana");
+    ben.receive(entry(&second)).unwrap();
+    let tasks = &host.project().tasks;
+    let at = tasks.iter().position(|t| t.id == added).unwrap();
+    let parent = tasks[..at].iter().rev().find(|t| t.outline_level < tasks[at].outline_level).unwrap();
+    assert_eq!(parent.id, summary, "still under its summary");
+    assert!(same(ana.local(), host.project()));
+}
+
+#[test]
+fn leases_and_accepted_changes_survive_a_restart_through_the_journal() {
+    let mut host = Host::new(plan());
+    let mut ana = join(&mut host);
+    let t = leaf(host.project(), 0);
+    local_edit(&mut ana, |p| rename(p, t, "Before the save"));
+    let lost = ana.next_change("edit").unwrap();
+    host.submit(&lost, "Ana");
+    // Saved here (plan, version, accepted ids); then Ben joins, so his lease is journaled.
+    let (saved, saved_at, applied) = (host.project().clone(), host.version(), host.applied_ids());
+    let ben_lease = host.lease().unwrap();
+    let mut ben = Replica::new(host.project().clone(), host.version(), ben_lease.clone());
+    let mut added = TaskId(0);
+    local_edit(&mut ben, |p| added = p.add_task("Ben's", None));
+
+    let mut restarted = Host::resume(saved, saved_at, applied);
+    restarted.replay_lease(&ben_lease);
+    // Ben's new task, from his lease, is accepted by the restarted host.
+    let o = send(&mut restarted, &mut ben, "Ben");
+    assert!(matches!(o, Outcome::Applied(_)), "{o:?}");
+    // Ana's change before the save is still known, so a resync treats it as confirmed.
+    assert!(restarted.was_applied(lost.id));
+    // A lease handed out again from a host that lost track would go backwards: refused.
+    let mut stale = Host::new(plan());
+    let behind = stale.lease().unwrap();
+    assert!(ben.lease(behind).is_err());
 }
