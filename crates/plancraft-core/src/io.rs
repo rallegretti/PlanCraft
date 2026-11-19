@@ -108,12 +108,8 @@ pub fn from_json_with_notes(text: &str, path: &Path) -> FileResult<(Project, Vec
     };
     limits::check_counts(&p).map_err(|e| FileError::Limit { path: path.into(), message: e.to_string() })?;
     p.version = FILE_VERSION;
-    // Keep id counters ahead of every stored id (hand-edited files may lag behind).
-    p.ids.task = p.ids.task.max(p.tasks.iter().map(|t| t.id.0).max().unwrap_or(0));
-    p.ids.resource = p.ids.resource.max(p.resources.iter().map(|r| r.id.0).max().unwrap_or(0));
-    p.ids.calendar = p.ids.calendar.max(p.calendars.iter().map(|c| c.id.0).max().unwrap_or(0));
-    p.ids.assignment = p.ids.assignment.max(p.assignments.iter().map(|a| a.id.0).max().unwrap_or(0));
-    p.ids.time_entry = p.ids.time_entry.max(p.time_entries.iter().map(|e| e.id.0).max().unwrap_or(0));
+    // Keep id counters ahead of every stored id, of every kind (hand-edited files may lag behind).
+    crate::sync::fit_counters(&mut p);
     // Plans saved before the Task Board existed get its default columns, numbered from 1 (no
     // column exists yet, so whatever the stored counter says, these ids are free and in range).
     if p.board_columns.is_empty() {
@@ -939,6 +935,18 @@ mod tests {
         let deep = format!("{{\"format\":\"plancraft\",\"x\":{}{}}}", "[".repeat(100_000), "]".repeat(100_000));
         std::fs::write(&path, deep).unwrap();
         assert!(load(&path).is_err());
+    }
+
+    #[test]
+    fn id_counters_behind_the_ids_are_raised_on_open() {
+        // A copy of a shared plan (or a hand-edited file) may count from below ids others used.
+        let mut p = crate::sample::demo_project(crate::dates::ymd(2026, 1, 5).unwrap());
+        let field = p.add_custom_field("Phase", crate::custom::CustomFieldKind::Text, &[]).unwrap();
+        p.ids.task = 0;
+        p.ids.custom_field = 0;
+        let (back, _) = from_json_with_notes(&to_json(&p).unwrap(), Path::new("x.plancraft")).unwrap();
+        assert!(back.ids.task >= back.tasks.iter().map(|t| t.id.0).max().unwrap());
+        assert!(back.ids.custom_field >= field.0, "custom field counter {} below field {}", back.ids.custom_field, field.0);
     }
 
     #[test]

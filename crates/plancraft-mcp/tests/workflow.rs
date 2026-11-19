@@ -1127,3 +1127,41 @@ fn hours_per_point_must_be_a_real_amount_of_time() {
     let ws = c.server.workspace().lock().unwrap();
     assert_eq!(ws.active_doc().unwrap().project.settings.minutes_per_point, 150);
 }
+
+#[test]
+fn a_plan_opened_from_a_server_through_the_tools() {
+    use plancraft_core::workspace::Workspace;
+    let ws = Workspace::default().shared();
+    let mut plan = plancraft_core::model::Project::new("Shared", plancraft_core::dates::ymd(2026, 10, 19).unwrap());
+    let a = plan.add_task("A", None);
+    plancraft_core::schedule::recalculate(&mut plan);
+    ws.lock().unwrap().add_shared(plan, "Shared.plancraft");
+    let c = Client::over(std::sync::Arc::clone(&ws));
+
+    // The server saves it: Save is refused, a path writes a copy, reloading is refused.
+    let e = c.call_err("save_project", json!({}));
+    assert!(e.contains("server"), "{e}");
+    let dir = tempfile::tempdir().unwrap();
+    let copy = dir.path().join("mine.plancraft");
+    let saved = c.call("save_project", json!({ "path": copy.to_str().unwrap() }));
+    assert_eq!(saved["copy"], true);
+    assert!(plancraft_core::io::load(&copy).is_ok());
+    assert!(c.call_err("reload_project", json!({})).contains("server"));
+
+    // An undo someone else's change since would undo is refused, and the step leaves the list.
+    c.call("update_task", json!({ "task": a.0, "name": "Mine" }));
+    {
+        let mut w = ws.lock().unwrap();
+        let doc = &mut w.docs[0];
+        let _ = doc.take_unsent();
+        let mut theirs = doc.project.clone();
+        theirs.tasks[0].name = "Hers".into();
+        doc.apply_remote(theirs);
+    }
+    let before = c.changes.load(Ordering::SeqCst);
+    let why = c.call_err("undo", json!({}));
+    assert!(why.contains("Cannot undo") && why.contains("since"), "{why}");
+    assert!(c.changes.load(Ordering::SeqCst) > before, "the app hears that the undo list changed");
+    assert_eq!(c.call("get_task", json!({ "task": a.0 }))["name"], "Hers");
+    assert!(c.call_err("undo", json!({})).contains("nothing to undo"));
+}

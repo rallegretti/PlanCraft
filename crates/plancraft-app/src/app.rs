@@ -76,6 +76,9 @@ pub struct PlanCraftApp {
     server_dialog: Option<dialogs::server::OpenFromServer>,
     /// "Open your version" was clicked in a shared plan's bar (by handle), acted on unlocked.
     open_dropped: Option<u64>,
+    /// Plans of the person's own work the server could not take, opened when the shared plan
+    /// they came from was closed (named in the close prompt).
+    kept_dropped: Vec<String>,
 }
 
 /// Why a plan's file needs the user's attention (see [`PlanCraftApp::disk_bar`]).
@@ -415,6 +418,7 @@ impl PlanCraftApp {
             remotes: Default::default(),
             server_dialog: None,
             open_dropped: None,
+            kept_dropped: Vec::new(),
             allow_exit: false,
             last_title: String::new(),
             shot: std::env::var_os("PLANCRAFT_SCREENSHOT").map(|p| (PathBuf::from(p), 0)),
@@ -1762,8 +1766,20 @@ impl PlanCraftApp {
 
     fn confirm_dialog(&mut self, ctx: &egui::Context) {
         let Some(req) = self.confirm_close else {
+            self.kept_dropped.clear();
             return;
         };
+        // Work the server could not take would go with the shared plan: it goes into a plan of
+        // its own first, unsaved (so it is asked about, and kept by recovery copies).
+        let closing: Vec<u64> = match req {
+            CloseRequest::Document(h) => vec![h],
+            CloseRequest::App => lock(&self.ws).docs.iter().map(|d| d.handle).collect(),
+        };
+        for h in closing {
+            if let Some(name) = self.keep_dropped(h) {
+                self.kept_dropped.push(name);
+            }
+        }
         let names: Vec<String> = {
             let ws = lock(&self.ws);
             match req {
@@ -1792,6 +1808,15 @@ impl PlanCraftApp {
                     RichText::new(
                         "Changes to plans opened from a server that the server has not confirmed yet are lost on closing. Save keeps a copy of your own.",
                     )
+                    .color(theme::pal().TEXT_WEAK),
+                );
+            }
+            if !self.kept_dropped.is_empty() {
+                ui.label(
+                    RichText::new(format!(
+                        "Your changes the server could not take are in a plan of their own: {}. It stays open until you save or close it.",
+                        self.kept_dropped.join(", ")
+                    ))
                     .color(theme::pal().TEXT_WEAK),
                 );
             }
@@ -2816,9 +2841,8 @@ impl PlanCraftApp {
         for n in self.remotes.sync(&mut ws) {
             self.st.toast(ToastKind::Warning, n);
         }
-        if let Some(h) = ws.active_doc().map(|d| d.handle) {
-            self.remotes.presence(h, self.st.sel.tasks.iter().next().copied());
-        }
+        let active = ws.active_doc().map(|d| d.handle);
+        self.remotes.presence(active, self.st.sel.tasks.iter().next().copied());
     }
 
     /// Shows a plan just opened from a server (or the one already open, if it is).
@@ -2883,10 +2907,19 @@ impl PlanCraftApp {
     /// Opens the person's version from before their work was dropped, as a new unsaved plan.
     fn open_dropped_version(&mut self) {
         let Some(handle) = self.open_dropped.take() else { return };
-        let Some(dropped) = self.remotes.get_mut(handle).and_then(|r| r.dropped.take()) else { return };
+        if self.keep_dropped(handle).is_some() {
+            self.set_status("Opened your version as a new plan. Save it to keep it.");
+        }
+    }
+
+    /// Puts the work of this person's that the shared plan `handle` could not take into a new
+    /// unsaved plan (made active). Returns its name, or `None` when there was none.
+    fn keep_dropped(&mut self, handle: u64) -> Option<String> {
+        let dropped = self.remotes.get_mut(handle).and_then(|r| r.dropped.take())?;
         let mut mine = *dropped.before;
         plancraft_core::sync::fit_counters(&mut mine);
         mine.name = format!("{} (my version)", mine.name);
+        let name = mine.name.clone();
         let mut ws = lock(&self.ws);
         let h = ws.add(mine, None);
         if let Some(doc) = ws.index_of(h).and_then(|i| ws.docs.get_mut(i)) {
@@ -2897,7 +2930,7 @@ impl PlanCraftApp {
         drop(ws);
         self.st.sel = Default::default();
         self.st.gantt.initialized_for = None;
-        self.set_status("Opened your version as a new plan. Save it to keep it.");
+        Some(name)
     }
 
     /// Saves a copy of a plan opened from a server as a file of its own. Returns whether it was
@@ -5560,6 +5593,52 @@ mod shared_tests {
         let ws = lock(&h.state().ws);
         let doc = ws.active_doc().unwrap();
         assert!(doc.shared.is_some() && doc.path.is_none(), "the open plan is still the server's");
+    }
+
+    #[test]
+    fn work_the_server_dropped_is_kept_when_the_plan_closes() {
+        let server = TestServer::start();
+        let mut h = app_on(&server, "ana");
+        until(&mut h, "settled", settled);
+        let (handle, mut mine) = {
+            let ws = lock(&h.state().ws);
+            let doc = ws.active_doc().unwrap();
+            (doc.handle, doc.project.clone())
+        };
+        mine.add_task("Only in my version", None);
+        h.state_mut().remotes.get_mut(handle).unwrap().dropped =
+            Some(crate::remote::DroppedWork { lines: vec!["Your new task was not kept".into()], before: Box::new(mine) });
+        h.run_steps(2);
+        assert!(lock(&h.state().ws).active_doc().unwrap().dirty, "work left out counts as unsaved: closing asks");
+        let ctx = h.ctx.clone();
+        h.state_mut().exec(&ctx, Command::Close);
+        h.run_steps(2);
+        h.get_by_label_contains("in a plan of their own").focus();
+        h.get_by_label("Don't Save").click();
+        h.run_steps(3);
+        let ws = lock(&h.state().ws);
+        assert!(ws.index_of(handle).is_none(), "the shared plan closed");
+        let kept = ws.docs.iter().find(|d| d.project.name.ends_with("(my version)")).expect("the dropped work is a plan of its own");
+        assert!(kept.dirty && kept.project.tasks.iter().any(|t| t.name == "Only in my version"));
+    }
+
+    #[test]
+    fn a_signed_out_plan_is_not_reused_and_says_where_it_stands() {
+        let server = TestServer::start();
+        let mut h = app_on(&server, "ana");
+        let handle = lock(&h.state().ws).active_doc().unwrap().handle;
+        let address = server.address();
+        {
+            let app = h.state();
+            assert_eq!(app.remotes.find(&lock(&app.ws), &address, "Plan.plancraft"), Some(handle));
+        }
+        let r = h.state_mut().remotes.get_mut(handle).unwrap();
+        r.status.state = plancraft_server::link::State::Connecting;
+        assert_eq!(r.state_label(), "Connecting");
+        r.status.state = plancraft_server::link::State::SignedOut("the password changed".into());
+        assert_eq!(r.state_label(), "Signed out");
+        let app = h.state();
+        assert_eq!(app.remotes.find(&lock(&app.ws), &address, "Plan.plancraft"), None, "opening it again signs in afresh");
     }
 
     #[test]

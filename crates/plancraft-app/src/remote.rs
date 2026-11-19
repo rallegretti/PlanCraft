@@ -85,7 +85,7 @@ impl Remote {
 /// Why a shared plan cannot be changed right now, if so.
 fn refusal(status: &Status, server: &str) -> Option<String> {
     match &status.state {
-        State::SignedOut(why) => Some(format!("Signed out of {server}: {why}. Use Save a Copy to keep your plan as it is.")),
+        State::SignedOut(why) => Some(format!("Signed out of {server}: {why}. Use Save As to keep a copy of your plan as it is.")),
         _ if !status.role.can_edit() => Some("You may only view this plan: the server gives you viewer access.".into()),
         _ => None,
     }
@@ -160,19 +160,22 @@ impl Remotes {
                 };
                 r.link.edited(r.sent, before, after, &label);
             }
-            // Saved means confirmed by the server.
-            doc.dirty = r.unconfirmed();
+            // Saved means confirmed by the server, with nothing of this person's left out (work the
+            // server could not take is lost on closing unless it is kept: closing asks).
+            doc.dirty = r.unconfirmed() || r.dropped.is_some();
         }
         notices
     }
 
-    /// The task this person is on in the plan `handle` (sent only when it changes).
-    pub fn presence(&mut self, handle: u64, task: Option<TaskId>) {
-        if let Some(r) = self.map.get_mut(&handle)
-            && r.presence != task
-        {
-            r.presence = task;
-            r.link.presence(task);
+    /// The task this person is on in the plan `active` (none in the others, so a plan left for
+    /// another tab does not keep showing them on a task); sent only when it changes.
+    pub fn presence(&mut self, active: Option<u64>, task: Option<TaskId>) {
+        for (handle, r) in &mut self.map {
+            let on = if Some(*handle) == active { task } else { None };
+            if r.presence != on {
+                r.presence = on;
+                r.link.presence(on);
+            }
         }
     }
 }

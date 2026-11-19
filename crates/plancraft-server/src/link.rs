@@ -12,14 +12,14 @@
 //! never hides that edit.
 
 use std::fmt;
-use std::sync::Arc;
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use plancraft_core::ids::TaskId;
 use plancraft_core::model::Project;
-use plancraft_core::sync::{Conflict, Merged, Replica, apply, diff, rebase};
+use plancraft_core::sync::{ChangeId, Conflict, Merged, Replica, apply, diff, rebase};
 use plancraft_core::{guard, limits, schedule};
 use uuid::Uuid;
 
@@ -45,6 +45,8 @@ const LEASE_LOW: u32 = 250;
 const LEASE_RETRY: Duration = Duration::from_secs(30);
 /// Wait before sending changes again after the server could not take them for now.
 const HOLD_AFTER_REFUSAL: Duration = Duration::from_secs(30);
+/// The longest wait before signing in again that a server can ask for.
+const LONGEST_LOGIN_WAIT: Duration = Duration::from_secs(3600);
 
 /// Called when there is news for the app (it wakes the app's window).
 pub type Waker = Arc<dyn Fn() + Send + Sync>;
@@ -67,9 +69,12 @@ impl fmt::Debug for Account {
 }
 
 /// A server address as typed (`host`, `host:port`, an IPv6 address with or without brackets)
-/// as `host:port`, with PlanCraft's port when none is given.
+/// as `host:port`, with PlanCraft's port when none is given. Host names are in lower case and
+/// without a final dot, so one server typed two ways is still one server (its confirmed key is
+/// found either way).
 pub fn normalise_address(typed: &str) -> Result<String, String> {
-    let s = typed.trim();
+    let lower = typed.trim().to_lowercase();
+    let s = lower.as_str();
     if s.is_empty() {
         return Err("type the server's address".into());
     }
@@ -86,17 +91,23 @@ pub fn normalise_address(typed: &str) -> Result<String, String> {
         };
     }
     match s.matches(':').count() {
-        0 => Ok(format!("{s}:{DEFAULT_PORT}")),
+        0 => Ok(format!("{}:{DEFAULT_PORT}", host_name(s)?)),
         1 => {
             let (host, port) = s.split_once(':').unwrap_or((s, ""));
-            if host.is_empty() {
-                return Err(format!("'{s}' has no host name"));
-            }
-            Ok(format!("{host}:{}", parse_port(port)?))
+            Ok(format!("{}:{}", host_name(host)?, parse_port(port)?))
         }
         // A bare IPv6 address.
         _ => Ok(format!("[{s}]:{DEFAULT_PORT}")),
     }
+}
+
+/// A host name without its final dot (`office-pc.` is `office-pc`).
+fn host_name(host: &str) -> Result<&str, String> {
+    let name = host.strip_suffix('.').unwrap_or(host);
+    if name.is_empty() {
+        return Err(format!("'{host}' has no host name"));
+    }
+    Ok(name)
 }
 
 fn parse_port(port: &str) -> Result<u16, String> {
@@ -165,7 +176,12 @@ enum Input {
 pub struct Link {
     inputs: mpsc::Sender<Input>,
     events: mpsc::Receiver<Event>,
+    latest: LatestPlan,
 }
+
+/// The latest plan for the app: replaced, not queued, so a window that runs no frames for a while
+/// (minimised) holds one copy of the plan, not one per change that came in.
+type LatestPlan = Arc<Mutex<Option<(Project, u64)>>>;
 
 /// What [`Link::open`] gives back.
 pub struct OpenedLink {
@@ -195,6 +211,7 @@ impl Link {
         let local = replica.local().clone();
         let (inputs, inputs_rx) = mpsc::channel();
         let (events_tx, events) = mpsc::channel();
+        let latest: LatestPlan = Arc::default();
         let (sender, receiver) = client.into_parts();
         let _ = sender.set_write_timeout(Some(WRITE_TIMEOUT));
         let mut session = Session {
@@ -208,6 +225,7 @@ impl Link {
             generation: 0,
             inputs: inputs.clone(),
             events: events_tx,
+            latest: Arc::clone(&latest),
             waker,
             acked: 0,
             label: String::new(),
@@ -215,6 +233,7 @@ impl Link {
             lease_retry_at: None,
             hold_until: None,
             resync_asked: false,
+            applied_on_reopen: None,
             presence: None,
             retry_at: None,
             retry_wait: RETRY_FIRST,
@@ -237,7 +256,7 @@ impl Link {
                 }
             })
             .map_err(|e| format!("cannot start keeping the plan in step: {e}"))?;
-        Ok(OpenedLink { link: Link { inputs, events }, project: local, role: opened.role, people })
+        Ok(OpenedLink { link: Link { inputs, events, latest }, project: local, role: opened.role, people })
     }
 
     /// Hands on a local edit (number `number`, counting up from 1): the plan before it and after
@@ -251,9 +270,13 @@ impl Link {
         let _ = self.inputs.send(Input::Presence(task));
     }
 
-    /// The events since last asked.
+    /// The events since last asked; the latest plan, if a new one came, last.
     pub fn events(&self) -> Vec<Event> {
-        self.events.try_iter().collect()
+        let mut events: Vec<Event> = self.events.try_iter().collect();
+        if let Some((project, acked)) = self.latest.lock().unwrap_or_else(PoisonError::into_inner).take() {
+            events.push(Event::Plan { project, acked });
+        }
+        events
     }
 }
 
@@ -299,6 +322,7 @@ struct Session {
     generation: u64,
     inputs: mpsc::Sender<Input>,
     events: mpsc::Sender<Event>,
+    latest: LatestPlan,
     waker: Waker,
     /// The number of the last edit taken in.
     acked: u64,
@@ -312,6 +336,10 @@ struct Session {
     /// The whole plan was asked for (entries were missed): further gaps until it comes are the
     /// same gap.
     resync_asked: bool,
+    /// The change on its way when the connection dropped, which the server said on reopening
+    /// went in, while the whole plan was asked for (catching up failed): the plan's answer cannot
+    /// say so itself.
+    applied_on_reopen: Option<ChangeId>,
     presence: Option<TaskId>,
     retry_at: Option<Instant>,
     retry_wait: Duration,
@@ -399,7 +427,8 @@ impl Session {
     }
 
     fn show_plan(&self) {
-        self.emit(Event::Plan { project: self.replica.local().clone(), acked: self.acked });
+        *self.latest.lock().unwrap_or_else(PoisonError::into_inner) = Some((self.replica.local().clone(), self.acked));
+        (self.waker)();
     }
 
     fn report(&self, merged: Merged, before: Project) {
@@ -435,18 +464,27 @@ impl Session {
         let _ = receiver.set_read_timeout(Some(READ_TIMEOUT));
         let inputs = self.inputs.clone();
         let started = thread::Builder::new().name("plancraft-link-reader".into()).spawn(move || {
-            loop {
-                let input = match receiver.recv(MAX_SERVER_FRAME) {
-                    Ok(bytes) => match serde_json::from_slice::<ServerMsg>(&bytes) {
-                        Ok(msg) => Input::Server { generation, msg: Box::new(msg) },
-                        Err(e) => Input::Lost { generation, why: format!("the server sent something unexpected: {e}") },
-                    },
-                    Err(e) => Input::Lost { generation, why: describe_wire(&e) },
-                };
-                let last = matches!(input, Input::Lost { .. });
-                if inputs.send(input).is_err() || last {
-                    break;
+            let read = inputs.clone();
+            // A reader that stopped without a word would leave the link looking connected.
+            if let Err(p) = guard::catch("reading from the server", move || {
+                loop {
+                    let input = match receiver.recv(MAX_SERVER_FRAME) {
+                        Ok(bytes) => match serde_json::from_slice::<ServerMsg>(&bytes) {
+                            Ok(msg) => Input::Server { generation, msg: Box::new(msg) },
+                            Err(e) => Input::Lost { generation, why: format!("the server sent something unexpected: {e}") },
+                        },
+                        Err(e) => Input::Lost { generation, why: describe_wire(&e) },
+                    };
+                    let last = matches!(input, Input::Lost { .. });
+                    if read.send(input).is_err() || last {
+                        break;
+                    }
                 }
+            }) {
+                let _ = inputs.send(Input::Lost {
+                    generation,
+                    why: format!("PlanCraft hit an internal error reading from the server ({})", p.message),
+                });
             }
         });
         match started {
@@ -465,11 +503,16 @@ impl Session {
     }
 
     fn lost(&mut self, why: &str) {
-        if let Some(c) = self.conn.take() {
-            c.sender.shutdown();
-        }
+        // Only a connection in use is dropped (and the wait before trying again grows once).
+        let Some(c) = self.conn.take() else { return };
+        c.sender.shutdown();
+        // What the old connection's reader still passes on is ignored from now on.
+        self.generation = self.generation.saturating_add(1);
         self.offline = Some(why.to_string());
         self.lease_asked = false;
+        // Questions asked over it are not answered: the next connection asks afresh.
+        self.resync_asked = false;
+        self.applied_on_reopen = None;
         self.schedule_retry();
     }
 
@@ -503,6 +546,8 @@ impl Session {
             return;
         }
         let app_ids = after.ids.clone();
+        // Checked on the edit as made: once fitted, its new items count from the current lease.
+        let outside_leases = self.replica.new_ids_outside_leases(&before.ids, &after);
         let fitted = before != *self.replica.local();
         let mut clashes = None;
         let next = if fitted {
@@ -520,7 +565,7 @@ impl Session {
         } else {
             after
         };
-        if self.replica.beyond_lease(&next.ids) {
+        if outside_leases || self.replica.beyond_lease(&next.ids) {
             if self.replica.leased() {
                 self.notice(format!(
                     "That change adds more new items than a shared plan takes at once ({}); it was not kept. Add them in smaller parts.",
@@ -562,7 +607,11 @@ impl Session {
         let r = rebase(&mine, &theirs, None);
         let dropped = (!r.conflicts.is_empty()).then(|| Event::Dropped { conflicts: r.conflicts, discarded: None, before: after.clone() });
         let mut p = checked(apply(now, &r.patch).map_err(|e| e.to_string())?)?;
-        p.ids = after.ids;
+        // The counters go on from the plan as it is now (a lease may have come since), raised
+        // only past this edit's own new items: the app's counters may be from before a refused
+        // edit, or an old lease.
+        p.ids = now.ids.clone();
+        raise_past_new_items(&mut p, now);
         Ok((p, dropped))
     }
 
@@ -643,8 +692,14 @@ impl Session {
                 self.send_pending();
             }
             ServerMsg::Snapshot { snapshot, in_flight_applied } => {
-                self.resync_asked = false;
-                self.snapshot(snapshot, in_flight_applied);
+                // The server answers a resync without knowing of the change on its way; reopening
+                // said whether it went in.
+                let reopened = self.applied_on_reopen.take().is_some_and(|id| self.replica.in_flight() == Some(id));
+                // A plan that cannot be read is not asked for again until the next connection
+                // (each entry missed would ask for the whole plan once more).
+                if self.snapshot(snapshot, in_flight_applied || reopened) {
+                    self.resync_asked = false;
+                }
                 self.send_pending();
             }
             ServerMsg::Leased { ids } => {
@@ -678,13 +733,14 @@ impl Session {
         }
     }
 
-    /// The whole plan from the server: this person's unconfirmed work is fitted onto it.
-    fn snapshot(&mut self, snapshot: Snapshot, in_flight_applied: bool) {
+    /// The whole plan from the server: this person's unconfirmed work is fitted onto it. False
+    /// when the plan could not be read.
+    fn snapshot(&mut self, snapshot: Snapshot, in_flight_applied: bool) -> bool {
         let project = match parse_plan(&snapshot.plan, &self.plan) {
             Ok(p) => p,
             Err(why) => {
                 self.notice(format!("The server sent a plan this PlanCraft cannot read: {why}"));
-                return;
+                return false;
             }
         };
         self.epoch = snapshot.epoch;
@@ -696,6 +752,7 @@ impl Session {
             }
             Err(e) => self.notice(format!("The plan could not be loaded again: {e}")),
         }
+        true
     }
 
     fn reconnect(&mut self) {
@@ -725,7 +782,11 @@ impl Session {
             Err(ClientError::LoginFailed { message, credentials: true, .. }) => self.signed_out = Some(message),
             Err(ClientError::LoginFailed { message, retry_after_secs, .. }) => {
                 self.offline = Some(message);
-                self.retry_at = Instant::now().checked_add(Duration::from_secs(retry_after_secs.max(1)));
+                let wait = Duration::from_secs(retry_after_secs).clamp(RETRY_FIRST, LONGEST_LOGIN_WAIT);
+                match Instant::now().checked_add(wait) {
+                    Some(at) => self.retry_at = Some(at),
+                    None => self.schedule_retry(),
+                }
             }
             Err(ClientError::Refused(message)) => self.signed_out = Some(message),
             Err(ClientError::Temporary(message)) => {
@@ -756,7 +817,10 @@ impl Session {
                     }
                 }
                 if gap {
-                    // Catching up failed part way: the whole plan, once.
+                    // Catching up failed part way: the whole plan, once. Its answer does not say
+                    // whether the change on its way went in (the server answers a resync on its
+                    // own), so what reopening said is kept for it.
+                    self.applied_on_reopen = self.replica.in_flight().filter(|_| opened.in_flight_applied);
                     self.resync_asked = self.send(&ClientMsg::Resync);
                 } else if self.replica.in_flight().is_some() {
                     // The change on its way when the connection dropped is not among the
@@ -767,7 +831,9 @@ impl Session {
                     }
                 }
             }
-            CatchUp::Snapshot { snapshot } => self.snapshot(snapshot, opened.in_flight_applied),
+            CatchUp::Snapshot { snapshot } => {
+                self.snapshot(snapshot, opened.in_flight_applied);
+            }
         }
         if let Some(ids) = opened.lease
             && self.replica.lease(ids.clone()).is_err()
@@ -792,6 +858,24 @@ impl Session {
     }
 }
 
+/// Raises `p`'s id counters past the ids of items it has and `now` does not.
+fn raise_past_new_items(p: &mut Project, now: &Project) {
+    fn raise(counter: &mut u32, old: impl Iterator<Item = u32>, new: impl Iterator<Item = u32>) {
+        let old: std::collections::HashSet<u32> = old.collect();
+        if let Some(max) = new.filter(|id| !old.contains(id)).max() {
+            *counter = (*counter).max(max);
+        }
+    }
+    let ids = &mut p.ids;
+    raise(&mut ids.task, now.tasks.iter().map(|t| t.id.0), p.tasks.iter().map(|t| t.id.0));
+    raise(&mut ids.resource, now.resources.iter().map(|r| r.id.0), p.resources.iter().map(|r| r.id.0));
+    raise(&mut ids.calendar, now.calendars.iter().map(|c| c.id.0), p.calendars.iter().map(|c| c.id.0));
+    raise(&mut ids.assignment, now.assignments.iter().map(|a| a.id.0), p.assignments.iter().map(|a| a.id.0));
+    raise(&mut ids.time_entry, now.time_entries.iter().map(|e| e.id.0), p.time_entries.iter().map(|e| e.id.0));
+    raise(&mut ids.custom_field, now.custom_fields.iter().map(|f| f.id.0), p.custom_fields.iter().map(|f| f.id.0));
+    raise(&mut ids.board_column, now.board_columns.iter().map(|c| c.id.0), p.board_columns.iter().map(|c| c.id.0));
+}
+
 fn describe_wire(e: &WireError) -> String {
     match e {
         WireError::Io(io) if matches!(io.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
@@ -813,7 +897,12 @@ mod tests {
         assert_eq!(normalise_address("fe80::1").unwrap(), format!("[fe80::1]:{DEFAULT_PORT}"));
         assert_eq!(normalise_address("[fe80::1]:9000").unwrap(), "[fe80::1]:9000");
         assert_eq!(normalise_address("[fe80::1]").unwrap(), format!("[fe80::1]:{DEFAULT_PORT}"));
-        for bad in ["", "  ", "host:0", "host:99999", "host:x", ":80", "a b", "http://x", "[fe80::1", "[::1]x"] {
+        // One server however it is typed: its confirmed key is found either way.
+        for typed in ["Office-PC", "office-pc.", "OFFICE-PC.:47340", " office-pc "] {
+            assert_eq!(normalise_address(typed).unwrap(), format!("office-pc:{DEFAULT_PORT}"), "{typed}");
+        }
+        assert_eq!(normalise_address("FE80::1").unwrap(), format!("[fe80::1]:{DEFAULT_PORT}"));
+        for bad in ["", "  ", "host:0", "host:99999", "host:x", ":80", "a b", "http://x", "[fe80::1", "[::1]x", ".", ".:80"] {
             assert!(normalise_address(bad).is_err(), "{bad}");
         }
     }

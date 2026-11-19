@@ -13,6 +13,9 @@ const NOT_SHARED: [&str; 5] = ["format", "version", "id", "ids", "sched"];
 /// An item's schedule, worked out by recalculation.
 const ITEM_SCHEDULE: &str = "sched";
 
+/// A task's place in the outline (with the order of the tasks, what makes it a subtask).
+const OUTLINE_LEVEL: &str = "outline_level";
+
 fn state(p: &Project) -> Result<Map<String, Value>, SyncError> {
     match serde_json::to_value(p) {
         Ok(Value::Object(m)) => Ok(m),
@@ -85,8 +88,8 @@ fn diff_list(list: Collection, a: &[(Key, &Map<String, Value>)], b: &[(Key, &Map
         }
     }
     out.removed = a.iter().map(|(k, _)| k).filter(|k| !after.contains(k)).cloned().collect();
-    if list == Collection::Tasks && !out.added.is_empty() {
-        out.parents = summaries_of(b, &out.added);
+    if list == Collection::Tasks {
+        out.parents = new_summaries(a, b, &out.added);
     }
     let old_order: Vec<&Key> = a.iter().map(|(k, _)| k).collect();
     let new_order: Vec<&Key> = b.iter().map(|(k, _)| k).collect();
@@ -99,24 +102,35 @@ fn diff_list(list: Collection, a: &[(Key, &Map<String, Value>)], b: &[(Key, &Map
     out
 }
 
-/// The summary each task of `wanted` sits under in the outline `tasks` (the nearest task above
-/// it with a lower outline level); top-level tasks have none.
-fn summaries_of(tasks: &[(Key, &Map<String, Value>)], wanted: &BTreeMap<Key, Value>) -> BTreeMap<Key, Key> {
-    let mut out = BTreeMap::new();
+/// The summary each task sits under in the outline `tasks` (the nearest task above it with a
+/// lower outline level); top-level tasks have none.
+fn summaries_of<'a>(tasks: &'a [(Key, &Map<String, Value>)]) -> HashMap<&'a Key, &'a Key> {
+    let mut out = HashMap::new();
     let mut open: Vec<(u64, &Key)> = Vec::new();
     for (k, item) in tasks {
-        let level = item.get("outline_level").and_then(Value::as_u64).unwrap_or(1);
+        let level = item.get(OUTLINE_LEVEL).and_then(Value::as_u64).unwrap_or(1);
         while open.last().is_some_and(|(l, _)| *l >= level) {
             open.pop();
         }
-        if wanted.contains_key(k)
-            && let Some((_, parent)) = open.last()
-        {
-            out.insert(k.clone(), (*parent).clone());
+        if let Some((_, parent)) = open.last() {
+            out.insert(k, *parent);
         }
         open.push((level, k));
     }
     out
+}
+
+/// The summary each task of `b` sits under when it is new (in `added`) or came to sit under
+/// another summary than in `a` (moved, indented or outdented): a rebase can then tell when
+/// someone else deleted that summary, or when deleting a summary would leave someone else's
+/// task under another one.
+fn new_summaries(a: &[(Key, &Map<String, Value>)], b: &[(Key, &Map<String, Value>)], added: &BTreeMap<Key, Value>) -> BTreeMap<Key, Key> {
+    let (before, after) = (summaries_of(a), summaries_of(b));
+    after
+        .into_iter()
+        .filter(|(k, parent)| added.contains_key(*k) || before.get(*k) != Some(parent))
+        .map(|(k, parent)| (k.clone(), parent.clone()))
+        .collect()
 }
 
 /// What changed from `before` to `after` (leaving out schedules and id counters).
@@ -332,27 +346,37 @@ pub fn rebase(mine: &Patch, theirs: &Patch, by: Option<&str>) -> Rebased {
                 lp.changed.insert(k.clone(), kept);
             }
         }
+        // Summaries they put a task under (a new one, or one moved or indented there).
+        let their_summaries: HashSet<&Key> = tlp.parents.values().collect();
         for k in &mlp.removed {
             if tlp.removed.contains(k) {
                 continue;
             }
-            if tlp.changed.contains_key(k) {
+            // Deleting a summary they just put a task under would leave that task under another
+            // summary, silently.
+            if tlp.changed.contains_key(k) || their_summaries.contains(k) {
                 out.conflicts.push(conflict(ConflictKind::DeletedChanged, Some(list), Some(k), None));
                 continue;
             }
             lp.removed.insert(k.clone());
         }
 
-        // A new task whose summary they deleted: placed after whatever is left, it would land
-        // under another summary.
+        // A task I put under a summary they deleted: placed after whatever is left, it would land
+        // under another summary. A new one is left out; for a moved or indented one the move is.
+        let mut moves_clash = false;
         for (k, parent) in &mlp.parents {
-            if !lp.added.contains_key(k) {
+            let added = lp.added.contains_key(k);
+            if !added && !mlp.added.contains_key(k) && tlp.removed.contains(k) {
                 continue;
             }
             if tlp.removed.contains(parent) {
-                lp.added.remove(k);
+                if added {
+                    lp.added.remove(k);
+                } else {
+                    moves_clash = true;
+                }
                 out.conflicts.push(conflict(ConflictKind::NoLongerFits, Some(list), Some(k), None));
-            } else {
+            } else if added || !mlp.added.contains_key(k) {
                 lp.parents.insert(k.clone(), parent.clone());
             }
         }
@@ -371,8 +395,9 @@ pub fn rebase(mine: &Patch, theirs: &Patch, by: Option<&str>) -> Rebased {
             let both_moved = mlp.moved && tlp.moved && tlp.order.as_ref().is_some_and(|to| shared(to) != shared(mo));
             if both_moved {
                 out.conflicts.push(conflict(ConflictKind::BothMoved, Some(list), None, None));
+                moves_clash = true;
             }
-            let my_moves = mlp.moved && !tlp.moved && !both_moved;
+            let my_moves = mlp.moved && !tlp.moved && !moves_clash;
             // Gone after both changes: what either deleted, and my additions that clashed.
             let gone =
                 |k: &Key| lp.removed.contains(k) || tlp.removed.contains(k) || (mlp.added.contains_key(k) && !lp.added.contains_key(k));
@@ -385,6 +410,17 @@ pub fn rebase(mine: &Patch, theirs: &Patch, by: Option<&str>) -> Rebased {
             };
             lp.order = Some(order);
             lp.moved = my_moves;
+        }
+        if moves_clash {
+            // Outline levels are part of a move: kept without it, they would put tasks under
+            // summaries nobody chose. My new tasks keep theirs.
+            for (k, fields) in lp.changed.iter_mut() {
+                if !mlp.added.contains_key(k) {
+                    fields.remove(OUTLINE_LEVEL);
+                }
+            }
+            lp.changed.retain(|_, fields| !fields.is_empty());
+            lp.parents.retain(|k, _| lp.added.contains_key(k));
         }
 
         if !lp.is_empty() {

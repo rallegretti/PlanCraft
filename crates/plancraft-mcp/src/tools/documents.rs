@@ -61,7 +61,7 @@ pub fn tools() -> Vec<Tool> {
         Tool::new(
             "save_project",
             "Save a project",
-            "Save the document to its file. With 'path', save as a new file (relative links to external projects are rewritten so they keep working). Fails when another program changed the file since it was opened or last saved, or when 'path' names another existing file, unless overwrite is true.",
+            "Save the document to its file. With 'path', save as a new file (relative links to external projects are rewritten so they keep working). Fails when another program changed the file since it was opened or last saved, or when 'path' names another existing file, unless overwrite is true. A plan opened from a PlanCraft Server is saved by the server: 'path' writes a copy of it.",
             schema(
                 json!({
                     "path": string("Optional new file path (Save As)."),
@@ -259,6 +259,18 @@ fn save_project(ctx: &Ctx, a: &Args) -> ToolResult {
         _ => None,
     };
     let out = ctx.with_doc(a, |doc| {
+        if doc.shared.is_some() {
+            // The server saves a shared plan; a path saves a copy of it, as Save As does in the app.
+            let Some(p) = &new_path else {
+                return err("this plan is opened from a server, which saves every change; pass 'path' to save a copy of your own");
+            };
+            ctx.require_file_access("Saving a copy")?;
+            if p.exists() && !overwrite {
+                return err(format!("{} already exists; pass overwrite: true to replace it (check with the user first)", p.display()));
+            }
+            doc.save_copy(p)?;
+            return Ok(json!({ "saved": true, "copy": true, "document": doc.handle, "path": p.display().to_string() }));
+        }
         match &new_path {
             Some(p) => {
                 let same =

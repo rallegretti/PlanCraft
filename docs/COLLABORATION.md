@@ -79,19 +79,29 @@ These are conflicts, and the later change is not applied:
 |---|---|
 | `BothChanged` | both set the duration of one task, to different values |
 | `ChangedDeleted` | you renamed a task Ana deleted |
-| `DeletedChanged` | you deleted a task Ana changed |
+| `DeletedChanged` | you deleted a task Ana changed, or a summary Ana just put a task under |
 | `BothMoved` | both reordered the task list |
 | `SameNewKey` | both added an item with one key (a lease ran out) |
-| `NoLongerFits` | your new assignment is to a task Ana deleted; your new subtask sat under a summary Ana deleted |
+| `NoLongerFits` | your new assignment is to a task Ana deleted; your new, moved or indented subtask sat under a summary Ana deleted |
 
 `Conflict::describe` turns each one into a sentence, e.g. *"Ana changed the duration of task
 'Pour slab' at the same time"*. A value both people set to the same thing is no conflict, and
 neither is the same move made by both (only the items both had before are compared).
 
-A new item goes after the item it followed. A patch records the summary each new task sits
-under (`ListPatch::parents`): if someone else deleted that summary, the task would land under
-another one, so it is a `NoLongerFits` conflict instead. Deleting only a neighbouring task is no
-conflict; the new task stays under its summary.
+A new item goes after the item it followed. A patch records the summary each task sits under
+when it is new or came to sit under another summary (moved, indented, outdented:
+`ListPatch::parents`). Either way round, a deleted summary never quietly takes someone's task
+somewhere else:
+
+- if someone else deleted that summary, a new task would land under another one: it is left out
+  (`NoLongerFits`); a moved or indented one keeps its old place, its move dropped with the
+  outline levels it set;
+- deleting a summary someone else just put a task under is `DeletedChanged`: the summary stays
+  (the rest of the deletion, its other subtasks, still goes in).
+
+Deleting only a neighbouring task is no conflict; the new task stays under its summary. When a
+move is dropped (`BothMoved`, or the case above), the outline levels it set go with it: kept
+alone they would put tasks under summaries nobody chose.
 
 Merging works field by field, and a field holding a list counts as one value. Two people adding
 different predecessors to the same task at the same time is a conflict (`BothChanged` on
@@ -114,7 +124,13 @@ if they turn out to matter.
    handed out) is `Refused`, and nothing changes;
 6. bumps the version and returns the `Entry` for everyone, the author included. The entry carries
    the change's whole effect, worked out after recalculation, so every replica ends up with the
-   host's plan exactly.
+   host's plan exactly. A change with no effect makes no version (no journal record, no
+   broadcast): it is answered as `AlreadyApplied`, and the author settles on the host's plan.
+
+Values must come back from JSON exactly as they went: `serde_json` is built with
+`float_roundtrip`. Without it some numbers (a resource's units of 300/1440, say) read back off in
+the last place, the copy never matched the host's, and the replica sent its "change" for ever.
+The `shared_editing` sweep sends every change, entry and whole plan through JSON.
 
 After a restart, `Host::resume` continues at the version the plan was saved at, with the ids of
 the changes accepted before that save (`Host::applied_ids`). `Host::replay` and
@@ -440,12 +456,23 @@ the `Replica` and the connection. Merging never runs on the app's thread.
   plan (`rejected` with their `role`) is kept, unsent, for *Save As*; the plan turns read-only.
   Other refusals drop the work and say why.
 - Missed entries with a change on its way reconnect (the server then says whether that change
-  went in); without one, the whole plan is asked for, once.
+  went in); without one, the whole plan is asked for, once per connection (a new connection asks
+  again). When catching up after reconnecting fails part way, the whole plan is asked for and
+  what reopening said about the change on its way is kept for the answer (a resync's answer does
+  not know of it): a change that went in is never sent again. Messages still arriving from a
+  dropped connection are ignored. A plan from the server that cannot be read is not asked for
+  again until the next connection.
+- A wait before signing in again that the server asks for is kept to at most an hour.
+- The latest plan for the app is kept in one slot, not queued: a window that runs no frames for a
+  while holds one copy of the plan, not one per change that came in.
 - The link asks for a new block of ids when fewer than 250 are left, and again 30 seconds after the
   server rationed it. Opened without a lease (the server rations them: 20 per person and plan,
   then one every 30 seconds), new items wait for one; changes to existing items go through. An
   edit adding more new items than a block holds (1,000) is refused with a message, rather than
-  using ids no lease handed out.
+  using ids no lease handed out; so is a new item whose id neither the current block nor the one
+  before it handed out (an edit made before a new block arrived counts on from the old one, and
+  past its end are someone else's ids). An edit fitted onto a plan that moved on counts its ids
+  from the plan as it is now, raised only past its own new items.
 - If the link's thread ever hits an internal error, the plan shows as signed out (never a link
   that silently stopped).
 
@@ -458,8 +485,14 @@ the `Replica` and the connection. Merging never runs on the app's thread.
   a warning, not a lock.
 - Work that was dropped (it clashed with someone's change, or no longer fitted the plan) shows in
   a bar above the plan, with *Open Your Version*: the person's plan just before, as a new unsaved
-  plan.
+  plan. While the bar shows, the plan counts as unsaved: closing it (or PlanCraft) first opens
+  that version as a plan of its own, so it is asked about and kept by recovery copies.
 - Changes not yet confirmed count as unsaved: closing asks, and *Save* there writes a copy.
+- Undo passes over steps that no longer change anything (an edit the server did not keep).
+- Addresses are compared in lower case without a final dot, so a known server typed another way
+  is still known. A "first visit" to a server whose name matches a known one with another key
+  warns that it may be another computer pretending to be it. A mistyped password after
+  confirming a key goes back to the form, with the key still confirmed.
 - Opening a plan's file directly while a server's journal sits next to it (the server has it
   open, or stopped before saving) warns to open it from the server instead.
 - MCP agents attached to that PlanCraft edit through the same document and link; their changes go
@@ -473,13 +506,20 @@ the `Replica` and the connection. Merging never runs on the app's thread.
   stops the retries; ids are topped up and too many at once are refused; an editor opened without
   a lease adds nothing until one comes; an editor made a viewer keeps unsent changes; a plan
   changed outside the server is loaded again.
+- `crates/plancraft-server/tests/link_scripted.rs`: a link against a scripted server, for states
+  a real server rarely reaches: a gap after reconnecting asks for the plan again; a gap with a
+  change on its way reconnects; a gap while catching up does not send an applied change again; an
+  edit right after a refused one is kept; an absurd wait before signing in again is not taken as
+  none.
 - The app's `shared_tests` (in `app.rs`): the real app with a plan from a real server: edits both
   ways, status bar, people and their tasks, Save; Save As writes a copy (it once froze the app);
-  undo keeps others' changes and is refused over theirs; a viewer; closing disconnects; the
-  journal warning. `dialogs/server.rs` tests the
-  window's steps (first visit, pinned key, second visit, wrong password, another key).
+  undo keeps others' changes and is refused over theirs; a viewer; closing disconnects; work the
+  server dropped is kept when the plan closes; a signed-out plan is not reused; the journal
+  warning. `dialogs/server.rs` tests the window's steps (first visit, pinned key, second visit,
+  wrong password, another key, a mistyped password on a first visit).
 - `hostile.rs` › `shared_editing` › `shared_undo_keeps_the_plan_valid`: random own edits, other
-  people's edits and undo/redo on a shared document never panic and always leave a valid plan.
+  people's edits and undo/redo on a shared document never panic (not even one a guard catches)
+  and always leave a valid plan.
 
 ### Left for later
 
@@ -489,6 +529,8 @@ the `Replica` and the connection. Merging never runs on the app's thread.
 - *Open Your Version* opens the plan from just before the latest dropped work; earlier dropped
   work listed in the same bar is not in it.
 - A hard lock on a task someone is editing (the marker is a warning only).
+- A sweep property that a successful shared undo leaves every value others changed since as it
+  was (the direct tests in `sync/tests.rs` and `workspace.rs` cover the known cases).
 
 ## Phase 4: discovery and sharing
 

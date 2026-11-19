@@ -15,7 +15,9 @@ plancraft-core = { path = "crates/plancraft-core" }
 plancraft-mcp = { path = "crates/plancraft-mcp" }
 plancraft-server = { path = "crates/plancraft-server" }
 serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
+# float_roundtrip: a value read back must be the value written, or a shared plan never settles
+# (the default parser is off by one in the last place for some values, such as 300/1440).
+serde_json = { version = "1.0", features = ["float_roundtrip"] }
 # Dates and times (replacing chrono, which is unmaintained: RUSTSEC-2026-0543).
 jiff = { version = "1", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }

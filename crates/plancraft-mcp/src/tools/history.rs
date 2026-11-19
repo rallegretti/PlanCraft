@@ -11,7 +11,7 @@ pub fn tools() -> Vec<Tool> {
         Tool::new(
             "undo",
             "Undo",
-            "Undo the last change(s) to the document (changes made by the user in the app or by the agent).",
+            "Undo the last change(s) to the document (changes made by the user in the app or by the agent). In a plan opened from a server, a change someone else changed since is not undone: it stops there and says why.",
             schema(json!({ "steps": integer("Number of steps to undo (default 1).") }), &[]),
             undo,
         ),
@@ -65,9 +65,10 @@ fn step(ctx: &Ctx, a: &Args, redo: bool) -> ToolResult {
             set(&mut v, "stopped", json!(why));
         }
         Ok(v)
-    })?;
+    });
+    // A refused step leaves the list even when nothing else was done.
     ctx.mark_changed();
-    Ok(out)
+    out
 }
 
 fn undo(ctx: &Ctx, a: &Args) -> ToolResult {

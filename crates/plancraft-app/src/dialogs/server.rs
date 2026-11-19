@@ -14,7 +14,7 @@ use plancraft_server::link::{Account, Link, OpenedLink, Waker, normalise_address
 use plancraft_server::protocol::{PlanInfo, Role, Secret};
 use plancraft_server::wire::{Fingerprint, Trust, WireError};
 
-use crate::settings::{AppSettings, KnownServer};
+use crate::settings::{AppSettings, KnownServer, same_address};
 use crate::theme;
 
 /// A plan opened from a server, for the app to show.
@@ -80,6 +80,9 @@ pub struct OpenFromServer {
     busy: Option<(String, mpsc::Receiver<Done>)>,
     /// The server at this address showed another key: offer to forget the old one.
     wrong_key: Option<String>,
+    /// A key confirmed in this window whose sign-in then failed (a mistyped password): signing in
+    /// again with it does not ask to confirm it again.
+    confirmed: Option<(String, Fingerprint)>,
 }
 
 /// A sentence for a failed connection or sign-in.
@@ -116,6 +119,7 @@ impl OpenFromServer {
             error: None,
             busy: None,
             wrong_key: None,
+            confirmed: None,
         }
     }
 
@@ -146,7 +150,10 @@ impl OpenFromServer {
                 return;
             }
         };
-        let known = settings.fingerprint_for(&address).map(|f| Fingerprint(f.to_string()));
+        let known = settings
+            .fingerprint_for(&address)
+            .map(|f| Fingerprint(f.to_string()))
+            .or_else(|| self.confirmed.as_ref().filter(|(a, _)| *a == address).map(|(_, f)| f.clone()));
         let (user, password) = (self.user.trim().to_string(), self.password.clone());
         self.run(ctx, &format!("Connecting to {address}…"), move || match known {
             None => match Client::connect(address.as_str(), &Trust::FirstUse, "PlanCraft") {
@@ -198,19 +205,21 @@ impl OpenFromServer {
         match done {
             Done::NewServer { address, fingerprint, server } => self.stage = Stage::Confirm { address, fingerprint, server },
             Done::Plans { address, fingerprint, server, plans } => {
-                let last = settings.servers.iter().find(|k| k.address == address).map(|k| k.plan.clone());
+                let last = settings.servers.iter().find(|k| same_address(&k.address, &address)).map(|k| k.plan.clone());
                 // The key is pinned once the person confirmed it and signed in with it.
                 settings.remember_server(KnownServer {
                     address: address.clone(),
                     user: self.user.trim().to_string(),
                     fingerprint: fingerprint.0.clone(),
                     plan: last.clone().unwrap_or_default(),
+                    name: server.clone(),
                 });
+                self.confirmed = None;
                 let chosen = last.filter(|l| plans.iter().any(|p| &p.name == l)).or_else(|| plans.first().map(|p| p.name.clone()));
                 self.stage = Stage::Plans { address, fingerprint, server, plans, chosen };
             }
             Done::Opened(opened) => {
-                if let Some(k) = settings.servers.iter().find(|k| k.address == opened.address).cloned() {
+                if let Some(k) = settings.servers.iter().find(|k| same_address(&k.address, &opened.address)).cloned() {
                     settings.remember_server(KnownServer { plan: opened.plan.clone(), ..k });
                 }
                 self.password.clear();
@@ -224,7 +233,15 @@ impl OpenFromServer {
                 ));
                 self.wrong_key = Some(address);
             }
-            Done::Failed(e) => self.error = Some(e),
+            Done::Failed(e) => {
+                // Signing in after confirming a key failed (a mistyped password, most likely): back
+                // to the form to type it again; the key stays confirmed for this window.
+                if let Stage::Confirm { address, fingerprint, .. } = &self.stage {
+                    self.confirmed = Some((address.clone(), fingerprint.clone()));
+                    self.stage = Stage::Form;
+                }
+                self.error = Some(e);
+            }
         }
         None
     }
@@ -247,7 +264,7 @@ impl OpenFromServer {
                 let busy = self.busy.is_some();
                 match &self.stage {
                     Stage::Form => self.form(ui, ctx, settings, busy),
-                    Stage::Confirm { .. } => cancel = self.confirm(ui, ctx, busy),
+                    Stage::Confirm { .. } => cancel = self.confirm(ui, ctx, settings, busy),
                     Stage::Plans { .. } => cancel = self.plans(ui, ctx, busy),
                 }
                 if let Some((what, _)) = &self.busy {
@@ -263,7 +280,7 @@ impl OpenFromServer {
                 if let Some(address) = self.wrong_key.clone()
                     && ui.button("Forget the old key").on_hover_text("Only if whoever runs the server says its key changed").clicked()
                 {
-                    settings.servers.retain(|k| k.address != address);
+                    settings.servers.retain(|k| !same_address(&k.address, &address));
                     settings.save();
                     self.wrong_key = None;
                     self.error = None;
@@ -317,10 +334,22 @@ impl OpenFromServer {
     }
 
     /// Returns true when cancelled.
-    fn confirm(&mut self, ui: &mut egui::Ui, ctx: &Context, busy: bool) -> bool {
+    fn confirm(&mut self, ui: &mut egui::Ui, ctx: &Context, settings: &AppSettings, busy: bool) -> bool {
         let Stage::Confirm { address, fingerprint, server } = &self.stage else { return false };
         let (address, fingerprint) = (address.clone(), fingerprint.clone());
-        ui.label(format!("This is your first visit to {server} ({address})."));
+        if let Some(known) = settings.same_name_other_key(server, &fingerprint.0) {
+            // Not a first visit at all, perhaps: the same name at another address, another key.
+            ui.colored_label(
+                theme::pal().ERROR,
+                format!(
+                    "Careful: a server named {server} you used before, at {}, had a different key. This may be another computer \
+                     pretending to be it. Unless whoever runs it says it moved and its key changed, choose It doesn't match.",
+                    known.address
+                ),
+            );
+        } else {
+            ui.label(format!("This is your first visit to {server} ({address})."));
+        }
         ui.label("Check that this key fingerprint matches the one the server shows (ask whoever runs it):");
         ui.add_space(4.0);
         egui::Frame::new().fill(theme::pal().HEADER_BG).corner_radius(4.0).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
@@ -466,6 +495,7 @@ mod tests {
             user: "ana".into(),
             fingerprint: server.running.fingerprint().0.clone(),
             plan: String::new(),
+            name: String::new(),
         });
         let mut d = filled(&settings, &server, "ana", "not the password");
         d.connect(&ctx, &settings);
@@ -486,5 +516,26 @@ mod tests {
         d.connect(&ctx, &settings);
         settle(&mut d, &mut settings);
         assert!(d.error.is_some());
+    }
+
+    #[test]
+    fn a_mistyped_password_on_a_first_visit_goes_back_to_the_form() {
+        let server = TestServer::start();
+        let ctx = Context::default();
+        let mut settings = AppSettings::default();
+        let mut d = filled(&settings, &server, "ana", "mistyped");
+        d.connect(&ctx, &settings);
+        settle(&mut d, &mut settings);
+        let Stage::Confirm { address, fingerprint, .. } = &d.stage else { panic!("{:?}", d.error) };
+        let (a, f) = (address.clone(), fingerprint.clone());
+        d.run(&ctx, "Signing in…", move || OpenFromServer::list(a, f, "ana", "mistyped"));
+        settle(&mut d, &mut settings);
+        assert!(matches!(d.stage, Stage::Form), "back to the form, where the password can be typed again");
+        assert!(d.error.as_deref().unwrap_or_default().contains("wrong user name or password"), "{:?}", d.error);
+        // Typed again: straight to the plans, without confirming the key a second time.
+        d.password = PASSWORD.into();
+        d.connect(&ctx, &settings);
+        settle(&mut d, &mut settings);
+        assert!(matches!(d.stage, Stage::Plans { .. }), "{:?}", d.error);
     }
 }

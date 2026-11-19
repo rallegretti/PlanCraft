@@ -368,6 +368,36 @@ fn an_edit_past_the_lease_is_seen() {
 }
 
 #[test]
+fn new_items_counted_from_an_old_lease_must_stay_inside_it() {
+    let mut host = Host::new(plan());
+    let mut r = join(&mut host);
+    let base = r.local().clone();
+    // A new task with the lease's next id is fine; one past the lease is not.
+    let with_id = |id: u32| {
+        let mut p = base.clone();
+        let t = p.add_task("New", None);
+        if let Some(task) = p.tasks.iter_mut().find(|x| x.id == t) {
+            task.id = crate::ids::TaskId(id);
+        }
+        p
+    };
+    let first = r.ids().task;
+    assert!(!r.new_ids_outside_leases(&base.ids, &with_id(first + 1)));
+    assert!(r.new_ids_outside_leases(&base.ids, &with_id(first + LEASE_SIZE + 1)));
+    // A new lease came while the app still counted from the old one: the old lease's ids not
+    // used yet are still fine; past its end is someone else's block.
+    host.lease().unwrap();
+    r.lease(host.lease().unwrap()).unwrap();
+    assert!(!r.new_ids_outside_leases(&base.ids, &with_id(first + LEASE_SIZE)));
+    assert!(r.new_ids_outside_leases(&base.ids, &with_id(first + LEASE_SIZE + 1)), "the block between belongs to someone else");
+    // Items that were there already (an undo putting one back) are not new.
+    assert!(!r.new_ids_outside_leases(&base.ids, &base));
+    // Without a lease nothing new fits.
+    let bare = Replica::without_lease(host.project().clone(), host.version());
+    assert!(bare.new_ids_outside_leases(&base.ids, &with_id(base.ids.task + 1)));
+}
+
+#[test]
 fn undo_takes_back_only_its_own_change() {
     let base = plan();
     let (a, b) = (leaf(&base, 1), leaf(&base, 2));
@@ -663,6 +693,182 @@ fn a_subtask_added_under_a_summary_someone_deleted_is_a_conflict() {
     assert!(merged.conflicts.iter().any(|c| c.kind == ConflictKind::NoLongerFits && c.key == Some(Key(added.0.to_string()))), "{merged:?}");
     assert!(!ana.local().tasks.iter().any(|t| t.id == added));
     assert!(same(ana.local(), host.project()));
+}
+
+#[test]
+fn floats_come_back_from_json_exactly() {
+    // Units worked out as work / duration; read back one place off, a replica's copy never
+    // matches the host's and it sends its "change" again for ever.
+    for (work, duration) in [(300.0_f64, 1440.0_f64), (7.0, 3.0), (1.0, 7.0), (480.0, 2280.0)] {
+        let units = work / duration;
+        let back: f64 = serde_json::from_str(&serde_json::to_string(&units).unwrap()).unwrap();
+        assert_eq!(back.to_bits(), units.to_bits(), "{work}/{duration}");
+    }
+}
+
+#[test]
+fn a_change_that_changes_nothing_makes_no_version() {
+    let mut host = Host::new(plan());
+    let mut ana = join(&mut host);
+    let x = leaf(host.project(), 1);
+    let name = task(host.project(), x).name.clone();
+    local_edit(&mut ana, |p| rename(p, x, "Renamed"));
+    let mut change = ana.next_change("rename").unwrap();
+    // Someone else made the same rename meanwhile... and the change is sent in a form that does
+    // nothing at the host (as a value read back one place off would).
+    let version = host.version();
+    for t in change.patch.lists.values_mut() {
+        for fields in t.changed.values_mut() {
+            fields.insert("name".into(), Slot::Set(serde_json::Value::String(name.clone())));
+        }
+    }
+    assert!(matches!(host.submit(&change, "Ana"), Outcome::AlreadyApplied(v) if v == version));
+    assert_eq!(host.version(), version, "no new version, no journal record, no broadcast");
+    assert!(host.was_applied(change.id));
+}
+
+/// A top-level summary and the top-level task right after its subtasks.
+fn summary_and_next(p: &Project) -> (TaskId, TaskId) {
+    let (si, summary) = p
+        .tasks
+        .iter()
+        .enumerate()
+        .find(|(i, t)| {
+            let end = i + 1 + p.tasks.iter().skip(i + 1).take_while(|c| c.outline_level > 1).count();
+            t.sched.is_summary && t.outline_level == 1 && p.tasks.get(end).is_some_and(|n| n.outline_level == 1)
+        })
+        .map(|(i, t)| (i, t.id))
+        .unwrap();
+    let end = si + 1 + p.tasks.iter().skip(si + 1).take_while(|c| c.outline_level > 1).count();
+    (summary, p.tasks[end].id)
+}
+
+fn summary_of(p: &Project, id: TaskId) -> Option<TaskId> {
+    let i = p.tasks.iter().position(|t| t.id == id).unwrap();
+    let level = p.tasks[i].outline_level;
+    p.tasks[..i].iter().rev().find(|t| t.outline_level < level).map(|t| t.id)
+}
+
+#[test]
+fn deleting_a_summary_someone_just_put_a_subtask_under_is_a_conflict() {
+    // Ana adds a subtask under a summary and it goes in first; Ben deletes the summary. Taking
+    // the deletion would leave Ana's subtask under whatever summary is above.
+    let mut host = Host::new(plan());
+    let (mut ana, mut ben) = (join(&mut host), join(&mut host));
+    let (summary, next) = summary_and_next(host.project());
+    let at = host.project().tasks.iter().position(|t| t.id == next).unwrap();
+    let mut added = TaskId(0);
+    local_edit(&mut ana, |p| {
+        added = p.add_task("Ana's subtask", Some(at));
+        p.task_mut(added).unwrap().outline_level = 2;
+    });
+    local_edit(&mut ben, |p| {
+        p.delete_tasks(&[summary]).unwrap();
+    });
+    let first = send(&mut host, &mut ana, "Ana");
+    // At the host: Ben's change, made before Ana's, is refused.
+    let change = ben.clone().next_change("delete").unwrap();
+    assert!(
+        matches!(host.clone().submit(&change, "Ben"), Outcome::Conflicts(c) if c.iter().any(|c| c.kind == ConflictKind::DeletedChanged))
+    );
+    // At Ben's copy: the deletion is dropped and reported.
+    let merged = ben.receive(entry(&first)).unwrap();
+    assert!(
+        merged.conflicts.iter().any(|c| c.kind == ConflictKind::DeletedChanged && c.key == Some(Key(summary.0.to_string()))),
+        "{merged:?}"
+    );
+    assert_eq!(summary_of(ben.local(), added), Some(summary), "Ana's subtask stays under its summary");
+    // The rest of Ben's deletion (the summary's other subtasks) still goes in.
+    let rest = send(&mut host, &mut ben, "Ben");
+    ana.receive(entry(&rest)).unwrap();
+    assert_eq!(summary_of(host.project(), added), Some(summary));
+    assert!(same(ben.local(), host.project()) && same(ana.local(), host.project()));
+}
+
+#[test]
+fn indenting_under_a_summary_someone_deleted_is_a_conflict_either_way_round() {
+    for ana_first in [false, true] {
+        let mut host = Host::new(plan());
+        let (mut ana, mut ben) = (join(&mut host), join(&mut host));
+        let original = host.project().clone();
+        let (summary, next) = summary_and_next(host.project());
+        local_edit(&mut ana, |p| p.indent(next).unwrap());
+        assert_eq!(summary_of(ana.local(), next), Some(summary));
+        local_edit(&mut ben, |p| {
+            p.delete_tasks(&[summary]).unwrap();
+        });
+        let (first, merged) = if ana_first {
+            let first = send(&mut host, &mut ana, "Ana");
+            (first.clone(), ben.receive(entry(&first)).unwrap())
+        } else {
+            let first = send(&mut host, &mut ben, "Ben");
+            (first.clone(), ana.receive(entry(&first)).unwrap())
+        };
+        assert!(
+            merged.conflicts.iter().any(|c| matches!(c.kind, ConflictKind::NoLongerFits | ConflictKind::DeletedChanged)),
+            "ana first: {ana_first}: {merged:?}"
+        );
+        let _ = first;
+        // What is left of the second person's work goes in after.
+        let (second, other) = if ana_first { (&mut ben, &mut ana) } else { (&mut ana, &mut ben) };
+        if !second.pending().is_empty() {
+            let rest = send(&mut host, second, "second");
+            other.receive(entry(&rest)).unwrap();
+        }
+        assert!(same(ana.local(), host.project()) && same(ben.local(), host.project()), "ana first: {ana_first}");
+        if !ana_first {
+            // Ben's deletion stands, and Ana's task stays where it was, with its subtasks: no
+            // level of the indent is left.
+            assert_eq!(summary_of(ana.local(), next), None);
+            for t in &ana.local().tasks {
+                assert_eq!(t.outline_level, task(&original, t.id).outline_level, "task {}", t.id.0);
+            }
+            assert!(ana.pending().is_empty());
+        } else {
+            // Ana's indent stands, and so does the summary.
+            assert_eq!(summary_of(ben.local(), next), Some(summary));
+        }
+    }
+}
+
+#[test]
+fn a_move_dropped_for_clashing_takes_its_outline_levels_with_it() {
+    // Ana moves the last top-level summary (with its subtasks) in among the first summary's
+    // subtasks, which makes them subtasks there; Ben reorders two other tasks first. Ana's move
+    // is dropped, and the levels it set must go too, or her summary would land under another.
+    let mut host = Host::new(plan());
+    let (mut ana, mut ben) = (join(&mut host), join(&mut host));
+    let p = host.project();
+    let last_summary = p.tasks.iter().rev().find(|t| t.sched.is_summary && t.outline_level == 1).unwrap().id;
+    let first_child = p.tasks.iter().find(|t| t.outline_level == 2).unwrap().id;
+    local_edit(&mut ana, |p| p.move_tasks_before(&[last_summary], Some(first_child)).unwrap());
+    let moved_level = task(ana.local(), last_summary).outline_level;
+    let (x, y) = (leaf(host.project(), 2), leaf(host.project(), 3));
+    local_edit(&mut ben, |p| p.move_tasks_before(&[y], Some(x)).unwrap());
+    let first = send(&mut host, &mut ben, "Ben");
+    let merged = ana.receive(entry(&first)).unwrap();
+    assert!(merged.conflicts.iter().any(|c| c.kind == ConflictKind::BothMoved), "{merged:?}");
+    assert_eq!(task(ana.local(), last_summary).outline_level, 1, "the move set level {moved_level}; dropped, it is back to 1");
+    if ana.next_change("rest").is_some() {
+        panic!("nothing of the move is left to send");
+    }
+    assert!(same(ana.local(), host.project()));
+}
+
+#[test]
+fn undoing_a_new_task_someone_put_a_subtask_under_is_refused() {
+    // I add X; someone adds Y as X's subtask. Undoing "add X" would put Y under another task.
+    let base = plan();
+    let mut mine = base.clone();
+    let x = mine.add_task("X", None);
+    mine.task_mut(x).unwrap().outline_level = 1;
+    recalculate(&mut mine);
+    let mut now = mine.clone();
+    let y = now.add_task("Y", None);
+    now.task_mut(y).unwrap().outline_level = 2;
+    recalculate(&mut now);
+    assert_eq!(summary_of(&now, y), Some(x));
+    assert!(matches!(reverse(&now, &base, &mine), Err(Reversal::ChangedSince(_))));
 }
 
 #[test]

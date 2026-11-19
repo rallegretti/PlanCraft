@@ -34,6 +34,13 @@ pub struct KnownServer {
     pub fingerprint: String,
     /// The plan last opened there.
     pub plan: String,
+    /// The name the server gave itself (to warn when a "new" server has the name of a known one).
+    pub name: String,
+}
+
+/// Whether two addresses name the same server (stored ones may predate lower-casing).
+pub fn same_address(stored: &str, address: &str) -> bool {
+    stored == address || plancraft_server::link::normalise_address(stored).is_ok_and(|a| a == address)
 }
 
 /// Servers remembered, at most.
@@ -100,6 +107,7 @@ impl AppSettings {
             short(&mut k.user);
             short(&mut k.fingerprint);
             short(&mut k.plan);
+            short(&mut k.name);
         }
         self.servers.retain(|k| !k.address.is_empty());
         self
@@ -107,12 +115,17 @@ impl AppSettings {
 
     /// The fingerprint confirmed for the server at `address`, if any.
     pub fn fingerprint_for(&self, address: &str) -> Option<&str> {
-        self.servers.iter().find(|k| k.address == address && !k.fingerprint.is_empty()).map(|k| k.fingerprint.as_str())
+        self.servers.iter().find(|k| same_address(&k.address, address) && !k.fingerprint.is_empty()).map(|k| k.fingerprint.as_str())
+    }
+
+    /// A known server that calls itself `name` but has another key than `fingerprint`.
+    pub fn same_name_other_key(&self, name: &str, fingerprint: &str) -> Option<&KnownServer> {
+        self.servers.iter().find(|k| !k.name.is_empty() && k.name == name && !k.fingerprint.is_empty() && k.fingerprint != fingerprint)
     }
 
     /// Remembers a server plans were opened from (first in the list from now on).
     pub fn remember_server(&mut self, server: KnownServer) {
-        self.servers.retain(|k| k.address != server.address);
+        self.servers.retain(|k| !same_address(&k.address, &server.address));
         self.servers.insert(0, server);
         self.servers.truncate(MAX_SERVERS);
         self.save();
@@ -184,12 +197,19 @@ mod tests {
                 user: "ana".into(),
                 fingerprint: format!("fp{i}"),
                 plan: "P".into(),
+                name: format!("server {i}"),
             });
         }
         assert_eq!(s.servers.len(), MAX_SERVERS);
         assert_eq!(s.servers[0].address, "host14:47340", "last used first");
         assert_eq!(s.fingerprint_for("host14:47340"), Some("fp14"));
         assert_eq!(s.fingerprint_for("elsewhere:1"), None);
+        // A known server's name with another key, at whatever address, is noticed.
+        assert_eq!(s.same_name_other_key("server 14", "another key").map(|k| k.address.as_str()), Some("host14:47340"));
+        assert!(s.same_name_other_key("server 14", "fp14").is_none() && s.same_name_other_key("new one", "x").is_none());
+        // An address remembered before addresses were put in lower case is still found.
+        s.servers[0].address = "Host14.:47340".into();
+        assert_eq!(s.fingerprint_for("host14:47340"), Some("fp14"));
         s.save_to(&path).unwrap();
         assert!(!std::fs::read_to_string(&path).unwrap().contains("password"));
         let long = "x".repeat(100_000);
