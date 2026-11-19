@@ -275,8 +275,18 @@ fn var_text(p: &Project, m: Minutes) -> String {
 }
 
 /// Indicator glyphs for a task.
-pub fn indicators(p: &Project, t: &Task, overallocated: &dyn Fn(TaskId) -> bool) -> Vec<(String, egui::Color32, String)> {
+/// `others`: who else is on it, in a plan opened from a server.
+pub fn indicators(
+    p: &Project,
+    t: &Task,
+    overallocated: &dyn Fn(TaskId) -> bool,
+    others: Option<&str>,
+) -> Vec<(String, egui::Color32, String)> {
     let mut v = Vec::new();
+    if let Some(names) = others {
+        // A warning, not a lock: they may be changing it right now.
+        v.push(("👥".into(), theme::pal().ACCENT_MID, format!("Also on this task: {names}")));
+    }
     if t.is_complete() {
         v.push(("✔".into(), theme::pal().OK, "This task was completed".into()));
     }
@@ -317,6 +327,8 @@ pub fn indicators(p: &Project, t: &Task, overallocated: &dyn Fn(TaskId) -> bool)
 
 pub struct CellCtx<'a> {
     pub overallocated: &'a dyn Fn(TaskId) -> bool,
+    /// In a plan opened from a server: who else is on each task (names, joined).
+    pub others_on: Option<&'a std::collections::HashMap<TaskId, String>>,
 }
 
 /// Cell content of `col` for the task at `idx`.
@@ -326,7 +338,10 @@ pub fn cell(col: TaskCol, p: &Project, idx: usize, ctx: &CellCtx) -> Cell {
     let s = &t.sched;
     let summary = s.is_summary;
     let mut c = match col {
-        Indicators => Cell { icons: indicators(p, t, ctx.overallocated), ..Default::default() },
+        Indicators => {
+            let others = ctx.others_on.and_then(|m| m.get(&t.id)).map(String::as_str);
+            Cell { icons: indicators(p, t, ctx.overallocated, others), ..Default::default() }
+        }
         Mode => {
             let (g, tip) = match t.mode {
                 ScheduleMode::Auto => ("⟳", "Auto Scheduled"),

@@ -637,7 +637,7 @@ impl SharedPlan {
         }
         for conn in gone {
             if let Some(s) = self.subscribers.remove(&conn) {
-                s.out.push(&ServerMsg::Closing { message: "you may no longer open this plan".into() });
+                s.out.push(&ServerMsg::Closing { message: "you may no longer open this plan".into(), for_good: true });
                 s.out.finish();
                 if self.current.get(&s.client) == Some(&conn) {
                     self.current.remove(&s.client);
@@ -661,7 +661,7 @@ impl SharedPlan {
         if let Some(old) = self.current.get(&sub.client).and_then(|c| self.subscribers.get(c))
             && old.user.to_lowercase() != sub.user.to_lowercase()
         {
-            sub.out.push(&ServerMsg::Error { message: "this copy of the plan belongs to someone else".into() });
+            sub.out.push(&ServerMsg::Error { message: "this copy of the plan belongs to someone else".into(), for_good: true });
             return Ok(Joined::No);
         }
         if let Some(old) = self.current.insert(sub.client, conn)
@@ -741,12 +741,12 @@ impl SharedPlan {
     pub fn lease_for(&mut self, conn: ConnId) -> Result<(), Broken> {
         let Some(user) = self.speaks(conn).map(|s| s.user.clone()) else { return Ok(()) };
         if !self.allow_lease(&user) {
-            self.send(conn, &ServerMsg::Error { message: "too many requests for new ids; wait a moment".into() });
+            self.send(conn, &ServerMsg::Error { message: "too many requests for new ids; wait a moment".into(), for_good: false });
             return Ok(());
         }
         match self.lease()? {
             Some(ids) => self.send(conn, &ServerMsg::Leased { ids }),
-            None => self.send(conn, &ServerMsg::Error { message: "this plan has run out of new ids".into() }),
+            None => self.send(conn, &ServerMsg::Error { message: "this plan has run out of new ids".into(), for_good: false }),
         }
         Ok(())
     }
@@ -761,7 +761,10 @@ impl SharedPlan {
         if self.journal.written() > self.max_unsaved_journal {
             let reason =
                 "the server cannot save this plan at the moment (see its log), so your change was not applied; try again later".to_string();
-            self.send(conn, &ServerMsg::Rejected { change: change.id, conflicts: Vec::new(), reason: Some(reason) });
+            self.send(
+                conn,
+                &ServerMsg::Rejected { change: change.id, conflicts: Vec::new(), reason: Some(reason), retry: true, role: None },
+            );
             return Ok(());
         }
         let incoming = serde_json::to_vec(&change.patch).map_or(usize::MAX, |b| b.len());
@@ -807,10 +810,15 @@ impl SharedPlan {
                     }
                 }
             }
-            Outcome::Conflicts(conflicts) => self.send(conn, &ServerMsg::Rejected { change: change.id, conflicts, reason: None }),
+            Outcome::Conflicts(conflicts) => {
+                self.send(conn, &ServerMsg::Rejected { change: change.id, conflicts, reason: None, retry: false, role: None })
+            }
             Outcome::Refused(reason) => {
                 (self.log)(&format!("{}: a change from {author} was refused: {reason}", self.name));
-                self.send(conn, &ServerMsg::Rejected { change: change.id, conflicts: Vec::new(), reason: Some(reason) });
+                self.send(
+                    conn,
+                    &ServerMsg::Rejected { change: change.id, conflicts: Vec::new(), reason: Some(reason), retry: false, role: None },
+                );
             }
             Outcome::AlreadyApplied(_) => self.resync(conn, true)?,
             Outcome::Resync => self.resync(conn, false)?,
@@ -914,7 +922,7 @@ impl SharedPlan {
 
     /// Closes the plan: tells everyone, saves it and gives back its lock.
     pub fn close(mut self, message: &str) {
-        self.broadcast(&ServerMsg::Closing { message: message.to_string() });
+        self.broadcast(&ServerMsg::Closing { message: message.to_string(), for_good: false });
         for s in self.subscribers.values() {
             s.out.finish();
         }
@@ -934,7 +942,7 @@ impl SharedPlan {
     /// the next opening starts from.
     pub fn abandon(mut self, why: &Broken) {
         (self.log)(&format!("{}: closed without saving: {}", self.name, why.0));
-        self.broadcast(&ServerMsg::Closing { message: why.0.clone() });
+        self.broadcast(&ServerMsg::Closing { message: why.0.clone(), for_good: false });
         for s in self.subscribers.values() {
             s.out.finish();
         }

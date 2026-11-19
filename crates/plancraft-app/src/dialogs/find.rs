@@ -51,7 +51,7 @@ fn columns(p: &Project, st: &UiState, only: Option<&str>) -> Vec<(usize, Field)>
 /// A cell's text as shown (for finding) and as edited (for replacing, `None` when the cell can't
 /// be edited).
 fn cell_texts(p: &Project, idx: usize, field: Field) -> (String, Option<String>) {
-    let ctx = CellCtx { overallocated: &|_| false };
+    let ctx = CellCtx { overallocated: &|_| false, others_on: None };
     let cell = field.cell(p, idx, &ctx);
     let editable = !cell.read_only && matches!(field.def(p).editor, Editor::Text);
     let edit = editable.then(|| cell.edit_text.clone().unwrap_or_else(|| cell.text.clone()));
@@ -387,7 +387,7 @@ pub fn fill_down(doc: &mut Document, st: &mut UiState) -> Result<String, String>
     if rest.is_empty() {
         return Err("Select the rows below too (Shift+click or Shift+Down), then fill down.".into());
     }
-    let ctx = CellCtx { overallocated: &|_| false };
+    let ctx = CellCtx { overallocated: &|_| false, others_on: None };
     let source = field.cell(p, *first, &ctx);
     let text = source.edit_text.unwrap_or(source.text);
     // Cells that are calculated for some tasks (a summary's duration) are left as they are.

@@ -31,21 +31,26 @@ fn step(ctx: &Ctx, a: &Args, redo: bool) -> ToolResult {
     let steps = a.u64("steps")?.unwrap_or(1).clamp(1, 200);
     let out = ctx.with_doc(a, |doc| {
         let mut done = Vec::new();
+        let mut refused = None;
         for _ in 0..steps {
             let label = if redo { doc.redo_label() } else { doc.undo_label() }.map(str::to_string);
             let Some(label) = label else { break };
-            let ok = if redo {
-                doc.redo_as(plancraft_core::workspace::ChangeSource::Agent)
-            } else {
-                doc.undo_as(plancraft_core::workspace::ChangeSource::Agent)
-            };
-            if !ok {
-                break;
+            let source = plancraft_core::workspace::ChangeSource::Agent;
+            // In a plan opened from a server, a step someone else changed since is refused.
+            match if redo { doc.try_redo_as(source) } else { doc.try_undo_as(source) } {
+                Ok(true) => done.push(label),
+                Ok(false) => break,
+                Err(why) => {
+                    refused = Some(why);
+                    break;
+                }
             }
-            done.push(label);
         }
         if done.is_empty() {
-            return err(if redo { "nothing to redo" } else { "nothing to undo" });
+            return match refused {
+                Some(why) => err(why),
+                None => err(if redo { "nothing to redo" } else { "nothing to undo" }),
+            };
         }
         let mut v = json!({
             "can_undo": doc.can_undo(),
@@ -56,6 +61,9 @@ fn step(ctx: &Ctx, a: &Args, redo: bool) -> ToolResult {
             "project_finish": fmt_dt(doc.project.sched.finish),
         });
         set(&mut v, if redo { "redone" } else { "undone" }, json!(done));
+        if let Some(why) = refused {
+            set(&mut v, "stopped", json!(why));
+        }
         Ok(v)
     })?;
     ctx.mark_changed();

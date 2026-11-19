@@ -1422,6 +1422,60 @@ mod shared_editing {
         Resync,
     }
 
+    #[derive(Clone, Debug)]
+    enum UndoStep {
+        Mine(Op),
+        /// Someone else's edit arrives (applied to the plan as it is, no undo step).
+        Theirs(Op),
+        Undo,
+        Redo,
+    }
+
+    fn undo_step() -> impl Strategy<Value = UndoStep> {
+        prop_oneof![
+            3 => edit_op().prop_map(UndoStep::Mine),
+            2 => edit_op().prop_map(UndoStep::Theirs),
+            2 => Just(UndoStep::Undo),
+            1 => Just(UndoStep::Redo),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: cases(32), ..ProptestConfig::default() })]
+
+        /// Undo and redo in a plan opened from a server (inverse patches over other people's
+        /// changes) never panic and always leave a valid plan.
+        #[test]
+        fn shared_undo_keeps_the_plan_valid(steps in prop::collection::vec(undo_step(), 1..50)) {
+            let mut doc = Document::new_shared(1, demo_project(start()), "Shared.plancraft");
+            for s in &steps {
+                match s {
+                    UndoStep::Mine(op) => {
+                        let r = doc.try_edit("mine", ChangeSource::User, |p| apply(p, op));
+                        prop_assert!(!matches!(r, Err(PlanError::Internal(_))), "{op:?}: {r:?}");
+                    }
+                    UndoStep::Theirs(op) => {
+                        let mut theirs = doc.project.clone();
+                        if apply(&mut theirs, op).is_ok() && limits::check_edit(&mut theirs).is_ok() {
+                            plancraft_core::schedule::recalculate(&mut theirs);
+                            doc.apply_remote(theirs);
+                        }
+                    }
+                    UndoStep::Undo | UndoStep::Redo => {
+                        let r = if matches!(s, UndoStep::Undo) { doc.try_undo_as(ChangeSource::User) } else { doc.try_redo_as(ChangeSource::User) };
+                        if let Err(why) = &r {
+                            prop_assert!(!why.contains("internal error"), "{s:?}: {why}");
+                        }
+                    }
+                }
+                prop_assert!(limits::check_counts(&doc.project).is_ok());
+                let mut copy = doc.project.clone();
+                prop_assert!(limits::sanitize(&mut copy).is_empty(), "{s:?} left values out of range");
+                let _ = doc.take_unsent();
+            }
+        }
+    }
+
     struct Net {
         host: Host,
         people: Vec<Replica>,

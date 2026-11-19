@@ -375,6 +375,9 @@ fn may_reload(doc: &Document, discard: bool) -> ToolResult<()> {
 fn reload_project(ctx: &Ctx, a: &Args) -> ToolResult {
     let discard = a.bool("discard_changes")?.unwrap_or(false);
     let (handle, path) = ctx.read(a, |doc| {
+        if doc.shared.is_some() {
+            return err("this plan is opened from a server: other people's changes arrive by themselves, and there is no file to reload");
+        }
         let Some(path) = doc.path.clone() else {
             return err("the document has never been saved, so it has no file to reload");
         };

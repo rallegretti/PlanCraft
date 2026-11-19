@@ -13,8 +13,16 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub enum ClientError {
     #[error(transparent)]
     Wire(#[from] WireError),
+    /// Refused for good: trying again will not help.
     #[error("{0}")]
     Refused(String),
+    /// Refused for now (the server is busy, starting or stopping): it may work later.
+    #[error("{0}")]
+    Temporary(String),
+    /// Signing in failed: `credentials` says the name or password was wrong; otherwise it may
+    /// work after `retry_after_secs`.
+    #[error("{message}")]
+    LoginFailed { message: String, retry_after_secs: u64, credentials: bool },
     #[error("the server sent something unexpected: {0}")]
     Unexpected(String),
 }
@@ -30,8 +38,13 @@ pub struct Client {
 
 fn unexpected(msg: &ServerMsg) -> ClientError {
     match msg {
-        ServerMsg::Error { message } | ServerMsg::Closing { message } => ClientError::Refused(message.clone()),
-        ServerMsg::LoginFailed { message, .. } => ClientError::Refused(message.clone()),
+        ServerMsg::Error { message, for_good: true } | ServerMsg::Closing { message, for_good: true } => {
+            ClientError::Refused(message.clone())
+        }
+        ServerMsg::Error { message, .. } | ServerMsg::Closing { message, .. } => ClientError::Temporary(message.clone()),
+        ServerMsg::LoginFailed { message, retry_after_secs, credentials } => {
+            ClientError::LoginFailed { message: message.clone(), retry_after_secs: *retry_after_secs, credentials: *credentials }
+        }
         other => ClientError::Unexpected(format!("{other:?}").chars().take(200).collect()),
     }
 }
@@ -60,6 +73,11 @@ impl Client {
             other => return Err(unexpected(&other)),
         }
         Ok(client)
+    }
+
+    /// The two halves of the connection, for a reader and a writer on different threads.
+    pub fn into_parts(self) -> (wire::Sender, wire::Receiver) {
+        (self.sender, self.receiver)
     }
 
     pub fn send(&mut self, msg: &ClientMsg) -> Result<(), ClientError> {
@@ -119,5 +137,22 @@ impl Client {
             ServerMsg::Opened(opened) => Ok(*opened),
             other => Err(unexpected(&other)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_refusals_for_good_are_final() {
+        let gone = ServerMsg::Error { message: "there is no plan 'X' that you may open".into(), for_good: true };
+        assert!(matches!(unexpected(&gone), ClientError::Refused(_)));
+        let busy = ServerMsg::Error { message: "the server is shutting down".into(), for_good: false };
+        assert!(matches!(unexpected(&busy), ClientError::Temporary(_)));
+        let closing = ServerMsg::Closing { message: "the plan was closed".into(), for_good: false };
+        assert!(matches!(unexpected(&closing), ClientError::Temporary(_)));
+        let wrong = ServerMsg::LoginFailed { message: "wrong user name or password".into(), retry_after_secs: 0, credentials: true };
+        assert!(matches!(unexpected(&wrong), ClientError::LoginFailed { credentials: true, .. }));
     }
 }

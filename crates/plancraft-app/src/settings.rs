@@ -18,11 +18,39 @@ pub struct AppSettings {
     pub mcp_autostart: bool,
     pub table_width: f32,
     pub theme: crate::theme::ThemeChoice,
+    /// Servers plans were opened from, last used first (never a password).
+    pub servers: Vec<KnownServer>,
 }
+
+/// A PlanCraft Server this person opened plans from.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct KnownServer {
+    /// `host:port`.
+    pub address: String,
+    pub user: String,
+    /// The server's key fingerprint as the person confirmed it on their first visit: a server
+    /// showing another key is refused.
+    pub fingerprint: String,
+    /// The plan last opened there.
+    pub plan: String,
+}
+
+/// Servers remembered, at most.
+const MAX_SERVERS: usize = 10;
+/// Longest text kept in a remembered server's fields.
+const MAX_SERVER_FIELD: usize = 300;
 
 impl Default for AppSettings {
     fn default() -> Self {
-        Self { recent: Vec::new(), mcp_port: 7878, mcp_autostart: false, table_width: 720.0, theme: crate::theme::ThemeChoice::System }
+        Self {
+            recent: Vec::new(),
+            mcp_port: 7878,
+            mcp_autostart: false,
+            table_width: 720.0,
+            theme: crate::theme::ThemeChoice::System,
+            servers: Vec::new(),
+        }
     }
 }
 
@@ -65,7 +93,29 @@ impl AppSettings {
             self.mcp_port = defaults.mcp_port;
         }
         self.recent.truncate(12);
+        self.servers.truncate(MAX_SERVERS);
+        let short = |s: &mut String| *s = s.chars().filter(|c| !c.is_control()).take(MAX_SERVER_FIELD).collect();
+        for k in &mut self.servers {
+            short(&mut k.address);
+            short(&mut k.user);
+            short(&mut k.fingerprint);
+            short(&mut k.plan);
+        }
+        self.servers.retain(|k| !k.address.is_empty());
         self
+    }
+
+    /// The fingerprint confirmed for the server at `address`, if any.
+    pub fn fingerprint_for(&self, address: &str) -> Option<&str> {
+        self.servers.iter().find(|k| k.address == address && !k.fingerprint.is_empty()).map(|k| k.fingerprint.as_str())
+    }
+
+    /// Remembers a server plans were opened from (first in the list from now on).
+    pub fn remember_server(&mut self, server: KnownServer) {
+        self.servers.retain(|k| k.address != server.address);
+        self.servers.insert(0, server);
+        self.servers.truncate(MAX_SERVERS);
+        self.save();
     }
 
     pub fn save(&self) {
@@ -121,5 +171,32 @@ mod tests {
         assert_eq!((s.mcp_port, s.table_width), (7878, 720.0));
         std::fs::write(&path, vec![b' '; (MAX_SETTINGS_BYTES + 1) as usize]).unwrap();
         assert_eq!(AppSettings::load_from(&path).mcp_port, 7878);
+    }
+
+    #[test]
+    fn servers_are_remembered_without_passwords_and_kept_in_bounds() {
+        let tmp = TempDir::new("servers");
+        let path = tmp.0.join("settings.json");
+        let mut s = AppSettings::default();
+        for i in 0..15 {
+            s.remember_server(KnownServer {
+                address: format!("host{i}:47340"),
+                user: "ana".into(),
+                fingerprint: format!("fp{i}"),
+                plan: "P".into(),
+            });
+        }
+        assert_eq!(s.servers.len(), MAX_SERVERS);
+        assert_eq!(s.servers[0].address, "host14:47340", "last used first");
+        assert_eq!(s.fingerprint_for("host14:47340"), Some("fp14"));
+        assert_eq!(s.fingerprint_for("elsewhere:1"), None);
+        s.save_to(&path).unwrap();
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("password"));
+        let long = "x".repeat(100_000);
+        std::fs::write(&path, format!(r#"{{"servers": [{{"address": "{long}", "user": "\u0000ana"}}, {{"address": ""}}]}}"#)).unwrap();
+        let back = AppSettings::load_from(&path);
+        assert_eq!(back.servers.len(), 1);
+        assert_eq!(back.servers[0].address.len(), MAX_SERVER_FIELD);
+        assert_eq!(back.servers[0].user, "ana");
     }
 }

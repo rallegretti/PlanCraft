@@ -347,6 +347,47 @@ fn leases_never_overlap_and_run_out_cleanly() {
 }
 
 #[test]
+fn an_edit_past_the_lease_is_seen() {
+    let mut host = Host::new(plan());
+    let r = join(&mut host);
+    let mut ids = r.ids().clone();
+    assert!(!r.beyond_lease(&ids));
+    ids.task = ids.task.saturating_add(LEASE_SIZE);
+    assert!(!r.beyond_lease(&ids), "the whole lease may be used");
+    ids.task = ids.task.saturating_add(1);
+    assert!(r.beyond_lease(&ids));
+    // Without a lease, nothing new fits until one arrives.
+    let mut bare = Replica::without_lease(host.project().clone(), host.version());
+    assert_eq!(bare.ids_left(), 0);
+    let mut one_more = bare.ids().clone();
+    assert!(!bare.beyond_lease(&one_more), "changing existing items needs no ids");
+    one_more.task += 1;
+    assert!(bare.beyond_lease(&one_more));
+    bare.lease(host.lease().unwrap()).unwrap();
+    assert!(bare.leased() && bare.ids_left() == LEASE_SIZE);
+}
+
+#[test]
+fn undo_takes_back_only_its_own_change() {
+    let base = plan();
+    let (a, b) = (leaf(&base, 1), leaf(&base, 2));
+    let mut mine = base.clone();
+    rename(&mut mine, a, "Mine");
+    recalculate(&mut mine);
+    let mut now = mine.clone();
+    rename(&mut now, b, "Theirs");
+    recalculate(&mut now);
+    let undone = reverse(&now, &base, &mine).unwrap();
+    assert_eq!(task(&undone, a).name, task(&base, a).name);
+    assert_eq!(task(&undone, b).name, "Theirs");
+    // Theirs touched the same value: refused.
+    rename(&mut now, a, "Changed again");
+    let refused = reverse(&now, &base, &mine).unwrap_err();
+    assert!(matches!(&refused, Reversal::ChangedSince(c) if !c.is_empty()));
+    assert!(refused.describe(&now).contains("since"), "{}", refused.describe(&now));
+}
+
+#[test]
 fn lists_that_cannot_be_matched_by_key_are_replaced_whole() {
     let mut before = plan();
     before.tables = vec![

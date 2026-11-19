@@ -218,6 +218,10 @@ pub enum ServerMsg {
         /// Seconds to wait before trying again (after several failures).
         #[serde(default)]
         retry_after_secs: u64,
+        /// The user name or password was wrong (not a wait or a problem on the server): trying
+        /// again with the same ones is pointless.
+        #[serde(default)]
+        credentials: bool,
     },
     Plans {
         plans: Vec<PlanInfo>,
@@ -234,6 +238,13 @@ pub enum ServerMsg {
         conflicts: Vec<Conflict>,
         #[serde(default)]
         reason: Option<String>,
+        /// The change may go in if sent again later (the server cannot save the plan at the
+        /// moment): keep it.
+        #[serde(default)]
+        retry: bool,
+        /// This person's role now, when it is why the change was refused (no longer an editor).
+        #[serde(default)]
+        role: Option<Role>,
     },
     /// The whole plan, after [`ClientMsg::Resync`] or a change whose base the server no longer
     /// has. `in_flight_applied` says whether the change just sent went in already.
@@ -252,9 +263,16 @@ pub enum ServerMsg {
     /// A request was refused (not signed in, not allowed, not understood).
     Error {
         message: String,
+        /// Trying again will not help (no access, signed out for good, another protocol);
+        /// otherwise it may work later (the server is busy, starting or stopping).
+        #[serde(default)]
+        for_good: bool,
     },
     /// The server is closing the connection (shutting down, or the plan could not be saved).
     Closing {
         message: String,
+        /// As for [`ServerMsg::Error`]: this person may not come back.
+        #[serde(default)]
+        for_good: bool,
     },
 }

@@ -13,6 +13,7 @@
 pub mod cli;
 pub mod client;
 pub mod journal;
+pub mod link;
 pub mod plan;
 pub mod protocol;
 pub mod server;

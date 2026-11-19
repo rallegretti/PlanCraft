@@ -700,7 +700,7 @@ fn a_broadcast_is_counted_once_however_many_receive_it() {
         queues.push(rx);
     }
     // A message of 1 MB to ten people: 1 MB in memory, not 10.
-    plan.broadcast(&ServerMsg::Error { message: "x".repeat(1_000_000) });
+    plan.broadcast(&ServerMsg::Error { message: "x".repeat(1_000_000), for_good: false });
     assert_eq!(plan.people_count(), 10, "nobody was dropped");
     assert!(budget.total() < 2_000_000 + 10 * 100_000, "{}", budget.total());
 }
@@ -747,7 +747,11 @@ fn changes_wait_while_the_journal_cannot_be_saved() {
     r.edited(p).unwrap();
     plan.submit(1, &r.next_change("Add").unwrap()).unwrap();
     assert!(!has_task(plan.host().project(), "Waits"));
-    assert!(messages(&rx).iter().any(|m| matches!(m, ServerMsg::Rejected { reason: Some(why), .. } if why.contains("cannot save"))));
+    assert!(
+        messages(&rx)
+            .iter()
+            .any(|m| matches!(m, ServerMsg::Rejected { reason: Some(why), retry: true, .. } if why.contains("cannot save")))
+    );
 }
 
 #[cfg(unix)]

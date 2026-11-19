@@ -467,10 +467,24 @@ pub fn history(ctx: &Context, doc: &mut Document, open: &mut bool) {
                     });
                 }
             });
+            let refused_id = egui::Id::new("history_refused");
             if let Some(n) = undo_to {
+                ui.ctx().data_mut(|d| d.remove::<String>(refused_id));
                 for _ in 0..n {
-                    doc.undo();
+                    // In a plan opened from a server, a change someone else changed since is not
+                    // undone: stop there and say why.
+                    match doc.try_undo_as(plancraft_core::workspace::ChangeSource::User) {
+                        Ok(true) => {}
+                        Ok(false) => break,
+                        Err(why) => {
+                            ui.ctx().data_mut(|d| d.insert_temp(refused_id, why));
+                            break;
+                        }
+                    }
                 }
+            }
+            if let Some(why) = ui.ctx().data(|d| d.get_temp::<String>(refused_id)) {
+                ui.colored_label(theme::pal().WARN, why);
             }
         });
 }

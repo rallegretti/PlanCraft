@@ -19,10 +19,12 @@
 mod host;
 mod patch;
 mod replica;
+mod undo;
 
 pub use host::{Change, Entry, Host, Outcome};
 pub use patch::{Rebased, apply, diff, fit_counters, rebase};
 pub use replica::{Merged, Replica};
+pub use undo::{Reversal, reverse};
 
 use crate::model::Project;
 use serde::{Deserialize, Serialize};
@@ -264,6 +266,22 @@ impl Conflict {
                 (None, Some(f)) => format!("Your change to the plan's {f} no longer fits the plan after the others' changes"),
                 (None, None) => "Your change no longer fits the plan after the others' changes".into(),
             },
+        }
+    }
+
+    /// What the conflict is about, e.g. "the duration of task 'Pour slab'" or "the order of the
+    /// tasks".
+    pub fn subject(&self, plan: &Project) -> String {
+        if self.kind == ConflictKind::BothMoved {
+            let list = self.list.map_or("items", Collection::field).replace('_', " ");
+            return format!("the order of the {list}");
+        }
+        let item = self.item_name(plan);
+        match (self.field.as_deref().map(|f| f.replace('_', " ")), item) {
+            (Some(f), Some(i)) => format!("the {f} of {i}"),
+            (Some(f), None) => format!("the plan's {f}"),
+            (None, Some(i)) => i,
+            (None, None) => "the plan".into(),
         }
     }
 

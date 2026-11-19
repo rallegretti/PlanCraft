@@ -70,6 +70,12 @@ pub struct PlanCraftApp {
     disk_action: Option<(u64, DiskAction)>,
     /// "Open in another PlanCraft" bars dismissed: the plan's handle and the other instance.
     lock_dismissed: HashSet<(u64, String)>,
+    /// Plans opened from a server, by handle.
+    remotes: crate::remote::Remotes,
+    /// The Open from Server window, while open.
+    server_dialog: Option<dialogs::server::OpenFromServer>,
+    /// "Open your version" was clicked in a shared plan's bar (by handle), acted on unlocked.
+    open_dropped: Option<u64>,
 }
 
 /// Why a plan's file needs the user's attention (see [`PlanCraftApp::disk_bar`]).
@@ -333,6 +339,41 @@ enum CloseRequest {
     App,
 }
 
+/// A shared plan's part of the status bar: a coloured dot, the server and how the connection
+/// stands, and who else is in the plan.
+fn shared_status(ui: &mut Ui, r: &crate::remote::Remote) {
+    use plancraft_server::link::State;
+    let pal = theme::pal();
+    let color = match &r.status.state {
+        State::Connected if r.unconfirmed() => pal.WARN,
+        State::Connected => pal.OK,
+        State::Connecting | State::Offline(_) => pal.TEXT_WEAK,
+        State::SignedOut(_) => pal.ERROR,
+    };
+    let (dot, _) = ui.allocate_exact_size(vec2(8.0, 12.0), Sense::hover());
+    ui.painter().circle_filled(dot.center(), 4.0, color);
+    let mut details = vec![format!("Signed in to {} as {}", r.server, r.user)];
+    if !r.status.role.can_edit() {
+        details.push("You may only view this plan.".into());
+    }
+    match &r.status.state {
+        State::Offline(why) => details.push(format!("Offline ({why}): reconnecting by itself; your changes wait and are sent then.")),
+        State::SignedOut(why) => details.push(format!("Signed out: {why}")),
+        State::Connected if r.unconfirmed() => details.push("Sending your changes…".into()),
+        _ => details.push("Every change is saved on the server.".into()),
+    }
+    let viewer = if r.status.role.can_edit() { "" } else { " · view only" };
+    ui.label(RichText::new(format!("{} · {}{viewer}", r.server, r.state_label())).size(12.0)).on_hover_text(details.join("\n"));
+    let others: Vec<&plancraft_server::protocol::Person> = r.others().collect();
+    if !others.is_empty() {
+        let names: Vec<&str> = others.iter().map(|p| p.user.as_str()).collect();
+        let first: Vec<&str> = names.iter().take(3).copied().collect();
+        let more = names.len().saturating_sub(3);
+        let shown = if more > 0 { format!("{} and {more} more", first.join(", ")) } else { first.join(", ") };
+        ui.label(RichText::new(format!("👥 {shown}")).size(12.0).color(pal.ACCENT_MID)).on_hover_text("Also in this plan");
+    }
+}
+
 /// The file extensions offered when picking a spreadsheet to import.
 fn spreadsheet_extensions() -> Vec<&'static str> {
     let text = plancraft_core::tabular::TEXT_EXTENSIONS.into_iter().filter(|e| *e != "txt");
@@ -371,6 +412,9 @@ impl PlanCraftApp {
             disk_bars: HashMap::new(),
             disk_action: None,
             lock_dismissed: HashSet::new(),
+            remotes: Default::default(),
+            server_dialog: None,
+            open_dropped: None,
             allow_exit: false,
             last_title: String::new(),
             shot: std::env::var_os("PLANCRAFT_SCREENSHOT").map(|p| (PathBuf::from(p), 0)),
@@ -548,12 +592,30 @@ impl PlanCraftApp {
                 self.st.gantt.initialized_for = None;
                 let verb = if plancraft_core::mspdi::is_mspdi_path(&path) { "Imported" } else { "Opened" };
                 self.set_status(format!("{verb} {}", path.display()));
+                // A PlanCraft Server shares this plan (or stopped without saving): its journal may
+                // hold changes the file does not have yet.
+                let journal = plancraft_server::journal::path_for(&path);
+                if journal.and_then(|j| std::fs::symlink_metadata(j).ok()).is_some_and(|m| m.is_file()) {
+                    self.st.toast(
+                        ToastKind::Warning,
+                        "A PlanCraft Server shares this plan, or stopped before saving its changes into the file. Open it from the \
+                         server (File › Open from Server…) to see every change; if the server is not running, starting it saves them.",
+                    );
+                }
             }
             Err(e) => self.st.toast(ToastKind::Error, e.to_string()),
         }
     }
 
     fn save(&mut self, save_as: bool) -> bool {
+        let shared = lock(&self.ws).active_doc().filter(|d| d.shared.is_some()).map(|d| d.handle);
+        if let Some(h) = shared {
+            if save_as {
+                return self.save_copy(h);
+            }
+            self.set_status("This plan is opened from a server, which saves every change as it is made. Save As keeps a copy of your own.");
+            return true;
+        }
         let Some((handle, name, ask)) =
             lock(&self.ws).active_doc().map(|d| (d.handle, format!("{}.{}", d.project.name, FILE_EXTENSION), save_as || d.path.is_none()))
         else {
@@ -898,6 +960,11 @@ impl PlanCraftApp {
                 self.dialogs.mcp = true;
                 self.st.start_page = false;
             }
+            Command::OpenFromServer => {
+                if self.server_dialog.is_none() {
+                    self.server_dialog = Some(dialogs::server::OpenFromServer::new(&self.settings));
+                }
+            }
             Command::About => self.dialogs.about = true,
             Command::SetView(v) => {
                 self.st.view = v;
@@ -1014,14 +1081,18 @@ impl PlanCraftApp {
             }
         }
         match cmd {
-            Command::Undo => {
-                if doc.undo() {
+            Command::Undo => match doc.try_undo_as(ChangeSource::User) {
+                Ok(true) => {
                     let l = doc.last_change.as_ref().map(|l| l.0.clone()).unwrap_or_default();
                     self.status = Some((l, Instant::now()));
                 }
-            }
+                Ok(false) => {}
+                Err(why) => st.toast(ToastKind::Warning, why),
+            },
             Command::Redo => {
-                doc.redo();
+                if let Err(why) = doc.try_redo_as(ChangeSource::User) {
+                    st.toast(ToastKind::Warning, why);
+                }
             }
             Command::InsertTask | Command::InsertMilestone => {
                 let milestone = cmd == Command::InsertMilestone;
@@ -1519,7 +1590,12 @@ impl PlanCraftApp {
         for (i, d) in ws.docs.iter().enumerate() {
             let active = ws.active == Some(i);
             let mark = if self.disk_bars.contains_key(&d.handle) || d.lock.elsewhere().is_some() { "⚠ " } else { "" };
-            let resp = child.selectable_label(active, format!("📄 {mark}{}", d.title()));
+            let remote = self.remotes.get(d.handle);
+            let icon = if remote.is_some() { "👥" } else { "📄" };
+            let mut resp = child.selectable_label(active, format!("{icon} {mark}{}", d.title()));
+            if let Some(r) = remote {
+                resp = resp.on_hover_text(format!("Opened from {} as {}: {}", r.server, r.user, r.state_label()));
+            }
             if resp.clicked() {
                 switch = Some(i);
             }
@@ -1557,6 +1633,10 @@ impl PlanCraftApp {
             };
             ui.label(RichText::new(msg).size(12.0));
             if let Some(doc) = doc {
+                if let Some(r) = self.remotes.get(doc.handle) {
+                    ui.separator();
+                    shared_status(ui, r);
+                }
                 ui.separator();
                 let auto = doc.project.settings.new_tasks_auto;
                 let resp = ui.add(
@@ -1691,11 +1771,30 @@ impl PlanCraftApp {
                 CloseRequest::App => ws.docs.iter().filter(|d| d.dirty).map(|d| d.project.name.clone()).collect(),
             }
         };
+        let shared: Vec<u64> = {
+            let ws = lock(&self.ws);
+            ws.docs
+                .iter()
+                .filter(|d| {
+                    d.shared.is_some() && d.dirty && matches!(req, CloseRequest::App)
+                        || matches!(req, CloseRequest::Document(h) if h == d.handle && d.shared.is_some())
+                })
+                .map(|d| d.handle)
+                .collect()
+        };
         let mut choice = None;
         egui::Modal::new(egui::Id::new("confirm_close")).show(ctx, |ui| {
             ui.set_width(380.0);
             ui.heading("Save changes?");
             ui.label(format!("Do you want to save changes to {}?", names.join(", ")));
+            if !shared.is_empty() {
+                ui.label(
+                    RichText::new(
+                        "Changes to plans opened from a server that the server has not confirmed yet are lost on closing. Save keeps a copy of your own.",
+                    )
+                    .color(theme::pal().TEXT_WEAK),
+                );
+            }
             ui.add_space(8.0);
             ui.horizontal(|ui| {
                 if ui.add(egui::Button::new(RichText::new("Save").color(Color32::WHITE)).fill(theme::pal().ACCENT)).clicked() {
@@ -1715,7 +1814,8 @@ impl PlanCraftApp {
                     let mut ws = lock(&self.ws);
                     ws.active = ws.index_of(h);
                 }
-                if self.save(false) {
+                let saved = if shared.contains(&h) { self.save_copy(h) } else { self.save(false) };
+                if saved {
                     self.close_doc(h);
                 } else if self.confirm_overwrite.is_some() {
                     self.close_after_save = Some(CloseRequest::Document(h));
@@ -1731,7 +1831,12 @@ impl PlanCraftApp {
                 let mut all = true;
                 for i in dirty {
                     lock(&self.ws).active = Some(i);
-                    if !self.save(false) {
+                    let h = lock(&self.ws).docs.get(i).map(|d| d.handle);
+                    let saved = match h {
+                        Some(h) if shared.contains(&h) => self.save_copy(h),
+                        _ => self.save(false),
+                    };
+                    if !saved {
                         // Stop at the first file that needs an answer (or failed); exiting carries
                         // on once the overwrite question is answered.
                         all = false;
@@ -1852,6 +1957,7 @@ impl PlanCraftApp {
                     "WorkingTime" => Command::ChangeWorkingTime,
                     "Statistics" => Command::Statistics,
                     "Mcp" => Command::McpPanel,
+                    "OpenServer" => Command::OpenFromServer,
                     "Assign" => Command::AssignResources,
                     "External" => Command::ExternalLinks,
                     "About" => Command::About,
@@ -2426,6 +2532,23 @@ impl PlanCraftApp {
         }
         self.apply_disk_changes(&mut ws);
         self.report_load_notes(&mut ws);
+        // Plans opened from a server: other people's changes in, this person's edits out.
+        for n in self.remotes.sync(&mut ws) {
+            self.st.toast(ToastKind::Warning, n);
+        }
+        // Who else is on which task in the active plan (the task table marks them).
+        self.st.others_on.clear();
+        if let Some(r) = ws.active_doc().and_then(|d| self.remotes.get(d.handle)) {
+            for p in r.others() {
+                if let Some(t) = p.task {
+                    let names = self.st.others_on.entry(t).or_default();
+                    if !names.is_empty() {
+                        names.push_str(", ");
+                    }
+                    names.push_str(&p.user);
+                }
+            }
+        }
 
         // Notice changes made by AI agents through MCP.
         let mut agent_msgs = Vec::new();
@@ -2528,6 +2651,7 @@ impl PlanCraftApp {
                 menubar::command_bar(ui, &mut self.st, &info, &self.settings, &mut out);
                 self.doc_tabs(ui, &mut ws, &mut out);
                 self.disk_bar(ui, &ws);
+                self.shared_bar(ui, &ws);
             });
             egui::Panel::bottom("status")
                 .frame(egui::Frame::new().fill(theme::pal().HEADER_BG).inner_margin(egui::Margin::symmetric(10, 3)))
@@ -2661,6 +2785,17 @@ impl PlanCraftApp {
             let ws = self.ws.clone();
             dialogs::mcp_panel::show(&ctx, &mut self.dialogs.mcp, &mut self.mcp, &mut self.settings, &ws);
         }
+        if let Some(d) = self.server_dialog.as_mut() {
+            match d.show(&ctx, &mut self.settings) {
+                dialogs::server::Outcome::Open => {}
+                dialogs::server::Outcome::Closed => self.server_dialog = None,
+                dialogs::server::Outcome::Opened(opened) => {
+                    self.server_dialog = None;
+                    self.add_remote(*opened);
+                }
+            }
+        }
+        self.open_dropped_version();
         if let Some(pdf) = self.dialogs.print.as_mut().and_then(|b| b.dialog.pending_pdf.take()) {
             self.save_pdf(pdf);
         }
@@ -2674,6 +2809,137 @@ impl PlanCraftApp {
 
         for c in out {
             self.exec(&ctx, c);
+        }
+        // Edits the commands just made go out now, not at the next frame (which may be a while).
+        let ws_arc = self.ws.clone();
+        let mut ws = lock(&ws_arc);
+        for n in self.remotes.sync(&mut ws) {
+            self.st.toast(ToastKind::Warning, n);
+        }
+        if let Some(h) = ws.active_doc().map(|d| d.handle) {
+            self.remotes.presence(h, self.st.sel.tasks.iter().next().copied());
+        }
+    }
+
+    /// Shows a plan just opened from a server (or the one already open, if it is).
+    fn add_remote(&mut self, opened: dialogs::server::Opened) {
+        let dialogs::server::Opened { opened, address, user, plan } = opened;
+        let mut ws = lock(&self.ws);
+        if let Some(h) = self.remotes.find(&ws, &address, &plan) {
+            ws.active = ws.index_of(h);
+            drop(ws);
+            self.set_status(format!("{plan} from {address} is already open."));
+            return;
+        }
+        let h = ws.add_shared(opened.project, &plan);
+        self.remotes.add(h, crate::remote::Remote::new(opened.link, &address, &user, opened.role, opened.people));
+        let _ = self.remotes.sync(&mut ws);
+        drop(ws);
+        self.st.start_page = false;
+        self.st.sel = Default::default();
+        self.st.gantt.initialized_for = None;
+        let viewer = if opened.role.can_edit() { "" } else { " (view only)" };
+        self.set_status(format!("Opened {plan} from {address}{viewer}. Every change is saved on the server."));
+    }
+
+    /// The bar above a shared plan: work of this person's the server's copy could not take.
+    fn shared_bar(&mut self, ui: &mut Ui, ws: &Workspace) {
+        let Some(handle) = ws.active_doc().map(|d| d.handle) else { return };
+        let Some(r) = self.remotes.get(handle) else { return };
+        let Some(dropped) = &r.dropped else { return };
+        let mut open = false;
+        let mut dismiss = false;
+        egui::Frame::new()
+            .fill(theme::pal().PANEL_BG)
+            .stroke(Stroke::new(1.0, theme::pal().WARN))
+            .inner_margin(egui::Margin::symmetric(10, 5))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(RichText::new("⚠").color(theme::pal().WARN).size(15.0));
+                    ui.label(RichText::new("Some of your changes were not kept:").color(theme::pal().TEXT));
+                    open = ui
+                        .button("Open Your Version")
+                        .on_hover_text("Your plan just before the latest of these, as a new unsaved plan")
+                        .clicked();
+                    dismiss = ui.button("Dismiss").clicked();
+                });
+                for line in dropped.lines.iter().rev().take(5) {
+                    ui.label(RichText::new(format!("• {line}")).color(theme::pal().TEXT_WEAK));
+                }
+                let more = dropped.lines.len().saturating_sub(5);
+                if more > 0 {
+                    ui.label(RichText::new(format!("… and {more} more")).color(theme::pal().TEXT_WEAK));
+                }
+            });
+        if open {
+            self.open_dropped = Some(handle);
+        }
+        if dismiss && let Some(r) = self.remotes.get_mut(handle) {
+            r.dropped = None;
+        }
+    }
+
+    /// Opens the person's version from before their work was dropped, as a new unsaved plan.
+    fn open_dropped_version(&mut self) {
+        let Some(handle) = self.open_dropped.take() else { return };
+        let Some(dropped) = self.remotes.get_mut(handle).and_then(|r| r.dropped.take()) else { return };
+        let mut mine = *dropped.before;
+        plancraft_core::sync::fit_counters(&mut mine);
+        mine.name = format!("{} (my version)", mine.name);
+        let mut ws = lock(&self.ws);
+        let h = ws.add(mine, None);
+        if let Some(doc) = ws.index_of(h).and_then(|i| ws.docs.get_mut(i)) {
+            // Unsaved work: closing it asks, and a recovery copy keeps it.
+            doc.dirty = true;
+            doc.user_changes = true;
+        }
+        drop(ws);
+        self.st.sel = Default::default();
+        self.st.gantt.initialized_for = None;
+        self.set_status("Opened your version as a new plan. Save it to keep it.");
+    }
+
+    /// Saves a copy of a plan opened from a server as a file of its own. Returns whether it was
+    /// saved.
+    fn save_copy(&mut self, handle: u64) -> bool {
+        let Some(name) = self.copy_name(handle) else { return false };
+        let Some(mut path) = rfd::FileDialog::new().add_filter("PlanCraft project", &[FILE_EXTENSION]).set_file_name(name).save_file()
+        else {
+            return false;
+        };
+        if path.extension().is_none() {
+            path.set_extension(FILE_EXTENSION);
+        }
+        self.write_copy(handle, path)
+    }
+
+    /// The file name offered for a copy of plan `handle`.
+    fn copy_name(&self, handle: u64) -> Option<String> {
+        // One lock for the lookup: locking again while it is held would wait for ever.
+        let ws = lock(&self.ws);
+        ws.index_of(handle).and_then(|i| ws.docs.get(i)).map(|d| format!("{}.{FILE_EXTENSION}", d.title().trim_end_matches('*')))
+    }
+
+    /// Writes the copy of plan `handle` chosen in [`PlanCraftApp::save_copy`].
+    fn write_copy(&mut self, handle: u64, path: PathBuf) -> bool {
+        let r = {
+            let ws = lock(&self.ws);
+            match ws.index_of(handle).and_then(|i| ws.docs.get(i)) {
+                Some(doc) => doc.save_copy(&path),
+                None => return false,
+            }
+        };
+        match r {
+            Ok(()) => {
+                self.settings.add_recent(path.clone());
+                self.set_status(format!("Saved a copy to {}", path.display()));
+                true
+            }
+            Err(e) => {
+                self.st.toast(ToastKind::Error, e.to_string());
+                false
+            }
         }
     }
 }
@@ -3011,7 +3277,7 @@ mod ui_tests {
             let ws = h.state().ws.lock().unwrap();
             let p = &ws.active_doc().unwrap().project;
             let none = |_: TaskId| false;
-            let ctx_cells = crate::columns::CellCtx { overallocated: &none };
+            let ctx_cells = crate::columns::CellCtx { overallocated: &none, others_on: None };
             let col = crate::columns::TaskCol::Baseline(1, crate::columns::BlField::Finish);
             assert_eq!(crate::columns::cell(col, p, 0, &ctx_cells).text, crate::format::date(p.tasks[0].sched.finish));
             let interim = crate::columns::cell(crate::columns::TaskCol::Interim(1, false), p, 0, &ctx_cells).text;
@@ -5110,5 +5376,229 @@ mod ui_tests {
         let task = &h.state().st.task_usage_grid;
         assert_eq!(task.widths.first().copied(), task_widths.first().map(|w| w + 90.0));
         assert_eq!(task.cursor, Some((3, 1)));
+    }
+}
+
+/// A plan opened from a real PlanCraft Server in the app: edits go out, other people's come in,
+/// undo keeps their changes, a viewer cannot change anything, closing disconnects.
+#[cfg(test)]
+mod shared_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::indexing_slicing)]
+    use std::time::{Duration, Instant};
+
+    use super::*;
+    use crate::remote::test_server::TestServer;
+    use egui_kittest::Harness;
+    use egui_kittest::kittest::Queryable;
+    use plancraft_server::link::{Event, OpenedLink};
+
+    /// The app with `user`'s copy of the server's plan open.
+    fn app_on(server: &TestServer, user: &str) -> Harness<'static, PlanCraftApp> {
+        let shared = Workspace::default().shared();
+        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).build_eframe(move |cc| PlanCraftApp::new(cc, shared));
+        h.run_steps(2);
+        let opened = server.open(user);
+        h.state_mut().add_remote(dialogs::server::Opened {
+            opened,
+            address: server.address(),
+            user: user.into(),
+            plan: "Plan.plancraft".into(),
+        });
+        h.run_steps(2);
+        h
+    }
+
+    /// Runs frames until `done` holds.
+    fn until(h: &mut Harness<'static, PlanCraftApp>, what: &str, done: impl Fn(&PlanCraftApp) -> bool) {
+        let end = Instant::now() + Duration::from_secs(30);
+        loop {
+            h.run_steps(1);
+            if done(h.state()) {
+                return;
+            }
+            assert!(Instant::now() < end, "waited too long for {what}");
+            std::thread::sleep(Duration::from_millis(15));
+        }
+    }
+
+    fn doc_has(app: &PlanCraftApp, name: &str) -> bool {
+        lock(&app.ws).active_doc().is_some_and(|d| d.project.tasks.iter().any(|t| t.name == name))
+    }
+
+    fn settled(app: &PlanCraftApp) -> bool {
+        let ws = lock(&app.ws);
+        let Some(doc) = ws.active_doc() else { return false };
+        let connected = app.remotes.get(doc.handle).is_some_and(|r| r.status.state == plancraft_server::link::State::Connected);
+        connected && !doc.dirty && !doc.has_unsent()
+    }
+
+    /// Someone else's copy, driven by hand: waits until its plan shows `name`.
+    fn other_sees(other: &mut OpenedLink, name: &str) {
+        let end = Instant::now() + Duration::from_secs(30);
+        loop {
+            for e in other.link.events() {
+                if let Event::Plan { project, acked: 0 } = e {
+                    other.project = project;
+                }
+            }
+            if other.project.tasks.iter().any(|t| t.name == name) {
+                return;
+            }
+            assert!(Instant::now() < end, "the other copy never showed {name}");
+            std::thread::sleep(Duration::from_millis(15));
+        }
+    }
+
+    #[test]
+    fn edits_go_both_ways_and_the_plan_shows_it_is_shared() {
+        let server = TestServer::start();
+        let mut h = app_on(&server, "ana");
+        {
+            let ws = lock(&h.state().ws);
+            let doc = ws.active_doc().unwrap();
+            assert!(doc.shared.is_some() && doc.path.is_none());
+            assert_eq!(doc.title(), "Plan");
+        }
+        assert_eq!(h.state().last_title, "Plan - PlanCraft");
+        h.get_by_label_contains("· Connected");
+        let mut ben = server.open("ben");
+        // Ana's edit, made in the app, reaches Ben.
+        lock(&h.state().ws).active_doc_mut().unwrap().edit("Add", |p| p.add_task("From Ana", None)).unwrap();
+        h.run_steps(1);
+        other_sees(&mut ben, "From Ana");
+        until(&mut h, "Ana's edit confirmed", settled);
+        // Ben's edit appears in the app.
+        let before = ben.project.clone();
+        let mut after = before.clone();
+        after.add_task("From Ben", None);
+        plancraft_core::schedule::recalculate(&mut after);
+        ben.link.edited(1, before, after, "Add");
+        until(&mut h, "Ben's edit", |app| doc_has(app, "From Ben"));
+        until(&mut h, "people", |app| {
+            lock(&app.ws).active_doc().and_then(|d| app.remotes.get(d.handle)).is_some_and(|r| r.others().count() == 1)
+        });
+        h.run_steps(2);
+        h.get_by_label_contains("👥 ben");
+        // Ben's place shows in Ana's task table.
+        let task = ben.project.tasks[2].id;
+        ben.link.presence(Some(task));
+        until(&mut h, "Ben's place", |app| app.st.others_on.get(&task).is_some_and(|n| n == "ben"));
+        // Saving is the server's job; Save says so and changes nothing.
+        let ctx = h.ctx.clone();
+        h.state_mut().exec(&ctx, Command::Save);
+        assert!(h.state().status.as_ref().is_some_and(|(m, _)| m.contains("saves every change")));
+    }
+
+    #[test]
+    fn undo_keeps_other_peoples_changes_and_is_refused_over_theirs() {
+        let server = TestServer::start();
+        let mut h = app_on(&server, "ana");
+        let mut ben = server.open("ben");
+        let (a, b) = {
+            let ws = lock(&h.state().ws);
+            let p = &ws.active_doc().unwrap().project;
+            let leaves: Vec<TaskId> = p.tasks.iter().filter(|t| !t.sched.is_summary).map(|t| t.id).take(2).collect();
+            (leaves[0], leaves[1])
+        };
+        lock(&h.state().ws).active_doc_mut().unwrap().edit("Rename", |p| p.task_mut(a).unwrap().name = "Ana's".into()).unwrap();
+        h.run_steps(1);
+        other_sees(&mut ben, "Ana's");
+        // Ben renames another task, then the same one.
+        let mut after = ben.project.clone();
+        after.task_mut(b).unwrap().name = "Ben's".into();
+        ben.link.edited(1, ben.project.clone(), after.clone(), "Rename");
+        until(&mut h, "Ben's rename", |app| doc_has(app, "Ben's"));
+        until(&mut h, "settled", settled);
+        let ctx = h.ctx.clone();
+        h.state_mut().exec(&ctx, Command::Undo);
+        until(&mut h, "undone", |app| !doc_has(app, "Ana's") && doc_has(app, "Ben's"));
+        // Redo, then Ben changes the same task: undoing again is refused.
+        h.state_mut().exec(&ctx, Command::Redo);
+        until(&mut h, "redone", |app| doc_has(app, "Ana's") && settled(app));
+        other_sees(&mut ben, "Ana's");
+        let mut theirs = ben.project.clone();
+        theirs.task_mut(a).unwrap().name = "Ben changed it".into();
+        ben.link.edited(2, ben.project.clone(), theirs, "Rename");
+        until(&mut h, "Ben's change", |app| doc_has(app, "Ben changed it"));
+        h.state_mut().st.toasts.clear();
+        h.state_mut().exec(&ctx, Command::Undo);
+        assert!(doc_has(h.state(), "Ben changed it"), "nothing was undone");
+        assert!(h.state().st.toasts.iter().any(|t| t.text.contains("Cannot undo")), "the person is told why");
+    }
+
+    #[test]
+    fn a_viewer_cannot_change_the_plan() {
+        let server = TestServer::start();
+        let mut h = app_on(&server, "vic");
+        let before = lock(&h.state().ws).active_doc().unwrap().project.clone();
+        h.state_mut().st.toasts.clear();
+        let ctx = h.ctx.clone();
+        h.state_mut().exec(&ctx, Command::InsertTask);
+        h.run_steps(2);
+        assert_eq!(lock(&h.state().ws).active_doc().unwrap().project, before);
+        assert!(
+            h.state().st.toasts.iter().any(|t| t.text.contains("only view")),
+            "{:?}",
+            h.state().st.toasts.iter().map(|t| &t.text).collect::<Vec<_>>()
+        );
+        h.get_by_label_contains("· view only");
+    }
+
+    #[test]
+    fn save_as_writes_a_copy_and_the_plan_stays_shared() {
+        // Regression: the file name was looked up holding the workspace lock twice, which froze
+        // the app on Save As (and on Save in the close prompt).
+        let server = TestServer::start();
+        let mut h = app_on(&server, "ana");
+        let handle = lock(&h.state().ws).active_doc().unwrap().handle;
+        assert_eq!(h.state().copy_name(handle).as_deref(), Some("Plan.plancraft"));
+        let dir = crate::recovery::tests::TempDir::new("copy");
+        let path = dir.0.join("Mine.plancraft");
+        assert!(h.state_mut().write_copy(handle, path.clone()));
+        let copy = plancraft_core::io::load(&path).unwrap();
+        assert!(!copy.tasks.is_empty());
+        let ws = lock(&h.state().ws);
+        let doc = ws.active_doc().unwrap();
+        assert!(doc.shared.is_some() && doc.path.is_none(), "the open plan is still the server's");
+    }
+
+    #[test]
+    fn opening_a_shared_plans_file_directly_warns() {
+        let dir = crate::recovery::tests::TempDir::new("journal");
+        let path = dir.0.join("Plan.plancraft");
+        plancraft_core::io::save(&plancraft_core::sample::demo_project(plancraft_core::dates::ymd(2026, 1, 5).unwrap()), &path).unwrap();
+        let shared = Workspace::default().shared();
+        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).build_eframe(move |cc| PlanCraftApp::new(cc, shared));
+        h.run_steps(2);
+        h.state_mut().open_path(path.clone());
+        assert!(h.state().st.toasts.is_empty(), "a plain plan file opens quietly");
+        let ctx = h.ctx.clone();
+        h.state_mut().exec(&ctx, Command::Close);
+        std::fs::write(plancraft_server::journal::path_for(&path).unwrap(), "{}\n").unwrap();
+        h.state_mut().open_path(path);
+        assert!(h.state().st.toasts.iter().any(|t| t.text.contains("PlanCraft Server shares this plan")));
+    }
+
+    #[test]
+    fn closing_the_plan_disconnects() {
+        let server = TestServer::start();
+        let mut h = app_on(&server, "ana");
+        let ben = server.open("ben");
+        until(&mut h, "settled", settled);
+        let ctx = h.ctx.clone();
+        h.state_mut().exec(&ctx, Command::Close);
+        h.run_steps(2);
+        assert!(lock(&h.state().ws).docs.is_empty());
+        let end = Instant::now() + Duration::from_secs(20);
+        let mut people = 2;
+        while people != 1 {
+            for e in ben.link.events() {
+                if let Event::People(p) = e {
+                    people = p.len();
+                }
+            }
+            assert!(Instant::now() < end, "Ana's copy is still connected");
+            std::thread::sleep(Duration::from_millis(15));
+        }
     }
 }

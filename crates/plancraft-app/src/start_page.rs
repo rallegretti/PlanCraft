@@ -297,6 +297,9 @@ fn start_actions(ui: &mut Ui, width: f32, out: &mut Vec<Command>) {
     if action(ui, "open", "📂", "Open…", "A PlanCraft plan, a Microsoft Project XML file, or a task list from Excel or CSV") {
         out.push(Command::Open);
     }
+    if action(ui, "server", "👥", "Open from Server…", "A plan shared on your network, to work on together") {
+        out.push(Command::OpenFromServer);
+    }
     if action(ui, "mcp", "⚡", "Connect an AI agent", "Let Claude Code and other MCP clients plan with you") {
         out.push(Command::McpPanel);
     }

@@ -35,6 +35,8 @@ pub struct Replica {
     ids: IdCounters,
     /// Where the current lease started (it holds [`LEASE_SIZE`] ids of each kind).
     lease_start: IdCounters,
+    /// No lease yet (the host had none to give): no new items until one arrives.
+    unleased: bool,
 }
 
 impl Replica {
@@ -42,7 +44,31 @@ impl Replica {
     pub fn new(project: Project, version: Version, ids: IdCounters) -> Self {
         let mut local = project.clone();
         local.ids = ids.clone();
-        Self { confirmed: project, version, local, pending: Patch::default(), in_flight: None, lease_start: ids.clone(), ids }
+        Self {
+            confirmed: project,
+            version,
+            local,
+            pending: Patch::default(),
+            in_flight: None,
+            lease_start: ids.clone(),
+            ids,
+            unleased: false,
+        }
+    }
+
+    /// Starts from the host's plan at `version` with no lease (a viewer's copy, or an editor the
+    /// host had no lease for yet): [`Replica::ids_left`] is 0 and any new item is
+    /// [`Replica::beyond_lease`] until [`Replica::lease`] gives a block.
+    pub fn without_lease(project: Project, version: Version) -> Self {
+        let ids = project.ids.clone();
+        let mut r = Self::new(project, version, ids);
+        r.unleased = true;
+        r
+    }
+
+    /// Whether this copy has a lease to count new ids from.
+    pub fn leased(&self) -> bool {
+        !self.unleased
     }
 
     /// The plan as this person sees it.
@@ -76,6 +102,9 @@ impl Replica {
 
     /// How many new ids of the scarcest kind are left in the lease (ask for another when low).
     pub fn ids_left(&self) -> u32 {
+        if self.unleased {
+            return 0;
+        }
         let (start, now) = (&self.lease_start, &self.ids);
         [
             (start.task, now.task),
@@ -90,6 +119,25 @@ impl Replica {
         .map(|(s, n)| s.saturating_add(LEASE_SIZE).saturating_sub(n))
         .min()
         .unwrap_or(0)
+    }
+
+    /// Whether counters `ids` (a local edit's) reach past the current lease: the edit added more
+    /// new items than the lease holds, and the host would refuse ids no lease handed out.
+    pub fn beyond_lease(&self, ids: &IdCounters) -> bool {
+        let start = &self.lease_start;
+        // Without a lease nothing may be added: any counter past where the copy started is.
+        let size = if self.unleased { 0 } else { LEASE_SIZE };
+        [
+            (start.task, ids.task),
+            (start.resource, ids.resource),
+            (start.calendar, ids.calendar),
+            (start.assignment, ids.assignment),
+            (start.time_entry, ids.time_entry),
+            (start.custom_field, ids.custom_field),
+            (start.board_column, ids.board_column),
+        ]
+        .into_iter()
+        .any(|(s, n)| n > s.saturating_add(size))
     }
 
     /// Takes a new block of ids from the host. A block starting below where this replica's ids
@@ -114,6 +162,7 @@ impl Replica {
         self.local.ids = ids.clone();
         self.lease_start = ids.clone();
         self.ids = ids;
+        self.unleased = false;
         Ok(())
     }
 

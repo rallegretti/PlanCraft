@@ -180,15 +180,38 @@ pub enum ChangeSource {
 struct Snapshot {
     label: String,
     source: ChangeSource,
+    /// The plan before the step.
     project: Project,
+    /// The plan right after the step, in a shared plan: undoing takes back only what the step
+    /// changed (`sync::reverse`), not other people's changes made since.
+    after: Option<Project>,
     /// Estimated size, computed once when the snapshot is taken.
     bytes: usize,
 }
 
 impl Snapshot {
-    fn new(label: String, source: ChangeSource, project: Project) -> Self {
-        let bytes = approx_bytes(&project);
-        Self { label, source, project, bytes }
+    fn new(label: String, source: ChangeSource, project: Project, after: Option<Project>) -> Self {
+        let bytes = approx_bytes(&project).saturating_add(after.as_ref().map_or(0, approx_bytes));
+        Self { label, source, project, after, bytes }
+    }
+}
+
+/// A plan opened from a server (docs/COLLABORATION.md › Phase 3): its edits go to the server's
+/// copy, not to a file. The app hands them on ([`Document::take_unsent`]) and puts other people's
+/// changes in with [`Document::apply_remote`].
+#[derive(Clone, Debug, Default)]
+pub struct Shared {
+    /// The plan's name on the server (`Plan.plancraft`).
+    pub name: String,
+    /// Why it cannot be changed (only allowed to view it, signed out), if so.
+    pub read_only: Option<String>,
+    /// The plan before the edits made since they were last handed on.
+    unsent: Option<Project>,
+}
+
+impl Shared {
+    pub fn new(name: &str) -> Self {
+        Self { name: name.to_string(), read_only: None, unsent: None }
     }
 }
 
@@ -220,6 +243,8 @@ pub struct Document {
     /// Whether this PlanCraft holds the plan's lock file, or another one has the plan open
     /// ([`crate::lock`]).
     pub lock: LockState,
+    /// Opened from a server rather than from a file.
+    pub shared: Option<Shared>,
     undo: Vec<Snapshot>,
     redo: Vec<Snapshot>,
 }
@@ -239,16 +264,60 @@ impl Document {
             imported_from: None,
             disk_stamp: None,
             lock: LockState::None,
+            shared: None,
             undo: Vec::new(),
             redo: Vec::new(),
         }
     }
 
-    /// Window/tab title: file name or project name, with `*` when modified.
+    /// A plan opened from a server, named `name` there.
+    pub fn new_shared(handle: u64, project: Project, name: &str) -> Self {
+        let mut doc = Self::new(handle, project, None);
+        doc.shared = Some(Shared::new(name));
+        doc
+    }
+
+    /// The edits made since they were last handed on: the plan before them and as it is now.
+    /// `None` when there are none (or the plan is not shared).
+    pub fn take_unsent(&mut self) -> Option<(Project, Project)> {
+        let before = self.shared.as_mut()?.unsent.take()?;
+        Some((before, self.project.clone()))
+    }
+
+    /// Edits not handed on yet.
+    pub fn has_unsent(&self) -> bool {
+        self.shared.as_ref().is_some_and(|s| s.unsent.is_some())
+    }
+
+    /// Puts in the plan as the server's copy now has it (other people's changes merged with this
+    /// person's): no undo step, and the undo steps stay valid (shared undo takes back only what
+    /// each step changed).
+    pub fn apply_remote(&mut self, project: Project) {
+        self.project = project;
+        self.revision = self.revision.wrapping_add(1);
+    }
+
+    /// Notes a change to a shared plan that has to go to the server.
+    fn note_unsent(&mut self, before: &Project) {
+        if let Some(s) = self.shared.as_mut()
+            && s.unsent.is_none()
+        {
+            s.unsent = Some(before.clone());
+        }
+    }
+
+    fn refusal(&self) -> Option<PlanError> {
+        self.shared.as_ref().and_then(|s| s.read_only.clone()).map(PlanError::Invalid)
+    }
+
+    /// Window/tab title: file name (or the plan's name on its server) or project name, with `*`
+    /// when modified.
     pub fn title(&self) -> String {
+        let shared = self.shared.as_ref().map(|s| Path::new(&s.name));
         let base = self
             .path
-            .as_ref()
+            .as_deref()
+            .or(shared)
             .and_then(|p| p.file_stem())
             .map(|s| s.to_string_lossy().into_owned())
             .unwrap_or_else(|| self.project.name.clone());
@@ -283,6 +352,9 @@ impl Document {
         source: ChangeSource,
         f: impl FnOnce(&mut Project) -> Result<R, E>,
     ) -> Result<R, E> {
+        if let Some(refused) = self.refusal() {
+            return Err(E::from(refused));
+        }
         let before = self.project.clone();
         let project = &mut self.project;
         let outcome = guard::catch(&format!("edit '{label}'"), || -> Result<R, E> {
@@ -293,7 +365,9 @@ impl Document {
         });
         match outcome {
             Ok(Ok(r)) => {
-                self.undo.push(Snapshot::new(label.into(), source, before));
+                self.note_unsent(&before);
+                let after = self.shared.is_some().then(|| self.project.clone());
+                self.undo.push(Snapshot::new(label.into(), source, before, after));
                 self.redo.clear();
                 self.trim_undo();
                 self.touched(label, source);
@@ -360,26 +434,63 @@ impl Document {
         self.redo_as(ChangeSource::User)
     }
 
-    /// Undoes the last change, attributed to `source`.
+    /// Undoes the last change, attributed to `source` (`false`: nothing to undo, or it was
+    /// refused; see [`Document::try_undo_as`]).
     pub fn undo_as(&mut self, source: ChangeSource) -> bool {
-        let Some(s) = self.undo.pop() else {
-            return false;
-        };
-        let current = std::mem::replace(&mut self.project, s.project);
-        self.redo.push(Snapshot::new(s.label.clone(), s.source, current));
-        self.touched(&format!("Undo {}", s.label), source);
-        true
+        self.try_undo_as(source).unwrap_or(false)
     }
 
     /// Redoes the last undone change, attributed to `source`.
     pub fn redo_as(&mut self, source: ChangeSource) -> bool {
-        let Some(s) = self.redo.pop() else {
-            return false;
+        self.try_redo_as(source).unwrap_or(false)
+    }
+
+    /// Undoes the last change, attributed to `source`. `Ok(false)`: nothing to undo. In a shared
+    /// plan it takes back only what that change did, and is refused (with why) when someone
+    /// changed the same values since, or the plan may only be viewed.
+    pub fn try_undo_as(&mut self, source: ChangeSource) -> Result<bool, String> {
+        self.step_back(source, true)
+    }
+
+    /// Redoes the last undone change; see [`Document::try_undo_as`].
+    pub fn try_redo_as(&mut self, source: ChangeSource) -> Result<bool, String> {
+        self.step_back(source, false)
+    }
+
+    /// Undo (`undo`) or redo: moves the top step of one stack to the other.
+    fn step_back(&mut self, source: ChangeSource, undo: bool) -> Result<bool, String> {
+        if let Some(refused) = self.refusal() {
+            return Err(refused.to_string());
+        }
+        let (from, to) = if undo { (&mut self.undo, &mut self.redo) } else { (&mut self.redo, &mut self.undo) };
+        let Some(s) = from.pop() else {
+            return Ok(false);
         };
-        let current = std::mem::replace(&mut self.project, s.project);
-        self.undo.push(Snapshot::new(s.label.clone(), s.source, current));
-        self.touched(&format!("Redo {}", s.label), source);
-        true
+        let restored = match &s.after {
+            // Shared: take back only what the step changed, on the plan as it is now.
+            Some(after) => match crate::sync::reverse(&self.project, &s.project, after) {
+                Ok(p) => p,
+                Err(why) => {
+                    // Someone changed the same values since: this step can no longer be taken
+                    // back (or redone) without undoing theirs. It leaves the list, so the steps
+                    // before it can still be undone.
+                    let verb = if undo { "undo" } else { "redo" };
+                    let message = format!(
+                        "Cannot {verb} {}: {}. It was taken off the {verb} list; {verb} again for the step before it.",
+                        s.label,
+                        why.describe(&self.project)
+                    );
+                    return Err(message);
+                }
+            },
+            None => s.project.clone(),
+        };
+        let current = std::mem::replace(&mut self.project, restored);
+        let after = s.after.is_some().then(|| self.project.clone());
+        to.push(Snapshot::new(s.label.clone(), s.source, current.clone(), after));
+        self.note_unsent(&current);
+        self.touched(&format!("{} {}", if undo { "Undo" } else { "Redo" }, s.label), source);
+        Ok(true)
     }
 
     /// Saves to the current path. Fails with [`io::FileError::ChangedOnDisk`] when another program
@@ -486,6 +597,9 @@ impl Document {
     }
 
     fn save_checked(&mut self, check: bool) -> FileResult<()> {
+        if let Some(e) = self.shared_save_refusal() {
+            return Err(e);
+        }
         let Some(path) = self.path.clone() else {
             return Err(io::FileError::Io {
                 path: PathBuf::new(),
@@ -528,6 +642,9 @@ impl Document {
     /// Microsoft Project XML when opened (use [`crate::mspdi::save`] to export one).
     pub fn save_as(&mut self, path: impl AsRef<Path>) -> FileResult<()> {
         let path = path.as_ref().to_path_buf();
+        if let Some(e) = self.shared_save_refusal() {
+            return Err(e);
+        }
         if crate::mspdi::is_mspdi_path(&path) {
             return Err(io::FileError::Io {
                 path,
@@ -560,6 +677,35 @@ impl Document {
         self.user_changes = false;
         self.claim_lock();
         Ok(())
+    }
+
+    /// A plan opened from a server is saved by the server: saving it here would leave a file
+    /// nobody else sees. [`Document::save_copy`] writes a copy instead.
+    fn shared_save_refusal(&self) -> Option<io::FileError> {
+        let shared = self.shared.as_ref()?;
+        Some(io::FileError::Io {
+            path: PathBuf::from(&shared.name),
+            source: std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "this plan is opened from a server, which saves every change; use Save a Copy to keep a file of your own",
+            ),
+        })
+    }
+
+    /// Writes the plan to `path` as a file of its own, leaving this document as it is (for a plan
+    /// opened from a server: the copy can be opened and changed like any other plan). Id
+    /// counters are raised past every id in use first, so the copy stands on its own.
+    pub fn save_copy(&self, path: impl AsRef<Path>) -> FileResult<()> {
+        let path = path.as_ref();
+        if crate::mspdi::is_mspdi_path(path) {
+            return Err(io::FileError::Io {
+                path: path.into(),
+                source: std::io::Error::new(std::io::ErrorKind::InvalidInput, "a plan is saved as a .plancraft file"),
+            });
+        }
+        let mut copy = self.project.clone();
+        crate::sync::fit_counters(&mut copy);
+        io::save(&copy, path)
     }
 
     /// Re-reads external documents (an explicit Refresh Links, following every link) and updates
@@ -647,6 +793,15 @@ impl Workspace {
         doc.claim_lock();
         let _ = doc.refresh_external_on_open();
         self.docs.push(doc);
+        self.active = self.docs.len().checked_sub(1);
+        self.next_handle
+    }
+
+    /// Adds a plan opened from a server (named `name` there) and makes it active: no file, no lock
+    /// file, no file watching. Returns its handle.
+    pub fn add_shared(&mut self, project: Project, name: &str) -> u64 {
+        self.next_handle = self.next_handle.saturating_add(1);
+        self.docs.push(Document::new_shared(self.next_handle, project, name));
         self.active = self.docs.len().checked_sub(1);
         self.next_handle
     }
@@ -798,6 +953,107 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn shared_pair() -> (Workspace, u64) {
+        let mut p = Project::new("Shared", crate::dates::ymd(2026, 10, 19).unwrap());
+        p.add_task("A", None);
+        p.add_task("B", None);
+        recalculate(&mut p);
+        let mut ws = Workspace::default();
+        let h = ws.add_shared(p, "Shared.plancraft");
+        (ws, h)
+    }
+
+    fn task_named<'a>(p: &'a Project, name: &str) -> &'a crate::model::Task {
+        p.tasks.iter().find(|t| t.name == name).unwrap()
+    }
+
+    #[test]
+    fn a_shared_plan_hands_on_its_edits_once() {
+        let (mut ws, h) = shared_pair();
+        let i = ws.index_of(h).unwrap();
+        let doc = &mut ws.docs[i];
+        assert_eq!(doc.title(), "Shared");
+        assert!(doc.take_unsent().is_none(), "nothing edited yet");
+        let start = doc.project.clone();
+        doc.edit("Add", |p| p.add_task("C", None)).unwrap();
+        doc.edit("Add", |p| p.add_task("D", None)).unwrap();
+        assert!(doc.has_unsent());
+        let (before, after) = doc.take_unsent().unwrap();
+        assert_eq!(before, start, "both edits go together, from the plan before the first");
+        assert_eq!(after, doc.project);
+        assert!(doc.take_unsent().is_none());
+        assert!(doc.undo());
+        assert!(doc.take_unsent().is_some(), "an undo is an edit to hand on too");
+    }
+
+    #[test]
+    fn undo_in_a_shared_plan_keeps_other_peoples_changes() {
+        let (mut ws, h) = shared_pair();
+        let i = ws.index_of(h).unwrap();
+        let doc = &mut ws.docs[i];
+        let a = task_named(&doc.project, "A").id;
+        doc.edit("Rename", |p| p.tasks.iter_mut().find(|t| t.id == a).unwrap().name = "A2".into()).unwrap();
+        // Someone else renames B meanwhile.
+        let mut theirs = doc.project.clone();
+        theirs.tasks.iter_mut().find(|t| t.name == "B").unwrap().name = "B (Ana)".into();
+        doc.apply_remote(theirs);
+        assert_eq!(doc.try_undo_as(ChangeSource::User), Ok(true));
+        assert!(doc.project.tasks.iter().any(|t| t.name == "A"), "my rename was taken back");
+        assert!(doc.project.tasks.iter().any(|t| t.name == "B (Ana)"), "hers stayed");
+        assert_eq!(doc.try_redo_as(ChangeSource::User), Ok(true));
+        assert!(doc.project.tasks.iter().any(|t| t.name == "A2"));
+        assert!(doc.project.tasks.iter().any(|t| t.name == "B (Ana)"));
+    }
+
+    #[test]
+    fn undo_is_refused_when_someone_changed_the_same_value_since() {
+        let (mut ws, h) = shared_pair();
+        let i = ws.index_of(h).unwrap();
+        let doc = &mut ws.docs[i];
+        let a = task_named(&doc.project, "A").id;
+        doc.edit("Rename", |p| p.tasks.iter_mut().find(|t| t.id == a).unwrap().name = "Mine".into()).unwrap();
+        let mut theirs = doc.project.clone();
+        theirs.tasks.iter_mut().find(|t| t.id == a).unwrap().name = "Hers".into();
+        doc.apply_remote(theirs);
+        doc.take_unsent();
+        let why = doc.try_undo_as(ChangeSource::User).unwrap_err();
+        assert!(why.contains("Cannot undo Rename") && why.contains("since"), "{why}");
+        assert_eq!(task_named(&doc.project, "Hers").id, a, "nothing was undone");
+        assert!(why.contains("taken off"), "{why}");
+        assert!(!doc.can_undo(), "the step left the list, so it no longer blocks the steps before it");
+        assert!(doc.take_unsent().is_none(), "a refused undo sends nothing");
+    }
+
+    #[test]
+    fn a_plan_that_may_only_be_viewed_refuses_every_change() {
+        let (mut ws, h) = shared_pair();
+        let i = ws.index_of(h).unwrap();
+        let doc = &mut ws.docs[i];
+        doc.edit("Add", |p| p.add_task("C", None)).unwrap();
+        doc.shared.as_mut().unwrap().read_only = Some("You may only view this plan".into());
+        let before = doc.project.clone();
+        let e = doc.edit("Add", |p| p.add_task("D", None)).unwrap_err();
+        assert!(e.to_string().contains("only view"));
+        assert!(doc.try_undo_as(ChangeSource::Agent).is_err());
+        assert_eq!(doc.project, before);
+        assert!(doc.save().is_err() && doc.save_as(std::env::temp_dir().join("x.plancraft")).is_err(), "the server saves it");
+    }
+
+    #[test]
+    fn a_copy_of_a_shared_plan_stands_on_its_own() {
+        let (mut ws, h) = shared_pair();
+        let i = ws.index_of(h).unwrap();
+        let doc = &mut ws.docs[i];
+        // A replica's counters sit in its own lease, far from its ids.
+        doc.project.ids.task = 1;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("copy.plancraft");
+        doc.save_copy(&path).unwrap();
+        let copy = io::load(&path).unwrap();
+        assert!(copy.ids.task >= copy.tasks.iter().map(|t| t.id.0).max().unwrap());
+        assert!(doc.path.is_none() && doc.shared.is_some(), "the document stays shared");
+    }
 
     #[test]
     fn undo_redo_and_failed_edits() {
