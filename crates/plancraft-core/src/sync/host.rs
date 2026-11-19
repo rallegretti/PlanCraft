@@ -1,7 +1,7 @@
 //! The host's copy of a shared plan: the one order of changes everyone follows.
 
 use super::patch::{apply, check_size, diff, fit_counters, rebase};
-use super::{ChangeId, Conflict, LEASE_SIZE, LOG_LIMIT, Patch, SyncError, Version};
+use super::{ChangeId, Conflict, LEASE_SIZE, LOG_BYTES, LOG_LIMIT, Patch, SyncError, Version};
 use crate::ids::IdCounters;
 use crate::limits::{self, MAX_ID, MAX_NAME_CHARS};
 use crate::model::Project;
@@ -59,6 +59,10 @@ pub struct Host {
     project: Project,
     version: Version,
     log: VecDeque<Entry>,
+    /// The size of each logged entry's patch (as JSON), and their total.
+    log_sizes: VecDeque<usize>,
+    log_bytes: usize,
+    log_bytes_limit: usize,
     /// Ids of accepted changes, longer than the log keeps entries ([`APPLIED_MEMORY`]), so a
     /// replica whose reply went missing can tell whether its change went in.
     applied: HashSet<ChangeId>,
@@ -80,11 +84,26 @@ impl Host {
     /// [`Host::replay_lease`]. Replicas that knew later versions resync.
     pub fn resume(mut project: Project, version: Version, applied: Vec<ChangeId>) -> Self {
         fit_counters(&mut project);
-        let mut host = Self { project, version, log: VecDeque::new(), applied: HashSet::new(), applied_order: VecDeque::new() };
+        let mut host = Self {
+            project,
+            version,
+            log: VecDeque::new(),
+            log_sizes: VecDeque::new(),
+            log_bytes: 0,
+            log_bytes_limit: LOG_BYTES,
+            applied: HashSet::new(),
+            applied_order: VecDeque::new(),
+        };
         for id in applied {
             host.note_applied(id);
         }
         host
+    }
+
+    /// Keeps at most `bytes` of entries in the log (tests; the default is [`LOG_BYTES`]).
+    pub fn with_log_bytes(mut self, bytes: usize) -> Self {
+        self.log_bytes_limit = bytes;
+        self
     }
 
     /// The ids of the accepted changes the host remembers, oldest first (save them with the plan).
@@ -156,6 +175,13 @@ impl Host {
 
     /// Rebases, checks and applies a change from `author`.
     pub fn submit(&mut self, change: &Change, author: &str) -> Outcome {
+        self.submit_checked(change, author, |_| Ok(()))
+    }
+
+    /// [`Host::submit`], with one more check of the plan the change would make: an `Err` refuses
+    /// the change (`Outcome::Refused`) and nothing changes. The server uses it to keep a shared
+    /// plan small enough to open again.
+    pub fn submit_checked(&mut self, change: &Change, author: &str, check: impl FnOnce(&Project) -> Result<(), String>) -> Outcome {
         if self.applied.contains(&change.id) {
             let at = self.log.iter().find(|e| e.change == change.id).map_or(self.version, |e| e.version);
             return Outcome::AlreadyApplied(at);
@@ -186,6 +212,9 @@ impl Host {
         // was never handed out, and taking it would use up ids for good (up to `MAX_ID`).
         if let Some(kind) = beyond_counters(&after, &before.ids) {
             return Outcome::Refused(format!("a new {kind} has an id that was never handed out"));
+        }
+        if let Err(reason) = check(&after) {
+            return Outcome::Refused(reason);
         }
         let effect = match diff(before, &after) {
             Ok(p) => p,
@@ -222,11 +251,20 @@ impl Host {
         }
     }
 
+    /// Logs an entry. The log keeps the last [`LOG_LIMIT`] entries and at most [`LOG_BYTES`] of
+    /// them (the newest always), so large changes cannot fill the memory; a replica further
+    /// behind resyncs from a snapshot.
     fn remember(&mut self, entry: Entry) {
         self.note_applied(entry.change);
+        let size = serde_json::to_vec(&entry.patch).map_or(usize::MAX, |b| b.len());
         self.log.push_back(entry);
-        while self.log.len() > LOG_LIMIT {
+        self.log_sizes.push_back(size);
+        self.log_bytes = self.log_bytes.saturating_add(size);
+        while self.log.len() > LOG_LIMIT || (self.log_bytes > self.log_bytes_limit && self.log.len() > 1) {
             self.log.pop_front();
+            if let Some(old) = self.log_sizes.pop_front() {
+                self.log_bytes = self.log_bytes.saturating_sub(old);
+            }
         }
     }
 }

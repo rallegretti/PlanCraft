@@ -38,6 +38,9 @@ pub const LEASE_SIZE: u32 = 1_000;
 /// Changes the host keeps for replicas that fall behind (older ones resync from a snapshot).
 pub const LOG_LIMIT: usize = 1_000;
 
+/// The most bytes of changes (as JSON) the host keeps for replicas that fall behind.
+pub const LOG_BYTES: usize = 64 * 1024 * 1024;
+
 /// Identifies one change, so a change sent twice (after a timeout) is applied once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]

@@ -173,6 +173,43 @@ fn normalized_signed_date(s: &str) -> Option<String> {
     (fixed != s).then_some(fixed)
 }
 
+/// How [`open_regular`] treats a symbolic link at the path.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Links {
+    /// Followed to the file it points at.
+    Follow,
+    /// Refused (Unix; elsewhere only checked before opening).
+    Refuse,
+}
+
+/// Opens `path` for reading (or writing, without truncating) only if it is a regular file, and
+/// checks the file actually opened, not the name: something swapped in after a check (a FIFO,
+/// which would block the open forever, a device, a folder, or a link with [`Links::Refuse`]) is
+/// refused instead of read. On Unix the open never blocks.
+pub fn open_regular(path: &Path, write: bool, links: Links) -> std::io::Result<std::fs::File> {
+    let mut opts = std::fs::OpenOptions::new();
+    if write {
+        opts.write(true);
+    } else {
+        opts.read(true);
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let nofollow = if links == Links::Refuse { libc::O_NOFOLLOW } else { 0 };
+        opts.custom_flags(libc::O_NONBLOCK | nofollow);
+    }
+    #[cfg(not(unix))]
+    if links == Links::Refuse && std::fs::symlink_metadata(path)?.file_type().is_symlink() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{} is a link", path.display())));
+    }
+    let file = opts.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("{} is not a regular file", path.display())));
+    }
+    Ok(file)
+}
+
 /// Loads a project document and recalculates it.
 pub fn load(path: impl AsRef<Path>) -> FileResult<Project> {
     load_with_notes(path).map(|(p, _)| p)
@@ -187,7 +224,7 @@ pub fn load_with_notes(path: impl AsRef<Path>) -> FileResult<(Project, Vec<Strin
     if !std::fs::metadata(path).map_err(io_err)?.is_file() {
         return Err(io_err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "not a regular file")));
     }
-    let file = std::fs::File::open(path).map_err(io_err)?;
+    let file = open_regular(path, false, Links::Follow).map_err(io_err)?;
     let size = file.metadata().map_err(io_err)?.len();
     if size > MAX_FILE_BYTES {
         return Err(FileError::TooLarge { path: path.into(), size });
@@ -220,6 +257,12 @@ pub enum Privacy {
     /// Always readable by the owner only (settings, recovery copies, session tokens). A symbolic
     /// link at `path` is replaced, never followed, so private data can't be redirected elsewhere.
     OwnerOnly,
+    /// A plan PlanCraft Server shares from a folder others can write to: like `KeepExisting`
+    /// (permissions and group kept, read-only refused), but `path` must be a regular file or
+    /// missing. A link is refused rather than followed, so nobody can point the server's writes
+    /// at another file; one swapped in at the last moment is replaced by the rename, never
+    /// written through.
+    NoLinks,
 }
 
 /// Most symbolic links followed in a row before giving up (as Linux's `ELOOP` limit).
@@ -264,6 +307,15 @@ pub fn write_atomic(path: &Path, bytes: &[u8], privacy: Privacy) -> std::io::Res
             resolved.as_path()
         }
         Privacy::OwnerOnly => path,
+        Privacy::NoLinks => match std::fs::symlink_metadata(path) {
+            Ok(m) if !m.is_file() => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("{} is not a regular file (a link, a folder or a device); it is not written", path.display()),
+                ));
+            }
+            _ => path,
+        },
     };
     let dir = match path.parent() {
         Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
@@ -273,13 +325,14 @@ pub fn write_atomic(path: &Path, bytes: &[u8], privacy: Privacy) -> std::io::Res
     let tmp = dir.join(format!(".{}.{}-{}.tmp", name.to_string_lossy(), std::process::id(), COUNTER.fetch_add(1, Ordering::Relaxed)));
     let existing = match privacy {
         Privacy::KeepExisting => std::fs::metadata(path).ok(),
+        Privacy::NoLinks => std::fs::symlink_metadata(path).ok(),
         Privacy::OwnerOnly => None,
     };
     // Read-only by its permission bits, or not writable by this user for another reason (a file
     // owned by someone else, in a folder this user may write to, would otherwise be replaced).
     let not_writable = existing.as_ref().is_some_and(|m| {
         m.permissions().readonly()
-            || matches!(std::fs::OpenOptions::new().write(true).open(path), Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied)
+            || matches!(open_regular(path, true, if privacy == Privacy::NoLinks { Links::Refuse } else { Links::Follow }), Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied)
     });
     if not_writable {
         return Err(std::io::Error::new(
@@ -713,6 +766,50 @@ mod tests {
             create_private_dir(&private).unwrap();
             assert_eq!(std::fs::metadata(&private).unwrap().permissions().mode() & 0o777, 0o700);
         }
+    }
+
+    /// A FIFO in place of a file is refused at once, not waited on forever.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_is_refused_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("plan.plancraft");
+        let made = std::process::Command::new("mkfifo").arg(&fifo).status();
+        if !made.is_ok_and(|s| s.success()) {
+            return; // no mkfifo here
+        }
+        assert!(open_regular(&fifo, false, Links::Follow).is_err());
+        assert!(open_regular(&fifo, true, Links::Follow).is_err());
+        assert!(load(&fifo).is_err());
+        let link = dir.path().join("link");
+        std::fs::write(dir.path().join("real"), "x").unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real"), &link).unwrap();
+        assert!(open_regular(&link, false, Links::Refuse).is_err());
+        assert!(open_regular(&link, false, Links::Follow).is_ok());
+    }
+
+    /// A shared plan is never written through a link someone planted in its place, and keeps
+    /// its permissions otherwise.
+    #[cfg(unix)]
+    #[test]
+    fn no_links_refuses_a_link_and_keeps_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let plan = dir.path().join("plan.plancraft");
+        std::fs::write(&plan, "old").unwrap();
+        std::fs::set_permissions(&plan, std::fs::Permissions::from_mode(0o664)).unwrap();
+        write_atomic(&plan, b"new", Privacy::NoLinks).unwrap();
+        assert_eq!(std::fs::read_to_string(&plan).unwrap(), "new");
+        assert_eq!(std::fs::metadata(&plan).unwrap().permissions().mode() & 0o777, 0o664);
+        let target = dir.path().join("precious");
+        std::fs::write(&target, "keep").unwrap();
+        std::fs::remove_file(&plan).unwrap();
+        std::os::unix::fs::symlink(&target, &plan).unwrap();
+        assert!(write_atomic(&plan, b"evil", Privacy::NoLinks).is_err());
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep");
+        let fresh = dir.path().join("fresh.plancraft");
+        write_atomic(&fresh, b"x", Privacy::NoLinks).unwrap();
+        assert_eq!(std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777, 0o600);
     }
 
     /// Regression: saving through a symbolic link replaced the link with a regular file, leaving

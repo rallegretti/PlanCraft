@@ -706,3 +706,37 @@ fn leases_and_accepted_changes_survive_a_restart_through_the_journal() {
     let behind = stale.lease().unwrap();
     assert!(ben.lease(behind).is_err());
 }
+
+#[test]
+fn a_check_can_refuse_a_change_and_nothing_changes() {
+    let mut host = Host::new(plan());
+    let mut r = join(&mut host);
+    let before = host.project().clone();
+    let id = leaf(r.local(), 0);
+    local_edit(&mut r, |p| rename(p, id, "Too big"));
+    let change = r.next_change("edit").unwrap();
+    let outcome = host.submit_checked(&change, "ana", |after| {
+        assert_eq!(task(after, id).name, "Too big", "the check sees the plan the change would make");
+        Err("too large".into())
+    });
+    assert_eq!(outcome, Outcome::Refused("too large".into()));
+    assert_eq!(host.version(), 1);
+    assert!(same(host.project(), &before));
+    assert!(!host.was_applied(change.id), "it can be sent again");
+}
+
+#[test]
+fn the_log_keeps_its_bytes_in_bounds() {
+    let mut host = Host::new(plan()).with_log_bytes(5_000);
+    let mut r = join(&mut host);
+    let id = leaf(r.local(), 0);
+    for i in 0..20 {
+        local_edit(&mut r, |p| rename(p, id, &format!("{i} {}", "x".repeat(900))));
+        let o = send(&mut host, &mut r, "ana");
+        assert!(matches!(o, Outcome::Applied(_)));
+    }
+    let kept = host.since(host.version() - 1).expect("the newest is always kept");
+    assert_eq!(kept.len(), 1);
+    assert!(host.since(1).is_none(), "older changes are gone: a replica that far behind resyncs");
+    assert!(host.since(host.version() - 4).is_some());
+}

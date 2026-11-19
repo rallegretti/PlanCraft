@@ -1,10 +1,11 @@
 # PlanCraft architecture
 
-PlanCraft is a Cargo workspace with three crates:
+PlanCraft is a Cargo workspace with four crates:
 
 ```
-plancraft-app  ──►  plancraft-mcp  ──►  plancraft-core
-     └──────────────────────────────────────┘
+plancraft-app  ──►  plancraft-mcp     ──►  plancraft-core
+     │         ──►  plancraft-server  ──►       ▲
+     └──────────────────────────────────────────┘
 ```
 
 ## plancraft-core
@@ -105,7 +106,7 @@ An open plan holds an advisory lock file next to it, `.NAME.lock` (hidden on Win
 
 ### Shared editing (`sync`)
 
-Plain logic, no networking; nothing uses it unless someone shares a plan (see [COLLABORATION.md](COLLABORATION.md)). `sync::diff` works out a `Patch` between two plans through their JSON form: top-level values, and each list's items matched by key, field by field (added, changed, removed, new order), without schedules or id counters. `sync::apply` applies one (refusing fixed values, taken keys and missing items); the caller checks and recalculates. `sync::rebase` moves a patch over a change made since: different fields combine, new items keep their places, and the same value changed twice, a change to a deleted item, or a list reordered by both are `Conflict`s. `Host` orders changes (version, a log of 1,000 entries, duplicate detection, the same checks as `Document::edit`, id leases) and `Replica` is one person's copy (confirmed plan plus pending work, at most one change on its way, resync after missed changes, piece-by-piece salvage when merged work no longer fits).
+Plain logic, no networking; nothing uses it unless someone shares a plan (see [COLLABORATION.md](COLLABORATION.md)). `sync::diff` works out a `Patch` between two plans through their JSON form: top-level values, and each list's items matched by key, field by field (added, changed, removed, new order), without schedules or id counters. `sync::apply` applies one (refusing fixed values, taken keys and missing items); the caller checks and recalculates. `sync::rebase` moves a patch over a change made since: different fields combine, new items keep their places, and the same value changed twice, a change to a deleted item, or a list reordered by both are `Conflict`s. `Host` orders changes (version, a log of at most 1,000 entries and 64 MB, duplicate detection, the same checks as `Document::edit` plus any of the caller's own through `submit_checked`, id leases) and `Replica` is one person's copy (confirmed plan plus pending work, at most one change on its way, resync after missed changes, piece-by-piece salvage when merged work no longer fits).
 
 ### Undo and attribution
 
@@ -133,6 +134,17 @@ The MCP server is a hand-rolled JSON-RPC 2.0 server. It has no async runtime, wh
   - `run_stdio`: newline-delimited JSON.
   - `serve_http`: Streamable HTTP via `tiny_http`, on a background thread. It rejects non-local `Origin` headers, and checks `Host` on loopback addresses.
 - **`cli`:** shared by the `plancraft-mcp` binary and `plancraft mcp`.
+
+## plancraft-server
+
+PlanCraft Server shares a folder of plans for several people to edit at once (opt-in; see [COLLABORATION.md](COLLABORATION.md)). Plain threads, no async runtime: one reader and one writer per connection, one for upkeep.
+
+- **`wire`:** the encrypted connection: Noise (`Noise_NX_25519_ChaChaPoly_BLAKE2s`, `snow` with pure-Rust crypto), the server's key pair and fingerprint, frames split over Noise messages and capped before they are read.
+- **`protocol`:** the JSON messages (`ClientMsg`, `ServerMsg`), roles and frame limits.
+- **`users`:** the owner-only users file with Argon2id hashes, roles per folder and per plan, slowing down failed sign-ins (`Throttle`), and a cap on password checks at once (`Gate`).
+- **`journal`, `plan`:** one shared plan: its `sync::Host`, its journal (changes and id leases on disk before anyone hears of them), saving, recovery after a crash, its lock file, and the people who have it open.
+- **`server`:** accepting connections, signing in, opening plans (one per connection) and handing requests to them in order; **`client`:** the other end, used by the tests (and by the app in phase 3).
+- **`cli`:** shared by the `plancraft-server` binary and `plancraft serve`.
 
 ## plancraft-app
 
