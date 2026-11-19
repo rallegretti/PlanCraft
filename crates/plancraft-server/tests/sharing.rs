@@ -143,6 +143,10 @@ fn private_mdns_port() -> u16 {
 #[test]
 fn a_shared_folder_is_announced_while_it_is_shared() {
     let port = private_mdns_port();
+    if !plancraft_server::discovery::on_a_network() {
+        eprintln!("skipped: this computer is on no network");
+        return;
+    }
     let mut browser = match Browser::start_on(port) {
         Ok(b) => b,
         Err(e) => {
@@ -184,6 +188,10 @@ fn servers_are_found_on_the_network_and_go_away_when_stopped() {
     // A private mDNS port: nothing reaches anyone listening on the usual one (the messages still
     // go out on the network).
     let port = private_mdns_port();
+    if !plancraft_server::discovery::on_a_network() {
+        eprintln!("skipped: this computer is on no network");
+        return;
+    }
     let mut browser = match Browser::start_on(port) {
         Ok(b) => b,
         Err(e) => {

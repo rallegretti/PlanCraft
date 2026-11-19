@@ -572,20 +572,37 @@ the `Replica` and the connection. Merging never runs on the app's thread.
   `socket2`; IPv4, 224.0.0.251). It replaced the `mdns-sd` library, which kept every record anyone
   sent with no limit on how many or for how long: a hostile computer on the network could fill
   memory in seconds. Ours does only what PlanCraft needs:
-  - the responder answers questions about its one server (PTR, SRV, TXT, A), announces it three
-    times when it starts and on each network it joins, answers on one network at most once a
-    second (one-shot queriers directly, 20 a second at most), says goodbye when it stops, and keeps
+  - the responder answers questions about its one server (PTR, SRV, TXT, A; and the DNS-SD list
+    of service types), announces it three times when it starts and on each network it joins
+    (networks looked at again every 5 seconds, so starting before the network is up is fine),
+    answers by multicast after a random 20–120 ms and at most once a second per network (put off,
+    not dropped), answers one-shot queriers directly (their id and only their questions about us
+    back, 10-second lifetimes, no cache-flush; 20 a second in all, 2 per querier, never to this
+    computer's own addresses), sends everything with IP TTL 255, says goodbye when it stops (its
+    PTR, SRV and TXT; not the host's address, which other servers on the computer share), and keeps
     nothing it hears;
-  - the listener asks for PlanCraft servers (at once, then after 1, 2, 4… seconds, a minute apart
-    at most) and keeps only their records: 256 servers, 256 host names, 32 addresses each, every
-    record forgotten after 75 minutes whatever lifetime it was sent with. It wakes the window when
-    the list changes (no polling);
-  - both drop, unread, every packet from a computer outside this computer's own networks (an
-    address and its netmask, RFC 6762 §11), so nothing from beyond the local network is heard or
-    answered;
+  - the listener asks for PlanCraft servers (at once, then after 1, 2, 4… seconds, 30 seconds
+    apart at most, so a server is heard again well within its records' 2-minute lifetime) and
+    keeps only their records. Each server belongs to the computer that announced it (the packet's
+    sender): only that computer can point it elsewhere, give its addresses or say goodbye for it.
+    One computer holds at most 8 servers, 256 in all; a server not yet told where it is goes after
+    20 seconds (and is the first to make room); 8 addresses each; nothing kept more than 3 minutes
+    without being heard again, whatever lifetime it was sent with. A goodbye takes effect after a
+    second, and the listener asks again at once (the server answers if it is still there). A fresh
+    address with cache-flush replaces the old ones. Answers count only from the mDNS port. It wakes
+    the window a few times a second at most when the list changes (no polling);
+  - both drop, unread, every packet from a computer outside this computer's own networks (its
+    address and the network's prefix length, so on Windows too; not network or broadcast
+    addresses; RFC 6762 §11), so nothing from beyond the local network is heard or answered;
   - packets are read with every length, count, label and compression pointer checked (pointers
     only backwards, 64 at most; names of at most 255 bytes; 64 questions and 256 records read at
-    most); `tests/mdns.rs` sweeps random bytes and mDNS-like packets.
+    most; 4 KiB of names decoded per packet at most, so a packet of long names pointing at each
+    other costs little), and each side reads only what it needs (the responder a query's
+    questions, the listener a response's records); `tests/mdns.rs` sweeps random bytes,
+    mDNS-like packets and what several hostile computers could say.
+  - IPv4 only: a server listening on one IPv6 address is not announced (people type its address);
+    one listening on `[::]` is announced with its IPv4 addresses, which it accepts only where the
+    system lets IPv6 sockets take IPv4 too (not by default on Windows: bind `0.0.0.0` there).
 - A server announces `_plancraft._tcp` as "*folder* on *computer*", on each of the computer's
   networks (looked at again every 5 seconds, so new ones are announced on) when it listens on all
   of them, or on its one address's network. The announcement is withdrawn first thing when the server
@@ -611,10 +628,9 @@ the `Replica` and the connection. Merging never runs on the app's thread.
   offered (IPv4 addresses on the network first, then global IPv6; link-local IPv6 is passed over,
   as it needs an interface named, and loopback, which would point at whoever connects).
   It never vouches for a key: the fingerprint is still confirmed on the first visit and checked
-  against the pin after that. A flood is taken in a bounded amount at a time; if the listener is
-  given up on, it listens afresh.
-- No one computer can fill the list (`discovery::FoundList`): an announcement does not say who
-  sent it, so servers are counted by what it does say, at most 4 per host name and 4 per address
+  against the pin after that.
+- No one computer can fill the list: the listener keeps 8 servers per sending computer (above),
+  and `discovery::FoundList` counts what announcements say, at most 4 per host name and 4 per address
   (whatever the port), 64 in all, first come first kept. One computer sharing more than 4 folders
   shows 4 of them; the others are opened by typing the address. A server at an address whose key
   is trusted here always gets in and is listed first, once per trusted address (anyone can add a

@@ -71,14 +71,16 @@ fn instance_unescaped(fullname: &str) -> String {
 }
 
 /// The networks mDNS uses: this computer's IPv4 networks, but not loopback, container and
-/// virtual-machine bridges, or VPN and overlay networks.
+/// virtual-machine bridges, or VPN and overlay networks. The netmask comes from the prefix length
+/// (on Windows, the network's own; the netmask `if-addrs` gives there is a guess that can be the
+/// address's own /32, which would hear no one).
 fn mdns_nets() -> Vec<Net> {
     let mut nets: Vec<Net> = if_addrs::get_if_addrs()
         .map(|l| {
             l.into_iter()
                 .filter(|i| !virtual_interface(&i.name) && !overlay_interface(&i.name))
                 .filter_map(|i| match i.addr {
-                    if_addrs::IfAddr::V4(v4) if !v4.ip.is_loopback() && !v4.ip.is_link_local() => Some(Net { ip: v4.ip, mask: v4.netmask }),
+                    if_addrs::IfAddr::V4(v4) if !v4.ip.is_loopback() => Net::new(v4.ip, v4.prefixlen, i.index),
                     _ => None,
                 })
                 .collect()
@@ -88,6 +90,11 @@ fn mdns_nets() -> Vec<Net> {
     nets.dedup();
     nets.truncate(16);
     nets
+}
+
+/// Whether this computer is on a network mDNS can use (tests skip when it is not).
+pub fn on_a_network() -> bool {
+    !mdns_nets().is_empty()
 }
 
 /// `text` cut to at most `max` bytes, on a character boundary.
@@ -136,7 +143,7 @@ pub fn instance_name(folder: &str, host: &str) -> String {
 
 impl Announcer {
     /// Announces a server called `name` listening at `addr` on the standard mDNS port. A server
-    /// listening on every address (`0.0.0.0`) announces each of the computer's addresses, kept up
+    /// listening on every address (`0.0.0.0`) announces each of the computer's IPv4 networks, kept up
     /// to date as they change.
     pub fn start(name: &str, host: &str, addr: std::net::SocketAddr) -> Result<Announcer, String> {
         Self::start_on(name, host, addr, MDNS_PORT)
@@ -161,8 +168,8 @@ impl Announcer {
             txt: vec![format!("v={}", crate::protocol::PROTOCOL)],
             only,
         };
-        let responder =
-            mdns::Responder::start(service, mdns_port, mdns_nets).map_err(|e| format!("cannot announce the server on the network: {e}"))?;
+        let responder = mdns::Responder::start(service, mdns_port, mdns_nets)
+            .map_err(|e| format!("cannot announce the server on the network ({e})"))?;
         Ok(Announcer { _responder: responder, fullname })
     }
 }
@@ -444,7 +451,7 @@ impl Browser {
     /// [`Browser::start`] on another mDNS port (tests).
     pub fn start_on(mdns_port: u16) -> Result<Browser, String> {
         let listener = mdns::Listener::start(service_name(), mdns_port, mdns_nets)
-            .map_err(|e| format!("cannot look for servers on the network: {e}"))?;
+            .map_err(|e| format!("cannot look for servers on the network ({e})"))?;
         Ok(Browser { listener, seen: None, found: FoundList::default() })
     }
 
@@ -456,10 +463,10 @@ impl Browser {
 
     /// Takes in what was heard since the last call; returns whether the list changed.
     pub fn poll(&mut self) -> bool {
-        let (generation, resolved) = self.listener.resolved();
-        if self.seen == Some(generation) {
+        if self.seen == Some(self.listener.generation()) {
             return false;
         }
+        let (generation, resolved) = self.listener.resolved();
         self.seen = Some(generation);
         let now: Vec<String> = resolved.iter().map(|r| fullname_of(&r.instance)).collect();
         let gone: Vec<String> = self.found.heard.keys().filter(|k| !now.contains(k)).cloned().collect();
@@ -585,6 +592,16 @@ mod tests {
         assert_eq!(list.list().first().unwrap().name, "A");
         list.set_trusted(["10.0.0.2"]);
         assert_eq!(list.list().first().unwrap().name, "B");
+    }
+
+    /// This computer's networks for mDNS, with their netmasks from the prefix length (shown, to
+    /// check on each build machine: a /32 would hear no one).
+    #[test]
+    fn this_computers_networks_have_their_netmasks() {
+        for n in mdns_nets() {
+            eprintln!("mdns network: {} mask {} interface {:?}", n.ip, n.mask, n.iface);
+            assert!(!n.ip.is_loopback() && u32::from(n.mask).leading_ones() >= 8, "{n:?}");
+        }
     }
 
     #[test]
