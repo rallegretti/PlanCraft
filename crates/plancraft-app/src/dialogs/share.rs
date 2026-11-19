@@ -28,7 +28,8 @@ use crate::theme;
 #[derive(Default)]
 pub struct ShareHost {
     pub sharing: Option<Sharing>,
-    /// The last server stopped by itself (could not start, or crashed): why.
+    /// The last server stopped by itself (could not start, or crashed), or could not be started:
+    /// what to say, in full.
     pub error: Option<String>,
     /// The last server's log, kept once it stopped (to see why it could not start).
     pub last_log: Vec<String>,
@@ -37,10 +38,25 @@ pub struct ShareHost {
     log_shown: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// To look again while the server starts or stops.
     ctx: Option<Context>,
+    /// The server running now was started announcing itself on the network.
+    pub announced: bool,
+    /// A change to the users file still being made when the window closed: its answer is
+    /// still told (and the window takes it back when reopened).
+    pending: Option<(String, Answer)>,
 }
 
 /// How often the app is redrawn at most for new log lines while the log is shown.
 const LOG_REDRAW: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Redraws the app for the server: its state at once; its log only while someone looks at it, a
+/// few times a second at most (a busy server logs a line per sign-in, plan and change).
+fn share_waker(repaint: Context, log_shown: std::sync::Arc<std::sync::atomic::AtomicBool>) -> plancraft_server::sharing::Waker {
+    std::sync::Arc::new(move |wake| match wake {
+        Wake::State => repaint.request_repaint(),
+        Wake::Log if log_shown.load(std::sync::atomic::Ordering::Relaxed) => repaint.request_repaint_after(LOG_REDRAW),
+        Wake::Log => {}
+    })
+}
 
 impl ShareHost {
     /// Looks at the server. Returns why it stopped, once, when it stopped on its own.
@@ -55,7 +71,11 @@ impl ShareHost {
         match state {
             State::Stopped(why) => {
                 self.last_log = self.sharing.take().map(|s| s.log()).unwrap_or_default();
-                self.error = why.clone();
+                self.error = why.as_ref().map(|w| format!("Sharing stopped: {w}"));
+                // Drawn now as stopped (the status bar may have drawn it as still stopping).
+                if let Some(ctx) = &self.ctx {
+                    ctx.request_repaint();
+                }
                 why
             }
             _ => None,
@@ -73,19 +93,14 @@ impl ShareHost {
     pub fn start(&mut self, program: &Program, folder: &Path, config: &Path, port: u16, announce: bool, ctx: &Context) {
         let repaint = ctx.clone();
         let log_shown = std::sync::Arc::clone(&self.log_shown);
-        // The server's state redraws at once; its log only while someone looks at it, a few
-        // times a second at most (a busy server logs a line per sign-in, plan and change).
-        let waker: plancraft_server::sharing::Waker = std::sync::Arc::new(move |wake| match wake {
-            Wake::State => repaint.request_repaint(),
-            Wake::Log if log_shown.load(std::sync::atomic::Ordering::Relaxed) => repaint.request_repaint_after(LOG_REDRAW),
-            Wake::Log => {}
-        });
+        let waker = share_waker(repaint, log_shown);
         self.ctx = Some(ctx.clone());
+        self.announced = announce;
         self.error = None;
         self.last_log.clear();
         match Sharing::start(program, folder, config, port, announce, waker) {
             Ok(s) => self.sharing = Some(s),
-            Err(e) => self.error = Some(e),
+            Err(e) => self.error = Some(format!("Could not start sharing: {e}")),
         }
     }
 
@@ -98,6 +113,18 @@ impl ShareHost {
     #[cfg(test)]
     fn log_watched(&self) -> bool {
         self.log_shown.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The answer of a change to the users file made in a window since closed, once it came.
+    pub fn take_answer(&mut self) -> Option<Result<String, String>> {
+        let (_, rx) = self.pending.as_ref()?;
+        let done = match rx.try_recv() {
+            Ok(d) => d,
+            Err(mpsc::TryRecvError::Empty) => return None,
+            Err(mpsc::TryRecvError::Disconnected) => Err("The change stopped unexpectedly.".into()),
+        };
+        self.pending = None;
+        Some(done)
     }
 
     /// Asks the server to stop (it saves every plan first).
@@ -166,18 +193,21 @@ impl UserOp {
             UserOp::Add { .. } => Form::Add,
             UserOp::Password { .. } => Form::Password,
             UserOp::Role { plan: Some(_), .. } => Form::Rule,
-            UserOp::Role { plan: None, .. } | UserOp::ClearPlan { .. } | UserOp::Remove { .. } => Form::None,
+            UserOp::Remove { name } => Form::Removed(name.clone()),
+            UserOp::Role { plan: None, .. } | UserOp::ClearPlan { .. } => Form::None,
         }
     }
 }
 
 /// The part of the window a change was typed into.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Form {
     None,
     Add,
     Password,
     Rule,
+    /// Someone was removed: forms naming them go too.
+    Removed(String),
 }
 
 /// Makes a change to the users file; returns what to say. New passwords are hashed first, then
@@ -373,7 +403,7 @@ impl ShareFolder {
     /// Takes the answer of a change, if it has come.
     fn collect(&mut self) {
         let Some((_, form, rx)) = &self.busy else { return };
-        let form = *form;
+        let form = form.clone();
         let done = match rx.try_recv() {
             Ok(d) => d,
             Err(mpsc::TryRecvError::Empty) => return,
@@ -390,6 +420,15 @@ impl ShareFolder {
                 }
                 Form::Password => self.password_for = None,
                 Form::Rule => self.new_rule = None,
+                Form::Removed(name) => {
+                    let gone = |n: &String| n.trim().eq_ignore_ascii_case(name.trim());
+                    if self.password_for.as_ref().is_some_and(|(n, _)| gone(n)) {
+                        self.password_for = None;
+                    }
+                    if self.new_rule.as_ref().is_some_and(|(n, _, _)| gone(n)) {
+                        self.new_rule = None;
+                    }
+                }
                 Form::None => {}
             }
         }
@@ -407,8 +446,16 @@ impl ShareFolder {
         host: &mut ShareHost,
         open_here: &dyn Fn(&Path) -> Vec<String>,
     ) -> Outcome {
+        if self.busy.is_none()
+            && let Some((what, rx)) = host.pending.take()
+        {
+            // A change made before the window was last closed, still going.
+            self.busy = Some((what, Form::None, rx));
+        }
         self.collect();
         self.reload_users();
+        // Changes from the command line show up without waiting for the mouse.
+        ctx.request_repaint_after(std::time::Duration::from_secs(2));
         // Set again below while the log is unfolded.
         host.watch_log(false);
         let mut open = true;
@@ -422,28 +469,34 @@ impl ShareFolder {
             .default_pos(ctx.content_rect().center_top() + egui::vec2(0.0, 90.0))
             .open(&mut open)
             .show(ctx, |ui| {
-                if let Some(o) = self.server(ui, ctx, settings, host, open_here) {
-                    outcome = o;
-                }
-                ui.add_space(6.0);
-                ui.separator();
-                self.people(ui, ctx);
-                let has_log = host.sharing.as_ref().map_or(!host.last_log.is_empty(), |s| s.log_len() > 0);
-                if has_log {
-                    ui.add_space(4.0);
-                    egui::CollapsingHeader::new("Server log").id_salt("share_log").show(ui, |ui| {
-                        // Unfolded: new lines redraw the app.
-                        host.watch_log(true);
-                        let log = host.sharing.as_ref().map_or_else(|| host.last_log.clone(), Sharing::log);
-                        egui::ScrollArea::vertical().max_height(160.0).stick_to_bottom(true).show(ui, |ui| {
-                            for line in log.iter().rev().take(200).rev() {
-                                ui.label(RichText::new(line).monospace().size(11.0));
-                            }
+                // Taller than a small screen (many addresses, many people, the log): it scrolls.
+                let max = (ctx.content_rect().height() - 160.0).max(200.0);
+                egui::ScrollArea::vertical().id_salt("share_window_scroll").max_height(max).show(ui, |ui| {
+                    if let Some(o) = self.server(ui, ctx, settings, host, open_here) {
+                        outcome = o;
+                    }
+                    ui.add_space(6.0);
+                    ui.separator();
+                    self.people(ui, ctx, host.sharing.is_some());
+                    let has_log = host.sharing.as_ref().map_or(!host.last_log.is_empty(), |s| s.log_len() > 0);
+                    if has_log {
+                        ui.add_space(4.0);
+                        egui::CollapsingHeader::new("Server log").id_salt("share_log").show(ui, |ui| {
+                            // Unfolded: new lines redraw the app.
+                            host.watch_log(true);
+                            let log = host.sharing.as_ref().map_or_else(|| host.last_log.clone(), Sharing::log);
+                            egui::ScrollArea::vertical().max_height(160.0).stick_to_bottom(true).show(ui, |ui| {
+                                for line in log.iter().rev().take(200).rev() {
+                                    ui.label(RichText::new(line).monospace().size(11.0));
+                                }
+                            });
                         });
-                    });
-                }
+                    }
+                });
             });
         if !open {
+            // A change still being made is told when it is done, window or not.
+            host.pending = self.busy.take().map(|(what, _, rx)| (what, rx));
             return Outcome::Closed;
         }
         outcome
@@ -501,7 +554,7 @@ impl ShareFolder {
                         for a in &addresses {
                             copy_box(ui, a);
                         }
-                        if settings.share_announce {
+                        if host.announced {
                             ui.label(
                                 RichText::new("It is also listed under On your network in their Open from Server window.")
                                     .small()
@@ -576,7 +629,11 @@ impl ShareFolder {
             ui.label("Port:");
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.port).desired_width(60.0));
-                ui.checkbox(&mut settings.share_announce, "List it for others on the network").on_hover_text(
+                let announce = ui.checkbox(&mut settings.share_announce, "List it for others on the network");
+                if announce.changed() {
+                    settings.save();
+                }
+                announce.on_hover_text(
                     "Everyone on the network this computer is on sees \"folder on computer\" in their Open from Server window, \
                      on any network it joins while sharing. People can still type the address with this off.",
                 );
@@ -601,7 +658,7 @@ impl ShareFolder {
             ui.colored_label(theme::pal().ERROR, "The port is a number from 1 to 65535.");
         }
         if let Some(e) = &host.error {
-            ui.colored_label(theme::pal().ERROR, format!("Sharing stopped: {e}"));
+            ui.colored_label(theme::pal().ERROR, e.as_str());
         }
         ui.add_space(4.0);
         let ready = self.folder.is_some() && port.is_some() && self.users.as_ref().is_ok_and(|u| !u.is_empty());
@@ -620,7 +677,7 @@ impl ShareFolder {
     }
 
     /// The bottom half: who may sign in.
-    fn people(&mut self, ui: &mut egui::Ui, ctx: &Context) {
+    fn people(&mut self, ui: &mut egui::Ui, ctx: &Context, sharing: bool) {
         ui.label(RichText::new("People who may sign in").strong());
         let busy = self.busy.is_some();
         let users = match &self.users {
@@ -630,7 +687,9 @@ impl ShareFolder {
                 return;
             }
         };
-        if users.is_empty() {
+        if users.is_empty() && sharing {
+            ui.colored_label(theme::pal().WARN, "Nobody can sign in now: add someone below.");
+        } else if users.is_empty() {
             ui.label(RichText::new("Nobody yet.").color(theme::pal().TEXT_WEAK));
         }
         let mut op: Option<(String, UserOp)> = None;
@@ -710,15 +769,17 @@ impl ShareFolder {
             let mut cancel = false;
             ui.horizontal(|ui| {
                 ui.label(format!("{name} for"));
-                if self.plans.is_empty() {
-                    ui.add(egui::TextEdit::singleline(plan).hint_text("Plan.plancraft").desired_width(160.0));
-                } else {
-                    egui::ComboBox::from_id_salt("share_rule_plan").selected_text(plan.as_str()).width(180.0).show_ui(ui, |ui| {
-                        for p in &self.plans {
-                            ui.selectable_value(plan, p.clone(), p);
-                        }
-                    });
-                }
+                ui.add_enabled_ui(!busy, |ui| {
+                    if self.plans.is_empty() {
+                        ui.add(egui::TextEdit::singleline(plan).hint_text("Plan.plancraft").desired_width(160.0));
+                    } else {
+                        egui::ComboBox::from_id_salt("share_rule_plan").selected_text(plan.as_str()).width(180.0).show_ui(ui, |ui| {
+                            for p in &self.plans {
+                                ui.selectable_value(plan, p.clone(), p);
+                            }
+                        });
+                    }
+                });
                 ui.label("is");
                 role_combo(ui, "share_rule_role", role, true, !busy);
                 let valid = plancraft_server::server::valid_plan_name(plan);
@@ -898,6 +959,33 @@ mod tests {
         assert_eq!(local_name_of("bür"), None);
     }
 
+    /// Regression: every line the server logged redrew the whole app, window open or not.
+    #[test]
+    fn log_lines_redraw_only_while_the_log_is_read() {
+        let ctx = Context::default();
+        let shown = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let wake = share_waker(ctx.clone(), std::sync::Arc::clone(&shown));
+        // Frames until egui wants no more of its own (it redraws its first frames).
+        let settle = || {
+            for _ in 0..20 {
+                ctx.run_ui(egui::RawInput::default(), |_| {}).textures_delta.clear();
+                if !ctx.has_requested_repaint() {
+                    return;
+                }
+            }
+            panic!("egui keeps asking for frames");
+        };
+        settle();
+        wake(Wake::Log);
+        assert!(!ctx.has_requested_repaint(), "nobody reads the log");
+        wake(Wake::State);
+        assert!(ctx.has_requested_repaint(), "the server's state always shows");
+        settle();
+        shown.store(true, std::sync::atomic::Ordering::Relaxed);
+        wake(Wake::Log);
+        assert!(ctx.has_requested_repaint(), "the log is unfolded");
+    }
+
     /// Regression: a change wiped every half-filled form in the window, not just its own.
     #[test]
     fn a_change_clears_only_its_own_form() {
@@ -936,7 +1024,7 @@ mod tests {
         let w = ShareFolder::new(&settings, config.clone(), Some(dir.0.clone()));
         let host = ShareHost {
             sharing: None,
-            error: Some("cannot listen on 0.0.0.0:47340: address in use".into()),
+            error: Some("Sharing stopped: cannot listen on 0.0.0.0:47340: address in use".into()),
             last_log: vec!["plancraft-server: cannot listen on 0.0.0.0:47340: address in use".into()],
             ..ShareHost::default()
         };

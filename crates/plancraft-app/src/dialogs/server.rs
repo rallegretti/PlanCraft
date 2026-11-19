@@ -112,8 +112,14 @@ fn sign_in(address: &str, trust: &Trust, user: &str, password: &str) -> Result<C
 }
 
 impl OpenFromServer {
-    /// The window, filled in with the server used last.
+    /// The window, filled in with the server used last (tests; the app says whether to browse).
+    #[cfg(test)]
     pub fn new(settings: &AppSettings) -> Self {
+        Self::new_with(settings, true)
+    }
+
+    /// The window; `browse`: look for servers on the network while it is open.
+    pub fn new_with(settings: &AppSettings, browse: bool) -> Self {
         let last = settings.servers.first().cloned().unwrap_or_default();
         let mut d = OpenFromServer {
             address: last.address,
@@ -126,7 +132,7 @@ impl OpenFromServer {
             confirmed: None,
             // Opening this window is what lets PlanCraft look for servers on the network; it stops
             // when the window closes. Tests never touch the network.
-            browser: if cfg!(test) { None } else { plancraft_server::discovery::Browser::start().ok() },
+            browser: if cfg!(test) || !browse { None } else { plancraft_server::discovery::Browser::start().ok() },
             found: Vec::new(),
         };
         // Servers whose key is trusted here always make the list, first.
@@ -139,7 +145,8 @@ impl OpenFromServer {
     /// The window for a server this PlanCraft started (Share Folder): its key is known, so it is
     /// not asked about.
     pub fn for_own_server(settings: &AppSettings, address: &str, fingerprint: &str) -> Self {
-        let mut w = Self::new(settings);
+        // Its address is known: no looking for servers on the network.
+        let mut w = Self::new_with(settings, false);
         w.address = address.to_string();
         if let Some(k) = settings.servers.iter().find(|k| same_address(&k.address, address)) {
             w.user = k.user.clone();
@@ -148,6 +155,11 @@ impl OpenFromServer {
             w.confirmed = Some((a, Fingerprint(fingerprint.to_string())));
         }
         w
+    }
+
+    /// Signing in or opening a plan is going on.
+    pub fn is_busy(&self) -> bool {
+        self.busy.is_some()
     }
 
     /// Servers heard of on the network (tests).
@@ -367,9 +379,21 @@ impl OpenFromServer {
                         let pinned = |a: &String| settings.fingerprint_for(&normalise_address(a).unwrap_or_default()).is_some();
                         let known = f.addresses.iter().find(|a| pinned(a));
                         let address = known.unwrap_or(&f.address).clone();
-                        let name = RichText::new(&f.name);
-                        let button = egui::Button::new(name).small().truncate();
-                        let r = ui.add_enabled(!busy, button).on_hover_text(format!("{}\n{address}", f.name));
+                        // A trusted server by the name it had when its key was confirmed (an
+                        // announcement may pair a trusted address with any name).
+                        let remembered = known
+                            .and_then(|a| settings.servers.iter().find(|k| same_address(&k.address, a)))
+                            .map(|k| k.name.clone())
+                            .filter(|n| !n.is_empty());
+                        let full = remembered.unwrap_or_else(|| f.name.clone());
+                        // Cut, not squeezed: a name near the end of a row would shrink to "…".
+                        let shown: String = match full.char_indices().nth(40) {
+                            Some((cut, _)) => format!("{}…", full.get(..cut).unwrap_or(&full)),
+                            None => full.clone(),
+                        };
+                        let r = ui
+                            .add_enabled(!busy, egui::Button::new(RichText::new(shown)).small())
+                            .on_hover_text(format!("{full}\n{address}"));
                         // The address, always: two servers can call themselves the same.
                         ui.label(RichText::new(&address).small().color(theme::pal().TEXT_WEAK));
                         // Drawn by PlanCraft, beside the name (a name can't fake it).

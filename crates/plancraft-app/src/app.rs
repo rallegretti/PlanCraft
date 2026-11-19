@@ -128,12 +128,13 @@ pub fn lock(ws: &SharedWorkspace) -> MutexGuard<'_, Workspace> {
 
 /// The plans of `folder` open in this PlanCraft from their files, by file name (a server can't share
 /// them while they are open here).
-fn open_in_folder(ws: &Workspace, folder: &Path) -> Vec<String> {
+fn open_in_folder(paths: &[PathBuf], folder: &Path) -> Vec<String> {
     let Ok(folder) = std::fs::canonicalize(folder) else { return Vec::new() };
-    ws.docs
+    // A plan opened by a bare file name sits in the current folder.
+    let dir_of = |p: &Path| p.parent().map(|d| if d.as_os_str().is_empty() { Path::new(".") } else { d }).map(Path::to_path_buf);
+    paths
         .iter()
-        .filter_map(|d| d.path.as_ref())
-        .filter(|p| p.parent().and_then(|dir| std::fs::canonicalize(dir).ok()).as_deref() == Some(folder.as_path()))
+        .filter(|p| dir_of(p).and_then(|dir| std::fs::canonicalize(dir).ok()).as_deref() == Some(folder.as_path()))
         .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
         .collect()
 }
@@ -996,7 +997,9 @@ impl PlanCraftApp {
             }
             Command::OpenFromServer => {
                 if self.server_dialog.is_none() {
-                    self.server_dialog = Some(dialogs::server::OpenFromServer::new(&self.settings));
+                    // Screenshots never look for servers on the network.
+                    let browse = self.shot.is_none();
+                    self.server_dialog = Some(dialogs::server::OpenFromServer::new_with(&self.settings, browse));
                 }
             }
             Command::ShareFolder => {
@@ -1677,7 +1680,8 @@ impl PlanCraftApp {
                 _ => "Ready".to_string(),
             };
             ui.label(RichText::new(msg).size(12.0));
-            if let Some((folder, state)) = self.share.status() {
+            // Stopped: about to be taken away this frame (and redrawn), not "stopping".
+            if let Some((folder, state)) = self.share.status().filter(|(_, s)| !matches!(s, plancraft_server::sharing::State::Stopped(_))) {
                 ui.separator();
                 let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
                 let (dot, text) = match state {
@@ -2056,7 +2060,10 @@ impl PlanCraftApp {
                             plancraft_server::server::default_config(),
                             dialogs::share::server_program(),
                         ) {
-                            // Never announced: screenshots must not list a server on the network.
+                            // Never announced, and on this computer only: screenshots must not
+                            // offer a server to the network.
+                            let mut program = program;
+                            program.args.extend(["--bind".into(), "127.0.0.1".into()]);
                             self.share.start(&program, &folder, &config, self.settings.share_port, false, ctx);
                         }
                         Command::ShareFolder
@@ -2913,12 +2920,21 @@ impl PlanCraftApp {
         }
         if let Some(d) = self.share_dialog.as_mut() {
             let ws = self.ws.clone();
-            let open_here = move |folder: &Path| open_in_folder(&lock(&ws), folder);
+            // The plans' paths are taken under the lock; the disk is looked at after.
+            let open_here = move |folder: &Path| {
+                let paths: Vec<PathBuf> = lock(&ws).docs.iter().filter_map(|d| d.path.clone()).collect();
+                open_in_folder(&paths, folder)
+            };
             match d.show(&ctx, &mut self.settings, &mut self.share, &open_here) {
                 dialogs::share::Outcome::Open => {}
                 dialogs::share::Outcome::Closed => self.share_dialog = None,
                 dialogs::share::Outcome::OpenFromServer { address, fingerprint } => {
-                    self.server_dialog = Some(dialogs::server::OpenFromServer::for_own_server(&self.settings, &address, &fingerprint));
+                    if self.server_dialog.as_ref().is_some_and(dialogs::server::OpenFromServer::is_busy) {
+                        // Not over a sign-in or an opening still going on there.
+                        self.st.toast(ToastKind::Info, "Open from Server is busy: try again once it is done.");
+                    } else {
+                        self.server_dialog = Some(dialogs::server::OpenFromServer::for_own_server(&self.settings, &address, &fingerprint));
+                    }
                 }
             }
         }
@@ -2928,6 +2944,14 @@ impl PlanCraftApp {
         }
         if let Some(why) = self.share.poll() {
             self.st.toast(ToastKind::Error, format!("Sharing stopped: {why}"));
+        }
+        // A change to who may sign in, made in a Share Folder window since closed.
+        if self.share_dialog.is_none() {
+            match self.share.take_answer() {
+                Some(Ok(said)) => self.st.toast(ToastKind::Info, said),
+                Some(Err(e)) => self.st.toast(ToastKind::Error, format!("Changing who may sign in: {e}")),
+                None => {}
+            }
         }
         self.open_dropped_version();
         if let Some(pdf) = self.dialogs.print.as_mut().and_then(|b| b.dialog.pending_pdf.take()) {
@@ -5871,8 +5895,9 @@ mod shared_tests {
         // Share Folder offers the plan's folder (where starting a server saves the journal).
         assert_eq!(h.state().share_suggest.as_deref(), Some(dir.0.as_path()));
         // The plan is open here, so a server for that folder could not share it yet.
-        assert_eq!(open_in_folder(&lock(&h.state().ws), &dir.0), ["Plan.plancraft"]);
-        assert!(open_in_folder(&lock(&h.state().ws), &dir.0.join("elsewhere")).is_empty());
+        let paths: Vec<PathBuf> = lock(&h.state().ws).docs.iter().filter_map(|d| d.path.clone()).collect();
+        assert_eq!(open_in_folder(&paths, &dir.0), ["Plan.plancraft"]);
+        assert!(open_in_folder(&paths, &dir.0.join("elsewhere")).is_empty());
     }
 
     #[test]

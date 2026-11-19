@@ -53,8 +53,15 @@ mod tests {
     fn a_caught_panic_survives_a_closed_stderr() {
         const CHILD: &str = "PLANCRAFT_GUARD_CLOSED_STDERR";
         if std::env::var_os(CHILD).is_some() {
-            // Wait until the reading end is surely closed.
-            std::thread::sleep(std::time::Duration::from_millis(300));
+            // Wait until standard error is surely gone: a write to it fails.
+            use std::io::Write;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while writeln!(std::io::stderr().lock(), "waiting for the reader to go").is_ok() {
+                if std::time::Instant::now() > deadline {
+                    std::process::exit(4);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
             let caught = catch("closed stderr", || -> i32 { panic!("kaput") });
             std::process::exit(if caught.is_err() { 0 } else { 3 });
         }

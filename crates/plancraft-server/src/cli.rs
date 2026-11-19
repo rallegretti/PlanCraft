@@ -27,6 +27,7 @@ Usage:
       --watch-stdin    stop (saving every plan) when standard input closes, and
                        say on standard output when listening; PlanCraft's
                        File > Share Folder runs the server this way
+      Put -- before FOLDER when its name starts with '-' or is a command word.
 
   plancraft-server user add NAME [--role viewer|editor|admin] [--password-stdin]
   plancraft-server user passwd NAME [--password-stdin]
@@ -46,6 +47,9 @@ struct Args {
     rest: Vec<String>,
     /// `rest` as given (a folder whose name is not valid UTF-8 is still that folder).
     rest_os: Vec<std::ffi::OsString>,
+    /// The first name came after `--`: it is the folder to share, even if it reads like a
+    /// command (`help`, `user`, `--help`).
+    folder_only: bool,
     config: Option<PathBuf>,
     port: Option<String>,
     bind: Option<String>,
@@ -60,6 +64,7 @@ fn parse(args: Vec<std::ffi::OsString>) -> Result<Args, String> {
     let mut out = Args {
         rest: Vec::new(),
         rest_os: Vec::new(),
+        folder_only: false,
         config: None,
         port: None,
         bind: None,
@@ -118,6 +123,9 @@ fn parse(args: Vec<std::ffi::OsString>) -> Result<Args, String> {
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
             _ => {}
         }
+        if options_end && out.rest.is_empty() {
+            out.folder_only = true;
+        }
         out.rest.push(a);
         out.rest_os.push(os);
     }
@@ -141,6 +149,13 @@ fn stderr_log() -> Log {
     })
 }
 
+/// Prints a line of output. Never `println!`: it panics when the output is closed (`… | head`),
+/// after the change was made.
+fn say(text: &str) {
+    use std::io::Write;
+    let _ = writeln!(std::io::stdout().lock(), "{text}");
+}
+
 fn read_password(args: &Args, prompt: &str) -> Result<String, String> {
     if args.password_stdin {
         let mut line = String::new();
@@ -161,6 +176,9 @@ pub fn run(args: Vec<std::ffi::OsString>) -> i32 {
         Ok(()) => 0,
         Err(e) => {
             use std::io::Write;
+            // One line (a folder name may hold a line break): PlanCraft's Share Folder reads the
+            // last line as why the server stopped.
+            let e: String = e.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
             let _ = writeln!(std::io::stderr().lock(), "plancraft-server: {e}");
             1
         }
@@ -169,19 +187,22 @@ pub fn run(args: Vec<std::ffi::OsString>) -> i32 {
 
 fn run_inner(args: Vec<std::ffi::OsString>) -> Result<(), String> {
     let args = parse(args)?;
+    if args.folder_only {
+        return serve(&args);
+    }
     match args.rest.first().map(String::as_str) {
         None | Some("help" | "-h" | "--help") => {
-            println!("{HELP}");
+            say(HELP);
             Ok(())
         }
         Some("-V" | "--version") => {
-            println!("plancraft-server {}", env!("CARGO_PKG_VERSION"));
+            say(&format!("plancraft-server {}", env!("CARGO_PKG_VERSION")));
             Ok(())
         }
         Some("user") => user(&args),
         Some("fingerprint") => {
             let keys = Keys::load_or_create(&server::key_path(&config(&args)?))?;
-            println!("{}", keys.fingerprint());
+            say(&keys.fingerprint().to_string());
             Ok(())
         }
         Some(_) => serve(&args),
@@ -198,13 +219,13 @@ fn user(args: &Args) -> Result<(), String> {
             let r = role(args.role.as_deref().unwrap_or("editor"))?;
             let password = NewPassword::new(&read_password(args, &format!("Password for {name}: "))?)?;
             Users::change(&path, |users| users.add_with(&name, &password, r))?;
-            println!("Added {name} ({}).", r.name());
+            say(&format!("Added {name} ({}).", r.name()));
         }
         Some("passwd") => {
             let name = arg(2, "the user name")?;
             let password = NewPassword::new(&read_password(args, &format!("New password for {name}: "))?)?;
             Users::change(&path, |users| users.set_password_with(&name, &password))?;
-            println!("Changed the password of {name}.");
+            say(&format!("Changed the password of {name}."));
         }
         Some("role") => {
             let name = arg(2, "the user name")?;
@@ -218,26 +239,26 @@ fn user(args: &Args) -> Result<(), String> {
             }
             Users::change(&path, |users| users.set_role(&name, r, args.plan.as_deref()))?;
             match &args.plan {
-                Some(p) => println!("{name} is now {} for {p}.", r.name()),
-                None => println!("{name} is now {}.", r.name()),
+                Some(p) => say(&format!("{name} is now {} for {p}.", r.name())),
+                None => say(&format!("{name} is now {}.", r.name())),
             }
         }
         Some("remove") => {
             let name = arg(2, "the user name")?;
             Users::change(&path, |users| users.remove(&name))?;
-            println!("Removed {name}.");
+            say(&format!("Removed {name}."));
         }
         Some("list") => {
             let users = Users::load(&path)?;
             if users.is_empty() {
-                println!("No users yet.");
+                say("No users yet.");
             }
             for u in users.list() {
                 let extra: Vec<String> = u.plans.iter().map(|(p, r)| format!("{p}: {}", r.name())).collect();
                 if extra.is_empty() {
-                    println!("{}  {}", u.name, u.role.name());
+                    say(&format!("{}  {}", u.name, u.role.name()));
                 } else {
-                    println!("{}  {}  ({})", u.name, u.role.name(), extra.join(", "));
+                    say(&format!("{}  {}  ({})", u.name, u.role.name(), extra.join(", ")));
                 }
             }
         }

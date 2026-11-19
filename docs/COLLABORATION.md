@@ -576,26 +576,33 @@ the `Replica` and the connection. Merging never runs on the app's thread.
   127.0.0.1`) never announces. The announcement points to `computer-plancraft.local`, not the
   computer's own `.local` name, which the system answers for (two answers with different addresses
   could make the system think another computer took its name). Container and virtual-machine
-  interfaces are left out of announcing and listening.
+  interfaces, and VPN and overlay networks (WireGuard, Tailscale, ZeroTier, tunnels), are left out
+  of announcing and listening (interfaces as they are when it starts).
 - Announcing tells everyone on the network the folder's and the computer's names, on every
   network the computer joins while sharing (a laptop taken from the office to a café): the box's
-  tooltip says so, and sharing stops when PlanCraft quits.
+  tooltip says so, and sharing stops when PlanCraft quits. The server also accepts connections on
+  every network the computer is on (it listens on all of them; signing in is still needed).
 - The *Open from Server* window lists the servers it hears of under *On your network*, each with
   its address; clicking one fills in its address. A ✔ (drawn beside the name, so no name can fake
   it) marks a server with an address whose key is already pinned, and that address is used over
   the "best" one, since anyone can add addresses to another server's announcement. It listens only
   while the window is open, and closing it never waits for the network.
 - An announcement is anyone's word: its name is cut short with no control or invisible characters
-  (direction overrides, zero-width characters) and no trust mark in front, and only addresses the
-  window takes are offered (IPv4 addresses on the network first,
-  then global IPv6, then loopback; link-local IPv6 is passed over, as it needs an interface named).
+  (direction overrides, zero-width and blank-looking characters, combining marks, variation
+  selectors, tags) and no check marks or locks anywhere, and only addresses the window takes are
+  offered (IPv4 addresses on the network first, then global IPv6; link-local IPv6 is passed over,
+  as it needs an interface named, and loopback, which would point at whoever connects).
   It never vouches for a key: the fingerprint is still confirmed on the first visit and checked
   against the pin after that. A flood is taken in a bounded amount at a time; if the listener is
   given up on, it listens afresh.
 - No one computer can fill the list (`discovery::FoundList`): an announcement does not say who
-  sent it, so servers are counted by what it does say, at most 4 per host name and 4 per address,
-  64 in all, first come first kept. Servers at an address whose key is trusted here always get in
-  (64 of those too) and are listed first. The window shows them all, scrolling.
+  sent it, so servers are counted by what it does say, at most 4 per host name and 4 per address
+  (whatever the port), 64 in all, first come first kept. One computer sharing more than 4 folders
+  shows 4 of them; the others are opened by typing the address. A server at an address whose key
+  is trusted here always gets in and is listed first, once per trusted address (anyone can add a
+  trusted address to an announcement; a second one claiming it is not taken in), under the name
+  it had when its key was confirmed; trust is looked for among all the addresses given, not only
+  the best few. The window shows them all, scrolling.
 - Nothing announces or listens unless someone shares a folder or opens the window. Tests announce
   on a private mDNS port, so nothing reaches anyone listening on the usual one (the messages still
   go out on the network), with names unique to the run.
@@ -614,7 +621,9 @@ the `Replica` and the connection. Merging never runs on the app's thread.
   while the server is still saving; `APPIMAGE` counts only when PlanCraft runs inside that
   AppImage's mount, since every program an AppImage starts inherits it). It starts in the
   server's private folder, with the environment PlanCraft was started with (not its bundled
-  libraries); the folder goes after `--`, so a name starting with "-" is still a folder. So:
+  libraries); the folder goes after `--`, so a name starting with "-", or reading like a command
+  (`help`, `user`), is still a folder. Its fatal error is always one line (control characters in a
+  folder's name become spaces). So:
   - the server has its own lock identity: it refuses a plan open in one of this PlanCraft's
     windows ("open elsewhere") until it is closed there, and a plan it shares warns when opened
     here directly, exactly as between two computers. The window lists the folder's plans open
@@ -637,7 +646,12 @@ the `Replica` and the connection. Merging never runs on the app's thread.
   or "stopped from outside PlanCraft"). Its log stays in the window. Starting can be cancelled.
 - The server's state (ready, stopped) redraws the app at once; its log lines only while the log is
   unfolded in the open window, at most 4 times a second (a busy server logs a line per sign-in,
-  plan and change).
+  plan and change). A server whose output has ended but that is not gone yet counts as stopping,
+  so the app looks again rather than waiting for news that already came. The server's log never
+  holds a name that is not a user's (it may be a password typed in the wrong box).
+- The window scrolls when it is taller than the screen. A change to who may sign in still being
+  made when the window closes is told when it is done (and the window shows it if reopened); the
+  window looks at the users file every 2 seconds for changes made from the command line.
 - The same window manages people: add (name, password, role), change a role, set or take away a
   role for one plan (*Plans…*, *Same as other plans*), change a password, remove (asked twice).
   It edits the server's users file directly (the one `plancraft serve user …` manages), so

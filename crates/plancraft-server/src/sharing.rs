@@ -171,6 +171,7 @@ impl Sharing {
         // `--`: a folder whose name starts with "-" is still the folder.
         cmd.arg("--").arg(folder);
         // Not wherever PlanCraft was started (a USB stick would stay in use while sharing).
+        let _ = plancraft_core::io::create_private_dir(config);
         if config.is_dir() {
             cmd.current_dir(config);
         }
@@ -266,10 +267,18 @@ impl Sharing {
                 State::Stopped(why)
             }
             Ok(None) if self.stdin.is_none() => State::Stopping,
-            Ok(None) => match lock(&self.inner).ready.clone() {
-                Some(r) => State::Sharing(r),
-                None => State::Starting,
-            },
+            Ok(None) => {
+                let i = lock(&self.inner);
+                match i.ready.clone() {
+                    // Its output has ended but it is not gone yet (it is ending: the system
+                    // closes a program's output just before it can be waited for). Said as
+                    // stopping, so the app looks again in a moment rather than waiting for news
+                    // that already came.
+                    Some(_) if i.log_done => State::Stopping,
+                    Some(r) => State::Sharing(r),
+                    None => State::Starting,
+                }
+            }
             Err(e) => {
                 let why = Some(format!("Cannot tell whether the server is running: {e}"));
                 self.ended = Some(why.clone());

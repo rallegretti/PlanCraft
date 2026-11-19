@@ -804,7 +804,12 @@ fn sign_in(shared: &Arc<Shared>, ip: Option<IpAddr>, out: &Outbox, user: &str, p
         None => {
             let retry = throttle.wait(user, ip).as_secs();
             drop(throttle);
-            (shared.log)(&format!("failed sign-in as '{}' from {}", printable(user), ip.map(|i| i.to_string()).unwrap_or_default()));
+            let from = ip.map(|i| i.to_string()).unwrap_or_default();
+            // An unknown name is not written down: it may be a password typed in the wrong box.
+            match users.get(user) {
+                Some(known) => (shared.log)(&format!("failed sign-in as '{}' from {from}", printable(&known.name))),
+                None => (shared.log)(&format!("failed sign-in with a name that is not a user's, from {from}")),
+            }
             out.push(&ServerMsg::LoginFailed { message: "wrong user name or password".into(), retry_after_secs: retry, credentials: true });
             None
         }

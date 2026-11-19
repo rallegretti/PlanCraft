@@ -150,24 +150,34 @@ pub fn pick_address(addresses: &[IpAddr], port: u16) -> Option<String> {
 /// The addresses to connect to among those a server announced, best first (see
 /// [`pick_address`]), at most eight.
 fn ranked_addresses(addresses: &[IpAddr], port: u16) -> Vec<String> {
-    let rank = |ip: &IpAddr| match ip {
+    usable_addresses(addresses, port).into_iter().take(8).map(|ip| typed(ip, port)).collect()
+}
+
+/// How good an address is to connect to (lower is better); `None`: not one to connect to.
+fn rank(ip: &IpAddr) -> Option<u8> {
+    match ip {
         IpAddr::V4(v4) if v4.is_unspecified() || v4.is_multicast() || v4.is_broadcast() => None,
-        IpAddr::V4(v4) if v4.is_loopback() => Some(3),
+        // Loopback means "this computer" to whoever connects: never an address the network gives.
+        IpAddr::V4(v4) if v4.is_loopback() => None,
         IpAddr::V4(v4) if v4.is_link_local() => Some(2),
         IpAddr::V4(_) => Some(0),
         IpAddr::V6(v6) if v6.is_unspecified() || v6.is_multicast() => None,
-        IpAddr::V6(v6) if v6.is_loopback() => Some(4),
+        IpAddr::V6(v6) if v6.is_loopback() => None,
         // fe80::/10: link-local.
         IpAddr::V6(v6) if v6.segments().first().is_some_and(|s| s & 0xffc0 == 0xfe80) => None,
         IpAddr::V6(_) => Some(1),
-    };
+    }
+}
+
+/// Every address to connect to among `addresses`, best first, each once (none without a port).
+fn usable_addresses(addresses: &[IpAddr], port: u16) -> Vec<IpAddr> {
     if port == 0 {
         return Vec::new();
     }
     let mut ranked: Vec<(u8, IpAddr)> = addresses.iter().filter_map(|ip| rank(ip).map(|r| (r, *ip))).collect();
     ranked.sort_unstable();
     ranked.dedup();
-    ranked.into_iter().take(8).map(|(_, ip)| typed(ip, port)).collect()
+    ranked.into_iter().map(|(_, ip)| ip).collect()
 }
 
 /// An address as people type it in *Open from Server*: the port only when it is not the usual one.
@@ -198,17 +208,31 @@ fn reachable(ip: &IpAddr) -> bool {
 fn virtual_interface(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     let unix = ["docker", "br-", "virbr", "vboxnet", "vmnet", "podman", "cni", "flannel", "lxcbr", "lxdbr"];
+    // macOS: bridge100 and up are virtual machines' (bridge0 is a Thunderbolt bridge).
+    let mac_vm_bridge = name.strip_prefix("bridge").and_then(|n| n.parse::<u32>().ok()).is_some_and(|n| n >= 100);
     (name.starts_with("veth") && !name.starts_with("vethernet"))
         || unix.iter().any(|p| name.starts_with(p))
+        || mac_vm_bridge
+        || name.starts_with("vnic")
         || name.starts_with("vethernet (wsl")
         || name.contains("(default switch)")
+        || name.contains("virtualbox host-only")
+        || name.starts_with("vmware network adapter")
+}
+
+/// VPN and overlay networks (WireGuard, Tailscale, ZeroTier, tunnels): reachable, but announcing
+/// on them tells the folder's and computer's names to everyone on that network.
+fn overlay_interface(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    ["tun", "utun", "tap", "wg", "tailscale", "zt", "ipsec", "ppp"].iter().any(|p| name.starts_with(p))
 }
 
 /// Keeps a daemon off this computer's virtual interfaces (it would announce, and hear, addresses
-/// only this computer reaches).
+/// only this computer reaches) and off VPN and overlay networks.
 fn skip_virtual_interfaces(daemon: &ServiceDaemon) {
-    let names: std::collections::BTreeSet<String> =
-        if_addrs::get_if_addrs().map(|l| l.into_iter().map(|i| i.name).filter(|n| virtual_interface(n)).collect()).unwrap_or_default();
+    let names: std::collections::BTreeSet<String> = if_addrs::get_if_addrs()
+        .map(|l| l.into_iter().map(|i| i.name).filter(|n| virtual_interface(n) || overlay_interface(n)).collect())
+        .unwrap_or_default();
     if !names.is_empty() {
         let _ = daemon.disable_interface(names.into_iter().map(mdns_sd::IfKind::Name).collect::<Vec<_>>());
     }
@@ -229,23 +253,34 @@ pub fn local_addresses(port: u16) -> Vec<String> {
 /// Characters that change how text around them looks without showing themselves (direction
 /// overrides, zero-width characters): a name could look like another with them.
 fn invisible(c: char) -> bool {
-    matches!(c, '\u{00ad}' | '\u{061c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}')
+    matches!(c,
+        // Format characters: soft hyphen, direction marks and overrides, zero-width ones.
+        '\u{00ad}' | '\u{061c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}'
+        | '\u{feff}' | '\u{fff9}'..='\u{fffb}'
+        // Combining marks (drawn over the character before), variation selectors, tags.
+        | '\u{0300}'..='\u{036f}' | '\u{1ab0}'..='\u{1aff}' | '\u{1dc0}'..='\u{1dff}' | '\u{20d0}'..='\u{20ff}'
+        | '\u{fe00}'..='\u{fe0f}' | '\u{fe20}'..='\u{fe2f}' | '\u{e0000}'..='\u{e007f}' | '\u{e0100}'..='\u{e01ef}'
+        // Characters drawn blank: Hangul fillers, the blank Braille pattern, the grapheme joiner.
+        | '\u{115f}' | '\u{1160}' | '\u{3164}' | '\u{ffa0}' | '\u{2800}')
 }
 
-/// Marks PlanCraft draws beside servers it already trusts: a name must not start with one.
+/// Marks like the one PlanCraft draws beside servers it already trusts: a name holds none.
 fn trust_mark(c: char) -> bool {
-    matches!(c, '✔' | '✓' | '☑' | '✅' | '🔒' | '🔐')
+    matches!(c, '✔' | '✓' | '☑' | '✅' | '🗸' | '√' | '🔒' | '🔐' | '🛡')
 }
 
 /// What an announcement says, made safe to show: its name cut short with no control or
-/// invisible characters and no trust mark in front, and the addresses to connect to. `None` when
+/// invisible characters and no trust marks, and the addresses to connect to. `None` when
 /// it gives nothing to connect to.
 pub fn found_from(fullname: &str, port: u16, addresses: &[IpAddr]) -> Option<Found> {
     let addresses = ranked_addresses(addresses, port);
     let address = addresses.first()?.clone();
-    let name: String =
-        mdns_sd::instance_name_unescaped(fullname).chars().filter(|c| !c.is_control() && !invisible(*c)).take(MAX_NAME_CHARS).collect();
-    let name = name.trim_start_matches(|c: char| trust_mark(c) || c.is_whitespace()).trim_end();
+    let name: String = mdns_sd::instance_name_unescaped(fullname)
+        .chars()
+        .filter(|c| !c.is_control() && !invisible(*c) && !trust_mark(*c))
+        .take(MAX_NAME_CHARS)
+        .collect();
+    let name = name.trim();
     let name = if name.is_empty() { address.clone() } else { name.to_string() };
     Some(Found { name, address, addresses })
 }
@@ -256,14 +291,24 @@ struct Heard {
     found: Found,
     /// The host name its announcement points to, lower case.
     host: String,
-    /// One of its addresses is trusted already.
-    trusted: bool,
+    /// Every address it gave to connect to (counted without the port: one computer can announce
+    /// on any number of ports), at most [`MAX_ADDRESSES_COUNTED`].
+    ips: Vec<IpAddr>,
+    /// Its port.
+    port: u16,
+    /// The address it gave whose key is trusted already (normalised), if any.
+    trusted_at: Option<String>,
 }
 
+/// Addresses of one announcement looked at, at most.
+const MAX_ADDRESSES_COUNTED: usize = 32;
+
 /// The servers heard of, kept so no one computer can crowd out the others: at most
-/// [`MAX_PER_HOST`] per host name and per address, [`MAX_FOUND`] in all, first come first kept.
-/// Servers at an address already trusted (their key was confirmed before) always get in (up to
-/// [`MAX_FOUND`] of those too) and come first.
+/// [`MAX_PER_HOST`] per host name and per address (whatever the port), [`MAX_FOUND`] in all,
+/// first come first kept. A server at an address already trusted (its key was confirmed before)
+/// always gets in and comes first, once per trusted address: anyone can add a trusted address to
+/// an announcement, so a second one claiming it is not taken in (the window shows a trusted
+/// server by the name it had when its key was confirmed, and connects to that address anyway).
 #[derive(Default)]
 pub struct FoundList {
     heard: BTreeMap<String, Heard>,
@@ -276,42 +321,62 @@ fn normalised(address: &str) -> String {
 }
 
 impl FoundList {
-    /// The addresses whose key is trusted already (as typed in *Open from Server*).
+    /// The trusted address among `ips` on `port`, normalised, if any.
+    fn trusted_among(&self, ips: &[IpAddr], port: u16) -> Option<String> {
+        ips.iter().map(|ip| normalised(&typed(*ip, port))).find(|a| self.trusted.contains(a))
+    }
+
+    /// The addresses whose key is trusted already (as typed in *Open from Server*). Servers
+    /// already listed are not looked at again (they are, as they announce themselves again).
     pub fn set_trusted<'a>(&mut self, addresses: impl IntoIterator<Item = &'a str>) {
         self.trusted = addresses.into_iter().map(normalised).collect();
-        let trusted = &self.trusted;
-        for h in self.heard.values_mut() {
-            h.trusted = h.found.addresses.iter().any(|a| trusted.contains(&normalised(a)));
+        let mut claimed = std::collections::HashSet::new();
+        let names: Vec<String> = self.heard.keys().cloned().collect();
+        for name in names {
+            let Some(h) = self.heard.get(&name) else { continue };
+            let at = self.trusted_among(&h.ips, h.port);
+            if let Some(h) = self.heard.get_mut(&name) {
+                // One server per trusted address (the first, by name).
+                h.trusted_at = at.filter(|a| claimed.insert(a.clone()));
+            }
         }
     }
 
     /// Takes in a server's announcement (`fullname` as announced, the host name it points to,
     /// its port and addresses). Returns whether the list changed.
     pub fn heard(&mut self, fullname: &str, host: &str, port: u16, addresses: &[IpAddr]) -> bool {
-        let Some(found) = found_from(fullname, port, addresses) else { return self.heard.remove(fullname).is_some() };
+        let Some(mut found) = found_from(fullname, port, addresses) else { return self.heard.remove(fullname).is_some() };
         let host = host.trim_end_matches('.').to_lowercase();
-        let trusted = found.addresses.iter().any(|a| self.trusted.contains(&normalised(a)));
-        if self.heard.get(fullname).is_some_and(|h| h.found == found && h.host == host) {
+        let ips: Vec<IpAddr> = usable_addresses(addresses, port).into_iter().take(MAX_ADDRESSES_COUNTED).collect();
+        // Among all its addresses, not only the best few (more addresses can push it out).
+        let trusted_at = self.trusted_among(&ips, port);
+        if let Some(at) = &trusted_at
+            && !found.addresses.iter().any(|a| normalised(a) == *at)
+            && let Some(ip) = ips.iter().copied().find(|ip| normalised(&typed(*ip, port)) == *at)
+        {
+            found.addresses.insert(0, typed(ip, port));
+        }
+        if self.heard.get(fullname).is_some_and(|h| h.found == found && h.host == host && h.ips == ips) {
             return false;
         }
         // Counted without this server's own earlier announcement.
         let others = || self.heard.iter().filter(|(name, _)| name.as_str() != fullname).map(|(_, h)| h);
-        let admitted = if trusted {
-            others().filter(|h| h.trusted).count() < MAX_FOUND
-        } else if others().filter(|h| !h.trusted).count() >= MAX_FOUND {
-            // Full (checked first: cheap, and what a flood mostly meets).
-            false
-        } else {
-            let same_host = others().filter(|h| !h.trusted && h.host == host).count();
-            let same_address =
-                found.addresses.iter().map(|a| others().filter(|h| !h.trusted && h.found.addresses.contains(a)).count()).max().unwrap_or(0);
-            same_host < MAX_PER_HOST && same_address < MAX_PER_HOST
+        let admitted = match &trusted_at {
+            // Once per trusted address.
+            Some(at) => !others().any(|h| h.trusted_at.as_ref() == Some(at)),
+            None if others().filter(|h| h.trusted_at.is_none()).count() >= MAX_FOUND => false,
+            None => {
+                let untrusted = || others().filter(|h| h.trusted_at.is_none());
+                let same_host = untrusted().filter(|h| h.host == host).count();
+                let same_address = ips.iter().map(|ip| untrusted().filter(|h| h.ips.contains(ip)).count()).max().unwrap_or(0);
+                same_host < MAX_PER_HOST && same_address < MAX_PER_HOST
+            }
         };
         if !admitted {
             // Not taken in (an earlier announcement of it stays as it was).
             return false;
         }
-        self.heard.insert(fullname.to_string(), Heard { found, host, trusted });
+        self.heard.insert(fullname.to_string(), Heard { found, host, ips, port, trusted_at });
         true
     }
 
@@ -324,8 +389,9 @@ impl FoundList {
     pub fn list(&self) -> Vec<Found> {
         let mut list: Vec<&Heard> = self.heard.values().collect();
         list.sort_by(|a, b| {
-            b.trusted
-                .cmp(&a.trusted)
+            b.trusted_at
+                .is_some()
+                .cmp(&a.trusted_at.is_some())
                 .then_with(|| a.found.name.to_lowercase().cmp(&b.found.name.to_lowercase()))
                 .then_with(|| a.found.address.cmp(&b.found.address))
         });
@@ -432,7 +498,9 @@ mod tests {
         assert_eq!(pick_address(&[lan], 47400).as_deref(), Some("192.168.1.20:47400"));
         assert_eq!(pick_address(&[local6, global6], DEFAULT_PORT).as_deref(), Some("[2001:db8::5]"));
         assert_eq!(pick_address(&[global6], 1).as_deref(), Some("[2001:db8::5]:1"));
-        assert_eq!(pick_address(&[local6, lo], DEFAULT_PORT).as_deref(), Some("127.0.0.1"));
+        // Loopback from the network would point at whoever connects: never offered.
+        assert_eq!(pick_address(&[local6, lo], DEFAULT_PORT), None);
+        assert_eq!(pick_address(&[IpAddr::V6(Ipv6Addr::LOCALHOST)], DEFAULT_PORT), None);
         assert_eq!(pick_address(&[local6], DEFAULT_PORT), None);
         assert_eq!(pick_address(&[lan], 0), None);
         assert_eq!(pick_address(&[], DEFAULT_PORT), None);
@@ -465,6 +533,11 @@ mod tests {
             list.heard(&name(usize::from(i)), "flood.local.", DEFAULT_PORT, &[ip(i)]);
         }
         assert_eq!(list.list().len(), MAX_PER_HOST);
+        // One address on many ports: still that address's four.
+        for i in 250..300u16 {
+            list.heard(&name(usize::from(i)), &format!("p{i}.local."), 50_000 + i, &[ip(66)]);
+        }
+        assert_eq!(list.list().len(), MAX_PER_HOST);
         // A real server heard afterwards gets in.
         assert!(list.heard("Plans on studio-pc._plancraft._tcp.local.", "studio-pc-plancraft.local.", DEFAULT_PORT, &[ip(20)]));
         assert!(list.list().iter().any(|f| f.name == "Plans on studio-pc"));
@@ -490,6 +563,20 @@ mod tests {
         let first = list.list().into_iter().next().unwrap();
         assert_eq!((first.name.as_str(), first.address.as_str()), ("Office", "10.0.0.9"));
         assert_eq!(list.list().len(), MAX_FOUND + 1);
+        // Others claiming the trusted address (anyone can add it to an announcement) are not
+        // taken in: one server per trusted address.
+        for i in 0..64 {
+            assert!(!list.heard(&format!("Payroll {i}._plancraft._tcp.local."), "evil.local.", DEFAULT_PORT, &[trusted]));
+        }
+        assert_eq!(list.list().len(), MAX_FOUND + 1);
+        // A trusted address is found among many, however many better ones come before it.
+        let mut list = FoundList::default();
+        list.set_trusted(["192.168.1.9"]);
+        let mut many: Vec<IpAddr> = (1..=20).map(|n| IpAddr::V4(Ipv4Addr::new(1, 0, 0, n))).collect();
+        many.push(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 9)));
+        assert!(list.heard("Plans._plancraft._tcp.local.", "pc.local.", DEFAULT_PORT, &many));
+        let f = list.list().into_iter().next().unwrap();
+        assert!(f.addresses.contains(&"192.168.1.9".to_string()), "{:?}", f.addresses);
         // Trusting it later moves it up too.
         let mut list = FoundList::default();
         list.heard("B._plancraft._tcp.local.", "b.local.", DEFAULT_PORT, &[IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))]);
@@ -500,15 +587,32 @@ mod tests {
     }
 
     #[test]
+    fn vpns_and_overlays_are_not_announced_on() {
+        for name in ["tun0", "utun3", "wg0", "tailscale0", "ztabcdef", "ppp0"] {
+            assert!(overlay_interface(name), "{name}");
+        }
+        for name in ["eth0", "en0", "Wi-Fi", "wlan0"] {
+            assert!(!overlay_interface(name), "{name}");
+        }
+    }
+
+    #[test]
     fn container_bridges_are_not_offered() {
         for name in ["docker0", "br-3f2a", "veth12", "virbr0", "vboxnet0", "vmnet8", "podman0"] {
             assert!(virtual_interface(name), "{name}");
         }
-        for name in ["vEthernet (WSL (Hyper-V firewall))", "vEthernet (Default Switch)"] {
+        for name in [
+            "vEthernet (WSL (Hyper-V firewall))",
+            "vEthernet (Default Switch)",
+            "bridge100",
+            "vnic0",
+            "VirtualBox Host-Only Network",
+            "VMware Network Adapter VMnet8",
+        ] {
             assert!(virtual_interface(name), "{name}");
         }
         // A Hyper-V external switch holds the computer's real address.
-        for name in ["eth0", "enp5s0", "wlan0", "en0", "Ethernet", "Wi-Fi", "tailscale0", "wg0", "vEthernet (External Switch)"] {
+        for name in ["eth0", "enp5s0", "wlan0", "en0", "Ethernet", "Wi-Fi", "tailscale0", "wg0", "vEthernet (External Switch)", "bridge0"] {
             assert!(!virtual_interface(name), "{name}");
         }
     }
@@ -529,10 +633,15 @@ mod tests {
         // No fake trust mark, no hidden characters that make a name look like another.
         let f = found_from("✔ \u{202e}Plans\u{200b} on studio-pc._plancraft._tcp.local.", DEFAULT_PORT, &lan).unwrap();
         assert_eq!(f.name, "Plans on studio-pc");
+        // Blank-looking characters in front of a mark, marks anywhere, combining marks.
+        for fake in ["\u{3164}✔ Plans", "\u{2800}✓Plans", "Pla√ns", "\u{e0041}🗸 Pl\u{0301}ans", "\u{ffa0}\u{fe0f}✅Plans"] {
+            let f = found_from(&format!("{fake}._plancraft._tcp.local."), DEFAULT_PORT, &lan).unwrap();
+            assert_eq!(f.name, "Plans", "{fake:?}");
+        }
         // Every address is kept, best first: one already trusted can be picked over the best.
         let many = [IpAddr::V4(Ipv4Addr::new(192, 168, 1, 9)), IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1)), IpAddr::V4(Ipv4Addr::LOCALHOST)];
         let f = found_from("x._plancraft._tcp.local.", DEFAULT_PORT, &many).unwrap();
-        assert_eq!(f.addresses, ["1.0.0.1", "192.168.1.9", "127.0.0.1"]);
+        assert_eq!(f.addresses, ["1.0.0.1", "192.168.1.9"]);
         let f = found_from("Evil\u{1b}[2J\u{7}name._plancraft._tcp.local.", DEFAULT_PORT, &lan).unwrap();
         assert!(!f.name.chars().any(char::is_control), "{:?}", f.name);
         let long = format!("{}._plancraft._tcp.local.", "x".repeat(10_000));

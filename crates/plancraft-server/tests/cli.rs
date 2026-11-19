@@ -29,23 +29,55 @@ fn the_command_line_waits_for_a_change_made_elsewhere() {
     let config = dir.path().join("config");
     let path = plancraft_server::server::users_path(&config);
     let password = NewPassword::new("correct horse").unwrap();
-    let (inside, wait) = std::sync::mpsc::channel();
-    let app = {
-        let path = path.clone();
-        std::thread::spawn(move || {
-            Users::change(&path, |u| {
-                inside.send(()).unwrap();
-                std::thread::sleep(std::time::Duration::from_millis(1500));
-                u.add_with("Ana", &password, Role::Editor)
-            })
-        })
-    };
-    wait.recv().unwrap();
-    let (ok, _, err) = run(&config, &["user", "add", "ben", "--password-stdin"], "correct horse\n");
-    assert!(ok, "{err}");
-    app.join().unwrap().unwrap();
+    // The command line, waiting for its password.
+    let mut cli = Command::new(env!("CARGO_BIN_EXE_plancraft-server"))
+        .args(["user", "add", "ben", "--password-stdin", "--config"])
+        .arg(&config)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    Users::change(&path, |u| {
+        // While PlanCraft holds the users file, the command line gets its password, hashes it
+        // and comes to the file: it must wait, not save over this change.
+        cli.stdin.take().unwrap().write_all(b"correct horse\n").unwrap();
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        assert!(cli.try_wait().unwrap().is_none(), "the command line finished while the file was held");
+        u.add_with("Ana", &password, Role::Editor)
+    })
+    .unwrap();
+    let out = cli.wait_with_output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let names: Vec<String> = Users::load(&path).unwrap().list().iter().map(|u| u.name.clone()).collect();
     assert_eq!(names, ["Ana", "ben"]);
+}
+
+/// After `--`, the name is the folder to share, even one that reads like a command; and why the
+/// server stopped is one line, whatever the folder's name holds.
+#[test]
+fn a_name_after_dashes_is_always_the_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    let serve = |name: &str| {
+        let out = Command::new(env!("CARGO_BIN_EXE_plancraft-server"))
+            .current_dir(dir.path())
+            .arg("--config")
+            .arg(&config)
+            .args(["--port", "0", "--bind", "127.0.0.1", "--no-announce", "--", name])
+            .output()
+            .unwrap();
+        (out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
+    };
+    for name in ["--help", "help", "user", "fingerprint"] {
+        let (ok, out, err) = serve(name);
+        assert!(!ok && !out.contains("Usage") && err.contains("cannot open the folder"), "{name}: {out} {err}");
+    }
+    #[cfg(unix)]
+    {
+        let (ok, _, err) = serve("two\nlines");
+        assert!(!ok && err.trim_end().lines().count() == 1 && err.starts_with("plancraft-server: "), "{err:?}");
+    }
 }
 
 #[test]
