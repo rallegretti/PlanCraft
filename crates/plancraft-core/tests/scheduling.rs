@@ -364,6 +364,27 @@ fn an_outline_change_never_links_a_task_to_its_own_summary() {
     assert!(q.summary_self_links().is_empty());
 }
 
+/// Regression: an outline change could make links go round in a circle through a summary (S
+/// links to X, X to Y, then Y moved under S), which linking itself refuses.
+#[test]
+fn an_outline_change_never_makes_links_go_round_in_a_circle() {
+    let mut p = project();
+    let s = task(&mut p, "S", 1);
+    let s1 = task(&mut p, "S1", 1);
+    let x = task(&mut p, "X", 1);
+    let y = task(&mut p, "Y", 1);
+    p.indent(s1).unwrap();
+    p.link(s.into(), x, LinkType::FS, Lag::None).unwrap();
+    p.link(x.into(), y, LinkType::FS, Lag::None).unwrap();
+    let before = p.tasks.clone();
+    let e = p.move_tasks_before(&[y], Some(s1)).unwrap_err().to_string();
+    assert!(e.contains("circle"), "{e}");
+    assert_eq!(p.tasks, before, "nothing moved");
+    assert!(!recalculate(&mut p).warnings.iter().any(|w| w.contains("Circular")));
+    // Moves that make no circle still go through.
+    p.move_tasks_before(&[y], Some(s)).unwrap();
+}
+
 /// Regression: dropping a selection onto the first row of one of its own blocks moved nothing.
 #[test]
 fn a_selection_dropped_on_its_own_first_row_gathers_there() {

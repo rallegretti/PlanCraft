@@ -42,13 +42,23 @@ thread_local! {
     static DISK_SEEN: std::cell::RefCell<std::collections::HashMap<u64, Seen>> = std::cell::RefCell::default();
 }
 
-/// Runs `f` (a tool call or a resource read) with every open document's file checked first,
-/// outside the workspace lock: a slow or hung network share must never stall the app while the
-/// lock is held. The views below use what was found.
-pub fn checking_disk_first<R>(ws: &std::sync::Mutex<Workspace>, f: impl FnOnce() -> R) -> R {
+/// Runs `f` (a tool call or a resource read) with the files of the documents `pick` names
+/// (`None`: every open document) checked first, outside the workspace lock: a slow or hung
+/// network share must never stall the app while the lock is held, nor a call about another
+/// plan. The views below use what was found.
+pub fn checking_disk_first<R>(
+    ws: &std::sync::Mutex<Workspace>,
+    pick: impl FnOnce(&Workspace) -> Option<Vec<u64>>,
+    f: impl FnOnce() -> R,
+) -> R {
     let targets: Vec<(u64, Option<std::path::PathBuf>, Option<plancraft_core::io::DiskStamp>)> = {
         let ws = ws.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        ws.docs.iter().map(|d| (d.handle, d.path.clone(), d.disk_stamp())).collect()
+        let picked = pick(&ws);
+        ws.docs
+            .iter()
+            .filter(|d| picked.as_ref().is_none_or(|p| p.contains(&d.handle)))
+            .map(|d| (d.handle, d.path.clone(), d.disk_stamp()))
+            .collect()
     };
     let seen: std::collections::HashMap<u64, Seen> = targets
         .into_iter()

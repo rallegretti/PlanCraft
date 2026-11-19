@@ -64,7 +64,7 @@ fn find_doc<'a>(ws: &'a Workspace, key: &str) -> Option<&'a Document> {
 }
 
 pub fn read(server: &McpServer, uri: &str) -> Result<Value, RpcError> {
-    crate::views::checking_disk_first(server.workspace(), || read_checked(server, uri))
+    crate::views::checking_disk_first(server.workspace(), |_| None, || read_checked(server, uri))
 }
 
 fn read_checked(server: &McpServer, uri: &str) -> Result<Value, RpcError> {

@@ -683,6 +683,7 @@ impl PlanCraftApp {
             Some(p) => doc.save_as(&p).map(|_| p),
             None => doc.save().map(|_| doc.path.clone().unwrap_or_default()),
         };
+        ws.keep_locks();
         drop(ws);
         if let Err(plancraft_core::io::FileError::ChangedOnDisk { .. }) = &r {
             // Never silently overwrite another program's changes: ask first.
@@ -2646,7 +2647,14 @@ impl PlanCraftApp {
             self.st.sel.resources.retain(|id| p.resource(*id).is_some());
             // Nor tasks the filter or search hides: commands on "the selected tasks" (Task
             // Information, dragging rows, clearing a field) would change tasks nobody can see.
-            if (self.st.filter != crate::state::TaskFilter::All || !self.st.search.trim().is_empty()) && !self.st.sel.tasks.is_empty() {
+            // Views that list every task (Resource Usage, the resource views, Timesheet) select
+            // tasks the filter leaves out of the others: those stay.
+            let filtered_view =
+                !matches!(self.st.view, ViewKind::ResourceSheet | ViewKind::ResourceUsage | ViewKind::Workload | ViewKind::Timesheet);
+            if filtered_view
+                && (self.st.filter != crate::state::TaskFilter::All || !self.st.search.trim().is_empty())
+                && !self.st.sel.tasks.is_empty()
+            {
                 let shown: HashSet<TaskId> =
                     views::search_order(p, &mut self.st).into_iter().filter_map(|i| p.tasks.get(i).map(|t| t.id)).collect();
                 self.st.sel.tasks.retain(|id| shown.contains(id));
@@ -3055,6 +3063,11 @@ mod ui_tests {
         h.state_mut().st.search = name;
         h.run_steps(2);
         assert_eq!(h.state().st.sel.tasks.iter().copied().collect::<Vec<_>>(), vec![a], "only the task still shown stays selected");
+        // Resource Usage lists every task: one selected there stays selected.
+        h.state_mut().st.view = ViewKind::ResourceUsage;
+        h.state_mut().st.sel.tasks = [b].into_iter().collect();
+        h.run_steps(2);
+        assert!(h.state().st.sel.tasks.contains(&b), "a view that doesn't filter keeps its selection");
     }
 
     fn focus_task_grid(h: &mut Harness<'static, PlanCraftApp>) {
@@ -4252,6 +4265,46 @@ mod ui_tests {
         // Released far to the right, over the chart.
         drag(&mut h, from, egui::pos2(1300.0, to.y));
         assert_eq!(tasks(&h), before, "dropped off the rows: nothing moves");
+    }
+
+    /// Regression: a row drag remembered a row number, so when an agent's change moved the rows
+    /// during the drag, the task now on that row moved instead of the one dragged.
+    #[test]
+    fn a_row_drag_moves_the_task_dragged_even_when_rows_move_meanwhile() {
+        let mut h = harness();
+        let before = tasks(&h);
+        let dragged = before[1].clone();
+        let button =
+            |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        let (from, to) = (row_number_at(&h, 1), row_number_at(&h, 5));
+        h.event(egui::Event::PointerMoved(from));
+        h.run_steps(1);
+        h.event(button(from, true));
+        h.run_steps(1);
+        for k in 1..=4 {
+            h.event(egui::Event::PointerMoved(from + (to - from) * (k as f32 / 8.0)));
+            h.run_steps(1);
+        }
+        {
+            let ws = h.state().ws.clone();
+            let mut ws = lock(&ws);
+            ws.active_doc_mut()
+                .unwrap()
+                .edit_as("Add Task", ChangeSource::Agent, |p| {
+                    p.add_task("Agent's task", Some(0));
+                })
+                .unwrap();
+        }
+        for k in 5..=8 {
+            h.event(egui::Event::PointerMoved(from + (to - from) * (k as f32 / 8.0)));
+            h.run_steps(1);
+        }
+        h.event(button(to, false));
+        h.run_steps(3);
+        let after = tasks(&h);
+        assert_eq!(after[0], "Agent's task", "the agent's task stays where it was put");
+        assert_eq!(after[1], before[0], "the task now on the dragged row stays: {after:?}");
+        assert_ne!(after[2], dragged, "the dragged task moved: {after:?}");
     }
 
     /// Fill Down copies the top selected cell into the selected cells below it, in one undo step.

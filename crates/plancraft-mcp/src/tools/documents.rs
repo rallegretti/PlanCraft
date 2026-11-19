@@ -303,6 +303,10 @@ fn save_project(ctx: &Ctx, a: &Args) -> ToolResult {
             "path": doc.path.as_ref().map(|p| p.display().to_string()),
         }))
     })?;
+    ctx.with_workspace(|ws| {
+        ws.keep_locks();
+        Ok(())
+    })?;
     ctx.mark_changed();
     Ok(out)
 }

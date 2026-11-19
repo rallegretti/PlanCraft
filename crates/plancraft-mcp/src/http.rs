@@ -51,6 +51,28 @@ pub const MAX_REQUESTS: usize = 256;
 /// closing, so the client sees the reply instead of a reset connection.
 const DRAIN_TIME: Duration = Duration::from_secs(1);
 const DRAIN_BYTES: u64 = 64 * 1024;
+/// Connections draining at once, at most (their slots are already given back): past this a
+/// reply is closed without draining, so a client opening connections fast can't pile up threads.
+const MAX_DRAINING: usize = 64;
+static DRAINING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A place among the [`MAX_DRAINING`] connections draining, given back when dropped.
+struct Draining;
+
+impl Draining {
+    fn take() -> Option<Draining> {
+        use std::sync::atomic::Ordering;
+        // Taken first, so the place is given back by the guard even when there was none.
+        let place = Draining;
+        (DRAINING.fetch_add(1, Ordering::SeqCst) < MAX_DRAINING).then_some(place)
+    }
+}
+
+impl Drop for Draining {
+    fn drop(&mut self) {
+        DRAINING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
 /// Longest wait for any one read from a client.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// Time a client has to send the whole request (headers and body).
@@ -340,6 +362,7 @@ fn serve_connection(server: &McpServer, mut stream: TcpStream, loopback: bool, t
     // data can reset the connection before the client sees the reply, so drain a little first,
     // for at most DRAIN_TIME in all (a client dripping bytes can't keep its slot).
     let _ = stream.shutdown(Shutdown::Write);
+    let Some(_draining) = Draining::take() else { return };
     let Some(until) = Instant::now().checked_add(DRAIN_TIME) else { return };
     let mut left = DRAIN_BYTES;
     let mut chunk = [0u8; 8 * 1024];
@@ -596,24 +619,57 @@ fn read_and_route(
     if loopback && !head.header("Host").is_some_and(is_loopback_host) {
         return Ok(Reply::text(403, "Forbidden: invalid Host header"));
     }
-    if !authorized(&head, token) {
-        return Ok(Reply::text(401, "Unauthorized: send the PlanCraft session token as 'Authorization: Bearer <token>'")
-            .header("WWW-Authenticate", "Bearer realm=\"plancraft\""));
-    }
-    // Past the token check: the reply proves this server knows the token, when asked.
-    let proof = head
-        .header(crate::session::NONCE_HEADER)
-        .map(str::trim)
-        .filter(|n| crate::session::valid_nonce(n))
-        .map(|n| crate::session::proof(token, n));
-    let proved = |r: Reply| match &proof {
-        Some(p) => r.header(crate::session::PROOF_HEADER, p),
+    let nonce = head.header(crate::session::NONCE_HEADER).map(str::trim).filter(|n| crate::session::valid_nonce(n));
+    // A bearer token, or a request signed with it (`plancraft mcp --attach`, which never sends
+    // the token itself), checked once its body is read.
+    let signed = match (authorized(&head, token), nonce, head.header(crate::session::AUTH_HEADER)) {
+        (true, ..) => None,
+        (false, Some(n), Some(mac)) if head.method == "POST" && (head.path.is_empty() || head.path == "/mcp") => {
+            Some(Signed { nonce: n, mac: mac.trim(), token })
+        }
+        _ => return Ok(unauthorized()),
+    };
+    // Once the request is known to come from a holder of the token, its reply proves this
+    // server holds it too (when a nonce was sent): signed over the nonce, status and body.
+    let proven = std::cell::Cell::new(false);
+    let proved = |r: Reply| match nonce.filter(|_| proven.get()) {
+        Some(n) => {
+            let mac = crate::session::reply_mac(token, n, r.status, &r.body);
+            r.header(crate::session::PROOF_HEADER, &mac)
+        }
         None => r,
     };
-    authorized_route(server, conn, &head, body_start, limits, slots).map(proved).map_err(proved)
+    authorized_route(server, conn, &head, body_start, limits, slots, signed, &proven).map(proved).map_err(proved)
 }
 
-/// [`read_and_route`] past the token check.
+fn unauthorized() -> Reply {
+    Reply::text(401, "Unauthorized: send the PlanCraft session token as 'Authorization: Bearer <token>'")
+        .header("WWW-Authenticate", "Bearer realm=\"plancraft\"")
+}
+
+/// A request signed with the session token (see [`crate::session::AUTH_HEADER`]).
+struct Signed<'a> {
+    nonce: &'a str,
+    mac: &'a str,
+    token: &'a str,
+}
+
+/// Frees the pre-authentication slot and takes a request slot.
+fn take_request_slot(limits: HttpLimits, slots: &mut Slots) -> Result<(), Reply> {
+    slots.pending = None;
+    match Active::take(&slots.busy, limits.max_requests) {
+        Some(slot) => {
+            slots.request = Some(slot);
+            Ok(())
+        }
+        None => Err(Reply::text(503, "Service Unavailable: too many requests at once").header("Retry-After", "1")),
+    }
+}
+
+/// [`read_and_route`] past the token check (for a signed request, the check happens once the
+/// body is read, still holding the pre-authentication slot). `proven` is set once the request is
+/// known to come from a holder of the token.
+#[allow(clippy::too_many_arguments)]
 fn authorized_route(
     server: &McpServer,
     conn: &mut Conn<'_>,
@@ -621,12 +677,14 @@ fn authorized_route(
     body_start: usize,
     limits: HttpLimits,
     slots: &mut Slots,
+    signed: Option<Signed<'_>>,
+    proven: &std::cell::Cell<bool>,
 ) -> Result<Reply, Reply> {
-    // Free the pre-authentication slot and take a request slot.
-    slots.pending = None;
-    match Active::take(&slots.busy, limits.max_requests) {
-        Some(slot) => slots.request = Some(slot),
-        None => return Ok(Reply::text(503, "Service Unavailable: too many requests at once").header("Retry-After", "1")),
+    if signed.is_none() {
+        proven.set(true);
+        if let Err(busy) = take_request_slot(limits, slots) {
+            return Ok(busy);
+        }
     }
     if !(head.path.is_empty() || head.path == "/mcp") {
         return Ok(Reply::text(404, "Not found: the MCP endpoint is /mcp"));
@@ -671,6 +729,16 @@ fn authorized_route(
         continue_if_asked(conn, head)?;
         conn.body_with_length(body_start, len)?
     };
+    if let Some(s) = signed {
+        let expected = crate::session::request_mac(s.token, s.nonce, &body);
+        if !crate::session::tokens_match(s.mac, &expected) || !crate::session::take_nonce(s.nonce) {
+            return Ok(unauthorized());
+        }
+        proven.set(true);
+        if let Err(busy) = take_request_slot(limits, slots) {
+            return Ok(busy);
+        }
+    }
 
     let msg: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,

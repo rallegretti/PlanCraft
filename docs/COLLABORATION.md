@@ -284,7 +284,8 @@ saving, and the next opening starts from what is on disk. If the plan file was c
 while shared (someone ignored the lock), or replaced by a link, it is not overwritten: the shared
 plan is saved to a new hidden `.NAME shared copy <time>.plancraft` instead (never through a link,
 and not listed as a plan of its own, so it cannot bypass the plan's access rules), and the log
-says so. The journal's header names that copy (`saved_to`): until a person keeps one version as
+says so. The journal names that copy (in the save record, written before the copy, and then in
+the header, `saved_to`): until a person keeps one version as
 the plan (and removes the journal if they keep the outside one), the server refuses to open the
 plan again, rather than starting afresh from the outside file and leaving every shared change in
 the copy unnoticed. A plan file that cannot be written is tried again after 30 seconds. The
@@ -307,16 +308,20 @@ An editor cannot make a plan unusable:
 - The host keeps at most 64 MB of recent changes for catching up (`sync::LOG_BYTES`), whatever
   their number.
 - A change may set at most 256 values of one item (or of the plan), with names of at most 64
-  characters, and 200,000 values in all (`sync::check_size`, before rebasing): rebasing costs
-  time in proportion to them, and one change of 300,000 made-up fields held a plan for most of
-  a minute.
+  characters, and 2,000,000 values in all (`sync::check_size`, before rebasing; room for a few
+  values on every task and assignment of the largest plan): rebasing costs time in proportion to
+  them, and one change of 300,000 made-up fields on one task held a plan for most of a minute.
 - Large frames (over 1 MiB) from all connections together may hold at most 256 MB while they are
-  read and handled (`server::MAX_INBOUND_BYTES`); one that does not fit closes its connection,
-  and the client sends it again after reconnecting.
+  read and handled (`server::MAX_INBOUND_BYTES`), one at a time per account; one that does not
+  fit is answered "busy" and closes its connection, and the client sends it again after
+  reconnecting. Once its length is known a frame must arrive within a minute, or longer at
+  256 KB/s for a large one (`wire::frame_deadline`), so a sender trickling bytes cannot keep its
+  room.
 
 Nor can a viewer flood the others: who is where goes out from upkeep (every 200 ms at most),
 not once per message, and one connection gets the whole plan at most every 2 seconds (asks
-in between are answered once, from upkeep).
+in between are answered once, from upkeep). The whole plan is written out once per version and
+shared by every join and resync until it changes.
 
 The server does not check whose block a new item's id came from: an undo may rightly bring back a
 task with an id from someone else's block. Each copy refuses ids outside its own blocks instead
@@ -374,8 +379,11 @@ One JSON object per frame, tagged by `type`; see the types for the fields.
   addresses together, each try for that name waits up to a minute, so someone guessing from many
   addresses gets about a try a minute. Networks where that name signed in during the last 30
   days skip this wait (an IPv4 address, or an IPv6 /64, as a computer's temporary IPv6 addresses
-  change within it), so the guesser cannot keep the real person out. The list is kept, owner-only,
-  in `trusted-sign-ins.json` in the server's private folder, so a restart does not lose it.
+  change within it), so the guesser cannot keep the real person out; ten failures for the name
+  from inside such a network within the hour end that network's exemption, since one computer
+  can use any address in a /64. The list is kept, owner-only, in `trusted-sign-ins.json` in the
+  server's private folder (written from upkeep, never while a sign-in waits), so a restart does
+  not lose it.
   Unknown names take as long to check as known ones; at most two passwords are checked at once.
 - On Unix the key and users files are 0600 and made so again if loosened. On Windows they rely on
   the folder's permissions (owner-only access lists need platform code: phase 5).

@@ -122,7 +122,7 @@ fn a_crash_after_the_plan_file_was_written_does_not_apply_changes_twice() {
     let version = plan.host().version();
     // The first two steps of a save, then the power fails.
     let text = io::to_json(plan.host().project()).unwrap();
-    plan.journal.append(&Record::Saving { version, plan_hash: plan_hash(text.as_bytes()) }).unwrap();
+    plan.journal.append(&Record::Saving { version, plan_hash: plan_hash(text.as_bytes()), to: None }).unwrap();
     io::write_atomic(&path, text.as_bytes(), Privacy::KeepExisting).unwrap();
     drop(plan);
 
@@ -140,7 +140,7 @@ fn a_crash_before_the_plan_file_was_written_replays_the_journal() {
     add_task(&mut plan, 1, &mut r, &rx, "Replayed");
     let version = plan.host().version();
     let text = io::to_json(plan.host().project()).unwrap();
-    plan.journal.append(&Record::Saving { version, plan_hash: plan_hash(text.as_bytes()) }).unwrap();
+    plan.journal.append(&Record::Saving { version, plan_hash: plan_hash(text.as_bytes()), to: None }).unwrap();
     drop(plan);
 
     let plan = open(&path);
@@ -246,6 +246,32 @@ fn a_plan_whose_shared_work_went_to_a_copy_is_not_reopened_from_the_outside_file
     std::fs::rename(&copy, &path).unwrap();
     let again = open(&path);
     assert!(has_task(again.host.project(), "Shared work"));
+}
+
+/// Regression: a crash during the first save to the hidden copy (after the copy was written,
+/// before the journal's new header) reopened the plan from the outside file, silently.
+#[test]
+fn a_crash_while_first_saving_to_the_copy_still_refuses_the_outside_file() {
+    let (_dir, path) = setup();
+    let mut plan = open(&path);
+    let (mut r, rx) = join(&mut plan, 1, ClientId::new());
+    add_task(&mut plan, 1, &mut r, &rx, "Shared work");
+    let mut outside = io::load(&path).unwrap();
+    outside.name = "Changed outside".into();
+    io::save(&outside, &path).unwrap();
+    // The steps of that save, up to the power failure: the record, then the copy.
+    let text = io::to_json(plan.host().project()).unwrap();
+    let copy = path.with_file_name(".Plan.plancraft shared copy 2026-01-01 000000.plancraft");
+    let to = Some(copy.file_name().unwrap().to_string_lossy().into_owned());
+    plan.journal.append(&Record::Saving { version: plan.host().version(), plan_hash: plan_hash(text.as_bytes()), to }).unwrap();
+    io::write_atomic(&copy, text.as_bytes(), Privacy::OwnerOnly).unwrap();
+    drop(plan);
+    let e = SharedPlan::open(&path, "Plan.plancraft", crate::quiet()).err().expect("refused until a person picks a version");
+    assert!(e.contains("shared copy") && !e.contains(&*path.parent().unwrap().to_string_lossy()), "names only: {e}");
+    // Moving the copy away keeps the outside version.
+    std::fs::remove_file(&copy).unwrap();
+    let plan = open(&path);
+    assert_eq!(plan.host().project().name, "Changed outside");
 }
 
 fn hidden_files(near: &Path, what: &str) -> Vec<PathBuf> {

@@ -22,7 +22,7 @@ mod replica;
 mod undo;
 
 pub use host::{Change, Entry, Host, Outcome};
-pub use patch::{MAX_CHANGED_FIELDS, MAX_ITEM_FIELDS, Rebased, apply, check_size, diff, fit_counters, rebase};
+pub use patch::{MAX_CHANGED_FIELDS, MAX_FIELD_NAME, MAX_ITEM_FIELDS, Rebased, apply, check_size, diff, fit_counters, rebase};
 pub use replica::{Merged, Replica};
 pub use undo::{Reversal, reverse};
 

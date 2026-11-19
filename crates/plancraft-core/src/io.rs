@@ -366,9 +366,12 @@ pub fn write_atomic_stamped(path: &Path, bytes: &[u8], privacy: Privacy) -> std:
             f.set_permissions(m.permissions())?;
         }
         f.sync_all()?;
-        let m = f.metadata()?;
-        let stamp = DiskStamp { modified: m.modified().ok(), len: m.len() };
+        // Stamped once closed, by the temporary name (only this save writes there): network
+        // shares (SMB) set a file's time when it is closed, so a stamp taken before would never
+        // match the file read by name afterwards.
         drop(f);
+        let m = std::fs::symlink_metadata(&tmp)?;
+        let stamp = DiskStamp { modified: m.modified().ok(), len: m.len() };
         rename_over(&tmp, path)?;
         sync_dir(&dir);
         Ok(stamp)

@@ -51,10 +51,12 @@ program on the same computer must not be able to read or change them just by fin
 The app also writes the URL and token to a session file that only your user account can read
 (`mcp-session.json` in PlanCraft's config directory; 0600 inside a 0700 directory on macOS and Linux). The
 `--attach` bridge reads it, so Claude Code never needs the token itself and keeps working after the app restarts.
-The bridge also checks that it is talking to that PlanCraft: each request carries a fresh random
-`X-PlanCraft-Nonce`, and the app answers with `X-PlanCraft-Proof` (a SHA-256 of the token and the nonce). A reply
-without it comes from another program listening where PlanCraft was (it crashed and left its session file) and
-never reaches the agent:
+The bridge never sends the token itself, and checks that it is talking to that PlanCraft: each request carries a
+fresh random `X-PlanCraft-Nonce` and, in `X-PlanCraft-Auth`, an HMAC-SHA256 keyed by the token over the nonce and
+the body (in place of `Authorization: Bearer`); the app takes each nonce once and answers with `X-PlanCraft-Proof`,
+an HMAC over the nonce, the status and its reply. A reply without a valid proof comes from another program
+listening where PlanCraft was (it crashed and left its session file): nothing of it, not even its text in an
+error, reaches the agent, and that program never learns the token:
 
 ```sh
 claude mcp add plancraft -- /path/to/plancraft mcp --attach

@@ -920,7 +920,9 @@ impl Workspace {
         let mut doc = self.docs.remove(i);
         // Another open document on the same file (Save As onto a plan already open) keeps the
         // lock: it is handed over rather than released.
-        let same_file = |d: &Document| d.path.is_some() && d.path == doc.path;
+        let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let closing = doc.path.as_deref().map(canonical);
+        let same_file = |d: &Document| closing.is_some() && d.path.as_deref().map(canonical) == closing;
         if doc.lock == LockState::Held
             && let Some(other) = self.docs.iter_mut().find(|d| same_file(d))
         {
@@ -935,6 +937,17 @@ impl Workspace {
             other => other,
         };
         true
+    }
+
+    /// Writes again the lock files of documents that hold one, where it went missing: after a
+    /// Save As away from a file another open document also has (Save As onto a plan already
+    /// open), the first gave that file's lock back, which the other still relies on.
+    pub fn keep_locks(&mut self) {
+        for doc in &mut self.docs {
+            if doc.lock == LockState::Held {
+                doc.claim_lock();
+            }
+        }
     }
 
     /// Gives back every lock file this workspace holds (when quitting).

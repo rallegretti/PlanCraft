@@ -92,6 +92,14 @@ impl Client {
         Ok(())
     }
 
+    /// Sends the length of a frame of `len` bytes and only `start` of it (tests of senders that
+    /// stall).
+    #[doc(hidden)]
+    pub fn send_start(&mut self, len: usize, start: &[u8]) -> Result<(), ClientError> {
+        self.sender.send_start(len, start)?;
+        Ok(())
+    }
+
     /// The next message from the server.
     pub fn recv(&mut self) -> Result<ServerMsg, ClientError> {
         let bytes = self.receiver.recv(MAX_SERVER_FRAME)?;

@@ -264,20 +264,34 @@ impl Project {
         out
     }
 
-    /// Runs an outline change `f`, refusing it (and putting the tasks back) when it makes a task a
-    /// subtask of a summary it is linked to, or a summary of a task linked to it.
+    /// Runs an outline change `f`, refusing it (and putting the tasks back) when it leaves links
+    /// that [`Project::link`] would refuse: a task under a summary it is linked to (or a summary of
+    /// a task linked to it), or links that now go round in a circle (a summary's links count for
+    /// its subtasks). (A task that becomes a summary keeps a finish-to-finish link, which the
+    /// scheduler then ignores with a warning: see [`SUMMARY_FINISH_LINK`].)
     fn keeping_summaries_unlinked<R>(&mut self, f: impl FnOnce(&mut Self) -> PlanResult<R>) -> PlanResult<R> {
         let had = self.summary_self_links();
+        let had_cycle = crate::schedule::has_cycle(self);
         let tasks = self.tasks.clone();
         let r = f(self)?;
-        if let Some((p, s)) = self.summary_self_links().into_iter().find(|l| !had.contains(l)) {
-            self.tasks = tasks;
-            let name = |id: TaskId| self.task(id).map(|t| t.name.clone()).unwrap_or_default();
-            return invalid(format!(
+        let name = |p: &Self, id: TaskId| p.task(id).map(|t| t.name.clone()).unwrap_or_default();
+        let refusal = if let Some((p, s)) = self.summary_self_links().into_iter().find(|l| !had.contains(l)) {
+            Some(format!(
                 "'{}' is linked to '{}', and a task cannot be linked to its own summary; remove the link first",
-                name(s),
-                name(p)
-            ));
+                name(self, s),
+                name(self, p)
+            ))
+        } else if !had_cycle && crate::schedule::has_cycle(self) {
+            Some(
+                "this would make the links go round in a circle (a summary's links count for all of its subtasks); remove a link first"
+                    .into(),
+            )
+        } else {
+            None
+        };
+        if let Some(why) = refusal {
+            self.tasks = tasks;
+            return invalid(why);
         }
         Ok(r)
     }

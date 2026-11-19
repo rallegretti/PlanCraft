@@ -16,9 +16,11 @@ const ITEM_SCHEDULE: &str = "sched";
 /// Values one item (or the plan itself) may have changed in one patch, at most.
 pub const MAX_ITEM_FIELDS: usize = 256;
 /// The longest field name a patch may carry.
-const MAX_FIELD_NAME: usize = 64;
-/// Values one patch may change in existing items and the plan, at most (new items aside).
-pub const MAX_CHANGED_FIELDS: usize = 200_000;
+pub const MAX_FIELD_NAME: usize = 64;
+/// Values one patch may change in existing items and the plan, at most (new items aside): room
+/// for a few values on every task and assignment of the largest plan (progress updated
+/// everywhere at once), far below what would hold a shared plan up.
+pub const MAX_CHANGED_FIELDS: usize = 2_000_000;
 
 /// A task's place in the outline (with the order of the tasks, what makes it a subtask).
 const OUTLINE_LEVEL: &str = "outline_level";
