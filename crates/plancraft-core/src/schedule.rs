@@ -1109,6 +1109,18 @@ fn rollup_tracking(p: &mut Project) {
     }
 }
 
+/// Whether the plan's links (summaries expanded, as the scheduler follows them) go round in a
+/// circle somewhere. `false` if the check itself fails.
+pub(crate) fn has_cycle(p: &Project) -> bool {
+    guard::catch("cycle check", || {
+        let mut eng = Engine::new(p);
+        eng.build_edges();
+        eng.topo_sort();
+        eng.warnings.iter().any(|w| w.starts_with("Circular dependency"))
+    })
+    .unwrap_or(false)
+}
+
 /// Recalculates the whole schedule in place.
 ///
 /// Never panics: if the engine hits a bug, the project keeps its previous dates and gets a

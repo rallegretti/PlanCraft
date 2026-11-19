@@ -50,7 +50,13 @@ program on the same computer must not be able to read or change them just by fin
 
 The app also writes the URL and token to a session file that only your user account can read
 (`mcp-session.json` in PlanCraft's config directory; 0600 inside a 0700 directory on macOS and Linux). The
-`--attach` bridge reads it, so Claude Code never needs the token itself and keeps working after the app restarts:
+`--attach` bridge reads it, so Claude Code never needs the token itself and keeps working after the app restarts.
+The bridge never sends the token itself, and checks that it is talking to that PlanCraft: each request carries a
+fresh random `X-PlanCraft-Nonce` and, in `X-PlanCraft-Auth`, an HMAC-SHA256 keyed by the token over the nonce and
+the body (in place of `Authorization: Bearer`); the app takes each nonce once and answers with `X-PlanCraft-Proof`,
+an HMAC over the nonce, the status and its reply. A reply without a valid proof comes from another program
+listening where PlanCraft was (it crashed and left its session file): nothing of it, not even its text in an
+error, reaches the agent, and that program never learns the token:
 
 ```sh
 claude mcp add plancraft -- /path/to/plancraft mcp --attach
@@ -83,7 +89,7 @@ HTTP details (MCP "Streamable HTTP", JSON responses only):
   `.localhost` name or a loopback IP address (DNS-rebinding protection). Requests without the session's bearer
   token get `401` (tokens are compared in constant time). These checks run before the body is read.
 * Limits: at most 32 connections at a time (more get `503`), 64 KiB of headers, bodies up to 32 MiB (`413`
-  beyond), at most 10 s between reads and 60 s for the whole request (`408`). Each connection carries one request.
+  beyond), at most 10 s between reads, 10 s for the request line and headers and 60 s for the whole request (`408`). Each connection carries one request.
   Even with a token, do not bind to a public interface: traffic is not encrypted.
 
 ### Command line
@@ -162,7 +168,7 @@ These are also sent to the client as `instructions` in the `initialize` result.
   `save_project` refuses to overwrite a changed file unless `overwrite` is true. In the desktop app, a plan without
   unsaved changes reloads by itself.
 * **Open in another PlanCraft** — when the plan is also open in another PlanCraft (another window, another
-  server, someone on a shared folder; its lock file `.NAME.lock` says who), `open_project`, `list_documents` and
+  server, someone on a shared folder; its lock file `.NAME.plancraft.lock` says who), `open_project`, `list_documents` and
   `get_project` show `open_elsewhere` ("ana in PlanCraft 0.7.0 on studio-pc since 2026-11-18 09:15") and results
   carry a `disk_notice`. The server holds the lock of each plan it has open and gives it back on close or exit.
 * **Errors** — tool failures are returned as results with `isError: true` and an explanation (unknown

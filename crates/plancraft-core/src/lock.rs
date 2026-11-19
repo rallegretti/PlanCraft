@@ -15,12 +15,13 @@
 //! a regular file (a directory, a FIFO, a symbolic link) is never read or written, and the names in
 //! it are cut short and stripped of control characters before they are shown.
 
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::fs::{self, OpenOptions};
 use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock, PoisonError, Weak};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -33,6 +34,15 @@ pub const REFRESH: Duration = Duration::from_secs(30);
 pub const STALE_AFTER: Duration = Duration::from_secs(150);
 /// Most bytes read from a lock file.
 pub const MAX_LOCK_BYTES: u64 = 4096;
+/// A lock not touched for this long by the clock is stale at once. One younger (but past
+/// [`STALE_AFTER`]) is stale only once it went untouched while this PlanCraft watched for
+/// [`WATCH`]: another computer's clock may run ahead, which makes a live lock look old.
+const SURELY_STALE: Duration = Duration::from_secs(3600);
+/// How long a lock must stay untouched under this PlanCraft's own clock to count as stale: more
+/// than one [`REFRESH`], in which a live PlanCraft touches it.
+const WATCH: Duration = Duration::from_secs(45);
+/// Lock files watched, at most (the list is cleared beyond it).
+const MAX_WATCHED: usize = 1024;
 /// Longest name kept from a lock file.
 const MAX_NAME_CHARS: usize = 80;
 
@@ -149,11 +159,45 @@ pub fn lock_path(plan: &Path) -> Option<PathBuf> {
 #[derive(Debug, PartialEq, Eq)]
 enum Found {
     Missing,
-    /// Not a regular file, or unreadable: never touched.
+    /// Something else sits where the lock goes (a folder, a link, a device): never touched, and
+    /// taken for someone unknown having the plan open, so planting it cannot silence the warning.
+    Planted,
+    /// Unreadable: never touched.
     Unusable,
     Ours,
-    Stale(Owner),
+    /// Stale, with the file's time when it was judged (a touch since means it is in use).
+    Stale(Owner, Option<SystemTime>),
     Live(Owner),
+}
+
+/// The owner written in a lock file (`Err`: missing, or not a regular file that can be read).
+fn read_owner(lock: &Path) -> Result<Owner, ErrorKind> {
+    let mut bytes = Vec::new();
+    crate::io::open_regular(lock, false, crate::io::Links::Refuse)
+        .and_then(|f| f.take(MAX_LOCK_BYTES).read_to_end(&mut bytes))
+        .map_err(|e| e.kind())?;
+    // Not a lock PlanCraft wrote (garbage, cut short): someone unknown, judged by its age.
+    Ok(serde_json::from_slice::<Owner>(&bytes).unwrap_or_default().sanitized())
+}
+
+fn watched() -> &'static Mutex<HashMap<PathBuf, (SystemTime, Instant)>> {
+    static WATCHED: OnceLock<Mutex<HashMap<PathBuf, (SystemTime, Instant)>>> = OnceLock::new();
+    WATCHED.get_or_init(Mutex::default)
+}
+
+/// How long the lock file has kept the time `modified` while this PlanCraft watched it.
+fn untouched_for(lock: &Path, modified: SystemTime) -> Duration {
+    let mut seen = watched().lock().unwrap_or_else(PoisonError::into_inner);
+    match seen.get(lock) {
+        Some((m, since)) if *m == modified => since.elapsed(),
+        _ => {
+            if seen.len() >= MAX_WATCHED {
+                seen.clear();
+            }
+            seen.insert(lock.to_path_buf(), (modified, Instant::now()));
+            Duration::ZERO
+        }
+    }
 }
 
 fn inspect(lock: &Path) -> Found {
@@ -163,25 +207,80 @@ fn inspect(lock: &Path) -> Found {
         Err(_) => return Found::Unusable,
     };
     if !meta.is_file() {
-        return Found::Unusable;
+        return Found::Planted;
     }
-    let mut bytes = Vec::new();
-    let read = crate::io::open_regular(lock, false, crate::io::Links::Refuse).and_then(|f| f.take(MAX_LOCK_BYTES).read_to_end(&mut bytes));
-    match read {
-        Ok(_) => {}
-        Err(e) if e.kind() == ErrorKind::NotFound => return Found::Missing,
+    let owner = match read_owner(lock) {
+        Ok(o) => o,
+        Err(ErrorKind::NotFound) => return Found::Missing,
         Err(_) => return Found::Unusable,
-    }
-    // Not a lock PlanCraft wrote (garbage, cut short): someone unknown, judged by its age.
-    let owner = serde_json::from_slice::<Owner>(&bytes).unwrap_or_default().sanitized();
+    };
     let me = identity();
     if !owner.instance.is_empty() && owner.instance == me.instance {
         return Found::Ours;
     }
     // A time in the future (clocks that differ between computers) counts as just touched.
-    let age = meta.modified().ok().and_then(|m| SystemTime::now().duration_since(m).ok()).unwrap_or_default();
+    let modified = meta.modified().ok();
+    let age = modified.and_then(|m| SystemTime::now().duration_since(m).ok()).unwrap_or_default();
+    let old = age > STALE_AFTER && (age > SURELY_STALE || modified.is_some_and(|m| untouched_for(lock, m) >= WATCH));
     let gone_here = !owner.host.is_empty() && owner.host == me.host && (owner.pid == me.pid || !process_alive(owner.pid));
-    if age > STALE_AFTER || gone_here { Found::Stale(owner) } else { Found::Live(owner) }
+    if old || gone_here { Found::Stale(owner, modified) } else { Found::Live(owner) }
+}
+
+/// Takes the stale lock of `stale` away. Moved aside first (only one PlanCraft can move the file):
+/// if what was moved is not that stale lock after all (another PlanCraft took it over and wrote
+/// its own meanwhile), it is put back, never replacing a lock written since.
+fn take_over(lock: &Path, stale: &Owner, modified: Option<SystemTime>) {
+    take_over_with(lock, stale, modified, |from, to| fs::hard_link(from, to));
+}
+
+/// [`take_over`], putting a lock back with `link` (a hard link; tests stand in a failing one).
+fn take_over_with(lock: &Path, stale: &Owner, modified: Option<SystemTime>, link: impl Fn(&Path, &Path) -> std::io::Result<()>) {
+    let Some(name) = lock.file_name() else { return };
+    let mut aside_name = name.to_os_string();
+    aside_name.push(format!(".{}.old", identity().instance));
+    let aside = lock.with_file_name(aside_name);
+    if fs::rename(lock, &aside).is_err() {
+        // Gone already (someone else took it over), or it cannot be moved: look again.
+        return;
+    }
+    // Someone else's lock written since, or the stale owner's touched since (it woke up): put
+    // back. A rename keeps the file's time.
+    let touched = modified.is_some_and(|m| fs::symlink_metadata(&aside).ok().and_then(|a| a.modified().ok()) != Some(m));
+    if read_owner(&aside).is_ok_and(|o| o != *stale) || touched {
+        put_back(&aside, lock, link);
+    }
+    let _ = fs::remove_file(&aside);
+}
+
+/// Puts the lock moved to `aside` back at `lock`, never replacing a lock written there since: a
+/// hard link, or where the folder has none (FAT, exFAT, some network shares) a new file with the
+/// same contents.
+fn put_back(aside: &Path, lock: &Path, link: impl Fn(&Path, &Path) -> std::io::Result<()>) {
+    match link(aside, lock) {
+        Ok(()) => {}
+        Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+        Err(_) => {
+            let mut bytes = Vec::new();
+            let read = crate::io::open_regular(aside, false, crate::io::Links::Refuse)
+                .and_then(|f| f.take(MAX_LOCK_BYTES).read_to_end(&mut bytes));
+            if read.is_err() {
+                return;
+            }
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::OpenOptionsExt;
+                options.attributes(0x2); // hidden, like a lock written afresh
+            }
+            if let Ok(mut f) = options.open(lock)
+                && f.write_all(&bytes).is_err()
+            {
+                drop(f);
+                let _ = fs::remove_file(lock);
+            }
+        }
+    }
 }
 
 /// Whether process `pid` runs on this computer (as far as can be told without calling the
@@ -240,6 +339,7 @@ pub fn claim(plan: &Path) -> LockState {
                 return LockState::Held;
             }
             Found::Live(owner) => return LockState::OpenElsewhere(owner),
+            Found::Planted => return LockState::OpenElsewhere(Owner::default()),
             Found::Unusable => return LockState::None,
             Found::Missing => match write_new(&lock) {
                 Ok(()) => return LockState::Held,
@@ -247,12 +347,7 @@ pub fn claim(plan: &Path) -> LockState {
                 Err(e) if e.kind() == ErrorKind::AlreadyExists => continue,
                 Err(_) => return LockState::None,
             },
-            Found::Stale(owner) => {
-                // Only if it is still the same stale lock (not one written meanwhile).
-                if inspect(&lock) == Found::Stale(owner) {
-                    let _ = fs::remove_file(&lock);
-                }
-            }
+            Found::Stale(owner, modified) => take_over(&lock, &owner, modified),
         }
     }
     LockState::None
@@ -262,6 +357,7 @@ pub fn claim(plan: &Path) -> LockState {
 pub fn open_elsewhere(plan: &Path) -> Option<Owner> {
     match inspect(&lock_path(plan)?) {
         Found::Live(owner) => Some(owner),
+        Found::Planted => Some(Owner::default()),
         _ => None,
     }
 }
@@ -413,8 +509,57 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = plan(dir.path());
         write_lock(&path, &other());
-        age(&path, STALE_AFTER + Duration::from_secs(5));
+        age(&path, SURELY_STALE + Duration::from_secs(5));
         assert_eq!(claim(&path), LockState::Held);
+    }
+
+    /// Regression: another computer's clock running ahead made a live lock look stale, and it was
+    /// taken over on every round; the other PlanCraft never learnt of it.
+    #[test]
+    fn a_lock_that_only_looks_old_is_watched_before_it_is_taken_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = plan(dir.path());
+        let lock = lock_path(&path).unwrap();
+        write_lock(&path, &other());
+        age(&path, STALE_AFTER + Duration::from_secs(5));
+        assert!(matches!(claim(&path), LockState::OpenElsewhere(_)), "first seen: perhaps only another clock");
+        // Touched meanwhile (a live PlanCraft): still live, and watched afresh.
+        age(&path, STALE_AFTER + Duration::from_secs(9));
+        assert!(matches!(claim(&path), LockState::OpenElsewhere(_)));
+        // Untouched for longer than a refresh under this clock: stale.
+        let modified = fs::metadata(&lock).unwrap().modified().unwrap();
+        let long_ago = Instant::now().checked_sub(WATCH + Duration::from_secs(1)).unwrap();
+        watched().lock().unwrap().insert(lock.clone(), (modified, long_ago));
+        assert_eq!(claim(&path), LockState::Held);
+    }
+
+    /// Regression: two PlanCraft taking over one stale lock at once could both end up "holding"
+    /// it, one having deleted the other's fresh lock.
+    #[test]
+    fn taking_over_never_removes_a_lock_written_meanwhile() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = plan(dir.path());
+        let lock = lock_path(&path).unwrap();
+        let stale = other();
+        // Another PlanCraft already took the stale lock over and wrote its own.
+        let fresh = Owner { user: "ben".into(), instance: Uuid::new_v4().to_string(), ..other() };
+        write_lock(&path, &fresh);
+        take_over(&lock, &stale, None);
+        assert_eq!(other_named(&path), fresh, "the lock written meanwhile is back in place");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2, "nothing left aside");
+        // Where the folder has no hard links, it is put back all the same.
+        take_over_with(&lock, &stale, None, |_, _| Err(std::io::Error::other("no hard links here")));
+        assert_eq!(other_named(&path), fresh, "put back without a hard link");
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2, "nothing left aside");
+        // The stale owner touched its lock since it was judged stale (it woke up): put back.
+        write_lock(&path, &stale);
+        let judged = SystemTime::now() - Duration::from_secs(3600);
+        take_over(&lock, &stale, Some(judged));
+        assert_eq!(other_named(&path), stale, "a lock touched since is in use");
+        // The stale one itself is taken away.
+        let modified = fs::metadata(&lock).unwrap().modified().ok();
+        take_over(&lock, &stale, modified);
+        assert!(!lock.exists());
     }
 
     #[test]
@@ -442,10 +587,11 @@ mod tests {
         fs::write(&lock, serde_json::to_vec(&long).unwrap()).unwrap();
         let LockState::OpenElsewhere(owner) = claim(&path) else { panic!() };
         assert!(owner.user.chars().count() <= MAX_NAME_CHARS && !owner.user.contains('\u{1b}'));
-        // A directory where the lock file goes: no lock, no error.
+        // A directory where the lock file goes: never touched, and taken for someone unknown (it
+        // must not silence the warning for everyone).
         fs::remove_file(&lock).unwrap();
         fs::create_dir(&lock).unwrap();
-        assert_eq!(claim(&path), LockState::None);
+        assert!(matches!(claim(&path), LockState::OpenElsewhere(o) if o.describe().starts_with("someone")));
         release(&path);
         assert!(lock.is_dir());
     }
@@ -470,6 +616,37 @@ mod tests {
         assert!(lock_path(&copy).unwrap().is_file());
         ws.close(h);
         assert!(!lock_path(&copy).unwrap().exists(), "closing gives the lock back");
+
+        // Save As onto a plan open in another tab: closing either keeps the lock for the other.
+        let mut ws2 = Workspace::default();
+        let first = ws2.open(&path).unwrap();
+        let other = ws2.add(Project::new("Other", crate::dates::ymd(2026, 11, 18).unwrap()), None);
+        ws2.active = ws2.index_of(other);
+        ws2.active_doc_mut().unwrap().save_as(&path).unwrap();
+        ws2.close(first);
+        assert!(lock_path(&path).unwrap().is_file(), "the plan is still open in the other tab");
+        assert_eq!(ws2.active_doc().unwrap().lock, LockState::Held);
+        ws2.close(other);
+        assert!(!lock_path(&path).unwrap().exists());
+
+        // The same through another spelling of the path, and a Save As away from the shared file:
+        // the other tab keeps its lock.
+        let mut ws3 = Workspace::default();
+        let first = ws3.open(&path).unwrap();
+        let other = ws3.add(Project::new("Other", crate::dates::ymd(2026, 11, 18).unwrap()), None);
+        ws3.active = ws3.index_of(other);
+        let spelled = dir.path().join(".").join(path.file_name().unwrap());
+        ws3.active_doc_mut().unwrap().save_as(&spelled).unwrap();
+        ws3.active_doc_mut().unwrap().save_as(dir.path().join("away.plancraft")).unwrap();
+        ws3.keep_locks();
+        assert!(lock_path(&path).unwrap().is_file(), "the first tab still has the plan open");
+        ws3.active = ws3.index_of(first);
+        let again = ws3.add(Project::new("Again", crate::dates::ymd(2026, 11, 18).unwrap()), None);
+        ws3.active = ws3.index_of(again);
+        ws3.active_doc_mut().unwrap().save_as(&spelled).unwrap();
+        ws3.close(first);
+        assert!(lock_path(&path).unwrap().is_file(), "handed over through another spelling");
+        drop(ws3);
 
         // Quitting (dropping the workspace) gives every lock back.
         let mut ws = Workspace::default();
@@ -524,7 +701,7 @@ mod tests {
         let target = dir.path().join("precious.txt");
         fs::write(&target, "keep me").unwrap();
         std::os::unix::fs::symlink(&target, lock_path(&path).unwrap()).unwrap();
-        assert_eq!(claim(&path), LockState::None);
+        assert!(matches!(claim(&path), LockState::OpenElsewhere(_)), "a planted link warns");
         assert_eq!(fs::read_to_string(&target).unwrap(), "keep me");
     }
 

@@ -338,6 +338,64 @@ fn tasks_dragged_above_another_task() {
     assert!(p.move_tasks_before(&[TaskId(9999)], None).is_err());
 }
 
+/// Regression: dragging a task in among the subtasks of a summary it is linked to (or indenting
+/// it there) made it a subtask of a summary it is linked to, which `link` refuses: the summary
+/// started before its predecessor finished, with no warning.
+#[test]
+fn an_outline_change_never_links_a_task_to_its_own_summary() {
+    let mut p = project();
+    let a = task(&mut p, "A", 1);
+    let s = task(&mut p, "S", 1);
+    let s1 = task(&mut p, "S1", 1);
+    p.indent(s1).unwrap();
+    p.link(a.into(), s, LinkType::FS, Lag::None).unwrap();
+    let before = p.tasks.clone();
+    let e = p.move_tasks_before(&[a], Some(s1)).unwrap_err().to_string();
+    assert!(e.contains("own summary"), "{e}");
+    assert_eq!(p.tasks, before, "nothing moved");
+    // The same by indenting: a summary right after its predecessor.
+    p.move_tasks_before(&[a], None).unwrap();
+    let mut q = project();
+    let s = task(&mut q, "S", 1);
+    let x = task(&mut q, "X", 1);
+    q.link(s.into(), x, LinkType::FS, Lag::None).unwrap();
+    assert!(q.indent(x).is_err(), "X would become a subtask of its own predecessor");
+    assert_eq!(q.tasks.iter().find(|t| t.id == x).unwrap().outline_level, 1);
+    assert!(q.summary_self_links().is_empty());
+}
+
+/// Regression: an outline change could make links go round in a circle through a summary (S
+/// links to X, X to Y, then Y moved under S), which linking itself refuses.
+#[test]
+fn an_outline_change_never_makes_links_go_round_in_a_circle() {
+    let mut p = project();
+    let s = task(&mut p, "S", 1);
+    let s1 = task(&mut p, "S1", 1);
+    let x = task(&mut p, "X", 1);
+    let y = task(&mut p, "Y", 1);
+    p.indent(s1).unwrap();
+    p.link(s.into(), x, LinkType::FS, Lag::None).unwrap();
+    p.link(x.into(), y, LinkType::FS, Lag::None).unwrap();
+    let before = p.tasks.clone();
+    let e = p.move_tasks_before(&[y], Some(s1)).unwrap_err().to_string();
+    assert!(e.contains("circle"), "{e}");
+    assert_eq!(p.tasks, before, "nothing moved");
+    assert!(!recalculate(&mut p).warnings.iter().any(|w| w.contains("Circular")));
+    // Moves that make no circle still go through.
+    p.move_tasks_before(&[y], Some(s)).unwrap();
+}
+
+/// Regression: dropping a selection onto the first row of one of its own blocks moved nothing.
+#[test]
+fn a_selection_dropped_on_its_own_first_row_gathers_there() {
+    let mut p = project();
+    let t1 = task(&mut p, "T1", 1);
+    let _t2 = task(&mut p, "T2", 1);
+    let t3 = task(&mut p, "T3", 1);
+    p.move_tasks_before(&[t1, t3], Some(t1)).unwrap();
+    assert_eq!(p.tasks.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(), ["T1", "T3", "T2"]);
+}
+
 #[test]
 fn save_load_and_external_links() {
     let dir = tempfile::tempdir().unwrap();

@@ -14,7 +14,7 @@ use std::io::Read;
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Condvar, Mutex, PoisonError};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use argon2::password_hash::{PasswordHasher, PasswordVerifier};
 use argon2::{Argon2, PasswordHash};
@@ -282,8 +282,36 @@ impl Failures {
 #[derive(Debug, Default)]
 pub struct Throttle {
     failures: HashMap<String, Failures>,
-    /// When each name last signed in from each address (`user:name@ip:addr`).
-    trusted: HashMap<String, Instant>,
+    /// When each name last signed in from each network (`user:name@net:…`: an IPv4 address, or an
+    /// IPv6 /64, since a computer's temporary IPv6 addresses change within it).
+    trusted: HashMap<String, SystemTime>,
+    /// Where the trusted list is kept (owner-only), so a restart does not lose it.
+    trusted_file: Option<PathBuf>,
+    /// The trusted list changed since it was last handed out to be written.
+    trusted_unsaved: bool,
+}
+
+/// The trusted list's file in the server's private folder.
+pub fn trusted_path(config: &Path) -> PathBuf {
+    config.join("trusted-sign-ins.json")
+}
+
+/// The largest trusted list file read.
+const MAX_TRUSTED_BYTES: u64 = 4 * 1024 * 1024;
+
+fn trust_key(user: &str, ip: Option<IpAddr>) -> String {
+    let net = match ip {
+        Some(IpAddr::V6(v6)) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => {
+                let [a, b, c, d, ..] = v6.segments();
+                format!("{a:x}:{b:x}:{c:x}:{d:x}::/64")
+            }
+        },
+        Some(IpAddr::V4(v4)) => v4.to_string(),
+        None => "unknown".into(),
+    };
+    format!("user:{}@net:{net}", name_key(user))
 }
 
 fn address_key(ip: Option<IpAddr>) -> String {
@@ -309,16 +337,55 @@ fn name_key(user: &str) -> String {
 const NAME_FREE_FAILURES: u32 = 30;
 /// The longest such wait: someone guessing from many addresses is slowed to a try a minute.
 const NAME_MAX_WAIT: Duration = Duration::from_secs(60);
-/// How long a sign-in keeps the name-wide wait away from its address (the server remembers it
-/// until it restarts).
+/// How long a sign-in keeps the name-wide wait away from its network (kept in
+/// [`trusted_path`] across restarts).
 const TRUSTED_FOR: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+/// Failed sign-ins for one name from inside a trusted network before that network loses its
+/// trust for the name. A whole IPv6 /64 is trusted, and one computer can use any address in it,
+/// so the per-address count alone would let it guess without the name-wide wait.
+const TRUSTED_NET_FAILURES: u32 = 10;
+/// The longest trusted-list entry kept (a 64-character name of 4-byte characters and a network).
+const MAX_TRUST_KEY_BYTES: usize = 400;
 
 impl Throttle {
+    /// A throttle keeping its trusted list in `path` (read now, written on each sign-in). A
+    /// missing, oversized or unreadable file is an empty list.
+    pub fn with_trusted_file(path: PathBuf) -> Throttle {
+        let now = SystemTime::now();
+        let trusted = plancraft_core::io::open_regular(&path, false, plancraft_core::io::Links::Refuse)
+            .ok()
+            .and_then(|f| {
+                let mut text = String::new();
+                std::io::Read::take(f, MAX_TRUSTED_BYTES).read_to_string(&mut text).ok()?;
+                serde_json::from_str::<HashMap<String, u64>>(&text).ok()
+            })
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|(k, _)| k.len() <= MAX_TRUST_KEY_BYTES)
+            .filter_map(|(k, secs)| Some((k, SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(secs))?)))
+            .filter(|(_, t)| now.duration_since(*t).is_ok_and(|age| age < TRUSTED_FOR))
+            .take(MAX_TRACKED)
+            .collect();
+        Throttle { failures: HashMap::new(), trusted, trusted_file: Some(path), trusted_unsaved: false }
+    }
+
+    /// The trusted list to write, when it changed since the last call: the file and its bytes.
+    /// The caller writes it after letting go of the throttle, so sign-ins never wait on the disk.
+    pub fn take_trusted_save(&mut self) -> Option<(PathBuf, Vec<u8>)> {
+        if !std::mem::take(&mut self.trusted_unsaved) {
+            return None;
+        }
+        let path = self.trusted_file.clone()?;
+        let list: HashMap<&String, u64> =
+            self.trusted.iter().filter_map(|(k, t)| Some((k, t.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_secs()))).collect();
+        Some((path, serde_json::to_vec(&list).ok()?))
+    }
+
     /// How long `user` from `ip` must wait before trying again (zero: may try now).
     pub fn wait(&self, user: &str, ip: Option<IpAddr>) -> Duration {
         let now = Instant::now();
         let local = keys(user, ip).iter().filter_map(|k| self.failures.get(k)).map(|f| f.wait(now)).max().unwrap_or(Duration::ZERO);
-        if self.is_trusted(user, ip, now) {
+        if self.is_trusted(user, ip) {
             return local;
         }
         let everywhere = self.failures.get(&format!("name:{}", name_key(user))).map_or(Duration::ZERO, |f| {
@@ -330,9 +397,13 @@ impl Throttle {
         local.max(everywhere)
     }
 
-    /// Whether `user` signed in from `ip` lately (never for an unknown address).
-    fn is_trusted(&self, user: &str, ip: Option<IpAddr>, now: Instant) -> bool {
-        ip.is_some() && self.trusted.get(&keys(user, ip)[0]).is_some_and(|t| now.saturating_duration_since(*t) < TRUSTED_FOR)
+    /// Whether `user` signed in from `ip`'s network lately, and has not failed often from there
+    /// since (never for an unknown address).
+    fn is_trusted(&self, user: &str, ip: Option<IpAddr>) -> bool {
+        let now = SystemTime::now();
+        let key = trust_key(user, ip);
+        let failing = self.failures.get(&format!("failed:{key}")).is_some_and(|f| f.count >= TRUSTED_NET_FAILURES);
+        ip.is_some() && !failing && self.trusted.get(&key).is_some_and(|t| now.duration_since(*t).is_ok_and(|age| age < TRUSTED_FOR))
     }
 
     /// Starts a try: counts it as failed until [`Throttle::succeeded`]. `Err` with the wait when
@@ -349,13 +420,13 @@ impl Throttle {
     pub fn failed(&mut self, user: &str, ip: Option<IpAddr>) {
         let now = Instant::now();
         self.failures.retain(|_, f| now.saturating_duration_since(f.last) < FORGET_AFTER);
-        // Up to three entries are added below.
-        while self.failures.len() + 3 > MAX_TRACKED {
+        // Up to four entries are added below.
+        while self.failures.len() + 4 > MAX_TRACKED {
             let Some(oldest) = self.failures.iter().min_by_key(|(_, f)| f.last).map(|(k, _)| k.clone()) else { break };
             self.failures.remove(&oldest);
         }
         let [a, b] = keys(user, ip);
-        for k in [a, b, format!("name:{}", name_key(user))] {
+        for k in [a, b, format!("name:{}", name_key(user)), format!("failed:{}", trust_key(user, ip))] {
             let f = self.failures.entry(k).or_insert(Failures { count: 0, last: now });
             f.count = f.count.saturating_add(1);
             f.last = now;
@@ -368,13 +439,17 @@ impl Throttle {
         let [name, addr] = keys(user, ip);
         self.failures.remove(&name);
         if ip.is_some() {
-            let now = Instant::now();
-            self.trusted.retain(|_, t| now.saturating_duration_since(*t) < TRUSTED_FOR);
+            let now = SystemTime::now();
+            self.trusted.retain(|_, t| now.duration_since(*t).is_ok_and(|age| age < TRUSTED_FOR));
             while self.trusted.len() >= MAX_TRACKED {
                 let Some(oldest) = self.trusted.iter().min_by_key(|(_, t)| **t).map(|(k, _)| k.clone()) else { break };
                 self.trusted.remove(&oldest);
             }
-            self.trusted.insert(name, now);
+            self.trusted.insert(trust_key(user, ip), now);
+            self.trusted_unsaved = true;
+        }
+        if let Some(f) = self.failures.get_mut(&format!("failed:{}", trust_key(user, ip))) {
+            f.count = f.count.saturating_sub(1);
         }
         if let Some(f) = self.failures.get_mut(&format!("name:{}", name_key(user))) {
             f.count = f.count.saturating_sub(1);
@@ -491,6 +566,68 @@ mod tests {
             t.failed("carl", None);
         }
         assert!(t.wait("carl", None) <= MAX_WAIT);
+    }
+
+    /// Regression: the trust that keeps a real person out of the name-wide wait was lost on a
+    /// restart, and with each new temporary IPv6 address: someone failing once a minute for that
+    /// name kept them waiting at every new address.
+    #[test]
+    fn trust_outlives_a_restart_and_a_new_temporary_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = trusted_path(dir.path());
+        let home: IpAddr = "2001:db8:1:2::10".parse().unwrap();
+        let mut t = Throttle::with_trusted_file(file.clone());
+        t.begin("ana", Some(home)).unwrap();
+        t.succeeded("ana", Some(home));
+        // Someone guesses "ana" from many other addresses.
+        for i in 0..NAME_FREE_FAILURES * 2 {
+            let ip: IpAddr = format!("10.9.{}.{}", i / 200, i % 200).parse().unwrap();
+            t.failed("ana", Some(ip));
+        }
+        let renewed: IpAddr = "2001:db8:1:2:abcd::99".parse().unwrap();
+        assert_eq!(t.wait("ana", Some(renewed)), Duration::ZERO, "a new temporary address in the same network is still trusted");
+        assert!(t.wait("ana", Some("2001:db8:9:9::1".parse().unwrap())) > Duration::ZERO, "another network waits");
+        // After a restart the trust is still there.
+        let (path, bytes) = t.take_trusted_save().unwrap();
+        assert!(t.take_trusted_save().is_none(), "handed out once per change");
+        plancraft_core::io::write_atomic(&path, &bytes, plancraft_core::io::Privacy::OwnerOnly).unwrap();
+        let mut again = Throttle::with_trusted_file(file.clone());
+        for i in 0..NAME_FREE_FAILURES * 2 {
+            let ip: IpAddr = format!("10.8.{}.{}", i / 200, i % 200).parse().unwrap();
+            again.failed("ana", Some(ip));
+        }
+        assert_eq!(again.wait("ana", Some(home)), Duration::ZERO);
+        // A damaged file is an empty list, never an error.
+        std::fs::write(&file, "{not json").unwrap();
+        assert!(Throttle::with_trusted_file(file).trusted.is_empty());
+    }
+
+    /// Regression: trusting a whole IPv6 /64 let a computer in it guess a trusted name from a new
+    /// address each time, never meeting the name-wide wait.
+    #[test]
+    fn guessing_from_inside_a_trusted_network_loses_the_trust() {
+        let mut t = Throttle::default();
+        let home: IpAddr = "2001:db8:1:2::10".parse().unwrap();
+        t.begin("ana", Some(home)).unwrap();
+        t.succeeded("ana", Some(home));
+        let refused = (0..200u32)
+            .filter(|i| {
+                let ip: IpAddr = format!("2001:db8:1:2:{:x}::1", i + 1).parse().unwrap();
+                t.begin("ana", Some(ip)).is_err()
+            })
+            .count();
+        assert!(refused > 150, "guesses rotating through the trusted /64 must meet the name-wide wait ({refused} refused)");
+        // A few typos from the real person's network keep the trust.
+        let mut t = Throttle::default();
+        t.begin("ana", Some(home)).unwrap();
+        t.succeeded("ana", Some(home));
+        for i in 0..NAME_FREE_FAILURES * 2 {
+            t.failed("ana", Some(format!("10.7.{}.{}", i / 200, i % 200).parse().unwrap()));
+        }
+        for _ in 0..TRUSTED_NET_FAILURES - 1 {
+            t.failed("ana", Some(home));
+        }
+        assert!(t.is_trusted("ana", Some(home)));
     }
 
     #[test]

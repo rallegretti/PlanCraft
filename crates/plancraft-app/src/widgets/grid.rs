@@ -125,8 +125,9 @@ pub struct GridState {
     /// agent's change, a re-sort), the cursor and an open editor follow it, so typing never lands
     /// on another row's item.
     anchor: Option<(usize, RowKey)>,
-    /// The row being dragged by its row number.
-    row_drag: Option<usize>,
+    /// The row being dragged by its row number, and its item's key ([`GridConfig::row_key`]): rows
+    /// that move during the drag (an agent's or someone else's change) don't change what moves.
+    row_drag: Option<(usize, Option<u64>)>,
     /// Where the rows were drawn last frame (for tests that point at a row).
     pub body: Option<Rect>,
 }
@@ -643,12 +644,21 @@ pub fn show(
         && row < cfg.row_count
         && state.editing.is_none()
     {
-        state.row_drag = Some(row);
+        state.row_drag = Some((row, cfg.row_key.and_then(|k| k(row))));
         if !is_selected(row) {
             events.push(GridEvent::Select { row, shift: false, ctrl: false });
         }
     }
-    if let Some(from) = state.row_drag {
+    // A row drag ends without a move when Escape is pressed, or when it can no longer end here
+    // (released outside the window: no drag stop arrives; a new press while it lasts: the
+    // release was lost on the way), as a Gantt bar drag does.
+    if state.row_drag.is_some() {
+        let (esc, released, pressed) = ui.input(|i| (i.key_pressed(egui::Key::Escape), !i.pointer.any_down(), i.pointer.any_pressed()));
+        if esc || pressed || (released && !body_resp.drag_stopped()) {
+            state.row_drag = None;
+        }
+    }
+    if let Some((from, key)) = state.row_drag {
         let latest = ui.input(|i| i.pointer.latest_pos());
         // The boundary between rows nearest the pointer: the dragged rows go above that row.
         let drop_at = |p: Pos2, scroll: f32| {
@@ -672,7 +682,15 @@ pub fn show(
         }
         if !body_resp.dragged() {
             state.row_drag = None;
-            if let Some(to) = latest.map(|p| drop_at(p, state.scroll_y))
+            // Dropped over the rows only (not over the chart, below the table or outside it).
+            if let Some(to) = latest
+                .filter(|p| body.x_range().contains(p.x) && p.y >= body.top() - cfg.row_height && p.y <= body.bottom() + cfg.row_height)
+                .map(|p| drop_at(p, state.scroll_y))
+                // Where the dragged item is now (gone: nothing moves).
+                && let Some(from) = match (key, cfg.row_key) {
+                    (Some(k), Some(row_key)) => (0..cfg.row_count).find(|&r| row_key(r) == Some(k)),
+                    _ => Some(from),
+                }
                 && to != from
                 && to != from.saturating_add(1)
             {

@@ -12,7 +12,7 @@ use plancraft_core::ids::*;
 use plancraft_core::model::*;
 use plancraft_core::report;
 use plancraft_core::schedule::project_calendar;
-use plancraft_core::workspace::{ChangeSource, Document};
+use plancraft_core::workspace::{ChangeSource, DiskStatus, Document, Workspace};
 use serde_json::{Map, Value, json};
 
 use crate::args::*;
@@ -33,6 +33,56 @@ pub fn ranges_json(r: &[TimeRange]) -> Value {
     Value::Array(r.iter().map(|x| Value::String(x.to_string())).collect())
 }
 
+/// A document's file as last seen on disk, with the path and stamp it was checked against.
+type Seen = (Option<std::path::PathBuf>, Option<plancraft_core::io::DiskStamp>, DiskStatus);
+
+thread_local! {
+    /// The documents' files as checked just before this thread's tool call, without the
+    /// workspace lock ([`checking_disk_first`]).
+    static DISK_SEEN: std::cell::RefCell<std::collections::HashMap<u64, Seen>> = std::cell::RefCell::default();
+}
+
+/// Runs `f` (a tool call or a resource read) with the files of the documents `pick` names
+/// (`None`: every open document) checked first, outside the workspace lock: a slow or hung
+/// network share must never stall the app while the lock is held, nor a call about another
+/// plan. The views below use what was found.
+pub fn checking_disk_first<R>(
+    ws: &std::sync::Mutex<Workspace>,
+    pick: impl FnOnce(&Workspace) -> Option<Vec<u64>>,
+    f: impl FnOnce() -> R,
+) -> R {
+    let targets: Vec<(u64, Option<std::path::PathBuf>, Option<plancraft_core::io::DiskStamp>)> = {
+        let ws = ws.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let picked = pick(&ws);
+        ws.docs
+            .iter()
+            .filter(|d| picked.as_ref().is_none_or(|p| p.contains(&d.handle)))
+            .map(|d| (d.handle, d.path.clone(), d.disk_stamp()))
+            .collect()
+    };
+    let seen: std::collections::HashMap<u64, Seen> = targets
+        .into_iter()
+        .map(|(h, path, known)| {
+            let status = plancraft_core::workspace::disk_status(path.as_deref(), known);
+            (h, (path, known, status))
+        })
+        .collect();
+    DISK_SEEN.with(|s| *s.borrow_mut() = seen);
+    let r = f();
+    DISK_SEEN.with(|s| s.borrow_mut().clear());
+    r
+}
+
+/// The document's file on disk: as checked before the call, unless the call itself saved or
+/// opened it (then checked now: it was just written or read, so it answers at once).
+pub fn disk_of(doc: &Document) -> DiskStatus {
+    DISK_SEEN
+        .with(|s| {
+            s.borrow().get(&doc.handle).filter(|(path, known, _)| *path == doc.path && *known == doc.disk_stamp()).map(|(_, _, st)| *st)
+        })
+        .unwrap_or_else(|| doc.disk_status())
+}
+
 pub fn source_str(s: ChangeSource) -> &'static str {
     match s {
         ChangeSource::User => "user",
@@ -49,7 +99,7 @@ pub fn document_brief(doc: &Document, active: bool) -> Value {
         "path": doc.path.as_ref().map(|p| p.display().to_string()),
         "active": active,
         "dirty": doc.dirty,
-        "disk": doc.disk_status().as_str(),
+        "disk": disk_of(doc).as_str(),
         "open_elsewhere": doc.lock.elsewhere().map(|o| o.describe()),
         "revision": doc.revision,
         "tasks": doc.project.tasks.len(),
@@ -633,7 +683,7 @@ pub fn project_info(doc: &Document) -> Value {
         "calendar": json!({ "id": p.calendar.0, "name": p.base_calendar().name }),
         "path": doc.path.as_ref().map(|x| x.display().to_string()),
         "dirty": doc.dirty,
-        "disk": doc.disk_status().as_str(),
+        "disk": disk_of(doc).as_str(),
         "open_elsewhere": doc.lock.elsewhere().map(|o| o.describe()),
         "revision": doc.revision,
         "work": format_work(p.sched.work),

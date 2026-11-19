@@ -42,6 +42,10 @@ pub enum Record {
         plan_hash: String,
         #[serde(default)]
         applied: Vec<ChangeId>,
+        /// The hidden copy the plan was saved to instead of its file (someone changed the file
+        /// outside the server), by file name: on opening again, that copy holds the shared plan.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        saved_to: Option<String>,
     },
     Entry {
         entry: Entry,
@@ -52,6 +56,11 @@ pub enum Record {
     Saving {
         version: Version,
         plan_hash: String,
+        /// The hidden copy the plan goes to instead of the plan file (the file was changed
+        /// outside the server), written down before the copy is: a crash before the next header
+        /// still leaves the plan refusing to reopen from the outside file.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to: Option<String>,
     },
 }
 
@@ -204,7 +213,7 @@ mod tests {
     use super::*;
 
     fn header(v: Version) -> Record {
-        Record::Header { epoch: Uuid::nil(), version: v, plan_hash: "h".into(), applied: vec![ChangeId(Uuid::nil())] }
+        Record::Header { epoch: Uuid::nil(), version: v, plan_hash: "h".into(), applied: vec![ChangeId(Uuid::nil())], saved_to: None }
     }
 
     #[test]
@@ -213,7 +222,7 @@ mod tests {
         let path = dir.path().join(".plan.plancraft.journal");
         let mut j = Journal::start(&path, &header(3)).unwrap();
         j.append(&Record::Lease { start: IdCounters::default() }).unwrap();
-        j.append(&Record::Saving { version: 3, plan_hash: "x".into() }).unwrap();
+        j.append(&Record::Saving { version: 3, plan_hash: "x".into(), to: None }).unwrap();
         let back = read(&path).unwrap();
         assert_eq!(back.records.len(), 3);
         assert!(!back.damaged);
@@ -225,8 +234,8 @@ mod tests {
         assert!(!back.damaged, "a torn last line is normal after a crash");
         // Starting afresh replaces everything, and later records go to the new file.
         let mut j = Journal::start(&path, &header(4)).unwrap();
-        j.append(&Record::Saving { version: 4, plan_hash: "y".into() }).unwrap();
-        assert_eq!(read(&path).unwrap().records, vec![header(4), Record::Saving { version: 4, plan_hash: "y".into() }]);
+        j.append(&Record::Saving { version: 4, plan_hash: "y".into(), to: None }).unwrap();
+        assert_eq!(read(&path).unwrap().records, vec![header(4), Record::Saving { version: 4, plan_hash: "y".into(), to: None }]);
         assert!(j.written() > 0);
     }
 

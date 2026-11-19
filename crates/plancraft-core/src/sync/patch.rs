@@ -13,6 +13,15 @@ const NOT_SHARED: [&str; 5] = ["format", "version", "id", "ids", "sched"];
 /// An item's schedule, worked out by recalculation.
 const ITEM_SCHEDULE: &str = "sched";
 
+/// Values one item (or the plan itself) may have changed in one patch, at most.
+pub const MAX_ITEM_FIELDS: usize = 256;
+/// The longest field name a patch may carry.
+pub const MAX_FIELD_NAME: usize = 64;
+/// Values one patch may change in existing items and the plan, at most (new items aside): room
+/// for a few values on every task and assignment of the largest plan (progress updated
+/// everywhere at once), far below what would hold a shared plan up.
+pub const MAX_CHANGED_FIELDS: usize = 2_000_000;
+
 /// A task's place in the outline (with the order of the tasks, what makes it a subtask).
 const OUTLINE_LEVEL: &str = "outline_level";
 
@@ -239,6 +248,25 @@ pub fn apply(p: &Project, patch: &Patch) -> Result<Project, SyncError> {
 /// order names an item twice: checked before the host rebases it, since rebasing costs time in
 /// proportion to them.
 pub fn check_size(patch: &Patch) -> Result<(), SyncError> {
+    // Rebasing costs time in proportion to the fields changed too: a change of 300,000 made-up
+    // fields on one task, based far back, held a shared plan for most of a minute. No item has
+    // more than a few dozen fields, and names are short.
+    let long_name = |k: &str| k.len() > MAX_FIELD_NAME;
+    if patch.fields.len() > MAX_ITEM_FIELDS || patch.fields.keys().any(|k| long_name(k)) {
+        return Err(SyncError::Shape("the change sets more plan values than a plan has".into()));
+    }
+    let mut total = patch.fields.len();
+    for lp in patch.lists.values() {
+        for fields in lp.changed.values() {
+            if fields.len() > MAX_ITEM_FIELDS || fields.keys().any(|k| long_name(k)) {
+                return Err(SyncError::Shape("the change sets more values of one item than an item has".into()));
+            }
+            total = total.saturating_add(fields.len());
+        }
+    }
+    if total > MAX_CHANGED_FIELDS {
+        return Err(SyncError::Shape(format!("the change sets more than {MAX_CHANGED_FIELDS} values at once; make it in smaller parts")));
+    }
     for (list, lp) in &patch.lists {
         let max = list.limit();
         let sizes = [lp.added.len(), lp.changed.len(), lp.removed.len(), lp.parents.len(), lp.order.as_ref().map_or(0, Vec::len)];

@@ -255,34 +255,81 @@ impl TaskInfo {
 
     /// Writes the fields changed since the dialog opened to its task, or to each of its tasks
     /// (Multiple Task Information), in one edit.
+    ///
+    /// Each task starts from its own values, and takes from the dialog only the fields changed
+    /// there: a choice or a box the dialog shows with the first task's value (constraint type,
+    /// estimate kind, Estimated, task type, calendar…) is not written to the others unless it was
+    /// changed. Typing only a constraint date keeps each task's own constraint type, unless that
+    /// type takes no date (then it takes the dialog's, as typing a date in the table does);
+    /// typing an estimate gives every task the dialog's kind of estimate.
     fn apply_all(&self, p: &mut Project) -> Result<(), String> {
         let Some(o) = self.orig.as_deref().filter(|_| self.is_multi()) else { return self.apply(p) };
         for id in std::iter::once(self.id).chain(self.others.iter().copied()) {
             // Deleted meanwhile (by an agent): nothing to change there.
-            let Some(t) = p.task(id) else { continue };
-            let mut one = self.clone();
-            let mut orig = o.clone();
-            one.id = id;
-            // What the dialog didn't change follows each task (its kind and schedule mode).
-            one.summary = t.sched.is_summary;
-            orig.summary = one.summary;
-            if self.mode == o.mode {
-                one.mode = t.mode;
-                orig.mode = t.mode;
+            let Some(own) = Self::new(p, id, false) else { continue };
+            let name = own.name.clone();
+            let mut one = own.clone();
+            macro_rules! changed {
+                ($($field:ident),*) => {$(
+                    if self.$field != o.$field {
+                        one.$field = self.$field.clone();
+                    }
+                )*};
             }
-            if self.milestone == o.milestone {
-                one.milestone = t.is_milestone();
-                orig.milestone = one.milestone;
+            changed!(
+                name,
+                duration,
+                estimated,
+                percent,
+                priority,
+                mode,
+                start,
+                finish,
+                milestone,
+                active,
+                constraint,
+                constraint_date,
+                deadline,
+                task_type,
+                effort_driven,
+                calendar,
+                ignore_res_cal,
+                fixed_cost,
+                actual_start,
+                actual_finish,
+                on_timeline,
+                est_kind,
+                points,
+                optimistic,
+                most_likely,
+                pessimistic,
+                est_work,
+                deliverable,
+                notes
+            );
+            // A value typed where the task's own choice can't hold it is not dropped: the task
+            // takes the dialog's choice for it.
+            if self.constraint_date != o.constraint_date && self.constraint == o.constraint && !own.constraint.needs_date() {
+                one.constraint = if self.constraint.needs_date() { self.constraint } else { ConstraintKind::Snet };
             }
-            // Only "Estimated" ticked: each task keeps its own duration (the field may be empty
-            // because the durations differ).
-            if self.duration == o.duration {
-                let own = p.format_task_minutes(t, t.sched.duration, t.estimated);
-                one.duration = own.clone();
-                orig.duration = own;
+            let estimate_typed = self.points != o.points
+                || self.optimistic != o.optimistic
+                || self.most_likely != o.most_likely
+                || self.pessimistic != o.pessimistic
+                || self.est_work != o.est_work;
+            if estimate_typed && self.est_kind == o.est_kind {
+                one.est_kind = self.est_kind;
             }
-            let name = t.name.clone();
-            one.orig = Some(Box::new(orig));
+            if self.resume.trim() != self.resume_orig.trim() {
+                one.resume = self.resume.clone();
+            }
+            // By field, not by position: an agent may have added or removed fields meanwhile.
+            for mine in self.custom.iter().filter(|m| m.text.trim() != m.original.trim()) {
+                if let Some(row) = one.custom.iter_mut().find(|r| r.field == mine.field) {
+                    row.text = mine.text.clone();
+                }
+            }
+            one.orig = Some(Box::new(own));
             one.apply(p).map_err(|e| format!("{name}: {e}"))?;
         }
         Ok(())
@@ -411,7 +458,10 @@ impl TaskInfo {
             }
             if !self.milestone && (self.duration != o.duration || self.estimated != o.estimated) {
                 let typed = p.parse_task_duration(&self.duration).ok_or_else(|| format!("'{}' is not a valid duration", self.duration))?;
-                let typed = TypedDuration { estimated: typed.estimated || self.estimated, ..typed };
+                // The duration text shows "?" for an estimated task: unless it was edited, the box
+                // decides (unticking it would otherwise never take).
+                let estimated = if self.duration != o.duration { typed.estimated || self.estimated } else { self.estimated };
+                let typed = TypedDuration { estimated, ..typed };
                 p.set_typed_duration(id, typed).map_err(err)?;
             }
         }
@@ -1062,6 +1112,69 @@ mod tests {
         // One task: the plain dialog.
         assert!(!TaskInfo::new_multi(&p, &ids[..1]).unwrap().is_multi());
         assert!(TaskInfo::new_multi(&p, &[]).is_none());
+    }
+
+    /// Regression: choices and boxes showed the first task's value and were written to every task
+    /// when the text field beside them was edited: typing a constraint date turned task B's
+    /// Finish No Later Than into A's Start No Earlier Than; a duration made them all estimated.
+    #[test]
+    fn multiple_task_information_keeps_each_tasks_own_choices() {
+        let mut p = demo();
+        let ids: Vec<TaskId> = p.tasks.iter().filter(|t| !t.sched.is_summary && !t.is_milestone()).take(2).map(|t| t.id).collect();
+        let (a, b) = (ids[0], ids[1]);
+        let day = |d| plancraft_core::dates::ymd(2026, 11, d).unwrap().at(8, 0, 0, 0);
+        p.task_mut(a).unwrap().constraint = Constraint { kind: ConstraintKind::Snet, date: Some(day(2)) };
+        p.task_mut(b).unwrap().constraint = Constraint { kind: ConstraintKind::Fnlt, date: Some(day(20)) };
+        p.task_mut(a).unwrap().estimated = true;
+        p.task_mut(b).unwrap().estimated = false;
+        plancraft_core::schedule::recalculate(&mut p);
+        let mut info = TaskInfo::new_multi(&p, &ids).unwrap();
+        assert_eq!(info.constraint_date, "", "the dates differ");
+        info.constraint_date = "2026-11-25".into();
+        info.duration = "4d".into();
+        info.apply_all(&mut p).unwrap();
+        assert_eq!(p.task(a).unwrap().constraint.kind, ConstraintKind::Snet);
+        assert_eq!(p.task(b).unwrap().constraint.kind, ConstraintKind::Fnlt, "B keeps its own constraint type");
+        assert!(p.task(a).unwrap().estimated && !p.task(b).unwrap().estimated, "each keeps its own Estimated");
+        assert!(ids.iter().all(|id| p.task(*id).unwrap().duration == 4 * 480));
+
+        // Regression: a value typed where a task's own choice can't hold it was dropped: a date
+        // for a task As Soon As Possible, points for a task without an estimate.
+        p.task_mut(b).unwrap().constraint = Constraint::default();
+        p.task_mut(a).unwrap().estimate = Some(Estimate::Complexity { points: 5.0 });
+        p.task_mut(b).unwrap().estimate = None;
+        plancraft_core::schedule::recalculate(&mut p);
+        let mut info = TaskInfo::new_multi(&p, &ids).unwrap();
+        info.constraint_date = "2026-11-26".into();
+        info.points = "8".into();
+        info.apply_all(&mut p).unwrap();
+        let cb = p.task(b).unwrap().constraint;
+        assert!(cb.kind.needs_date() && cb.date.is_some(), "the date is kept: {cb:?}");
+        assert!(ids.iter().all(|id| matches!(p.task(*id).unwrap().estimate, Some(Estimate::Complexity { points }) if points == 8.0)));
+    }
+
+    /// Regression: unticking Estimated did nothing: the unchanged duration text ("3 days?") was
+    /// read as estimated again.
+    #[test]
+    fn unticking_estimated_takes() {
+        let mut p = demo();
+        let ids: Vec<TaskId> = p.tasks.iter().filter(|t| !t.sched.is_summary && !t.is_milestone()).take(2).map(|t| t.id).collect();
+        for id in &ids {
+            p.task_mut(*id).unwrap().estimated = true;
+        }
+        plancraft_core::schedule::recalculate(&mut p);
+        let mut info = TaskInfo::new(&p, ids[0], false).unwrap();
+        assert!(info.duration.ends_with('?'), "{}", info.duration);
+        info.estimated = false;
+        info.apply(&mut p).unwrap();
+        assert!(!p.task(ids[0]).unwrap().estimated);
+        let mut info = TaskInfo::new_multi(&p, &ids).unwrap();
+        info.estimated = true;
+        info.apply_all(&mut p).unwrap();
+        let mut info = TaskInfo::new_multi(&p, &ids).unwrap();
+        info.estimated = false;
+        info.apply_all(&mut p).unwrap();
+        assert!(ids.iter().all(|id| !p.task(*id).unwrap().estimated));
     }
 
     #[test]

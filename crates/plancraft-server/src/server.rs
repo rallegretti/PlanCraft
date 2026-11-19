@@ -5,7 +5,7 @@
 //! has opened it; its requests are handled in the order they came, one at a time. Nothing that
 //! holds a plan's lock ever waits on a connection (see [`Outbox`]).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -69,11 +69,21 @@ pub struct Options {
     pub login_timeout: Duration,
     /// Connections not signed in yet from one address, at most.
     pub not_signed_in_per_address: usize,
+    /// Bytes of large frames read at once from all connections ([`MAX_INBOUND_BYTES`]).
+    pub max_inbound_bytes: usize,
 }
 
 impl Options {
     pub fn new(folder: PathBuf, config: PathBuf, bind: SocketAddr, log: Log) -> Self {
-        Options { folder, config, bind, log, login_timeout: LOGIN_TIMEOUT, not_signed_in_per_address: MAX_NOT_SIGNED_IN_PER_ADDRESS }
+        Options {
+            folder,
+            config,
+            bind,
+            log,
+            login_timeout: LOGIN_TIMEOUT,
+            not_signed_in_per_address: MAX_NOT_SIGNED_IN_PER_ADDRESS,
+            max_inbound_bytes: MAX_INBOUND_BYTES,
+        }
     }
 }
 
@@ -136,6 +146,12 @@ struct Shared {
     login_timeout: Duration,
     not_signed_in_per_address: usize,
     budget: Arc<Budget>,
+    /// Bytes of large frames being read from all connections together (see [`MAX_INBOUND_BYTES`]).
+    inbound: AtomicUsize,
+    max_inbound: usize,
+    /// Accounts with a large frame being read now: one each, so one account (on many
+    /// connections) cannot take the whole budget.
+    large_senders: Mutex<HashSet<String>>,
     allowances: Allowances,
     /// Counts up whenever the users file was read again.
     users_generation: AtomicU64,
@@ -202,7 +218,7 @@ pub fn start(options: Options) -> Result<Running, String> {
         name: host_name(),
         keys,
         plans: Mutex::new(HashMap::new()),
-        throttle: Mutex::new(Throttle::default()),
+        throttle: Mutex::new(Throttle::with_trusted_file(crate::users::trusted_path(&options.config))),
         gate: Gate::new(HASHING_AT_ONCE),
         next_conn: AtomicU64::new(1),
         connections: AtomicUsize::new(0),
@@ -212,6 +228,9 @@ pub fn start(options: Options) -> Result<Running, String> {
         login_timeout: options.login_timeout,
         not_signed_in_per_address: options.not_signed_in_per_address,
         budget: Budget::standard(),
+        inbound: AtomicUsize::new(0),
+        large_senders: Mutex::new(HashSet::new()),
+        max_inbound: options.max_inbound_bytes,
         allowances: Allowances::default(),
         users_generation: AtomicU64::new(0),
         stop: AtomicBool::new(false),
@@ -378,10 +397,46 @@ fn accept_loop(shared: &Arc<Shared>, listener: &TcpListener) {
     }
 }
 
+/// Frames up to this size are read without asking for room.
+const SMALL_FRAME: usize = 1024 * 1024;
+/// Bytes of large frames read at once from all connections together, at most: a frame that does
+/// not fit closes its connection (the client sends it again after reconnecting).
+pub const MAX_INBOUND_BYTES: usize = 256 * 1024 * 1024;
+
+/// Room taken in [`Shared::inbound`] (and the account's place in [`Shared::large_senders`]),
+/// given back when dropped.
+struct Room<'a> {
+    shared: &'a Shared,
+    bytes: usize,
+    user: Option<String>,
+}
+
+impl Drop for Room<'_> {
+    fn drop(&mut self) {
+        if self.bytes > 0 {
+            self.shared.inbound.fetch_sub(self.bytes, Ordering::SeqCst);
+        }
+        if let Some(user) = &self.user {
+            lock(&self.shared.large_senders).remove(user);
+        }
+    }
+}
+
+/// Writes the trusted sign-ins list when it changed, outside the throttle's lock.
+fn save_trusted(shared: &Shared) {
+    let save = lock(&shared.throttle).take_trusted_save();
+    if let Some((path, bytes)) = save
+        && let Err(e) = plancraft_core::io::write_atomic(&path, &bytes, plancraft_core::io::Privacy::OwnerOnly)
+    {
+        (shared.log)(&format!("could not save the trusted sign-ins list: {e}"));
+    }
+}
+
 fn upkeep_loop(shared: &Arc<Shared>) {
     let mut users_seen = shared.users_generation.load(Ordering::SeqCst);
     while !shared.stop.load(Ordering::SeqCst) {
         std::thread::sleep(Duration::from_millis(200));
+        save_trusted(shared);
         // Connections that take too long to sign in (however slowly they send) are closed.
         let late: Vec<ConnId> = {
             let now = Instant::now();
@@ -431,6 +486,8 @@ fn upkeep_loop(shared: &Arc<Shared>) {
             }
         }
     }
+    // A sign-in in the last moments is still remembered.
+    save_trusted(shared);
 }
 
 /// Where a connection is.
@@ -475,7 +532,48 @@ fn serve(shared: &Arc<Shared>, conn: ConnId, stream: TcpStream, socket: Option<A
             Stage::Open { role, .. } if role.can_edit() => MAX_CLIENT_FRAME,
             _ => MAX_LOGIN_FRAME,
         };
-        let Ok(bytes) = receiver.recv(max) else { break };
+        // A large frame (a big change) needs room in the budget for all connections: one editor
+        // account cannot make the server hold many 65 MB frames (and what they parse into) at once.
+        // A frame given room must arrive within `wire::frame_deadline`, so a slow sender cannot
+        // keep it.
+        let reserved = std::cell::Cell::new(0usize);
+        let sender_name = match &stage {
+            Stage::Open { user, .. } => Some(user.name.to_lowercase()),
+            _ => None,
+        };
+        let holds_place = std::cell::Cell::new(false);
+        let reserve = |len: usize| {
+            if len <= SMALL_FRAME {
+                return true;
+            }
+            if let Some(name) = &sender_name {
+                if !lock(&shared.large_senders).insert(name.clone()) {
+                    return false;
+                }
+                holds_place.set(true);
+            }
+            let before = shared.inbound.fetch_add(len, Ordering::SeqCst);
+            if before.saturating_add(len) > shared.max_inbound {
+                shared.inbound.fetch_sub(len, Ordering::SeqCst);
+                return false;
+            }
+            reserved.set(len);
+            true
+        };
+        let read = receiver.recv_with(max, &reserve);
+        // Given back once the request was handled (the end of this turn of the loop).
+        let _room = Room { shared, bytes: reserved.get(), user: sender_name.filter(|_| holds_place.get()) };
+        let bytes = match read {
+            Ok(bytes) => bytes,
+            Err(wire::WireError::NoRoom(_)) => {
+                out.push(&ServerMsg::Error {
+                    message: "the server is busy reading other large changes; your change will be sent again shortly".into(),
+                    for_good: false,
+                });
+                break;
+            }
+            Err(_) => break,
+        };
         if matches!(stage, Stage::Hello | Stage::SignIn) {
             before_sign_in += 1;
             if before_sign_in > MAX_LOGIN_FRAMES || started.elapsed() > shared.login_timeout {

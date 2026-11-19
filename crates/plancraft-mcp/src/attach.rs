@@ -149,9 +149,14 @@ fn post(info: &SessionInfo, body: &str, version: Option<&str>) -> io::Result<(u1
         .filter(|v| crate::protocol::SUPPORTED_PROTOCOL_VERSIONS.contains(v))
         .map(|v| format!("MCP-Protocol-Version: {v}\r\n"))
         .unwrap_or_default();
+    // Signed with the token, never sending it: whatever listens at the address may not be the
+    // app (it crashed and left its session file). The reply must come back signed too.
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
+    let mac = session::request_mac(&info.token, &nonce, body.as_bytes());
     let head = format!(
-        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nAccept: application/json\r\n{version_header}Content-Length: {}\r\nConnection: close\r\n\r\n",
-        info.token,
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\n{}: {nonce}\r\n{}: {mac}\r\nContent-Type: application/json\r\nAccept: application/json\r\n{version_header}Content-Length: {}\r\nConnection: close\r\n\r\n",
+        session::NONCE_HEADER,
+        session::AUTH_HEADER,
         body.len()
     );
     s.write_all(head.as_bytes())?;
@@ -176,6 +181,26 @@ fn post(info: &SessionInfo, body: &str, version: Option<&str>) -> io::Result<(u1
         })
     });
     let body = if chunked { decode_chunked(body)? } else { body.to_vec() };
+    // Every reply the app gives a signed request is signed over the nonce, status and body; one
+    // that isn't comes from another program listening where PlanCraft was, and nothing of it
+    // (not even its text in an error) may reach the agent. 503 (busy) is answered before the
+    // request is checked, so it carries nothing worth passing on either; nor does 401 (the
+    // token was refused: `forward` reads the session file again).
+    if matches!(status, 401 | 503) {
+        return Ok((status, Vec::new()));
+    }
+    let shown = head.lines().skip(1).find_map(|l| {
+        l.split_once(':').filter(|(name, _)| name.trim().eq_ignore_ascii_case(session::PROOF_HEADER)).map(|(_, v)| v.trim().to_string())
+    });
+    if !shown.is_some_and(|p| session::tokens_match(&p, &session::reply_mac(&info.token, &nonce, status, &body))) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "the program answering at {} is not this PlanCraft, or does not know this session (HTTP {status}); open PlanCraft and start the server in Project ▸ AI Agents",
+                info.url
+            ),
+        ));
+    }
     Ok((status, body))
 }
 

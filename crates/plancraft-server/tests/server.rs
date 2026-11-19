@@ -583,3 +583,62 @@ fn a_few_computers_cannot_hold_every_place_for_signing_in() {
     assert!(matches!(ana.request(&ClientMsg::Ping).unwrap(), ServerMsg::Pong));
     server.stop();
 }
+
+/// Regression: every editor connection could hold a 65 MB frame (and what it parses into) at
+/// once, so one editor account could make the server use gigabytes. Large frames share one
+/// budget; one that does not fit closes its connection (the client sends it again later).
+#[test]
+fn large_frames_share_one_budget() {
+    use plancraft_server::protocol::{ClientId, ClientMsg};
+    let s = setup();
+    let mut o = s.options();
+    o.max_inbound_bytes = 2 * 1024 * 1024;
+    let server = plancraft_server::server::start(o).unwrap();
+    let mut c = signed_in(&server, "ana");
+    c.open("Plan.plancraft", ClientId::new(), None, None).unwrap();
+    // A frame over the budget (any frame over 1 MiB asks for room): the connection closes.
+    let mut big = vec![b' '; 3 * 1024 * 1024];
+    big.extend_from_slice(br#"{"type":"ping"}"#);
+    // Closed as soon as its length is read: sending the rest, or the next read, fails.
+    let sent = c.send_raw(&big);
+    assert!(sent.is_err() || c.recv().is_err(), "no room: closed");
+    // One that fits is read (and the room is given back: a second one too).
+    let mut c = signed_in(&server, "ana");
+    c.open("Plan.plancraft", ClientId::new(), None, None).unwrap();
+    for _ in 0..2 {
+        let mut fits = vec![b' '; 1536 * 1024];
+        fits.extend_from_slice(&serde_json::to_vec(&ClientMsg::Ping).unwrap());
+        c.send_raw(&fits).unwrap();
+        assert!(matches!(c.recv().unwrap(), plancraft_server::protocol::ServerMsg::Pong));
+    }
+}
+
+/// Regression: one account on several connections could take the whole budget for large frames
+/// (sending each slowly), so nobody else's large change was read.
+#[test]
+fn one_account_reads_one_large_frame_at_a_time() {
+    use plancraft_server::protocol::{ClientId, ClientMsg, ServerMsg};
+    let s = setup();
+    let server = plancraft_server::server::start(s.options()).unwrap();
+    let mut slow = signed_in(&server, "ana");
+    slow.open("Plan.plancraft", ClientId::new(), None, None).unwrap();
+    slow.send_start(8 * 1024 * 1024, b" ").unwrap();
+    // The server reads that frame's length before the second connection's frame arrives.
+    std::thread::sleep(Duration::from_millis(300));
+    let mut c = signed_in(&server, "ana");
+    c.open("Plan.plancraft", ClientId::new(), None, None).unwrap();
+    let mut big = vec![b' '; 2 * 1024 * 1024];
+    big.extend_from_slice(&serde_json::to_vec(&ClientMsg::Ping).unwrap());
+    let sent = c.send_raw(&big);
+    match c.recv() {
+        Ok(ServerMsg::Error { message, .. }) => assert!(message.contains("busy"), "{message}"),
+        other => assert!(sent.is_err() || other.is_err(), "the second large frame must be refused, got {other:?}"),
+    }
+    // Once the slow one is gone, the account's large frames are read again.
+    drop(slow);
+    std::thread::sleep(Duration::from_millis(300));
+    let mut c = signed_in(&server, "ana");
+    c.open("Plan.plancraft", ClientId::new(), None, None).unwrap();
+    c.send_raw(&big).unwrap();
+    assert!(matches!(c.recv().unwrap(), ServerMsg::Pong));
+}

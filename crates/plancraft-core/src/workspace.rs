@@ -623,8 +623,7 @@ impl Document {
         if check && self.changed_on_disk() {
             return Err(io::FileError::ChangedOnDisk { path });
         }
-        io::save(&self.project, &path)?;
-        self.disk_stamp = io::disk_stamp(&path);
+        self.disk_stamp = Some(io::save_stamped(&self.project, &path)?);
         self.dirty = false;
         self.user_changes = false;
         // The first save of a plan bound to a new file, or a lock file someone removed.
@@ -679,12 +678,12 @@ impl Document {
             let abs = if abs.is_absolute() { abs } else { std::env::current_dir().map(|c| c.join(&abs)).unwrap_or(abs) };
             e.path = io::relative_path(&abs, &new_dir).to_string_lossy().replace('\\', "/");
         }
-        io::save(&saved, &path)?;
+        let stamp = io::save_stamped(&saved, &path)?;
         let same_file = old.as_ref().is_some_and(|o| o == &path || std::fs::canonicalize(o).ok() == std::fs::canonicalize(&path).ok());
         if !same_file {
             self.release_lock();
         }
-        self.disk_stamp = io::disk_stamp(&path);
+        self.disk_stamp = Some(stamp);
         self.project.external_projects = saved.external_projects;
         self.path = Some(path);
         self.dirty = false;
@@ -919,6 +918,17 @@ impl Workspace {
             return false;
         };
         let mut doc = self.docs.remove(i);
+        // Another open document on the same file (Save As onto a plan already open) keeps the
+        // lock: it is handed over rather than released.
+        let canonical = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        let closing = doc.path.as_deref().map(canonical);
+        let same_file = |d: &Document| closing.is_some() && d.path.as_deref().map(canonical) == closing;
+        if doc.lock == LockState::Held
+            && let Some(other) = self.docs.iter_mut().find(|d| same_file(d))
+        {
+            other.lock = LockState::Held;
+            doc.lock = LockState::None;
+        }
         doc.release_lock();
         self.active = match self.active {
             _ if self.docs.is_empty() => None,
@@ -927,6 +937,17 @@ impl Workspace {
             other => other,
         };
         true
+    }
+
+    /// Writes again the lock files of documents that hold one, where it went missing: after a
+    /// Save As away from a file another open document also has (Save As onto a plan already
+    /// open), the first gave that file's lock back, which the other still relies on.
+    pub fn keep_locks(&mut self) {
+        for doc in &mut self.docs {
+            if doc.lock == LockState::Held {
+                doc.claim_lock();
+            }
+        }
     }
 
     /// Gives back every lock file this workspace holds (when quitting).

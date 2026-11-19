@@ -342,6 +342,29 @@ enum CloseRequest {
     App,
 }
 
+/// A plan's name made safe as a suggested file name.
+fn file_stem(name: &str) -> String {
+    name.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '-' } else { c }).collect()
+}
+
+/// The path to export to, from the file dialog's `path`: given the extension `ext` when typed
+/// without one (never replacing an existing file unasked: the dialog only asked about the name as
+/// typed), and refused when it ends in another extension (an export must never replace a plan or
+/// any other kind of file). `Err` is the sentence to show.
+fn export_path(path: PathBuf, ext: &str, what: &str) -> Result<PathBuf, String> {
+    match path.extension() {
+        None => {
+            let with_ext = path.with_extension(ext);
+            if with_ext.exists() {
+                return Err(format!("{} already exists. Choose it in the dialog to replace it, or pick another name.", with_ext.display()));
+            }
+            Ok(with_ext)
+        }
+        Some(e) if e.eq_ignore_ascii_case(ext) => Ok(path),
+        Some(_) => Err(format!("Choose a file name ending in .{ext} to export {what}.")),
+    }
+}
+
 /// A shared plan's part of the status bar: a coloured dot, the server and how the connection
 /// stands, and who else is in the plan.
 fn shared_status(ui: &mut Ui, r: &crate::remote::Remote) {
@@ -505,6 +528,8 @@ impl PlanCraftApp {
             (KeyboardShortcut::new(cmd, Key::X), Command::Cut, false),
             (KeyboardShortcut::new(cmd, Key::V), Command::Paste, false),
             (KeyboardShortcut::new(cmd, Key::D), Command::FillDown, false),
+            // Replace: Cmd+H hides the app on a Mac, so Cmd+Option+F there (and everywhere).
+            (KeyboardShortcut::new(cmd | Modifiers::ALT, Key::F), Command::Find(true), false),
             (KeyboardShortcut::new(cmd, Key::F), Command::Find(false), false),
             (KeyboardShortcut::new(cmd, Key::H), Command::Find(true), false),
             (KeyboardShortcut::new(Modifiers::NONE, Key::F5), Command::GoTo, false),
@@ -658,6 +683,7 @@ impl PlanCraftApp {
             Some(p) => doc.save_as(&p).map(|_| p),
             None => doc.save().map(|_| doc.path.clone().unwrap_or_default()),
         };
+        ws.keep_locks();
         drop(ws);
         if let Err(plancraft_core::io::FileError::ChangedOnDisk { .. }) = &r {
             // Never silently overwrite another program's changes: ask first.
@@ -700,29 +726,16 @@ impl PlanCraftApp {
         }) else {
             return;
         };
-        let name: String =
-            name.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '-' } else { c }).collect();
+        let name = file_stem(&name);
         let ext = plancraft_core::mspdi::EXTENSION;
         let Some(path) =
             rfd::FileDialog::new().add_filter("Microsoft Project XML", &[ext]).set_file_name(format!("{name}.{ext}")).save_file()
         else {
             return;
         };
-        let path = match path.extension() {
-            None => {
-                // The file dialog only asked about the name as typed: never replace "x.xml" unasked.
-                let with_ext = path.with_extension(ext);
-                if with_ext.exists() {
-                    return self.st.toast(
-                        ToastKind::Warning,
-                        format!("{} already exists. Choose it in the dialog to replace it, or pick another name.", with_ext.display()),
-                    );
-                }
-                with_ext
-            }
-            Some(e) if e.eq_ignore_ascii_case(ext) => path,
-            // Never write XML over a plan or any other kind of file.
-            Some(_) => return self.st.toast(ToastKind::Warning, "Choose a file name ending in .xml to export Microsoft Project XML."),
+        let path = match export_path(path, ext, "Microsoft Project XML") {
+            Ok(p) => p,
+            Err(why) => return self.st.toast(ToastKind::Warning, why),
         };
         match plancraft_core::io::write_atomic(&path, xml.as_bytes(), plancraft_core::io::Privacy::KeepExisting) {
             Ok(()) if notes.is_empty() => self.set_status(format!("Exported {}", path.display())),
@@ -841,21 +854,11 @@ impl PlanCraftApp {
 
     /// Asks where to save a PDF and writes it (no workspace lock is held while the file dialog is open).
     fn save_pdf(&mut self, pdf: dialogs::print::PendingPdf) {
-        let name: String =
-            pdf.name.chars().map(|c| if matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '-' } else { c }).collect();
+        let name = file_stem(&pdf.name);
         let Some(path) = rfd::FileDialog::new().add_filter("PDF", &["pdf"]).set_file_name(name).save_file() else { return };
-        let path = if path.extension().is_none() {
-            // The file dialog only asked about the name as typed: never replace "x.pdf" unasked.
-            let with_ext = path.with_extension("pdf");
-            if with_ext.exists() {
-                return self.st.toast(
-                    ToastKind::Warning,
-                    format!("{} already exists. Choose it in the dialog to replace it, or pick another name.", with_ext.display()),
-                );
-            }
-            with_ext
-        } else {
-            path
+        let path = match export_path(path, "pdf", "a PDF") {
+            Ok(p) => p,
+            Err(why) => return self.st.toast(ToastKind::Warning, why),
         };
         match plancraft_core::io::write_atomic(&path, &pdf.bytes, plancraft_core::io::Privacy::KeepExisting) {
             Ok(()) => self.set_status(format!("Saved {}", path.display())),
@@ -869,12 +872,15 @@ impl PlanCraftApp {
         else {
             return;
         };
-        let file = format!("{name}{}.csv", table.file_suffix());
-        if let Some(path) = rfd::FileDialog::new().add_filter("CSV", &["csv"]).set_file_name(file).save_file() {
-            match plancraft_core::io::write_atomic(&path, csv.as_bytes(), plancraft_core::io::Privacy::KeepExisting) {
-                Ok(()) => self.set_status(format!("Exported {}", path.display())),
-                Err(e) => self.st.toast(ToastKind::Error, format!("Could not save the CSV file: {e}")),
-            }
+        let file = format!("{}{}.csv", file_stem(&name), table.file_suffix());
+        let Some(path) = rfd::FileDialog::new().add_filter("CSV", &["csv"]).set_file_name(file).save_file() else { return };
+        let path = match export_path(path, "csv", "CSV") {
+            Ok(p) => p,
+            Err(why) => return self.st.toast(ToastKind::Warning, why),
+        };
+        match plancraft_core::io::write_atomic(&path, csv.as_bytes(), plancraft_core::io::Privacy::KeepExisting) {
+            Ok(()) => self.set_status(format!("Exported {}", path.display())),
+            Err(e) => self.st.toast(ToastKind::Error, format!("Could not save the CSV file: {e}")),
         }
     }
 
@@ -2639,6 +2645,20 @@ impl PlanCraftApp {
             let p = &doc.project;
             self.st.sel.tasks.retain(|id| p.task(*id).is_some());
             self.st.sel.resources.retain(|id| p.resource(*id).is_some());
+            // Nor tasks the filter or search hides: commands on "the selected tasks" (Task
+            // Information, dragging rows, clearing a field) would change tasks nobody can see.
+            // Views that list every task (Resource Usage, the resource views, Timesheet) select
+            // tasks the filter leaves out of the others: those stay.
+            let filtered_view =
+                !matches!(self.st.view, ViewKind::ResourceSheet | ViewKind::ResourceUsage | ViewKind::Workload | ViewKind::Timesheet);
+            if filtered_view
+                && (self.st.filter != crate::state::TaskFilter::All || !self.st.search.trim().is_empty())
+                && !self.st.sel.tasks.is_empty()
+            {
+                let shown: HashSet<TaskId> =
+                    views::search_order(p, &mut self.st).into_iter().filter_map(|i| p.tasks.get(i).map(|t| t.id)).collect();
+                self.st.sel.tasks.retain(|id| shown.contains(id));
+            }
         }
 
         // Window title.
@@ -3014,6 +3034,42 @@ mod ui_tests {
         h
     }
 
+    /// Regression: CSV export wrote over whatever file was chosen (the open plan included), and
+    /// suggested names with path separators in them.
+    #[test]
+    fn exports_never_replace_another_kind_of_file() {
+        let dir = crate::recovery::tests::TempDir::new("export");
+        assert_eq!(file_stem("Q1/Q2: plan?"), "Q1-Q2- plan-");
+        let plan = dir.0.join("Plan.plancraft");
+        assert!(export_path(plan, "csv", "CSV").unwrap_err().contains(".csv"));
+        assert_eq!(export_path(dir.0.join("tasks.CSV"), "csv", "CSV").unwrap(), dir.0.join("tasks.CSV"));
+        assert_eq!(export_path(dir.0.join("tasks"), "csv", "CSV").unwrap(), dir.0.join("tasks.csv"));
+        std::fs::write(dir.0.join("tasks.csv"), "kept").unwrap();
+        assert!(export_path(dir.0.join("tasks"), "csv", "CSV").unwrap_err().contains("already exists"));
+    }
+
+    /// Regression: tasks hidden by a search stayed selected, so Task Information, dragging rows
+    /// and clearing a cell changed them too.
+    #[test]
+    fn tasks_a_search_hides_leave_the_selection() {
+        let mut h = harness();
+        let (a, b, name) = {
+            let ws = lock(&h.state().ws);
+            let p = &ws.active_doc().unwrap().project;
+            let leaves: Vec<&plancraft_core::model::Task> = p.tasks.iter().filter(|t| !t.sched.is_summary).take(2).collect();
+            (leaves[0].id, leaves[1].id, leaves[0].name.clone())
+        };
+        h.state_mut().st.sel.tasks = [a, b].into_iter().collect();
+        h.state_mut().st.search = name;
+        h.run_steps(2);
+        assert_eq!(h.state().st.sel.tasks.iter().copied().collect::<Vec<_>>(), vec![a], "only the task still shown stays selected");
+        // Resource Usage lists every task: one selected there stays selected.
+        h.state_mut().st.view = ViewKind::ResourceUsage;
+        h.state_mut().st.sel.tasks = [b].into_iter().collect();
+        h.run_steps(2);
+        assert!(h.state().st.sel.tasks.contains(&b), "a view that doesn't filter keeps its selection");
+    }
+
     fn focus_task_grid(h: &mut Harness<'static, PlanCraftApp>) {
         let id = egui::Id::new(("task_grid", "Entry")).with("body");
         h.ctx.memory_mut(|m| m.request_focus(id));
@@ -3185,7 +3241,7 @@ mod ui_tests {
         let (a, b, level) = {
             let ws = h.state().ws.lock().unwrap();
             let p = &ws.active_doc().unwrap().project;
-            (p.tasks[15].id, p.tasks[16].id, p.tasks[16].outline_level)
+            (p.tasks[16].id, p.tasks[17].id, p.tasks[17].outline_level)
         };
         h.state_mut().st.sel.select_task(b);
         focus_task_grid(&mut h);
@@ -4182,6 +4238,73 @@ mod ui_tests {
         let (from, to) = (row_number_at(&h, 1), row_number_at(&h, 5));
         drag(&mut h, from, to);
         assert_eq!(tasks(&h), before);
+    }
+
+    /// Regression: a row drag could not be cancelled, and one released over the chart still moved
+    /// the rows (to the top or the end of the plan).
+    #[test]
+    fn a_row_drag_is_cancelled_by_escape_or_dropping_off_the_rows() {
+        let mut h = harness();
+        let before = tasks(&h);
+        let button =
+            |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        let (from, to) = (row_number_at(&h, 1), row_number_at(&h, 4));
+        h.event(egui::Event::PointerMoved(from));
+        h.run_steps(1);
+        h.event(button(from, true));
+        h.run_steps(1);
+        for k in 1..=8 {
+            h.event(egui::Event::PointerMoved(from + (to - from) * (k as f32 / 8.0)));
+            h.run_steps(1);
+        }
+        h.event(egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Modifiers::NONE });
+        h.run_steps(1);
+        h.event(button(to, false));
+        h.run_steps(3);
+        assert_eq!(tasks(&h), before, "Escape cancels the drag");
+        // Released far to the right, over the chart.
+        drag(&mut h, from, egui::pos2(1300.0, to.y));
+        assert_eq!(tasks(&h), before, "dropped off the rows: nothing moves");
+    }
+
+    /// Regression: a row drag remembered a row number, so when an agent's change moved the rows
+    /// during the drag, the task now on that row moved instead of the one dragged.
+    #[test]
+    fn a_row_drag_moves_the_task_dragged_even_when_rows_move_meanwhile() {
+        let mut h = harness();
+        let before = tasks(&h);
+        let dragged = before[1].clone();
+        let button =
+            |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        let (from, to) = (row_number_at(&h, 1), row_number_at(&h, 5));
+        h.event(egui::Event::PointerMoved(from));
+        h.run_steps(1);
+        h.event(button(from, true));
+        h.run_steps(1);
+        for k in 1..=4 {
+            h.event(egui::Event::PointerMoved(from + (to - from) * (k as f32 / 8.0)));
+            h.run_steps(1);
+        }
+        {
+            let ws = h.state().ws.clone();
+            let mut ws = lock(&ws);
+            ws.active_doc_mut()
+                .unwrap()
+                .edit_as("Add Task", ChangeSource::Agent, |p| {
+                    p.add_task("Agent's task", Some(0));
+                })
+                .unwrap();
+        }
+        for k in 5..=8 {
+            h.event(egui::Event::PointerMoved(from + (to - from) * (k as f32 / 8.0)));
+            h.run_steps(1);
+        }
+        h.event(button(to, false));
+        h.run_steps(3);
+        let after = tasks(&h);
+        assert_eq!(after[0], "Agent's task", "the agent's task stays where it was put");
+        assert_eq!(after[1], before[0], "the task now on the dragged row stays: {after:?}");
+        assert_ne!(after[2], dragged, "the dragged task moved: {after:?}");
     }
 
     /// Fill Down copies the top selected cell into the selected cells below it, in one undo step.

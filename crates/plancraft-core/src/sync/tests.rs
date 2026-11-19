@@ -695,6 +695,52 @@ fn a_subtask_added_under_a_summary_someone_deleted_is_a_conflict() {
     assert!(same(ana.local(), host.project()));
 }
 
+/// Regression: a change of 300,000 made-up fields on one task, based far back, took most of a
+/// minute to rebase while holding the plan.
+#[test]
+fn a_change_of_more_values_than_a_plan_has_is_refused_before_rebasing() {
+    let mut host = Host::new(plan());
+    let mut ana = join(&mut host);
+    let x = leaf(host.project(), 1);
+    local_edit(&mut ana, |p| rename(p, x, "Renamed"));
+    let mut change = ana.next_change("rename").unwrap();
+    let key = Key(x.0.to_string());
+    let fields = change.patch.lists.get_mut(&Collection::Tasks).unwrap().changed.get_mut(&key).unwrap();
+    for i in 0..MAX_ITEM_FIELDS {
+        fields.insert(format!("made_up_{i}"), Slot::Set(serde_json::Value::Bool(true)));
+    }
+    assert!(matches!(host.submit(&change, "Ana"), Outcome::Refused(why) if why.contains("one item")));
+    assert!(check_size(&Patch::default()).is_ok());
+}
+
+#[test]
+fn a_change_of_too_many_values_in_all_or_made_up_long_names_is_refused() {
+    let set = || Slot::Set(serde_json::Value::Bool(true));
+    let fields = |n: usize| (0..n).map(|i| (format!("f{i}"), set())).collect::<std::collections::BTreeMap<_, _>>();
+    // Progress on every task and assignment of the largest plan fits.
+    let mut fits = Patch::default();
+    let tasks = fits.lists.entry(Collection::Tasks).or_default();
+    tasks.changed = (0..limits::MAX_TASKS).map(|i| (Key(i.to_string()), fields(6))).collect();
+    let assignments = fits.lists.entry(Collection::Assignments).or_default();
+    assignments.changed = (0..limits::MAX_ASSIGNMENTS).map(|i| (Key(i.to_string()), fields(6))).collect();
+    assert!(check_size(&fits).is_ok());
+    // Past the total, refused.
+    let mut over = fits.clone();
+    let tasks = over.lists.get_mut(&Collection::Tasks).unwrap();
+    for fs in tasks.changed.values_mut() {
+        fs.extend(fields(MAX_CHANGED_FIELDS / limits::MAX_TASKS).into_iter().map(|(k, v)| (format!("x{k}"), v)));
+    }
+    assert!(matches!(check_size(&over), Err(SyncError::Shape(why)) if why.contains("smaller parts")));
+    // A made-up name longer than any field's, on the plan or on an item.
+    let long = "n".repeat(MAX_FIELD_NAME + 1);
+    let mut named = Patch::default();
+    named.fields.insert(long.clone(), set());
+    assert!(check_size(&named).is_err());
+    let mut named = Patch::default();
+    named.lists.entry(Collection::Tasks).or_default().changed.insert(Key("1".into()), [(long, set())].into_iter().collect());
+    assert!(check_size(&named).is_err());
+}
+
 #[test]
 fn floats_come_back_from_json_exactly() {
     // Units worked out as work / duration; read back one place off, a replica's copy never

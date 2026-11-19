@@ -280,7 +280,13 @@ impl McpServer {
         }
         let ctx = Ctx { server: self, changed: Cell::new(false) };
         let args = Args::new(map);
-        let outcome = catch_unwind(AssertUnwindSafe(|| (tool.handler)(&ctx, &args)));
+        // The document the call is about (listing them: all of them).
+        let pick = |ws: &Workspace| {
+            (name != "list_documents")
+                .then(|| Ctx::doc_index(ws, &args).ok().and_then(|i| ws.docs.get(i)).map(|d| d.handle).into_iter().collect())
+        };
+        let outcome =
+            crate::views::checking_disk_first(&self.workspace, pick, || catch_unwind(AssertUnwindSafe(|| (tool.handler)(&ctx, &args))));
         if ctx.changed.get() {
             self.notify_change();
         }
@@ -326,8 +332,10 @@ impl McpServer {
         };
         let elsewhere = elsewhere.map(|who| {
             format!(
-                "Document {handle} ({}) is also open by {who}. Changes saved there are noticed here; tell the user before making large changes, since only one version can be kept.",
-                path.display()
+                "Document {handle} ({}) is also open in another PlanCraft (its lock file, data written by that program, says: {}). Changes saved there are noticed here; tell the user before making large changes, since only one version can be kept.",
+                path.display(),
+                // Quoted as JSON: a quote in it can't end the quotation.
+                serde_json::to_string(&who).unwrap_or_default()
             )
         });
         match (disk, elsewhere) {

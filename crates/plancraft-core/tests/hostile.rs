@@ -204,8 +204,11 @@ proptest! {
     ) {
         let mut doc = Document::new(1, demo_project(start()), None);
         for op in ops {
+            let linked_to_own_summary = doc.project.summary_self_links();
             let r = doc.try_edit("junk", ChangeSource::Agent, |p| apply(p, &op));
             prop_assert!(!matches!(r, Err(PlanError::Internal(_))), "{op:?} panicked: {r:?}");
+            // No edit links a task to its own summary (`link` refuses it; moves must not make it).
+            prop_assert!(doc.project.summary_self_links().is_subset(&linked_to_own_summary), "{op:?} linked a task to its own summary");
             prop_assert!(limits::check_counts(&doc.project).is_ok());
             let mut copy = doc.project.clone();
             prop_assert!(limits::sanitize(&mut copy).is_empty(), "{op:?} left values out of range");

@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use plancraft_core::ids::{IdCounters, TaskId};
-use plancraft_core::io::{self, DiskStamp, Privacy, write_atomic};
+use plancraft_core::io::{self, DiskStamp, Privacy};
 use plancraft_core::limits::MAX_FILE_BYTES;
 use plancraft_core::lock::{self, LockState};
 use plancraft_core::model::Project;
@@ -41,6 +41,9 @@ pub const SAVE_WHEN_IDLE: Duration = Duration::from_secs(3);
 pub const SAVE_AT_LEAST: Duration = Duration::from_secs(60);
 /// Waits this long after a failed save before trying again.
 pub const SAVE_RETRY: Duration = Duration::from_secs(30);
+/// One connection gets the whole plan at most this often; more asks wait (sent from upkeep).
+/// Each whole plan is up to 56 MiB, made under the plan's lock.
+pub const MIN_SNAPSHOT_GAP: Duration = Duration::from_secs(2);
 /// The largest a shared plan may grow, as saved (below what a plan file may be, so it always
 /// opens again, and its whole-plan message always fits a frame).
 pub const MAX_SHARED_BYTES: usize = 56 * 1024 * 1024;
@@ -312,6 +315,17 @@ pub struct SharedPlan {
     last_change: Instant,
     last_save: Instant,
     last_lock: Instant,
+    /// Someone's place changed: who is where goes out from upkeep (at most every 200 ms), not
+    /// once per message, so one person flipping between tasks cannot flood the others' queues.
+    people_pending: bool,
+    /// When each connection last got the whole plan, and the ones waiting for it (with whether
+    /// the change on its way went in).
+    last_snapshot: HashMap<ConnId, Instant>,
+    /// The latest whole plan written out, kept while the version stays: joins and resyncs from
+    /// many connections share it instead of each writing the plan out again under the lock.
+    /// (Also keyed by the id counters, which a lease moves without a new version.)
+    snapshot_cache: std::cell::RefCell<Option<(Snapshot, plancraft_core::ids::IdCounters)>>,
+    snapshot_due: HashMap<ConnId, bool>,
     /// After a failed save, the next try waits until then.
     retry_save: Option<Instant>,
     subscribers: BTreeMap<ConnId, Subscriber>,
@@ -383,9 +397,13 @@ fn with_epoch(records: &[Record], new: Uuid) -> Vec<Record> {
     records
         .iter()
         .map(|r| match r {
-            Record::Header { version, plan_hash, applied, .. } => {
-                Record::Header { epoch: new, version: *version, plan_hash: plan_hash.clone(), applied: applied.clone() }
-            }
+            Record::Header { version, plan_hash, applied, saved_to, .. } => Record::Header {
+                epoch: new,
+                version: *version,
+                plan_hash: plan_hash.clone(),
+                applied: applied.clone(),
+                saved_to: saved_to.clone(),
+            },
             other => other.clone(),
         })
         .collect()
@@ -426,11 +444,40 @@ impl SharedPlan {
 
         // Which version the plan file holds, and what to replay on top of it.
         let mut start: Option<(Uuid, Version, Vec<ChangeId>, &[Record])> = None;
-        if let Some((Record::Header { epoch, version, plan_hash, applied }, rest)) = back.records.split_first() {
+        if let Some((Record::Header { epoch, version, plan_hash, applied, saved_to }, rest)) = back.records.split_first() {
+            // The shared plan went to a hidden copy (the file was changed outside the server):
+            // starting afresh from the file would leave every shared change in that copy,
+            // unnoticed. Nobody opens it until a person keeps one version as the plan.
+            // The copy named by the latest save record (written before the copy, so a crash
+            // before the next header counts too), else by the header.
+            let copy_name = rest
+                .iter()
+                .rev()
+                .find_map(|r| match r {
+                    Record::Saving { to, .. } => Some(to.clone()),
+                    _ => None,
+                })
+                .flatten()
+                .or_else(|| saved_to.clone());
+            // A save that went to the plan file itself and matches it: the file is the server's.
+            let saved_here = |r: &Record| matches!(r, Record::Saving { plan_hash, to: None, .. } if *plan_hash == file_hash);
+            if *plan_hash != file_hash
+                && !rest.iter().any(saved_here)
+                && let Some(copy) = copy_name.as_deref().map(|n| path.with_file_name(n)).filter(|c| c.is_file())
+            {
+                // Names only: the message goes to every client trying to open the plan.
+                let shown = |p: &Path| p.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                return Err(format!(
+                    "{name}: the shared plan was saved to {} because the plan file was changed outside the server. Keep the \
+                     version you want as {name} (moving the other away), and delete the journal {} if you keep the outside one.",
+                    shown(&copy),
+                    shown(&jpath)
+                ));
+            }
             if *plan_hash == file_hash {
                 start = Some((*epoch, *version, applied.clone(), rest));
             } else if let Some(saved) = rest.iter().rev().find_map(|r| match r {
-                Record::Saving { version, plan_hash } if *plan_hash == file_hash => Some(*version),
+                Record::Saving { version, plan_hash, to: None } if *plan_hash == file_hash => Some(*version),
                 _ => None,
             }) {
                 // The power failed after the plan was saved, before the journal started afresh.
@@ -508,7 +555,10 @@ impl SharedPlan {
         let journal = if replayed > 0 || damaged {
             Journal::start_with(&jpath, &records)
         } else {
-            Journal::start(&jpath, &Record::Header { epoch, version: host.version(), plan_hash: file_hash, applied: host.applied_ids() })
+            Journal::start(
+                &jpath,
+                &Record::Header { epoch, version: host.version(), plan_hash: file_hash, applied: host.applied_ids(), saved_to: None },
+            )
         }
         .map_err(|e| format!("cannot write the journal of {name}: {e}"))?;
         let now = Instant::now();
@@ -525,6 +575,10 @@ impl SharedPlan {
             last_change: now,
             last_save: now,
             last_lock: now,
+            people_pending: false,
+            last_snapshot: HashMap::new(),
+            snapshot_cache: std::cell::RefCell::new(None),
+            snapshot_due: HashMap::new(),
             retry_save: None,
             subscribers: BTreeMap::new(),
             current: HashMap::new(),
@@ -568,8 +622,17 @@ impl SharedPlan {
     }
 
     pub fn snapshot(&self) -> Result<Snapshot, String> {
+        let version = self.host.version();
+        let ids = &self.host.project().ids;
+        if let Some((s, _)) =
+            self.snapshot_cache.borrow().as_ref().filter(|(s, i)| s.epoch == self.epoch && s.version == version && i == ids)
+        {
+            return Ok(s.clone());
+        }
         let plan = io::to_json(self.host.project()).map_err(|e| e.to_string())?;
-        Ok(Snapshot { epoch: self.epoch, version: self.host.version(), plan })
+        let snapshot = Snapshot { epoch: self.epoch, version, plan };
+        *self.snapshot_cache.borrow_mut() = Some((snapshot.clone(), ids.clone()));
+        Ok(snapshot)
     }
 
     fn people(&self) -> Vec<Person> {
@@ -827,8 +890,43 @@ impl SharedPlan {
     }
 
     pub fn resync(&mut self, conn: ConnId, in_flight_applied: bool) -> Result<(), Broken> {
+        let now = Instant::now();
+        if self.last_snapshot.get(&conn).is_some_and(|t| now.saturating_duration_since(*t) < MIN_SNAPSHOT_GAP) {
+            // Asked again too soon: it goes from upkeep (once, however often it was asked).
+            let applied = self.snapshot_due.entry(conn).or_insert(false);
+            *applied |= in_flight_applied;
+            return Ok(());
+        }
+        self.send_snapshot(conn, in_flight_applied, now)
+    }
+
+    fn send_snapshot(&mut self, conn: ConnId, in_flight_applied: bool, now: Instant) -> Result<(), Broken> {
+        self.snapshot_due.remove(&conn);
+        self.last_snapshot.insert(conn, now);
         let snapshot = self.snapshot().map_err(Broken)?;
         self.send(conn, &ServerMsg::Snapshot { snapshot, in_flight_applied });
+        Ok(())
+    }
+
+    /// Sends what upkeep holds back: who is where, and whole plans asked for too often.
+    fn send_held(&mut self, now: Instant) -> Result<(), Broken> {
+        // Connections that left are forgotten.
+        let subscribers = &self.subscribers;
+        self.last_snapshot.retain(|c, _| subscribers.contains_key(c));
+        self.snapshot_due.retain(|c, _| subscribers.contains_key(c));
+        if std::mem::take(&mut self.people_pending) {
+            let people = self.people();
+            self.broadcast(&ServerMsg::People { people });
+        }
+        let ready: Vec<(ConnId, bool)> = self
+            .snapshot_due
+            .iter()
+            .filter(|(c, _)| self.last_snapshot.get(c).is_none_or(|t| now.saturating_duration_since(*t) >= MIN_SNAPSHOT_GAP))
+            .map(|(c, a)| (*c, *a))
+            .collect();
+        for (conn, applied) in ready {
+            self.send_snapshot(conn, applied, now)?;
+        }
         Ok(())
     }
 
@@ -838,8 +936,7 @@ impl SharedPlan {
             return;
         }
         s.task = task;
-        let people = self.people();
-        self.broadcast(&ServerMsg::People { people });
+        self.people_pending = true;
     }
 
     /// Whether the plan file is still the one this server last read or wrote (a regular file,
@@ -853,7 +950,7 @@ impl SharedPlan {
         let text = io::to_json(self.host.project()).map_err(|e| SaveError::Retry(e.to_string()))?;
         let hash = plan_hash(text.as_bytes());
         let version = self.host.version();
-        self.journal(&Record::Saving { version, plan_hash: hash.clone() }).map_err(SaveError::Broken)?;
+        // Where it goes is settled (and written down) before anything is written.
         if self.save_to == self.path && !self.file_is_ours() {
             // Someone changed the file while it was shared (ignoring the lock): leave theirs
             // alone. The copy is hidden (no plan of its own to share, with other access rules)
@@ -870,13 +967,18 @@ impl SharedPlan {
                 None => return Err(SaveError::Retry("the plan file was changed outside the server, and no copy could be made".into())),
             }
         }
+        let to = (self.save_to != self.path).then(|| self.save_to.file_name().map(|n| n.to_string_lossy().into_owned())).flatten();
+        self.journal(&Record::Saving { version, plan_hash: hash.clone(), to }).map_err(SaveError::Broken)?;
         let privacy = if self.save_to == self.path { Privacy::NoLinks } else { Privacy::OwnerOnly };
-        write_atomic(&self.save_to, text.as_bytes(), privacy).map_err(|e| SaveError::Retry(e.to_string()))?;
+        let stamp = io::write_atomic_stamped(&self.save_to, text.as_bytes(), privacy).map_err(|e| SaveError::Retry(e.to_string()))?;
         if self.save_to == self.path {
-            self.stamp = io::disk_stamp(&self.path);
+            // From the file as written, not read by name after: another program's write landing
+            // in between must not pass for the server's own.
+            self.stamp = Some(stamp);
         }
         self.size = text.len();
-        let header = Record::Header { epoch: self.epoch, version, plan_hash: hash, applied: self.host.applied_ids() };
+        let saved_to = (self.save_to != self.path).then(|| self.save_to.file_name().map(|n| n.to_string_lossy().into_owned())).flatten();
+        let header = Record::Header { epoch: self.epoch, version, plan_hash: hash, applied: self.host.applied_ids(), saved_to };
         let jpath = self.journal.path().to_path_buf();
         // If the new journal is in place but cannot be opened, the old handle points at a file
         // that is gone: writing on there would confirm changes no recovery can see.
@@ -898,6 +1000,7 @@ impl SharedPlan {
         if let Some(b) = &self.broken {
             return Err(b.clone());
         }
+        self.send_held(now)?;
         if now.saturating_duration_since(self.last_lock) >= lock::REFRESH {
             self.last_lock = now;
             if let LockState::OpenElsewhere(owner) = lock::claim(&self.path) {
