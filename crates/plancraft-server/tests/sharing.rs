@@ -246,3 +246,39 @@ proptest::proptest! {
         }
     }
 }
+
+/// Discovery between two computers, by hand: run `announce_for_others` on one computer and
+/// `hear_another_computer` on another at the same time, both with `PLANCRAFT_MDNS_TEST_PORT` (a
+/// private mDNS port) and `PLANCRAFT_MDNS_TEST_NAME` set:
+/// `cargo test -p plancraft-server --test sharing -- --ignored --nocapture announce_for_others`.
+#[test]
+#[ignore = "by hand, with another computer"]
+fn announce_for_others() {
+    let (port, name) = cross_machine_setup();
+    let _announcer = Announcer::start_on(&name, "cross-test", "0.0.0.0:47411".parse().unwrap(), port).unwrap();
+    eprintln!("announcing {name:?} on mDNS port {port} for 40 s");
+    std::thread::sleep(Duration::from_secs(40));
+}
+
+#[test]
+#[ignore = "by hand, with another computer"]
+fn hear_another_computer() {
+    let (port, name) = cross_machine_setup();
+    let mut browser = Browser::start_on(port).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(40);
+    loop {
+        browser.poll();
+        if let Some(f) = browser.found().into_iter().find(|f| f.name == name) {
+            eprintln!("heard {:?} at {}", f.name, f.address);
+            return;
+        }
+        assert!(Instant::now() < deadline, "not heard; heard: {:?}", browser.found());
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+fn cross_machine_setup() -> (u16, String) {
+    let port = std::env::var("PLANCRAFT_MDNS_TEST_PORT").ok().and_then(|p| p.parse().ok()).expect("PLANCRAFT_MDNS_TEST_PORT");
+    let name = std::env::var("PLANCRAFT_MDNS_TEST_NAME").expect("PLANCRAFT_MDNS_TEST_NAME");
+    (port, name)
+}
