@@ -54,8 +54,12 @@ fn cut_bytes(text: &str, max: usize) -> String {
     out
 }
 
-/// The computer's name as an mDNS host name (`studio-pc.local.`): letters, digits and hyphens.
+/// The host name the server's announcement points to (`studio-pc-plancraft.local.`): the
+/// computer's name in letters, digits and hyphens, with `-plancraft` added. Not the computer's
+/// own `.local` name, which the system answers for: two answers with different addresses for one
+/// name could make the system think another computer took its name, and rename itself.
 fn mdns_host(host: &str) -> String {
+    const SUFFIX: &str = "-plancraft";
     let label: String = host
         .split('.')
         .next()
@@ -63,9 +67,9 @@ fn mdns_host(host: &str) -> String {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
         .collect();
-    let label = cut_bytes(label.trim_matches('-'), MAX_LABEL_BYTES);
-    let label = if label.is_empty() { "plancraft-server".to_string() } else { label };
-    format!("{label}.local.")
+    let label = cut_bytes(label.trim_matches('-'), MAX_LABEL_BYTES.saturating_sub(SUFFIX.len()));
+    let label = label.trim_end_matches('-');
+    if label.is_empty() { "plancraft-server.local.".to_string() } else { format!("{label}{SUFFIX}.local.") }
 }
 
 /// The name announced for a server: what people see in the list (`Plans on studio-pc`), as one
@@ -93,6 +97,7 @@ impl Announcer {
     /// [`Announcer::start`] on another mDNS port (tests, so they never reach the real network).
     pub fn start_on(name: &str, host: &str, addr: std::net::SocketAddr, mdns_port: u16) -> Result<Announcer, String> {
         let daemon = ServiceDaemon::new_with_port(mdns_port).map_err(|e| format!("cannot announce the server on the network: {e}"))?;
+        skip_virtual_interfaces(&daemon);
         let ip = if addr.ip().is_unspecified() { String::new() } else { addr.ip().to_string() };
         let properties = [("v", crate::protocol::PROTOCOL.to_string())];
         let info = ServiceInfo::new(SERVICE, &instance_name(name, ""), &mdns_host(host), ip.as_str(), addr.port(), &properties[..])
@@ -126,12 +131,21 @@ pub struct Found {
     pub name: String,
     /// The address to connect to, as people type it (`192.168.1.20`, `192.168.1.20:47400`).
     pub address: String,
+    /// Every address it gave, best first (`address` is the first): one already trusted is
+    /// preferred to the best, as anyone can add addresses to another server's announcement.
+    pub addresses: Vec<String>,
 }
 
 /// The address to connect to among those a server announced: an IPv4 address on the network
 /// first, then a global IPv6 one, then the loopback address (the server runs on this computer).
 /// Link-local IPv6 addresses need an interface to be named, so they are passed over.
 pub fn pick_address(addresses: &[IpAddr], port: u16) -> Option<String> {
+    ranked_addresses(addresses, port).into_iter().next()
+}
+
+/// The addresses to connect to among those a server announced, best first (see
+/// [`pick_address`]), at most eight.
+fn ranked_addresses(addresses: &[IpAddr], port: u16) -> Vec<String> {
     let rank = |ip: &IpAddr| match ip {
         IpAddr::V4(v4) if v4.is_unspecified() || v4.is_multicast() || v4.is_broadcast() => None,
         IpAddr::V4(v4) if v4.is_loopback() => Some(3),
@@ -144,10 +158,12 @@ pub fn pick_address(addresses: &[IpAddr], port: u16) -> Option<String> {
         IpAddr::V6(_) => Some(1),
     };
     if port == 0 {
-        return None;
+        return Vec::new();
     }
-    let best = addresses.iter().filter_map(|ip| rank(ip).map(|r| (r, *ip))).min()?.1;
-    Some(typed(best, port))
+    let mut ranked: Vec<(u8, IpAddr)> = addresses.iter().filter_map(|ip| rank(ip).map(|r| (r, *ip))).collect();
+    ranked.sort_unstable();
+    ranked.dedup();
+    ranked.into_iter().take(8).map(|(_, ip)| typed(ip, port)).collect()
 }
 
 /// An address as people type it in *Open from Server*: the port only when it is not the usual one.
@@ -172,10 +188,26 @@ fn reachable(ip: &IpAddr) -> bool {
 }
 
 /// Interfaces only this computer reaches: container bridges and virtual machines' networks
-/// (Docker, Podman, libvirt, VirtualBox, VMware).
+/// (Docker, Podman, libvirt, VirtualBox, VMware, WSL and Hyper-V's Default Switch). A Hyper-V
+/// external switch (`vEthernet (External…)` on Windows) holds the computer's real network
+/// address, so it is kept.
 fn virtual_interface(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
-    ["docker", "br-", "veth", "virbr", "vboxnet", "vmnet", "podman", "cni", "flannel", "lxcbr", "lxdbr"].iter().any(|p| name.starts_with(p))
+    let unix = ["docker", "br-", "virbr", "vboxnet", "vmnet", "podman", "cni", "flannel", "lxcbr", "lxdbr"];
+    (name.starts_with("veth") && !name.starts_with("vethernet"))
+        || unix.iter().any(|p| name.starts_with(p))
+        || name.starts_with("vethernet (wsl")
+        || name.contains("(default switch)")
+}
+
+/// Keeps a daemon off this computer's virtual interfaces (it would announce, and hear, addresses
+/// only this computer reaches).
+fn skip_virtual_interfaces(daemon: &ServiceDaemon) {
+    let names: std::collections::BTreeSet<String> =
+        if_addrs::get_if_addrs().map(|l| l.into_iter().map(|i| i.name).filter(|n| virtual_interface(n)).collect()).unwrap_or_default();
+    if !names.is_empty() {
+        let _ = daemon.disable_interface(names.into_iter().map(mdns_sd::IfKind::Name).collect::<Vec<_>>());
+    }
 }
 
 /// The addresses of this computer that others on the network can type to reach a server on
@@ -190,14 +222,28 @@ pub fn local_addresses(port: u16) -> Vec<String> {
     ips.into_iter().take(8).map(|ip| typed(ip, port)).collect()
 }
 
-/// What an announcement says, made safe to show: its name cut short with no control
-/// characters, and an address to connect to. `None` when it gives nothing to connect to.
+/// Characters that change how text around them looks without showing themselves (direction
+/// overrides, zero-width characters): a name could look like another with them.
+fn invisible(c: char) -> bool {
+    matches!(c, '\u{00ad}' | '\u{061c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}' | '\u{fff9}'..='\u{fffb}')
+}
+
+/// Marks PlanCraft draws beside servers it already trusts: a name must not start with one.
+fn trust_mark(c: char) -> bool {
+    matches!(c, '✔' | '✓' | '☑' | '✅' | '🔒' | '🔐')
+}
+
+/// What an announcement says, made safe to show: its name cut short with no control or
+/// invisible characters and no trust mark in front, and the addresses to connect to. `None` when
+/// it gives nothing to connect to.
 pub fn found_from(fullname: &str, port: u16, addresses: &[IpAddr]) -> Option<Found> {
-    let address = pick_address(addresses, port)?;
-    let name: String = mdns_sd::instance_name_unescaped(fullname).chars().filter(|c| !c.is_control()).take(MAX_NAME_CHARS).collect();
-    let name = name.trim();
+    let addresses = ranked_addresses(addresses, port);
+    let address = addresses.first()?.clone();
+    let name: String =
+        mdns_sd::instance_name_unescaped(fullname).chars().filter(|c| !c.is_control() && !invisible(*c)).take(MAX_NAME_CHARS).collect();
+    let name = name.trim_start_matches(|c: char| trust_mark(c) || c.is_whitespace()).trim_end();
     let name = if name.is_empty() { address.clone() } else { name.to_string() };
-    Some(Found { name, address })
+    Some(Found { name, address, addresses })
 }
 
 /// Listens for servers' announcements until dropped.
@@ -216,6 +262,7 @@ impl Browser {
     /// [`Browser::start`] on another mDNS port (tests).
     pub fn start_on(mdns_port: u16) -> Result<Browser, String> {
         let daemon = ServiceDaemon::new_with_port(mdns_port).map_err(|e| format!("cannot look for servers on the network: {e}"))?;
+        skip_virtual_interfaces(&daemon);
         let events = match daemon.browse(SERVICE) {
             Ok(r) => r,
             Err(e) => {
@@ -229,9 +276,20 @@ impl Browser {
     /// Takes in the announcements heard since the last call; returns whether the list changed.
     pub fn poll(&mut self) -> bool {
         let mut changed = false;
-        // A flood of announcements is taken in a bit at a time, never all in one frame.
-        for _ in 0..256 {
-            let Ok(event) = self.events.try_recv() else { break };
+        // Everything waiting (the daemon gives up on a listener that lets 1,000 pile up), up to a
+        // bound, so a flood never holds up a frame for long.
+        for _ in 0..4096 {
+            let event = match self.events.try_recv() {
+                Ok(e) => e,
+                Err(mdns_sd::TryRecvError::Empty) => break,
+                Err(mdns_sd::TryRecvError::Disconnected) => {
+                    // Given up on (flooded), or its thread ended: listen afresh.
+                    if let Ok(events) = self.daemon.browse(SERVICE) {
+                        self.events = events;
+                    }
+                    break;
+                }
+            };
             match event {
                 ServiceEvent::ServiceResolved(s) if s.ty_domain == SERVICE => {
                     let addresses: Vec<IpAddr> = s.addresses.iter().map(mdns_sd::ScopedIp::to_ip_addr).collect();
@@ -260,10 +318,18 @@ impl Browser {
 }
 
 impl Drop for Browser {
+    /// Stops listening, waiting for the daemon on a thread of its own (closing the window must not
+    /// wait for it).
     fn drop(&mut self) {
-        let _ = self.daemon.stop_browse(SERVICE);
-        if let Ok(done) = self.daemon.shutdown() {
-            let _ = done.recv_timeout(GOODBYE_WAIT);
+        fn stop(daemon: &ServiceDaemon) {
+            let _ = daemon.stop_browse(SERVICE);
+            if let Ok(done) = daemon.shutdown() {
+                let _ = done.recv_timeout(GOODBYE_WAIT);
+            }
+        }
+        let daemon = self.daemon.clone();
+        if std::thread::Builder::new().name("plancraft-mdns-stop".into()).spawn(move || stop(&daemon)).is_err() {
+            stop(&self.daemon);
         }
     }
 }
@@ -299,7 +365,11 @@ mod tests {
         for name in ["docker0", "br-3f2a", "veth12", "virbr0", "vboxnet0", "vmnet8", "podman0"] {
             assert!(virtual_interface(name), "{name}");
         }
-        for name in ["eth0", "enp5s0", "wlan0", "en0", "Ethernet", "Wi-Fi", "tailscale0", "wg0"] {
+        for name in ["vEthernet (WSL (Hyper-V firewall))", "vEthernet (Default Switch)"] {
+            assert!(virtual_interface(name), "{name}");
+        }
+        // A Hyper-V external switch holds the computer's real address.
+        for name in ["eth0", "enp5s0", "wlan0", "en0", "Ethernet", "Wi-Fi", "tailscale0", "wg0", "vEthernet (External Switch)"] {
             assert!(!virtual_interface(name), "{name}");
         }
     }
@@ -316,7 +386,14 @@ mod tests {
     fn announcements_are_made_safe_to_show() {
         let lan = [IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))];
         let f = found_from(r"Plans on studio\.pc._plancraft._tcp.local.", DEFAULT_PORT, &lan).unwrap();
-        assert_eq!(f, Found { name: "Plans on studio.pc".into(), address: "10.0.0.2".into() });
+        assert_eq!(f, Found { name: "Plans on studio.pc".into(), address: "10.0.0.2".into(), addresses: vec!["10.0.0.2".into()] });
+        // No fake trust mark, no hidden characters that make a name look like another.
+        let f = found_from("✔ \u{202e}Plans\u{200b} on studio-pc._plancraft._tcp.local.", DEFAULT_PORT, &lan).unwrap();
+        assert_eq!(f.name, "Plans on studio-pc");
+        // Every address is kept, best first: one already trusted can be picked over the best.
+        let many = [IpAddr::V4(Ipv4Addr::new(192, 168, 1, 9)), IpAddr::V4(Ipv4Addr::new(1, 0, 0, 1)), IpAddr::V4(Ipv4Addr::LOCALHOST)];
+        let f = found_from("x._plancraft._tcp.local.", DEFAULT_PORT, &many).unwrap();
+        assert_eq!(f.addresses, ["1.0.0.1", "192.168.1.9", "127.0.0.1"]);
         let f = found_from("Evil\u{1b}[2J\u{7}name._plancraft._tcp.local.", DEFAULT_PORT, &lan).unwrap();
         assert!(!f.name.chars().any(char::is_control), "{:?}", f.name);
         let long = format!("{}._plancraft._tcp.local.", "x".repeat(10_000));
@@ -332,8 +409,9 @@ mod tests {
         assert_eq!(instance_name("\u{7}", ""), "PlanCraft Server");
         let n = instance_name(&"é".repeat(100), "pc");
         assert!(n.len() <= MAX_LABEL_BYTES && n.chars().all(|c| c == 'é'));
-        assert_eq!(mdns_host("Studio PC.example.com"), "studio-pc.local.");
-        assert_eq!(mdns_host("ünï"), "n.local.");
+        assert_eq!(mdns_host("Studio PC.example.com"), "studio-pc-plancraft.local.");
+        assert!(mdns_host(&"x".repeat(200)).trim_end_matches(".local.").len() <= MAX_LABEL_BYTES);
+        assert_eq!(mdns_host("ünï"), "n-plancraft.local.");
         assert_eq!(mdns_host("ü"), "plancraft-server.local.");
     }
 }

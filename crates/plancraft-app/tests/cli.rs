@@ -33,7 +33,12 @@ fn share_folder_runs_the_server_from_plancraft_itself() {
     let mut users = plancraft_server::users::Users::load(&plancraft_server::server::users_path(&config)).unwrap();
     users.add("ana", "correct horse", plancraft_server::protocol::Role::Editor).unwrap();
     users.save().unwrap();
-    let program = Program { program: env!("CARGO_BIN_EXE_plancraft").into(), args: vec!["serve".into()] };
+    // On this computer only (no firewall prompts on the build machines).
+    let program = Program {
+        program: env!("CARGO_BIN_EXE_plancraft").into(),
+        args: vec!["serve".into(), "--bind".into(), "127.0.0.1".into()],
+        prepare: None,
+    };
     let mut s = Sharing::start(&program, &folder, &config, 0, false, std::sync::Arc::new(|| {})).unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
     let ready = loop {

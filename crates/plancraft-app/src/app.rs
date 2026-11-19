@@ -1003,7 +1003,7 @@ impl PlanCraftApp {
                 if self.share_dialog.is_none() {
                     match plancraft_server::server::default_config() {
                         Some(config) => {
-                            let suggested = if self.share.sharing.is_none() { self.share_suggest.take() } else { None };
+                            let suggested = if self.share.sharing.is_none() { self.share_suggest.clone() } else { None };
                             self.share_dialog = Some(dialogs::share::ShareFolder::new(&self.settings, config, suggested));
                         }
                         None => self.st.toast(ToastKind::Error, "Cannot tell where to keep the server's files (no settings folder)."),
@@ -2056,7 +2056,8 @@ impl PlanCraftApp {
                             plancraft_server::server::default_config(),
                             dialogs::share::server_program(),
                         ) {
-                            self.share.start(&program, &folder, &config, self.settings.share_port, self.settings.share_announce, ctx);
+                            // Never announced: screenshots must not list a server on the network.
+                            self.share.start(&program, &folder, &config, self.settings.share_port, false, ctx);
                         }
                         Command::ShareFolder
                     }
@@ -2916,6 +2917,10 @@ impl PlanCraftApp {
                     self.server_dialog = Some(dialogs::server::OpenFromServer::for_own_server(&self.settings, &address, &fingerprint));
                 }
             }
+        }
+        if self.share.sharing.is_some() {
+            // Shared now: the folder suggested by a server's journal has served its purpose.
+            self.share_suggest = None;
         }
         if let Some(why) = self.share.poll() {
             self.st.toast(ToastKind::Error, format!("Sharing stopped: {why}"));

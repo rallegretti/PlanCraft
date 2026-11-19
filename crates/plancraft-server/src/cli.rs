@@ -44,6 +44,8 @@ Nothing listens on the network unless a server is started like this.";
 
 struct Args {
     rest: Vec<String>,
+    /// `rest` as given (a folder whose name is not valid UTF-8 is still that folder).
+    rest_os: Vec<std::ffi::OsString>,
     config: Option<PathBuf>,
     port: Option<String>,
     bind: Option<String>,
@@ -54,9 +56,10 @@ struct Args {
     watch_stdin: bool,
 }
 
-fn parse(args: Vec<String>) -> Result<Args, String> {
+fn parse(args: Vec<std::ffi::OsString>) -> Result<Args, String> {
     let mut out = Args {
         rest: Vec::new(),
+        rest_os: Vec::new(),
         config: None,
         port: None,
         bind: None,
@@ -67,21 +70,56 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
         watch_stdin: false,
     };
     let mut it = args.into_iter();
-    while let Some(a) = it.next() {
+    let mut options_end = false;
+    while let Some(os) = it.next() {
+        let a = os.to_string_lossy().into_owned();
         let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value"));
+        let mut text = |name: &str| value(name).map(|v| v.to_string_lossy().into_owned());
         match a.as_str() {
-            "--config" => out.config = Some(PathBuf::from(value("--config")?)),
-            "--port" => out.port = Some(value("--port")?),
-            "--bind" => out.bind = Some(value("--bind")?),
-            "--role" => out.role = Some(value("--role")?),
-            "--plan" => out.plan = Some(value("--plan")?),
-            "--password-stdin" => out.password_stdin = true,
-            "--no-announce" => out.no_announce = true,
-            "--watch-stdin" => out.watch_stdin = true,
-            "--help" | "--version" => out.rest.push(a),
+            _ if options_end => {}
+            "--" => {
+                // Everything after it is a name, even one starting with "-".
+                options_end = true;
+                continue;
+            }
+            "--config" => {
+                out.config = Some(PathBuf::from(value("--config")?));
+                continue;
+            }
+            "--port" => {
+                out.port = Some(text("--port")?);
+                continue;
+            }
+            "--bind" => {
+                out.bind = Some(text("--bind")?);
+                continue;
+            }
+            "--role" => {
+                out.role = Some(text("--role")?);
+                continue;
+            }
+            "--plan" => {
+                out.plan = Some(text("--plan")?);
+                continue;
+            }
+            "--password-stdin" => {
+                out.password_stdin = true;
+                continue;
+            }
+            "--no-announce" => {
+                out.no_announce = true;
+                continue;
+            }
+            "--watch-stdin" => {
+                out.watch_stdin = true;
+                continue;
+            }
+            "--help" | "--version" => {}
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
-            _ => out.rest.push(a),
+            _ => {}
         }
+        out.rest.push(a);
+        out.rest_os.push(os);
     }
     Ok(out)
 }
@@ -118,7 +156,7 @@ fn read_password(args: &Args, prompt: &str) -> Result<String, String> {
 }
 
 /// Runs the command line; returns the exit code.
-pub fn run(args: Vec<String>) -> i32 {
+pub fn run(args: Vec<std::ffi::OsString>) -> i32 {
     match run_inner(args) {
         Ok(()) => 0,
         Err(e) => {
@@ -129,7 +167,7 @@ pub fn run(args: Vec<String>) -> i32 {
     }
 }
 
-fn run_inner(args: Vec<String>) -> Result<(), String> {
+fn run_inner(args: Vec<std::ffi::OsString>) -> Result<(), String> {
     let args = parse(args)?;
     match args.rest.first().map(String::as_str) {
         None | Some("help" | "-h" | "--help") => {
@@ -251,7 +289,9 @@ fn watch_stdin(running: &server::Running, log: &Log) {
         let mut stdin = std::io::stdin().lock();
         loop {
             match stdin.read(&mut sink) {
-                Ok(0) | Err(_) => break,
+                Ok(0) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(_) => break,
                 Ok(_) => {}
             }
         }
@@ -267,7 +307,7 @@ fn watch_stdin(running: &server::Running, log: &Log) {
 }
 
 fn serve(args: &Args) -> Result<(), String> {
-    let folder = PathBuf::from(args.rest.first().ok_or("which folder?")?);
+    let folder = PathBuf::from(args.rest_os.first().ok_or("which folder?")?);
     if args.rest.len() > 1 {
         return Err("give one folder to share".into());
     }

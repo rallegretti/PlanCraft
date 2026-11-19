@@ -30,6 +30,8 @@ pub struct ShareHost {
     pub sharing: Option<Sharing>,
     /// The last server stopped by itself (could not start, or crashed): why.
     pub error: Option<String>,
+    /// The last server's log, kept once it stopped (to see why it could not start).
+    pub last_log: Vec<String>,
 }
 
 impl ShareHost {
@@ -38,7 +40,7 @@ impl ShareHost {
         let state = self.sharing.as_mut()?.state();
         match state {
             State::Stopped(why) => {
-                self.sharing = None;
+                self.last_log = self.sharing.take().map(|s| s.log()).unwrap_or_default();
                 self.error = why.clone();
                 why
             }
@@ -58,6 +60,7 @@ impl ShareHost {
         let repaint = ctx.clone();
         let waker: plancraft_server::sharing::Waker = std::sync::Arc::new(move || repaint.request_repaint());
         self.error = None;
+        self.last_log.clear();
         match Sharing::start(program, folder, config, port, announce, waker) {
             Ok(s) => self.sharing = Some(s),
             Err(e) => self.error = Some(e),
@@ -76,10 +79,26 @@ impl ShareHost {
 /// AppImage file itself (the executable sits in a temporary mount that goes away when this
 /// PlanCraft quits, while the server is still saving its plans).
 pub fn server_program() -> Result<Program, String> {
-    match std::env::var_os("APPIMAGE").filter(|a| !a.is_empty()) {
-        Some(a) => Ok(Program { program: PathBuf::from(a), args: vec!["serve".into()] }),
-        None => Program::this_plancraft(),
+    let mut program = Program::this_plancraft()?;
+    if let Some(image) = running_appimage(&program.program, std::env::var_os("APPIMAGE"), std::env::var_os("APPDIR")) {
+        program.program = image;
     }
+    // The server gets the environment PlanCraft was started with (not the bundled libraries).
+    #[cfg(target_os = "linux")]
+    {
+        program.prepare = Some(crate::bundled_libs::clean_child);
+    }
+    Ok(program)
+}
+
+/// The AppImage file `exe` runs from, if any. The AppImage runtime names it in `APPIMAGE` and its
+/// mount in `APPDIR`, but every program an AppImage starts inherits both: they count only when
+/// `exe` sits inside that mount (PlanCraft started from another AppImage's terminal must not run
+/// that AppImage).
+pub fn running_appimage(exe: &Path, appimage: Option<std::ffi::OsString>, appdir: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    let image = PathBuf::from(appimage.filter(|a| !a.is_empty())?);
+    let dir = PathBuf::from(appdir.filter(|d| !d.is_empty())?);
+    (image.is_absolute() && dir.is_absolute() && exe.starts_with(&dir)).then_some(image)
 }
 
 pub enum Outcome {
@@ -93,8 +112,8 @@ pub enum Outcome {
     },
 }
 
-/// A change to the users file, made on a background thread.
-#[derive(Clone, Debug)]
+/// A change to the users file, made on a background thread. (No `Debug`: it holds passwords.)
+#[derive(Clone)]
 enum UserOp {
     Add { name: String, password: String, role: Role },
     Password { name: String, password: String },
@@ -103,8 +122,35 @@ enum UserOp {
     Remove { name: String },
 }
 
+impl UserOp {
+    /// What the change was typed into (cleared once it is made).
+    fn form(&self) -> Form {
+        match self {
+            UserOp::Add { .. } => Form::Add,
+            UserOp::Password { .. } => Form::Password,
+            UserOp::Role { plan: Some(_), .. } => Form::Rule,
+            UserOp::Role { plan: None, .. } | UserOp::ClearPlan { .. } | UserOp::Remove { .. } => Form::None,
+        }
+    }
+}
+
+/// The part of the window a change was typed into.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Form {
+    None,
+    Add,
+    Password,
+    Rule,
+}
+
+/// One change to the users file at a time in this PlanCraft: a change still being made when its
+/// window was closed must not be overwritten by one made after reopening it (both would load the
+/// file before either saved it).
+static USERS_FILE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Makes a change to the users file; returns what to say.
 fn apply(path: &Path, op: UserOp) -> Result<String, String> {
+    let _one_at_a_time = USERS_FILE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut users = Users::load(path)?;
     let said = match op {
         UserOp::Add { name, password, role } => {
@@ -192,6 +238,9 @@ fn copy_box(ui: &mut egui::Ui, text: &str) {
     });
 }
 
+/// Where a change to the users file says how it went.
+type Answer = mpsc::Receiver<Result<String, String>>;
+
 /// The window.
 pub struct ShareFolder {
     /// The server's private folder (its key, users file and trusted sign-ins).
@@ -212,11 +261,14 @@ pub struct ShareFolder {
     /// A per-plan rule being added: who, the plan and the role.
     new_rule: Option<(String, String, Role)>,
     /// A change being made to the users file, and where its answer arrives.
-    busy: Option<(String, mpsc::Receiver<Result<String, String>>)>,
+    busy: Option<(String, Form, Answer)>,
     /// What the last change said (`Err`: it failed).
     note: Option<Result<String, String>>,
     /// The addresses shown for the server, worked out once for its port.
     addresses: Option<(u16, Vec<String>)>,
+    /// The shared folder's plans open in this PlanCraft, and when that was looked at (once a
+    /// second: it reads the disk).
+    open_here: Option<(std::time::Instant, Vec<String>)>,
 }
 
 impl ShareFolder {
@@ -241,6 +293,7 @@ impl ShareFolder {
             busy: None,
             note: None,
             addresses: None,
+            open_here: None,
         };
         w.reload_users();
         w
@@ -266,6 +319,7 @@ impl ShareFolder {
             return;
         }
         let (tx, rx) = mpsc::channel();
+        let form = op.form();
         let path = self.users_file();
         let repaint = ctx.clone();
         let started = std::thread::Builder::new().name("plancraft-share-users".into()).spawn(move || {
@@ -277,7 +331,7 @@ impl ShareFolder {
         match started {
             Ok(_) => {
                 self.note = None;
-                self.busy = Some((what.to_string(), rx));
+                self.busy = Some((what.to_string(), form, rx));
             }
             Err(e) => self.note = Some(Err(format!("Cannot change who may sign in: {e}"))),
         }
@@ -285,7 +339,8 @@ impl ShareFolder {
 
     /// Takes the answer of a change, if it has come.
     fn collect(&mut self) {
-        let Some((_, rx)) = &self.busy else { return };
+        let Some((_, form, rx)) = &self.busy else { return };
+        let form = *form;
         let done = match rx.try_recv() {
             Ok(d) => d,
             Err(mpsc::TryRecvError::Empty) => return,
@@ -293,10 +348,17 @@ impl ShareFolder {
         };
         self.busy = None;
         if done.is_ok() {
-            self.new_name.clear();
-            self.new_password.clear();
-            self.password_for = None;
-            self.new_rule = None;
+            // Only the form the change came from: someone half-way through adding a person keeps
+            // what they typed when they change another person's role meanwhile.
+            match form {
+                Form::Add => {
+                    self.new_name.clear();
+                    self.new_password.clear();
+                }
+                Form::Password => self.password_for = None,
+                Form::Rule => self.new_rule = None,
+                Form::None => {}
+            }
         }
         self.users_stamp = None;
         self.reload_users();
@@ -331,18 +393,17 @@ impl ShareFolder {
                 ui.add_space(6.0);
                 ui.separator();
                 self.people(ui, ctx);
-                if let Some(s) = host.sharing.as_ref() {
-                    let log = s.log();
-                    if !log.is_empty() {
-                        ui.add_space(4.0);
-                        egui::CollapsingHeader::new("Server log").id_salt("share_log").show(ui, |ui| {
-                            egui::ScrollArea::vertical().max_height(160.0).stick_to_bottom(true).show(ui, |ui| {
-                                for line in log.iter().rev().take(200).rev() {
-                                    ui.label(RichText::new(line).monospace().size(11.0));
-                                }
-                            });
+                let has_log = host.sharing.as_ref().map_or(!host.last_log.is_empty(), |s| s.log_len() > 0);
+                if has_log {
+                    ui.add_space(4.0);
+                    egui::CollapsingHeader::new("Server log").id_salt("share_log").show(ui, |ui| {
+                        let log = host.sharing.as_ref().map_or_else(|| host.last_log.clone(), Sharing::log);
+                        egui::ScrollArea::vertical().max_height(160.0).stick_to_bottom(true).show(ui, |ui| {
+                            for line in log.iter().rev().take(200).rev() {
+                                ui.label(RichText::new(line).monospace().size(11.0));
+                            }
                         });
-                    }
+                    });
                 }
             });
         if !open {
@@ -370,6 +431,9 @@ impl ShareFolder {
                         ui.horizontal(|ui| {
                             ui.spinner();
                             ui.label(format!("Starting to share {name}…"));
+                            if ui.button("Cancel").clicked() {
+                                host.stop();
+                            }
                         });
                     }
                     State::Stopping => {
@@ -388,12 +452,10 @@ impl ShareFolder {
                         let port = ready.addr.port();
                         ui.label("People open its plans with File › Open from Server… at one of these addresses:");
                         if self.addresses.as_ref().is_none_or(|(p, _)| *p != port) {
-                            let host_name = gethostname_short();
-                            let mut list = Vec::new();
-                            if !host_name.is_empty() {
-                                list.push(if port == DEFAULT_PORT { host_name } else { format!("{host_name}:{port}") });
+                            let mut list = plancraft_server::discovery::local_addresses(port);
+                            if let Some(name) = local_name() {
+                                list.push(if port == DEFAULT_PORT { name } else { format!("{name}:{port}") });
                             }
-                            list.extend(plancraft_server::discovery::local_addresses(port));
                             self.addresses = Some((port, list));
                         }
                         let addresses = self.addresses.as_ref().map(|(_, a)| a.clone()).unwrap_or_default();
@@ -410,7 +472,12 @@ impl ShareFolder {
                         ui.add_space(4.0);
                         ui.label("On their first visit they check that the server's key fingerprint matches this one:");
                         copy_box(ui, &ready.fingerprint);
-                        let here = open_here(&folder);
+                        let stale = self.open_here.as_ref().is_none_or(|(at, _)| at.elapsed() >= std::time::Duration::from_secs(1));
+                        if stale {
+                            self.open_here = Some((std::time::Instant::now(), open_here(&folder)));
+                            ctx.request_repaint_after(std::time::Duration::from_secs(1));
+                        }
+                        let here = self.open_here.as_ref().map(|(_, h)| h.clone()).unwrap_or_default();
                         if !here.is_empty() {
                             ui.add_space(4.0);
                             ui.colored_label(
@@ -470,7 +537,10 @@ impl ShareFolder {
             ui.label("Port:");
             ui.horizontal(|ui| {
                 ui.add(egui::TextEdit::singleline(&mut self.port).desired_width(60.0));
-                ui.checkbox(&mut settings.share_announce, "List it for others on the network");
+                ui.checkbox(&mut settings.share_announce, "List it for others on the network").on_hover_text(
+                    "Everyone on the network this computer is on sees \"folder on computer\" in their Open from Server window, \
+                     on any network it joins while sharing. People can still type the address with this off.",
+                );
             });
             ui.end_row();
         });
@@ -542,6 +612,9 @@ impl ShareFolder {
                             .on_hover_text("Other access to single plans")
                             .clicked()
                         {
+                            if let Some(f) = &self.folder {
+                                self.plans = plans_in(f);
+                            }
                             self.new_rule = Some((u.name.clone(), self.plans.first().cloned().unwrap_or_default(), Role::None));
                         }
                         if self.remove_asked.as_deref() == Some(u.name.as_str()) {
@@ -653,7 +726,7 @@ impl ShareFolder {
             .small()
             .color(theme::pal().TEXT_WEAK),
         );
-        if let Some((what, _)) = &self.busy {
+        if let Some((what, _, _)) = &self.busy {
             ui.horizontal(|ui| {
                 ui.spinner();
                 ui.label(what.as_str());
@@ -674,10 +747,15 @@ impl ShareFolder {
     }
 }
 
-/// This computer's name, as people type it.
-fn gethostname_short() -> String {
-    let name = plancraft_server::server::host_name();
-    name.split('.').next().unwrap_or_default().trim().to_string()
+/// This computer's name on the local network (`NAME.local`), when it is one people can type.
+fn local_name() -> Option<String> {
+    local_name_of(&plancraft_server::server::host_name())
+}
+
+fn local_name_of(host: &str) -> Option<String> {
+    let name = host.split('.').next().unwrap_or_default().trim();
+    let typeable = !name.is_empty() && name.len() <= 63 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+    typeable.then(|| format!("{name}.local"))
 }
 
 #[cfg(test)]
@@ -742,6 +820,48 @@ mod tests {
         assert_eq!(w.users.as_ref().unwrap().iter().map(|u| u.name.as_str()).collect::<Vec<_>>(), ["Ben"]);
     }
 
+    /// Regression: `APPIMAGE` was trusted whenever it was set, so PlanCraft started from another
+    /// AppImage's terminal ran that AppImage as its server.
+    #[test]
+    fn the_appimage_runs_the_server_only_when_plancraft_runs_from_it() {
+        let mounted = Path::new("/tmp/.mount_PlanCrAbc/usr/bin/plancraft");
+        let image = Some("/home/a/PlanCraft.AppImage".into());
+        let dir = Some("/tmp/.mount_PlanCrAbc".into());
+        assert_eq!(running_appimage(mounted, image.clone(), dir.clone()), Some(PathBuf::from("/home/a/PlanCraft.AppImage")));
+        let installed = Path::new("/usr/bin/plancraft");
+        assert_eq!(running_appimage(installed, image.clone(), dir.clone()), None, "inherited from another AppImage");
+        assert_eq!(running_appimage(mounted, image.clone(), None), None);
+        assert_eq!(running_appimage(mounted, None, dir.clone()), None);
+        assert_eq!(running_appimage(mounted, Some("".into()), dir.clone()), None);
+        assert_eq!(running_appimage(mounted, Some("PlanCraft.AppImage".into()), dir), None, "not a full path");
+    }
+
+    #[test]
+    fn this_computer_is_offered_by_a_name_people_can_type() {
+        assert_eq!(local_name_of("studio-pc").as_deref(), Some("studio-pc.local"));
+        assert_eq!(local_name_of("Robs-Mac.local").as_deref(), Some("Robs-Mac.local"));
+        assert_eq!(local_name_of("PlanCraft Server"), None);
+        assert_eq!(local_name_of(""), None);
+        assert_eq!(local_name_of("bür"), None);
+    }
+
+    /// Regression: a change wiped every half-filled form in the window, not just its own.
+    #[test]
+    fn a_change_clears_only_its_own_form() {
+        let dir = crate::recovery::tests::TempDir::new("share-forms");
+        let config = dir.0.as_path().join("server");
+        let ctx = Context::default();
+        let mut w = ShareFolder::new(&AppSettings::default(), config, None);
+        w.change(&ctx, "", UserOp::Add { name: "Ana".into(), password: "correct horse".into(), role: Role::Editor });
+        wait(&mut w);
+        w.new_name = "Ben".into();
+        w.new_password = "half typed".into();
+        w.change(&ctx, "", UserOp::Role { name: "Ana".into(), role: Role::Viewer, plan: None });
+        wait(&mut w);
+        assert!(matches!(&w.note, Some(Ok(_))), "{:?}", w.note);
+        assert_eq!((w.new_name.as_str(), w.new_password.as_str()), ("Ben", "half typed"));
+    }
+
     #[test]
     fn only_plans_directly_in_the_folder_are_listed() {
         let dir = crate::recovery::tests::TempDir::new("share-plans");
@@ -761,7 +881,11 @@ mod tests {
         let config = dir.0.join("server");
         let settings = AppSettings::default();
         let w = ShareFolder::new(&settings, config.clone(), Some(dir.0.clone()));
-        let host = ShareHost { sharing: None, error: Some("cannot listen on 0.0.0.0:47340: address in use".into()) };
+        let host = ShareHost {
+            sharing: None,
+            error: Some("cannot listen on 0.0.0.0:47340: address in use".into()),
+            last_log: vec!["plancraft-server: cannot listen on 0.0.0.0:47340: address in use".into()],
+        };
         let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1000.0, 800.0)).build_ui_state(
             |ui, (w, settings, host): &mut (ShareFolder, AppSettings, ShareHost)| {
                 let _ = w.show(ui.ctx(), settings, host, &|_| Vec::new());
@@ -769,7 +893,8 @@ mod tests {
             (w, settings, host),
         );
         h.run();
-        assert!(h.query_by_label_contains("address in use").is_some(), "why the last server stopped is shown");
+        assert!(h.query_by_label_contains("Sharing stopped: cannot listen").is_some(), "why the last server stopped is shown");
+        assert!(h.query_by_label_contains("Server log").is_some(), "its log is still there to read");
         assert!(h.query_by_label_contains("Add at least one person").is_some());
         h.state_mut().0.new_name = "Ana".into();
         h.state_mut().0.new_password = "correct horse".into();

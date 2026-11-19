@@ -44,7 +44,15 @@ pub enum State {
 struct Inner {
     ready: Option<Ready>,
     log: VecDeque<String>,
+    /// The server's standard error has ended: every line it wrote is in `log`.
+    log_done: bool,
 }
+
+/// How long [`Sharing::state`] waits, after the program ended, for the last of its log (its
+/// last words say why it stopped) before giving up on it.
+const LAST_WORDS_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
+/// What the server's command line puts before an error it stops on.
+const FATAL_PREFIX: &str = "plancraft-server: ";
 
 fn lock(m: &Mutex<Inner>) -> std::sync::MutexGuard<'_, Inner> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
@@ -56,14 +64,25 @@ fn lock(m: &Mutex<Inner>) -> std::sync::MutexGuard<'_, Inner> {
 pub struct Program {
     pub program: PathBuf,
     pub args: Vec<OsString>,
+    /// Adjusts the command before it starts (the app gives back the environment it was started
+    /// with).
+    pub prepare: Option<fn(&mut Command)>,
 }
 
 impl Program {
     /// This PlanCraft's own program, as `plancraft serve`.
     pub fn this_plancraft() -> Result<Program, String> {
         let program = std::env::current_exe().map_err(|e| format!("cannot find PlanCraft's own program: {e}"))?;
-        Ok(Program { program, args: vec!["serve".into()] })
+        Ok(Program { program: replaced_exe(program), args: vec!["serve".into()], prepare: None })
     }
+}
+
+/// Linux names a program replaced while it runs (a package upgrade) `… (deleted)`: the file now
+/// at the original name is the one to start.
+fn replaced_exe(program: PathBuf) -> PathBuf {
+    let Some(name) = program.to_str().and_then(|p| p.strip_suffix(" (deleted)")) else { return program };
+    let original = PathBuf::from(name);
+    if original.is_file() { original } else { program }
 }
 
 /// A folder being shared by a server program this PlanCraft started.
@@ -76,6 +95,9 @@ pub struct Sharing {
     inner: Arc<Mutex<Inner>>,
     /// Set once the program has ended, with what to say about it.
     ended: Option<Option<String>>,
+    /// The program has ended (when that was seen, and how), but its last log lines may still be
+    /// on their way.
+    exited: Option<(std::time::Instant, std::process::ExitStatus)>,
 }
 
 impl std::fmt::Debug for Sharing {
@@ -93,12 +115,27 @@ fn read_line(r: &mut impl BufRead) -> Option<String> {
         Ok(_) => {}
     }
     if buf.last() != Some(&b'\n') {
-        // Cut short: skip to the end of the line.
-        let mut rest = Vec::new();
-        let _ = r.read_until(b'\n', &mut rest);
+        skip_line(r);
     }
     let text = String::from_utf8_lossy(&buf);
     Some(text.trim_end_matches(['\r', '\n']).chars().filter(|c| !c.is_control() || *c == '\t').take(MAX_LINE_CHARS).collect())
+}
+
+/// Skips to the end of the line without keeping what it skips.
+fn skip_line(r: &mut impl BufRead) {
+    loop {
+        let (done, used) = match r.fill_buf() {
+            Ok([]) | Err(_) => return,
+            Ok(chunk) => match chunk.iter().position(|b| *b == b'\n') {
+                Some(at) => (true, at.saturating_add(1)),
+                None => (false, chunk.len()),
+            },
+        };
+        r.consume(used);
+        if done {
+            return;
+        }
+    }
 }
 
 fn spawn_reader(name: &str, f: impl FnOnce() + Send + 'static) -> Result<(), String> {
@@ -111,7 +148,6 @@ impl Sharing {
     pub fn start(program: &Program, folder: &Path, config: &Path, port: u16, announce: bool, waker: Waker) -> Result<Sharing, String> {
         let mut cmd = Command::new(&program.program);
         cmd.args(&program.args)
-            .arg(folder)
             .arg("--config")
             .arg(config)
             .arg("--port")
@@ -122,6 +158,15 @@ impl Sharing {
             .stderr(Stdio::piped());
         if !announce {
             cmd.arg("--no-announce");
+        }
+        // `--`: a folder whose name starts with "-" is still the folder.
+        cmd.arg("--").arg(folder);
+        // Not wherever PlanCraft was started (a USB stick would stay in use while sharing).
+        if config.is_dir() {
+            cmd.current_dir(config);
+        }
+        if let Some(prepare) = program.prepare {
+            prepare(&mut cmd);
         }
         #[cfg(windows)]
         {
@@ -159,13 +204,14 @@ impl Sharing {
                         drop(i);
                         waker();
                     }
+                    lock(&inner).log_done = true;
                     waker();
                 })?;
             }
             Ok::<(), String>(())
         })();
         let stdin = child.stdin.take();
-        let sharing = Sharing { folder: folder.to_path_buf(), child: Some(child), stdin, inner, ended: None };
+        let sharing = Sharing { folder: folder.to_path_buf(), child: Some(child), stdin, inner, ended: None, exited: None };
         // Dropping it stops the program again.
         started.map(|()| sharing)
     }
@@ -181,15 +227,30 @@ impl Sharing {
             return State::Stopped(why.clone());
         }
         let Some(child) = self.child.as_mut() else { return State::Stopped(None) };
-        match child.try_wait() {
+        let exited = match self.exited {
+            Some((_, status)) => Ok(Some(status)),
+            None => child.try_wait(),
+        };
+        match exited {
             Ok(Some(status)) => {
-                // Stopped when asked: nothing to explain. Otherwise the server's last words say why.
-                let why = if self.stdin.is_none() && status.success() {
-                    None
-                } else {
-                    let last = lock(&self.inner).log.back().cloned().unwrap_or_default();
-                    let last = last.strip_prefix("plancraft-server: ").unwrap_or(&last).to_string();
-                    Some(if last.is_empty() { format!("The server stopped ({status}).") } else { last })
+                let seen = *self.exited.get_or_insert((std::time::Instant::now(), status));
+                let (log_done, ready, last) = {
+                    let i = lock(&self.inner);
+                    (i.log_done, i.ready.is_some(), i.log.back().cloned().unwrap_or_default())
+                };
+                // Its last words may still be on their way (the log is read on another thread).
+                if !log_done && seen.0.elapsed() < LAST_WORDS_WAIT {
+                    return if self.stdin.is_none() || ready { State::Stopping } else { State::Starting };
+                }
+                let asked = self.stdin.is_none();
+                let why = match last.strip_prefix(FATAL_PREFIX) {
+                    // The server's own error (it could not start, or had to stop).
+                    Some(error) if !status.success() => Some(error.to_string()),
+                    // Stopped when asked: nothing to explain.
+                    _ if asked && status.success() => None,
+                    _ if status.success() => Some("The server was stopped from outside PlanCraft.".to_string()),
+                    // Killed, or crashed: whatever it logged last is not why.
+                    _ => Some(format!("The server stopped unexpectedly ({status}).")),
                 };
                 self.stdin = None;
                 self.ended = Some(why.clone());
@@ -211,6 +272,11 @@ impl Sharing {
     /// The server's log, oldest first.
     pub fn log(&self) -> Vec<String> {
         lock(&self.inner).log.iter().cloned().collect()
+    }
+
+    /// How many lines the server's log has.
+    pub fn log_len(&self) -> usize {
+        lock(&self.inner).log.len()
     }
 
     /// Asks the server to stop: it saves every plan, tells everyone and ends ([`State::Stopping`]
@@ -240,12 +306,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_replaced_program_is_started_from_its_name() {
+        let exe = std::env::current_exe().unwrap();
+        let deleted = PathBuf::from(format!("{} (deleted)", exe.display()));
+        assert_eq!(replaced_exe(deleted), exe);
+        let gone = PathBuf::from("/no/such/plancraft (deleted)");
+        assert_eq!(replaced_exe(gone.clone()), gone);
+        assert_eq!(replaced_exe(exe.clone()), exe);
+    }
+
+    #[test]
     fn long_and_odd_lines_are_cut() {
         let long = format!("{}\nnext\n", "x".repeat(200_000));
         let mut r = BufReader::new(long.as_bytes());
         assert_eq!(read_line(&mut r).unwrap().chars().count(), MAX_LINE_CHARS);
         assert_eq!(read_line(&mut r).as_deref(), Some("next"));
         assert_eq!(read_line(&mut r), None);
+        // The skipped part is not kept, however long.
+        let mut r = BufReader::with_capacity(16, std::io::repeat(b'y').take(10_000_000).chain(&b"\nlast\n"[..]));
+        assert_eq!(read_line(&mut r).unwrap().chars().count(), MAX_LINE_CHARS);
+        assert_eq!(read_line(&mut r).as_deref(), Some("last"));
         let mut r = BufReader::new(&b"a\x1b[2Jb\r\n\xff\xfe\n"[..]);
         assert_eq!(read_line(&mut r).as_deref(), Some("a[2Jb"));
         assert_eq!(read_line(&mut r).as_deref(), Some("\u{fffd}\u{fffd}"));

@@ -14,8 +14,9 @@ use plancraft_server::protocol::ClientId;
 use plancraft_server::sharing::{Program, Sharing, State};
 use plancraft_server::wire::{Fingerprint, Trust};
 
+/// The server, listening on this computer only (no firewall prompts on the build machines).
 fn program() -> Program {
-    Program { program: env!("CARGO_BIN_EXE_plancraft-server").into(), args: Vec::new() }
+    Program { program: env!("CARGO_BIN_EXE_plancraft-server").into(), args: vec!["--bind".into(), "127.0.0.1".into()], prepare: None }
 }
 
 fn waker() -> plancraft_server::sharing::Waker {
@@ -68,7 +69,12 @@ fn a_server_that_cannot_start_says_why() {
     let State::Stopped(Some(why)) = wait_for(&mut s, |st| matches!(st, State::Stopped(_))) else { panic!() };
     assert!(why.contains("cannot open the folder"), "{why}");
 
-    let missing = Program { program: setup.dir.path().join("no-such-program"), args: Vec::new() };
+    // A folder whose name starts with "-" is still a folder, not an option.
+    let mut s = Sharing::start(&program(), &setup.dir.path().join("-missing"), &setup.config, 0, false, waker()).unwrap();
+    let State::Stopped(Some(why)) = wait_for(&mut s, |st| matches!(st, State::Stopped(_))) else { panic!() };
+    assert!(why.contains("cannot open the folder"), "{why}");
+
+    let missing = Program { program: setup.dir.path().join("no-such-program"), args: Vec::new(), prepare: None };
     assert!(Sharing::start(&missing, &setup.folder, &setup.config, 0, false, waker()).unwrap_err().contains("cannot start the server"));
 }
 
@@ -94,9 +100,90 @@ fn dropping_the_sharing_stops_the_server() {
 }
 
 #[test]
+fn a_server_goes_on_saving_after_plancraft_is_gone() {
+    // As when PlanCraft quits: nobody reads the server's output any more. Writing its log must
+    // not stop it (a panic on a closed pipe), and it saves its plans and gives back their locks.
+    use std::io::BufRead;
+    let setup = common::setup();
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_plancraft-server"))
+        .args(["--bind", "127.0.0.1", "--port", "0", "--watch-stdin", "--no-announce", "--config"])
+        .arg(&setup.config)
+        .arg("--")
+        .arg(&setup.folder)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    out.read_line(&mut line).unwrap();
+    let ready = plancraft_server::cli::Ready::parse(line.trim_end()).unwrap_or_else(|| panic!("{line}"));
+    drop(out);
+    drop(child.stderr.take());
+    let addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), ready.addr.port());
+    let mut c = Client::connect(addr, &Trust::Pinned(Fingerprint(ready.fingerprint)), "test").unwrap();
+    c.login("ana", common::PASSWORD).unwrap();
+    c.open("Plan.plancraft", ClientId::default(), None, None).unwrap();
+    let lock = setup.folder.join(".Plan.plancraft.lock");
+    assert!(lock.exists());
+    drop(child.stdin.take());
+    let status = child.wait().unwrap();
+    assert!(status.success(), "{status}");
+    assert!(!lock.exists(), "the lock is given back");
+}
+
+/// A private mDNS port for a test, different between runs (two build machines on one network
+/// run the tests at the same time).
+fn private_mdns_port() -> u16 {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
+    45_353 + ((std::process::id() ^ nanos) % 2000) as u16
+}
+
+#[test]
+fn a_shared_folder_is_announced_while_it_is_shared() {
+    let port = private_mdns_port();
+    let mut browser = match Browser::start_on(port) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("skipped: no multicast here ({e})");
+            return;
+        }
+    };
+    let setup = common::setup();
+    let mut options = setup.options();
+    options.bind = "0.0.0.0:0".parse().unwrap();
+    options.announce = true;
+    options.mdns_port = port;
+    let server = plancraft_server::server::start(options).unwrap();
+    let wanted = format!(":{}", server.addr().port());
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let found = loop {
+        browser.poll();
+        if let Some(f) = browser.found().into_iter().find(|f| f.address.ends_with(&wanted) && f.name.starts_with("shared on ")) {
+            break f;
+        }
+        assert!(Instant::now() < deadline, "the server's announcement was not heard: {:?}", browser.found());
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(plancraft_server::link::normalise_address(&found.address).is_ok(), "{found:?}");
+    server.stop();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        browser.poll();
+        if !browser.found().iter().any(|f| f.name == found.name && f.address == found.address) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "the stopped server is still listed");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[test]
 fn servers_are_found_on_the_network_and_go_away_when_stopped() {
-    // A private mDNS port, so the test never announces anything on the real network.
-    let port = 45_353 + (std::process::id() % 1000) as u16;
+    // A private mDNS port: nothing reaches anyone listening on the usual one (the messages still
+    // go out on the network).
+    let port = private_mdns_port();
     let mut browser = match Browser::start_on(port) {
         Ok(b) => b,
         Err(e) => {
@@ -105,11 +192,12 @@ fn servers_are_found_on_the_network_and_go_away_when_stopped() {
         }
     };
     let server: SocketAddr = "0.0.0.0:47411".parse().unwrap();
-    let announcer = Announcer::start_on("Plans on test-pc", "test-pc", server, port).unwrap();
+    let name = format!("Plans on test-pc-{}", std::process::id());
+    let announcer = Announcer::start_on(&name, "test-pc", server, port).unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
     let found = loop {
         browser.poll();
-        if let Some(f) = browser.found().into_iter().find(|f| f.name == "Plans on test-pc") {
+        if let Some(f) = browser.found().into_iter().find(|f| f.name == name) {
             break f;
         }
         assert!(Instant::now() < deadline, "the announcement was not heard");
@@ -121,7 +209,7 @@ fn servers_are_found_on_the_network_and_go_away_when_stopped() {
     let deadline = Instant::now() + Duration::from_secs(20);
     loop {
         browser.poll();
-        if !browser.found().iter().any(|f| f.name == "Plans on test-pc") {
+        if !browser.found().iter().any(|f| f.name == name) {
             break;
         }
         assert!(Instant::now() < deadline, "the stopped server is still listed");

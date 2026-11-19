@@ -74,6 +74,8 @@ pub struct Options {
     /// Announce the server on the office network (mDNS), so *Open from Server* lists it. Off by
     /// default (tests); the command line turns it on unless `--no-announce`.
     pub announce: bool,
+    /// The mDNS port announced on ([`crate::discovery::MDNS_PORT`]; tests use another).
+    pub mdns_port: u16,
 }
 
 impl Options {
@@ -87,6 +89,7 @@ impl Options {
             not_signed_in_per_address: MAX_NOT_SIGNED_IN_PER_ADDRESS,
             max_inbound_bytes: MAX_INBOUND_BYTES,
             announce: false,
+            mdns_port: crate::discovery::MDNS_PORT,
         }
     }
 }
@@ -245,10 +248,12 @@ pub fn start(options: Options) -> Result<Running, String> {
         log: options.log,
     });
     let fingerprint = shared.keys.fingerprint();
-    if options.announce {
+    if options.announce && addr.ip().is_loopback() {
+        (shared.log)("Not announced on the network: it only listens on this computer");
+    } else if options.announce {
         let folder_name = shared.folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         let name = crate::discovery::instance_name(&folder_name, &shared.name);
-        match crate::discovery::Announcer::start(&name, &shared.name, addr) {
+        match crate::discovery::Announcer::start_on(&name, &shared.name, addr, options.mdns_port) {
             Ok(a) => {
                 (shared.log)(&format!("Announced on the network as \"{name}\""));
                 *lock(&shared.announcer) = Some(a);

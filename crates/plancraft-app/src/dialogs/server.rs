@@ -355,11 +355,23 @@ impl OpenFromServer {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("On your network:").color(theme::pal().TEXT_WEAK));
                 for f in self.found.iter().take(12) {
-                    let known = settings.fingerprint_for(&normalise_address(&f.address).unwrap_or_default()).is_some();
-                    let label = if known { format!("✔ {}", f.name) } else { f.name.clone() };
-                    if ui.add_enabled(!busy, egui::Button::new(label).small()).on_hover_text(&f.address).clicked() {
-                        self.address = f.address.clone();
-                        if let Some(k) = settings.servers.iter().find(|k| same_address(&k.address, &f.address)) {
+                    // An address already trusted, if the server gave one, before the best: anyone
+                    // can add addresses to another server's announcement.
+                    let pinned = |a: &String| settings.fingerprint_for(&normalise_address(a).unwrap_or_default()).is_some();
+                    let known = f.addresses.iter().find(|a| pinned(a));
+                    let address = known.unwrap_or(&f.address).clone();
+                    let name = RichText::new(&f.name);
+                    let button = egui::Button::new(name).small().truncate();
+                    let r = ui.add_enabled(!busy, button).on_hover_text(format!("{}\n{address}", f.name));
+                    // The address, always: two servers can call themselves the same.
+                    ui.label(RichText::new(&address).small().color(theme::pal().TEXT_WEAK));
+                    // Drawn by PlanCraft, beside the name (a name can't fake it).
+                    if known.is_some() {
+                        ui.label(RichText::new("✔").small().color(theme::pal().OK)).on_hover_text("Its key is already trusted here");
+                    }
+                    if r.clicked() {
+                        self.address = address.clone();
+                        if let Some(k) = settings.servers.iter().find(|k| same_address(&k.address, &address)) {
                             self.user = k.user.clone();
                         }
                     }
@@ -625,8 +637,16 @@ mod tests {
         let mut d = OpenFromServer::new(&AppSettings::default());
         d.address.clear();
         d.set_found(vec![
-            plancraft_server::discovery::Found { name: "Plans on studio-pc".into(), address: "10.0.0.2".into() },
-            plancraft_server::discovery::Found { name: "Office on desk-7".into(), address: "10.0.0.7:47400".into() },
+            plancraft_server::discovery::Found {
+                name: "Plans on studio-pc".into(),
+                address: "10.0.0.2".into(),
+                addresses: vec!["10.0.0.2".into()],
+            },
+            plancraft_server::discovery::Found {
+                name: "Office on desk-7".into(),
+                address: "10.0.0.7:47400".into(),
+                addresses: vec!["10.0.0.7:47400".into()],
+            },
         ]);
         let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1000.0, 800.0)).build_ui_state(
             |ui, (d, settings): &mut (OpenFromServer, AppSettings)| {
@@ -638,5 +658,39 @@ mod tests {
         h.get_by_label("Office on desk-7").click();
         h.run();
         assert_eq!(h.state().0.address, "10.0.0.7:47400");
+        // Only the address: the key is still checked on the first visit.
+        assert!(h.state().0.confirmed.is_none());
+    }
+
+    /// Regression: anyone on the network can add an address to another server's announcement;
+    /// the address already trusted is used, not the "best" one an impostor added.
+    #[test]
+    fn a_trusted_address_wins_over_one_added_by_someone_else() {
+        use egui_kittest::kittest::Queryable;
+        let mut settings = AppSettings::default();
+        settings.servers.push(crate::settings::KnownServer {
+            address: "192.168.1.9".into(),
+            user: "ana".into(),
+            fingerprint: "aa bb".into(),
+            ..Default::default()
+        });
+        let mut d = OpenFromServer::new(&settings);
+        d.address.clear();
+        d.set_found(vec![plancraft_server::discovery::Found {
+            name: "Plans on studio-pc".into(),
+            address: "1.0.0.1".into(),
+            addresses: vec!["1.0.0.1".into(), "192.168.1.9".into()],
+        }]);
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1000.0, 800.0)).build_ui_state(
+            |ui, (d, settings): &mut (OpenFromServer, AppSettings)| {
+                let _ = d.show(ui.ctx(), settings);
+            },
+            (d, settings),
+        );
+        h.run();
+        h.get_by_label("Plans on studio-pc").click();
+        h.run();
+        assert_eq!(h.state().0.address, "192.168.1.9");
+        assert_eq!(h.state().0.user, "ana");
     }
 }

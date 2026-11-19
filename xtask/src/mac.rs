@@ -362,6 +362,8 @@ fn info_plist(version: &str) -> String {
     <key>LSMinimumSystemVersion</key><string>{MIN_MACOS}</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSHumanReadableCopyright</key><string>Dedicated to the public domain (CC0 1.0)</string>
+    <key>NSLocalNetworkUsageDescription</key><string>PlanCraft shares folders of plans with people on your network and finds the PlanCraft Servers on it, when you ask it to.</string>
+    <key>NSBonjourServices</key><array><string>_plancraft._tcp</string></array>
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>

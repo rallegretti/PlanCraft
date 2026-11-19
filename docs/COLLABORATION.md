@@ -572,46 +572,71 @@ the `Replica` and the connection. Merging never runs on the app's thread.
   *computer*", on each of the computer's addresses (kept up to date as they change) when it listens
   on all of them, or on its one address. The announcement is withdrawn first thing when the server
   stops, so lists drop it at once. `--no-announce` (and the *List it for others on the network*
-  box in *Share Folder*) turns it off.
-- The *Open from Server* window lists the servers it hears of under *On your network* (✔ for
-  servers whose key is already pinned); clicking one fills in its address. It listens only while
-  the window is open.
-- An announcement is anyone's word: its name is cut short with no control characters, at most 64
-  servers are listed, and only an address the window takes is offered (an IPv4 address on the
-  network first, then a global IPv6 one, then loopback; link-local IPv6 is passed over, as it needs
-  an interface named). It never vouches for a key: the fingerprint is still confirmed on the first
-  visit and checked against the pin after that.
-- Nothing announces or listens unless someone shares a folder or opens the window. Tests use a
-  private mDNS port and never reach the real network.
+  box in *Share Folder*) turns it off; a server listening only on this computer (`--bind
+  127.0.0.1`) never announces. The announcement points to `computer-plancraft.local`, not the
+  computer's own `.local` name, which the system answers for (two answers with different addresses
+  could make the system think another computer took its name). Container and virtual-machine
+  interfaces are left out of announcing and listening.
+- Announcing tells everyone on the network the folder's and the computer's names, on every
+  network the computer joins while sharing (a laptop taken from the office to a café): the box's
+  tooltip says so, and sharing stops when PlanCraft quits.
+- The *Open from Server* window lists the servers it hears of under *On your network*, each with
+  its address; clicking one fills in its address. A ✔ (drawn beside the name, so no name can fake
+  it) marks a server with an address whose key is already pinned, and that address is used over
+  the "best" one, since anyone can add addresses to another server's announcement. It listens only
+  while the window is open, and closing it never waits for the network.
+- An announcement is anyone's word: its name is cut short with no control or invisible characters
+  (direction overrides, zero-width characters) and no trust mark in front, at most 64 servers are
+  listed, and only addresses the window takes are offered (IPv4 addresses on the network first,
+  then global IPv6, then loopback; link-local IPv6 is passed over, as it needs an interface named).
+  It never vouches for a key: the fingerprint is still confirmed on the first visit and checked
+  against the pin after that. A flood is taken in a bounded amount at a time; if the listener is
+  given up on, it listens afresh.
+- Nothing announces or listens unless someone shares a folder or opens the window. Tests announce
+  on a private mDNS port, so nothing reaches anyone listening on the usual one (the messages still
+  go out on the network), with names unique to the run.
+- System prompts: on Windows, the firewall asks the first time a folder is shared (the server
+  listens on every network) and may ask when *Open from Server* first looks for servers (mDNS
+  listens on UDP 5353). On macOS 15 and later, the first use of the local network asks for
+  permission; the app's `Info.plist` explains why (`NSLocalNetworkUsageDescription`) and names the
+  service (`NSBonjourServices`). Saying no there stops discovery and connections on the network.
 
 ### Share Folder (`plancraft_server::sharing`, the app's `dialogs::share`)
 
 *File › Share Folder…* shares a folder from this PlanCraft:
 
-- The server runs as a separate program, `plancraft serve FOLDER --watch-stdin` (from an
+- The server runs as a separate program, `plancraft serve --watch-stdin … -- FOLDER` (from an
   AppImage, the AppImage file: the executable's temporary mount goes away when PlanCraft quits,
-  while the server is still saving). So:
+  while the server is still saving; `APPIMAGE` counts only when PlanCraft runs inside that
+  AppImage's mount, since every program an AppImage starts inherits it). It starts in the
+  server's private folder, with the environment PlanCraft was started with (not its bundled
+  libraries); the folder goes after `--`, so a name starting with "-" is still a folder. So:
   - the server has its own lock identity: it refuses a plan open in one of this PlanCraft's
     windows ("open elsewhere") until it is closed there, and a plan it shares warns when opened
     here directly, exactly as between two computers. The window lists the folder's plans open
     here;
   - a crash in one never takes the other down;
   - quitting PlanCraft, or a crash, closes the server's standard input and it stops cleanly: every
-    plan saved, everyone told. It finishes that after PlanCraft is gone; its log writes never panic
-    on a closed pipe.
-- The window shows the folder, the addresses people type (this computer's name and its addresses,
-  container and virtual-machine bridges left out), and the key fingerprint people confirm, with
+    plan saved, everyone told. It finishes that after PlanCraft is gone; its log writes, and the
+    panic guard's, never panic on a closed pipe.
+- The window shows the folder, the addresses people type (this computer's addresses, container
+  and virtual-machine bridges left out, then its name as `computer.local`), and the key fingerprint
+  people confirm, with
   copy buttons. *Open a Plan from It…* opens the *Open from Server* window on `127.0.0.1` with the
   key already trusted (this PlanCraft started that server); *Stop Sharing* saves and stops. The
   status bar shows *Sharing folder* while it runs. Sharing never starts by itself: the folder, port
   and the announcing choice are remembered for next time, nothing else.
 - If the server stops by itself (it could not listen, the folder is gone, nobody may sign in) the
-  window and a message say why, in the server's own words.
+  window and a message say why, in the server's own words (its last log line, read to the end
+  before deciding, and only when it is the server's own error; otherwise "stopped unexpectedly"
+  or "stopped from outside PlanCraft"). Its log stays in the window. Starting can be cancelled.
 - The same window manages people: add (name, password, role), change a role, set or take away a
   role for one plan (*Plans…*, *Same as other plans*), change a password, remove (asked twice).
   It edits the server's users file directly (the one `plancraft serve user …` manages), so
   changes apply at once, also to people signed in now; passwords are hashed on a background
-  thread and not kept once used. Starting needs at least one person.
+  thread and not kept once used. Changes are made one at a time (also one made after closing and
+  reopening the window while another was still hashing); a change clears only the form it came
+  from. Starting needs at least one person.
 - A plan's file opened directly while a server's journal sits beside it says so, and *Share
   Folder* then offers that plan's folder: once the plan is closed here, sharing the folder saves
   the journal's changes into the file.
@@ -620,15 +645,24 @@ the `Replica` and the connection. Merging never runs on the app's thread.
 
 - `crates/plancraft-server/tests/sharing.rs`: a folder shared through the real server program
   (ready line, signing in with the fingerprint shown, the plan's lock held and given back on
-  stopping); a server that cannot start says why; dropping the sharing (as when PlanCraft quits)
-  stops the server and gives back the locks; a server announced on a private mDNS port is found
-  and goes away when stopped; any announcement reads safely (property test).
-- `discovery` unit tests: the best address, names made safe, names that fit in one DNS label,
-  container bridges left out, this computer's addresses are ones the window takes.
+  stopping); a server that cannot start says why (also for a folder named "-…"); dropping the
+  sharing (as when PlanCraft quits) stops the server and gives back the locks; a server whose
+  output nobody reads any more still saves its plans and gives back their locks; a shared folder
+  announced by the server itself, and an announcement on its own, are found on a private mDNS port
+  and go away when stopped; any announcement reads safely (property test).
+- `sharing` unit tests: long lines cut without keeping the rest, a program replaced by an upgrade
+  started from its name. `guard` tests: a caught panic still comes back with standard error closed.
+- `discovery` unit tests: the best address, names made safe (control and invisible characters,
+  fake trust marks), every address kept best first, names that fit in one DNS label, container
+  bridges left out (a Hyper-V external switch kept), this computer's addresses are ones the window
+  takes.
 - The app: `dialogs::share` tests add, change and remove people (and see people added from the
-  command line), list only plans directly in the folder, and draw the window with the reason the
-  last server stopped; `dialogs::server` tests open the PlanCraft's own server without asking about
-  its key (even over an old pin) and fill in a found server's address; `shared_tests` checks that
+  command line), clear only the form a change came from, list only plans directly in the folder,
+  run the AppImage only from inside it, offer this computer's `.local` name only when it can be
+  typed, and draw the window with the reason and log of the last server; `dialogs::server` tests
+  open the PlanCraft's own server without asking about its key (even over an old pin), fill in a
+  found server's address (and only that), and prefer a trusted address an announcement gave over
+  the "best" one; `shared_tests` checks that
   the journal warning offers the folder; `tests/cli.rs` runs Share Folder's server from the
   `plancraft` binary itself and sees it stop once let go.
 
