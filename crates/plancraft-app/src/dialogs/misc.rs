@@ -467,10 +467,29 @@ pub fn history(ctx: &Context, doc: &mut Document, open: &mut bool) {
                     });
                 }
             });
+            let refused_id = egui::Id::new("history_refused");
             if let Some(n) = undo_to {
-                for _ in 0..n {
-                    doc.undo();
+                ui.ctx().data_mut(|d| d.remove::<(u64, String)>(refused_id));
+                // Undo until the list is that much shorter (one Undo may pass over steps that no
+                // longer change anything). In a plan opened from a server, a change someone else
+                // changed since is not undone: stop there and say why.
+                let target = items.len().saturating_sub(n);
+                while doc.history().len() > target {
+                    match doc.try_undo_as(plancraft_core::workspace::ChangeSource::User) {
+                        Ok(true) => {}
+                        Ok(false) => break,
+                        Err(why) => {
+                            ui.ctx().data_mut(|d| d.insert_temp(refused_id, (doc.revision, why)));
+                            break;
+                        }
+                    }
                 }
+            }
+            // Shown until the plan changes.
+            if let Some((revision, why)) = ui.ctx().data(|d| d.get_temp::<(u64, String)>(refused_id))
+                && revision == doc.revision
+            {
+                ui.colored_label(theme::pal().WARN, why);
             }
         });
 }

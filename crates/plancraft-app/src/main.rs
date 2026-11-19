@@ -29,6 +29,7 @@ mod menubar;
 mod open_requests;
 mod printing;
 mod recovery;
+mod remote;
 mod settings;
 mod start_page;
 mod state;

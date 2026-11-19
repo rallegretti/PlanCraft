@@ -444,6 +444,8 @@ pub struct UiState {
     pub calendar_month: Date,
     pub toasts: Vec<Toast>,
     pub clipboard: Vec<Task>,
+    /// In the active plan, if opened from a server: who else is on each task (names, joined).
+    pub others_on: std::collections::HashMap<TaskId, String>,
 }
 
 impl Default for UiState {
@@ -482,6 +484,7 @@ impl Default for UiState {
             calendar_month: today.with_day(1).unwrap_or(today),
             toasts: Vec::new(),
             clipboard: Vec::new(),
+            others_on: Default::default(),
         }
     }
 }

@@ -16,9 +16,14 @@ pub struct Client {
 
 impl Client {
     pub fn new() -> Self {
+        Self::over(Workspace::default().shared())
+    }
+
+    /// A client of a server over `ws` (kept by the test, to change it as someone else would).
+    pub fn over(ws: plancraft_core::workspace::SharedWorkspace) -> Self {
         let changes = Arc::new(AtomicUsize::new(0));
         let c = Arc::clone(&changes);
-        let server = McpServer::new(Workspace::default().shared()).with_change_callback(Arc::new(move || {
+        let server = McpServer::new(ws).with_change_callback(Arc::new(move || {
             c.fetch_add(1, Ordering::SeqCst);
         }));
         let client = Self { server, changes, next_id: std::cell::Cell::new(1) };

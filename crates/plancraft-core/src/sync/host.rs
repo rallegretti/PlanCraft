@@ -220,6 +220,13 @@ impl Host {
             Ok(p) => p,
             Err(e) => return Outcome::Refused(e.to_string()),
         };
+        // A change that changes nothing (already there, or reduced to nothing by the rebase)
+        // makes no version: answered as applied, the replica settles on the host's plan instead
+        // of sending it again and again, each time a journal record and a broadcast.
+        if effect.is_empty() {
+            self.note_applied(change.id);
+            return Outcome::AlreadyApplied(self.version);
+        }
         self.version = self.version.saturating_add(1);
         let short = |s: &str| s.chars().take(MAX_NAME_CHARS).collect::<String>();
         let entry = Entry { version: self.version, change: change.id, author: short(author), label: short(&change.label), patch: effect };

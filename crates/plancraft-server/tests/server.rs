@@ -53,7 +53,7 @@ fn signing_in_and_what_each_person_may_see() {
     let server = s.start();
     let mut c = connect(&server);
     match c.login("ana", "wrong password") {
-        Err(ClientError::Refused(m)) => assert!(m.contains("wrong user name or password")),
+        Err(ClientError::LoginFailed { message: m, credentials, .. }) => assert!(credentials && m.contains("wrong user name or password")),
         other => panic!("{:?}", other.map(|_| ())),
     }
     assert!(c.login("nobody", PASSWORD).is_err());
@@ -101,7 +101,7 @@ fn another_protocol_is_turned_away() {
     let (mut sender, mut receiver) = (sender, receiver);
     sender.send(&serde_json::to_vec(&ClientMsg::Hello { protocol: PROTOCOL + 1, app: String::new() }).unwrap()).unwrap();
     let reply: ServerMsg = serde_json::from_slice(&receiver.recv(1 << 20).unwrap()).unwrap();
-    assert!(matches!(reply, ServerMsg::Error { message } if message.contains("protocol")));
+    assert!(matches!(reply, ServerMsg::Error { message, for_good: true } if message.contains("protocol")));
     assert!(receiver.recv(1 << 20).is_err(), "and the connection is closed");
     server.stop();
 }
@@ -134,7 +134,9 @@ fn guessing_passwords_is_slowed_down() {
     assert_eq!(waits[0], 0);
     assert!(waits[5] > 0, "{waits:?}");
     // Even the right password waits now.
-    assert!(matches!(c.login("ana", PASSWORD), Err(ClientError::Refused(m)) if m.contains("try again")));
+    assert!(
+        matches!(c.login("ana", PASSWORD), Err(ClientError::LoginFailed { message: m, credentials: false, retry_after_secs }) if m.contains("try again") && retry_after_secs > 0)
+    );
     server.stop();
 }
 
@@ -237,7 +239,7 @@ fn viewers_cannot_change_anything() {
     let mut r = replica(&opened);
     rename_first_task(&mut r, "Not allowed");
     let reply = next_reply(&mut vic, &ClientMsg::Change { change: r.next_change("Rename").unwrap() });
-    assert!(matches!(reply, ServerMsg::Rejected { reason: Some(m), .. } if m.contains("view")));
+    assert!(matches!(reply, ServerMsg::Rejected { reason: Some(m), role: Some(Role::Viewer), retry: false, .. } if m.contains("view")));
     assert!(matches!(next_reply(&mut vic, &ClientMsg::Lease), ServerMsg::Error { .. }));
     server.stop();
 }
@@ -420,7 +422,7 @@ fn many_sign_ins_at_once_cannot_all_try_a_password() {
             std::thread::spawn(move || {
                 let mut c = Client::connect(addr, &Trust::Pinned(fp), "test").unwrap();
                 match c.login("ana", "guess guess") {
-                    Err(ClientError::Refused(m)) => m.contains("wrong user name"),
+                    Err(ClientError::LoginFailed { message: m, .. }) => m.contains("wrong user name"),
                     _ => false,
                 }
             })

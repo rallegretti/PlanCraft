@@ -6,8 +6,8 @@ order, checks and recalculates each one, saves it safely, and passes it on to ev
 The model is the multi-user setup of desktop accounting programs: one copy is the real one, and
 any PlanCraft can be the host.
 
-Status: phase 1 (the sync engine, `plancraft_core::sync`) and phase 2 (the server, `plancraft-server`)
-are built. Phases 3–5 are planned below.
+Status: phase 1 (the sync engine, `plancraft_core::sync`), phase 2 (the server, `plancraft-server`)
+and phase 3 (PlanCraft as a client) are built. Phases 4–5 are planned below.
 
 ## Off unless someone turns it on
 
@@ -79,19 +79,29 @@ These are conflicts, and the later change is not applied:
 |---|---|
 | `BothChanged` | both set the duration of one task, to different values |
 | `ChangedDeleted` | you renamed a task Ana deleted |
-| `DeletedChanged` | you deleted a task Ana changed |
+| `DeletedChanged` | you deleted a task Ana changed, or a summary Ana just put a task under |
 | `BothMoved` | both reordered the task list |
 | `SameNewKey` | both added an item with one key (a lease ran out) |
-| `NoLongerFits` | your new assignment is to a task Ana deleted; your new subtask sat under a summary Ana deleted |
+| `NoLongerFits` | your new assignment is to a task Ana deleted; your new, moved or indented subtask sat under a summary Ana deleted |
 
 `Conflict::describe` turns each one into a sentence, e.g. *"Ana changed the duration of task
 'Pour slab' at the same time"*. A value both people set to the same thing is no conflict, and
 neither is the same move made by both (only the items both had before are compared).
 
-A new item goes after the item it followed. A patch records the summary each new task sits
-under (`ListPatch::parents`): if someone else deleted that summary, the task would land under
-another one, so it is a `NoLongerFits` conflict instead. Deleting only a neighbouring task is no
-conflict; the new task stays under its summary.
+A new item goes after the item it followed. A patch records the summary each task sits under
+when it is new or came to sit under another summary (moved, indented, outdented:
+`ListPatch::parents`). Either way round, a deleted summary never quietly takes someone's task
+somewhere else:
+
+- if someone else deleted that summary, a new task would land under another one: it is left out
+  (`NoLongerFits`); a moved or indented one keeps its old place, its move dropped with the
+  outline levels it set;
+- deleting a summary someone else just put a task under is `DeletedChanged`: the summary stays
+  (the rest of the deletion, its other subtasks, still goes in).
+
+Deleting only a neighbouring task is no conflict; the new task stays under its summary. When a
+move is dropped (`BothMoved`, or the case above), the outline levels it set go with it: kept
+alone they would put tasks under summaries nobody chose.
 
 Merging works field by field, and a field holding a list counts as one value. Two people adding
 different predecessors to the same task at the same time is a conflict (`BothChanged` on
@@ -114,7 +124,13 @@ if they turn out to matter.
    handed out) is `Refused`, and nothing changes;
 6. bumps the version and returns the `Entry` for everyone, the author included. The entry carries
    the change's whole effect, worked out after recalculation, so every replica ends up with the
-   host's plan exactly.
+   host's plan exactly. A change with no effect makes no version (no journal record, no
+   broadcast): it is answered as `AlreadyApplied`, and the author settles on the host's plan.
+
+Values must come back from JSON exactly as they went: `serde_json` is built with
+`float_roundtrip`. Without it some numbers (a resource's units of 300/1440, say) read back off in
+the last place, the copy never matched the host's, and the replica sent its "change" for ever.
+The `shared_editing` sweep sends every change, entry and whole plan through JSON.
 
 After a restart, `Host::resume` continues at the version the plan was saved at, with the ids of
 the changes accepted before that save (`Host::applied_ids`). `Host::replay` and
@@ -174,9 +190,12 @@ step into someone else's lease). A "save a copy" from a replica must call `fit_c
 ### Undo
 
 Undo in a shared plan cannot restore a whole-project snapshot, because that would also undo
-other people's changes made since. Phase 3 replaces it for shared plans with inverse patches:
-undoing your change applies `diff(after, before)` of that change, rebased over later entries.
-If someone changed the same values since, the undo is refused and the app says who changed them.
+other people's changes made since. Shared plans undo with inverse patches instead
+(`sync::reverse`): each undo step keeps the plan before and after the step, and undoing applies
+`diff(after, before)` rebased over everything that changed since. If someone changed any of the
+same values since, the undo is refused, nothing changes, and the app says what was changed; that
+step leaves the undo list (it can no longer be taken back without undoing theirs), so the steps
+before it stay within reach. Redo works the same way.
 
 ### Tests
 
@@ -289,7 +308,7 @@ One JSON object per frame, tagged by `type`; see the types for the fields.
 
 - From PlanCraft: `hello`, `login`, `list`, `open` (with the version it already has and the change
   whose reply went missing), `change`, `lease`, `resync`, `presence`, `ping`.
-- From the server: `welcome`, `logged_in`, `login_failed` (with how long to wait), `plans`,
+- From the server: `welcome`, `logged_in`, `login_failed` (with how long to wait, and whether the name or password was wrong), `plans`,
   `opened` (the whole plan or only the missed changes, a lease for editors, whether the in-flight
   change went in, who is there), `entry` (to everyone, its author included), `rejected` (conflicts
   or a reason), `snapshot`, `leased`, `people`, `pong`, `error`, `closing`.
@@ -382,30 +401,136 @@ the target, with no hard limit below the connection caps.
   process, even one a guard caught, and the shared plan must still read back within limits.
 - `tests/cli.rs`: managing users and starting a server from the command line.
 
-### Left for phase 3 (the client)
+### Left for later phases
 
-- Ping every 30 seconds; reconnect with `known` and `in_flight`; on a new `epoch`, start a fresh
-  replica from the snapshot and ask for a lease.
-- An edit that adds more new items than the lease has left (a paste of over 1,000 tasks) must ask
-  for more ids first: the server refuses ids no lease handed out.
-- Opening a plan file directly while its journal holds changes not yet saved (the server was
-  stopped by a crash and not restarted) should warn and offer to start the server.
 - A server running inside the app (phase 4) shares the app's lock identity, so it must refuse a
   plan the app has open in a window.
+- Starting the server from the warning shown when a shared plan's file is opened directly
+  (phase 4, *Share Folder…*).
 
 ## Phase 3: PlanCraft as a client
 
-- *File › Open from Server…*: the address (or a server found on the network), then user name and
-  password, then the plan.
-- The plan opens as a normal document whose edits go through the replica:
-  - a status mark shows connected, sending, or offline;
-  - other people's changes appear as they come in;
-  - a coloured marker shows who is editing which task, as a warning (a hard lock is optional);
-  - conflicts and dropped work show in a bar, with a recovery copy of the pre-merge version.
-- Offline edits wait and are sent on reconnection.
-- Undo uses inverse patches (see *Undo*).
-- MCP agents attached to that PlanCraft edit through the same replica, shown as "Claude for Ana".
-- File watching is off for plans opened from a server.
+### Opening a plan
+
+*File › Open from Server…* (also on the Start Page) asks for the server's address (`host`,
+`host:port`, an IPv6 address; port 47340 when none is given), user name and password:
+
+- On the first visit the server's key fingerprint is shown before any password is sent; the
+  person checks it against the one the server prints, and PlanCraft pins it in its settings once
+  they sign in with it. A server showing another key later is refused (as SSH does), with a way to
+  forget the old key if whoever runs the server says it changed.
+- The settings remember servers (address, user name, fingerprint, last plan; never a password).
+  The password is held only by the open window and by each open plan's link, to sign in again
+  after the connection drops.
+- Connecting, signing in and opening run on a background thread; the window keeps drawing.
+
+The plan opens as a document with no file (`Document::shared`): no lock file, no file watching,
+no Save (the server saves every change; *Save As* writes a copy of one's own, with its id
+counters raised so it stands alone). Opening the same plan again from the same server shows the
+open one. A viewer's plan refuses every change.
+
+### Keeping it in step (`plancraft_server::link`)
+
+Each plan opened from a server has a `Link` with two threads: a reader, and a session that owns
+the `Replica` and the connection. Merging never runs on the app's thread.
+
+- The app hands on each local edit as the plan before and after it, numbered. Edits are noticed
+  in `Document::try_edit` itself, so the UI, undo and MCP agents all go the same way; several
+  edits made in one frame go as one.
+- The link hands back the plan to show with the number of the last edit it includes. The app
+  shows it only when that is every edit handed on: a plan worked out before the person's latest
+  edit never hides that edit. An edit made on a plan that was already behind (other people's
+  changes arrived meanwhile) is fitted onto the current one (`rebase`); where both changed the
+  same value, theirs stays and the person is told.
+- Pings every 30 seconds; 75 seconds of silence counts as a lost connection. Reconnecting waits 1,
+  2, 4 … up to 30 seconds between tries, signs in again and catches up with `known` and
+  `in_flight` (missed entries, or the whole plan when the server has started a new run of it).
+  Edits made offline wait and go out on reconnection.
+- The server says which refusals are final (`for_good` on `error` and `closing`): no access, the
+  plan gone, signed out for good, another protocol. Only those, a wrong password (the password
+  changed) and a different server key stop the retries; the plan stays open as it is
+  (read-only), with *Save As* to keep a copy, and opening it again from the server signs in
+  afresh beside it. Anything else (the server starting, stopping or busy) is retried.
+- A change the server cannot take for now (it cannot save the plan: `rejected` with `retry`) is
+  kept and sent again after 30 seconds. One refused because the person may now only view the
+  plan (`rejected` with their `role`) is kept, unsent, for *Save As*; the plan turns read-only.
+  Other refusals drop the work and say why.
+- Missed entries with a change on its way reconnect (the server then says whether that change
+  went in); without one, the whole plan is asked for, once per connection (a new connection asks
+  again). When catching up after reconnecting fails part way, the whole plan is asked for and
+  what reopening said about the change on its way is kept for the answer (a resync's answer does
+  not know of it): a change that went in is never sent again. Messages still arriving from a
+  dropped connection are ignored. A plan from the server that cannot be read is not asked for
+  again until the next connection.
+- A wait before signing in again that the server asks for is kept to at most an hour.
+- The latest plan for the app is kept in one slot, not queued: a window that runs no frames for a
+  while holds one copy of the plan, not one per change that came in.
+- The link asks for a new block of ids when fewer than 250 are left, and again 30 seconds after the
+  server rationed it. Opened without a lease (the server rations them: 20 per person and plan,
+  then one every 30 seconds), new items wait for one; changes to existing items go through. An
+  edit adding more new items than a block holds (1,000) is refused with a message, rather than
+  using ids no lease handed out; so is a new item whose id neither the current block nor the one
+  before it handed out (an edit made before a new block arrived counts on from the old one, and
+  past its end are someone else's ids). An edit fitted onto a plan that moved on counts its ids
+  from the plan as it is now, raised only past its own new items.
+- If the link's thread ever hits an internal error, the plan shows as signed out (never a link
+  that silently stopped).
+
+### What the person sees
+
+- The status bar: a coloured dot and the server with *Connected*, *Sending*, *Connecting*,
+  *Offline* or *Signed out* (details on hover), *view only* for viewers, and who else is in the
+  plan. Tabs of plans opened from a server show 👥.
+- The task table's indicators column marks tasks others are on (👥, with their names on hover):
+  a warning, not a lock.
+- Work that was dropped (it clashed with someone's change, or no longer fitted the plan) shows in
+  a bar above the plan, with *Open Your Version*: the person's plan just before, as a new unsaved
+  plan. While the bar shows, the plan counts as unsaved: closing it (or PlanCraft) first opens
+  that version as a plan of its own, so it is asked about and kept by recovery copies.
+- Changes not yet confirmed count as unsaved: closing asks, and *Save* there writes a copy.
+- Undo passes over steps that no longer change anything (an edit the server did not keep).
+- Addresses are compared in lower case without a final dot, so a known server typed another way
+  is still known. A "first visit" to a server whose name matches a known one with another key
+  warns that it may be another computer pretending to be it. A mistyped password after
+  confirming a key goes back to the form, with the key still confirmed.
+- Opening a plan's file directly while a server's journal sits next to it (the server has it
+  open, or stopped before saving) warns to open it from the server instead.
+- MCP agents attached to that PlanCraft edit through the same document and link; their changes go
+  out labelled as an AI agent's (the server records the signed-in person as the author).
+
+### Tests
+
+- `crates/plancraft-server/tests/link.rs`: links against a real server: two people see each
+  other's changes and places; edits made while the server is down go out when it is back; a clash
+  is reported and both end with one plan; a viewer cannot change the plan; a changed password
+  stops the retries; ids are topped up and too many at once are refused; an editor opened without
+  a lease adds nothing until one comes; an editor made a viewer keeps unsent changes; a plan
+  changed outside the server is loaded again.
+- `crates/plancraft-server/tests/link_scripted.rs`: a link against a scripted server, for states
+  a real server rarely reaches: a gap after reconnecting asks for the plan again; a gap with a
+  change on its way reconnects; a gap while catching up does not send an applied change again; an
+  edit right after a refused one is kept; an absurd wait before signing in again is not taken as
+  none.
+- The app's `shared_tests` (in `app.rs`): the real app with a plan from a real server: edits both
+  ways, status bar, people and their tasks, Save; Save As writes a copy (it once froze the app);
+  undo keeps others' changes and is refused over theirs; a viewer; closing disconnects; work the
+  server dropped is kept when the plan closes; a signed-out plan is not reused; the journal
+  warning. `dialogs/server.rs` tests the window's steps (first visit, pinned key, second visit,
+  wrong password, another key, a mistyped password on a first visit).
+- `hostile.rs` › `shared_editing` › `shared_undo_keeps_the_plan_valid`: random own edits, other
+  people's edits and undo/redo on a shared document never panic (not even one a guard catches)
+  and always leave a valid plan.
+
+### Left for later
+
+- Agents shown as "Claude for Ana" to the others needs the author to travel with each change;
+  for now the label says it was an AI agent's.
+- Who changed what recently (a list of the server's entries with their authors).
+- *Open Your Version* opens the plan from just before the latest dropped work; earlier dropped
+  work listed in the same bar is not in it.
+- A hard lock on a task someone is editing (the marker is a warning only).
+- A sweep property that a successful shared undo leaves every value others changed since as it
+  was (the direct tests in `sync/tests.rs` and `workspace.rs` cover the known cases).
 
 ## Phase 4: discovery and sharing
 

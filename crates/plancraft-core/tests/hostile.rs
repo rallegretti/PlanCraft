@@ -1422,6 +1422,69 @@ mod shared_editing {
         Resync,
     }
 
+    #[derive(Clone, Debug)]
+    enum UndoStep {
+        Mine(Op),
+        /// Someone else's edit arrives (applied to the plan as it is, no undo step).
+        Theirs(Op),
+        Undo,
+        Redo,
+    }
+
+    fn undo_step() -> impl Strategy<Value = UndoStep> {
+        prop_oneof![
+            3 => edit_op().prop_map(UndoStep::Mine),
+            2 => edit_op().prop_map(UndoStep::Theirs),
+            2 => Just(UndoStep::Undo),
+            1 => Just(UndoStep::Redo),
+        ]
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig { cases: cases(32), ..ProptestConfig::default() })]
+
+        /// Undo and redo in a plan opened from a server (inverse patches over other people's
+        /// changes) never panic and always leave a valid plan.
+        #[test]
+        fn shared_undo_keeps_the_plan_valid(steps in prop::collection::vec(undo_step(), 1..50)) {
+            count_panics();
+            let start_panics = panics();
+            let mut doc = Document::new_shared(1, demo_project(start()), "Shared.plancraft");
+            for s in &steps {
+                match s {
+                    UndoStep::Mine(op) => {
+                        let r = doc.try_edit("mine", ChangeSource::User, |p| apply(p, op));
+                        prop_assert!(!matches!(r, Err(PlanError::Internal(_))), "{op:?}: {r:?}");
+                    }
+                    UndoStep::Theirs(op) => {
+                        let mut theirs = doc.project.clone();
+                        if apply(&mut theirs, op).is_ok() && limits::check_edit(&mut theirs).is_ok() {
+                            plancraft_core::schedule::recalculate(&mut theirs);
+                            doc.apply_remote(theirs);
+                        }
+                    }
+                    UndoStep::Undo | UndoStep::Redo => {
+                        let r = if matches!(s, UndoStep::Undo) { doc.try_undo_as(ChangeSource::User) } else { doc.try_redo_as(ChangeSource::User) };
+                        if let Err(why) = &r {
+                            prop_assert!(!why.contains("internal error"), "{s:?}: {why}");
+                        }
+                    }
+                }
+                prop_assert!(limits::check_counts(&doc.project).is_ok());
+                let mut copy = doc.project.clone();
+                prop_assert!(limits::sanitize(&mut copy).is_empty(), "{s:?} left values out of range");
+                prop_assert_eq!(panics(), start_panics, "{:?} panicked (a guard caught it)", s);
+                let _ = doc.take_unsent();
+            }
+        }
+    }
+
+    /// `value` written as JSON and read back.
+    fn wire<T: serde::Serialize + serde::de::DeserializeOwned>(value: &T) -> Result<T, TestCaseError> {
+        let text = serde_json::to_string(value).map_err(|e| TestCaseError::fail(e.to_string()))?;
+        serde_json::from_str(&text).map_err(|e| TestCaseError::fail(e.to_string()))
+    }
+
     struct Net {
         host: Host,
         people: Vec<Replica>,
@@ -1444,7 +1507,12 @@ mod shared_editing {
 
         fn resync(&mut self, i: usize) -> Result<(), TestCaseError> {
             let applied = self.people[i].in_flight().is_some_and(|id| self.host.was_applied(id));
-            let r = self.people[i].resync(self.host.project().clone(), self.host.version(), applied);
+            // The whole plan as the server sends it, and the link reads it.
+            let text = plancraft_core::io::to_json(self.host.project()).map_err(|e| TestCaseError::fail(e.to_string()))?;
+            let (mut plan, _) = plancraft_core::io::from_json_with_notes(&text, std::path::Path::new("Shared.plancraft"))
+                .map_err(|e| TestCaseError::fail(e.to_string()))?;
+            plancraft_core::schedule::recalculate(&mut plan);
+            let r = self.people[i].resync(plan, self.host.version(), applied);
             prop_assert!(r.is_ok(), "resync failed: {r:?}");
             Ok(())
         }
@@ -1461,8 +1529,12 @@ mod shared_editing {
                 }
                 Step::Send(i) => {
                     let Some(change) = self.people[*i].next_change("edit") else { return Ok(()) };
+                    // Through JSON both ways, as over the wire: a value that does not come back
+                    // as it went (a float off in the last place) would never settle.
+                    let change: sync::Change = wire(&change)?;
                     match self.host.submit(&change, &format!("person {i}")) {
                         Outcome::Applied(e) => {
+                            let e: Entry = wire(&e)?;
                             for inbox in &mut self.inbox {
                                 inbox.push_back(Msg::Entry(e.clone()));
                             }
@@ -1470,7 +1542,9 @@ mod shared_editing {
                         Outcome::Conflicts(_) => self.inbox[*i].push_back(Msg::Rejected(change.id, None)),
                         Outcome::Refused(why) => self.inbox[*i].push_back(Msg::Rejected(change.id, Some(why))),
                         Outcome::Resync => self.inbox[*i].push_back(Msg::Resync),
-                        Outcome::AlreadyApplied(_) => prop_assert!(false, "a change was sent twice"),
+                        // A change that changes nothing makes no version: the sender settles on
+                        // the host's plan.
+                        Outcome::AlreadyApplied(_) => self.inbox[*i].push_back(Msg::Resync),
                     }
                     let mut copy = self.host.project().clone();
                     prop_assert!(limits::sanitize(&mut copy).is_empty(), "the host's plan left the limits");

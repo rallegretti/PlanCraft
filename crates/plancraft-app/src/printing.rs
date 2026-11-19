@@ -132,7 +132,7 @@ fn task_sheet(p: &Project, st: &UiState, title: &str, pal: &Palette, all_columns
         columns.push(PrintColumn { title: f.title(p), width: w * PT_PER_PX, align });
     }
     let no_overallocation = |_: TaskId| false;
-    let ctx = CellCtx { overallocated: &no_overallocation };
+    let ctx = CellCtx { overallocated: &no_overallocation, others_on: None };
     let grouped = st.group.is_some();
     let rows = views::visible_rows(p, st)
         .iter()

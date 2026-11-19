@@ -98,7 +98,7 @@ pub fn task_table(
         let sel = &st.sel;
         let collapsed = &st.collapsed;
         let is_over = |id: TaskId| over_tasks.contains(&id);
-        let ctx = CellCtx { overallocated: &is_over };
+        let ctx = CellCtx { overallocated: &is_over, others_on: Some(&st.others_on) };
         let is_selected = |r: usize| match rows.get(r) {
             Some(Row::Group(g)) => {
                 !g.tasks.is_empty() && g.tasks.iter().all(|&i| p.tasks.get(i).is_some_and(|t| sel.tasks.contains(&t.id)))

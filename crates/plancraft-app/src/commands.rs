@@ -12,6 +12,8 @@ pub enum Command {
     NewDemo,
     Open,
     OpenPath(std::path::PathBuf),
+    /// The Open from Server window: a plan shared from a PlanCraft Server.
+    OpenFromServer,
     Save,
     SaveAs,
     Close,

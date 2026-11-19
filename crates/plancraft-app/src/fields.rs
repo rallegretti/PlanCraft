@@ -267,7 +267,7 @@ impl Field {
             ExpectedWork => t.estimate.map_or(SortKey::Missing, |e| mins(e.expected_work(&p.settings))),
             _ => {
                 let none = |_: TaskId| false;
-                let text = columns::cell(*col, p, idx, &CellCtx { overallocated: &none }).text;
+                let text = columns::cell(*col, p, idx, &CellCtx { overallocated: &none, others_on: None }).text;
                 if text.trim().is_empty() { SortKey::Missing } else { SortKey::Text(text.to_lowercase()) }
             }
         }
@@ -279,7 +279,7 @@ impl Field {
             Field::Custom(id) => p.tasks.get(idx).and_then(|t| t.custom.get(id)).map(|v| custom_display(p, *id, v)).unwrap_or_default(),
             Field::Builtin(col) => {
                 let none = |_: TaskId| false;
-                columns::cell(*col, p, idx, &CellCtx { overallocated: &none }).text
+                columns::cell(*col, p, idx, &CellCtx { overallocated: &none, others_on: None }).text
             }
         };
         if text.trim().is_empty() { "No value".to_string() } else { text }

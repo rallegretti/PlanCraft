@@ -479,7 +479,7 @@ fn serve(shared: &Arc<Shared>, conn: ConnId, stream: TcpStream, socket: Option<A
         if matches!(stage, Stage::Hello | Stage::SignIn) {
             before_sign_in += 1;
             if before_sign_in > MAX_LOGIN_FRAMES || started.elapsed() > shared.login_timeout {
-                out.push(&ServerMsg::Error { message: "signing in took too long".into() });
+                out.push(&ServerMsg::Error { message: "signing in took too long".into(), for_good: false });
                 break;
             }
         }
@@ -487,7 +487,7 @@ fn serve(shared: &Arc<Shared>, conn: ConnId, stream: TcpStream, socket: Option<A
             Ok(m) => m,
             Err(e) => {
                 bad += 1;
-                out.push(&ServerMsg::Error { message: format!("the request was not understood: {e}") });
+                out.push(&ServerMsg::Error { message: format!("the request was not understood: {e}"), for_good: false });
                 if bad >= MAX_BAD_FRAMES {
                     break;
                 }
@@ -500,7 +500,7 @@ fn serve(shared: &Arc<Shared>, conn: ConnId, stream: TcpStream, socket: Option<A
             Ok(true) => {}
             Ok(false) => break,
             Err(_) => {
-                out.push(&ServerMsg::Error { message: "the server ran into a problem with that request".into() });
+                out.push(&ServerMsg::Error { message: "the server ran into a problem with that request".into(), for_good: false });
                 break;
             }
         }
@@ -517,20 +517,24 @@ fn serve(shared: &Arc<Shared>, conn: ConnId, stream: TcpStream, socket: Option<A
 fn handle(ctx: &Ctx, stage: &mut Stage, msg: ClientMsg) -> bool {
     let Ctx { shared, conn, ip, out, receiver } = *ctx;
     let error = |message: &str| {
-        out.push(&ServerMsg::Error { message: message.into() });
+        out.push(&ServerMsg::Error { message: message.into(), for_good: false });
+    };
+    // A refusal trying again will not change.
+    let refuse = |message: &str| {
+        out.push(&ServerMsg::Error { message: message.into(), for_good: true });
     };
     match (&*stage, msg) {
         (Stage::SignedIn(user), ClientMsg::Ping) => {
             // Someone removed from the users file stops here too, even if they only ping.
             if shared.fresh(user).is_none() {
-                out.push(&ServerMsg::Closing { message: "you can no longer sign in to this server".into() });
+                out.push(&ServerMsg::Closing { message: "you can no longer sign in to this server".into(), for_good: true });
                 return false;
             }
             out.push(&ServerMsg::Pong);
         }
         (Stage::Open { user, name, .. }, ClientMsg::Ping) => {
             if shared.fresh(user).is_none_or(|u| u.role_for(name) == Role::None) {
-                out.push(&ServerMsg::Closing { message: "you may no longer open this plan".into() });
+                out.push(&ServerMsg::Closing { message: "you may no longer open this plan".into(), for_good: true });
                 return false;
             }
             out.push(&ServerMsg::Pong);
@@ -540,7 +544,7 @@ fn handle(ctx: &Ctx, stage: &mut Stage, msg: ClientMsg) -> bool {
         }
         (Stage::Hello, ClientMsg::Hello { protocol, .. }) => {
             if protocol != PROTOCOL {
-                error(&format!(
+                refuse(&format!(
                     "this server speaks protocol {PROTOCOL} and this PlanCraft speaks {protocol}: use the same PlanCraft version on both computers"
                 ));
                 return false;
@@ -564,7 +568,7 @@ fn handle(ctx: &Ctx, stage: &mut Stage, msg: ClientMsg) -> bool {
         (Stage::SignIn, _) => error("sign in first"),
         (Stage::SignedIn(user), msg @ (ClientMsg::List | ClientMsg::Open { .. })) => {
             let Some(user) = shared.fresh(user) else {
-                out.push(&ServerMsg::Closing { message: "you can no longer sign in to this server".into() });
+                out.push(&ServerMsg::Closing { message: "you can no longer sign in to this server".into(), for_good: true });
                 return false;
             };
             match msg {
@@ -574,7 +578,7 @@ fn handle(ctx: &Ctx, stage: &mut Stage, msg: ClientMsg) -> bool {
                 ClientMsg::Open { plan, client, known, in_flight } => {
                     let role = user.role_for(&plan);
                     if !valid_plan_name(&plan) || role == Role::None || !plan_exists(&shared.folder, &plan) {
-                        error(&format!("there is no plan '{}' that you may open", printable(&plan)));
+                        refuse(&format!("there is no plan '{}' that you may open", printable(&plan)));
                         return true;
                     }
                     let sub = Subscriber { user: user.name.clone(), client, role, out: out.clone(), task: None };
@@ -595,12 +599,12 @@ fn handle(ctx: &Ctx, stage: &mut Stage, msg: ClientMsg) -> bool {
             // The users file as it is now: someone removed, or no longer allowed, stops here.
             let role = shared.fresh(user).map_or(Role::None, |u| u.role_for(name));
             if role == Role::None {
-                out.push(&ServerMsg::Closing { message: "you may no longer open this plan".into() });
+                out.push(&ServerMsg::Closing { message: "you may no longer open this plan".into(), for_good: true });
                 return false;
             }
             let mut guard = lock(slot);
             let Slot::Open(plan) = &mut *guard else {
-                out.push(&ServerMsg::Closing { message: "the plan was closed".into() });
+                out.push(&ServerMsg::Closing { message: "the plan was closed".into(), for_good: false });
                 return false;
             };
             let result = match msg {
@@ -611,6 +615,8 @@ fn handle(ctx: &Ctx, stage: &mut Stage, msg: ClientMsg) -> bool {
                         change: change.id,
                         conflicts: Vec::new(),
                         reason: Some("you may only view this plan".into()),
+                        retry: false,
+                        role: Some(role),
                     });
                     Ok(())
                 }
@@ -647,6 +653,7 @@ fn sign_in(shared: &Arc<Shared>, ip: Option<IpAddr>, out: &Outbox, user: &str, p
         out.push(&ServerMsg::LoginFailed {
             message: format!("too many failed sign-ins; try again in {secs} seconds"),
             retry_after_secs: secs,
+            credentials: false,
         });
         return None;
     }
@@ -654,7 +661,11 @@ fn sign_in(shared: &Arc<Shared>, ip: Option<IpAddr>, out: &Outbox, user: &str, p
         Ok(u) => u,
         Err(e) => {
             (shared.log)(&format!("cannot read the users file: {e}"));
-            out.push(&ServerMsg::LoginFailed { message: "the server cannot read its users file".into(), retry_after_secs: 0 });
+            out.push(&ServerMsg::LoginFailed {
+                message: "the server cannot read its users file".into(),
+                retry_after_secs: 0,
+                credentials: false,
+            });
             return None;
         }
     };
@@ -669,7 +680,7 @@ fn sign_in(shared: &Arc<Shared>, ip: Option<IpAddr>, out: &Outbox, user: &str, p
             let retry = throttle.wait(user, ip).as_secs();
             drop(throttle);
             (shared.log)(&format!("failed sign-in as '{}' from {}", printable(user), ip.map(|i| i.to_string()).unwrap_or_default()));
-            out.push(&ServerMsg::LoginFailed { message: "wrong user name or password".into(), retry_after_secs: retry });
+            out.push(&ServerMsg::LoginFailed { message: "wrong user name or password".into(), retry_after_secs: retry, credentials: true });
             None
         }
     }
