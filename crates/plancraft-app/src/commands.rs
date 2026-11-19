@@ -149,7 +149,7 @@ pub fn task_context_menu(ui: &mut egui::Ui, emit: &mut dyn FnMut(Command)) {
     item(ui, "✂  Cut", Command::Cut);
     item(ui, "📋  Copy", Command::Copy);
     item(ui, "📥  Paste", Command::Paste);
-    item(ui, "⇩  Fill Down (Ctrl+D)", Command::FillDown);
+    item(ui, "⬇  Fill Down (Ctrl+D)", Command::FillDown);
     ui.separator();
     item(ui, "🔦  Find… (Ctrl+F)", Command::Find(false));
     item(ui, "↪  Go To… (F5)", Command::GoTo);

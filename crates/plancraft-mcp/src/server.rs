@@ -280,7 +280,7 @@ impl McpServer {
         }
         let ctx = Ctx { server: self, changed: Cell::new(false) };
         let args = Args::new(map);
-        let outcome = catch_unwind(AssertUnwindSafe(|| (tool.handler)(&ctx, &args)));
+        let outcome = crate::views::checking_disk_first(&self.workspace, || catch_unwind(AssertUnwindSafe(|| (tool.handler)(&ctx, &args))));
         if ctx.changed.get() {
             self.notify_change();
         }
@@ -326,7 +326,7 @@ impl McpServer {
         };
         let elsewhere = elsewhere.map(|who| {
             format!(
-                "Document {handle} ({}) is also open by {who}. Changes saved there are noticed here; tell the user before making large changes, since only one version can be kept.",
+                "Document {handle} ({}) is also open in another PlanCraft (its lock file, data written by that program, says: \"{who}\"). Changes saved there are noticed here; tell the user before making large changes, since only one version can be kept.",
                 path.display()
             )
         });

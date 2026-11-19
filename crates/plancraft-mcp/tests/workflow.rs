@@ -639,7 +639,12 @@ fn tools_warn_when_a_plan_is_open_in_another_plancraft() {
     let c = Client::new();
     let r = c.call("open_project", json!({ "path": path.to_str().unwrap() }));
     let notice = r["disk_notice"].as_str().unwrap();
-    assert!(notice.contains("also open by ana in PlanCraft 0.6.0 on studio-pc since 2026-11-18 09:15"), "{notice}");
+    // The lock file's text is quoted as what it is: data another program wrote.
+    assert!(
+        notice.contains("also open in another PlanCraft")
+            && notice.contains("says: \"ana in PlanCraft 0.6.0 on studio-pc since 2026-11-18 09:15\""),
+        "{notice}"
+    );
     assert_eq!(r["project"]["open_elsewhere"], "ana in PlanCraft 0.6.0 on studio-pc since 2026-11-18 09:15");
     assert!(c.call("list_documents", json!({}))["documents"][0]["open_elsewhere"].is_string());
 

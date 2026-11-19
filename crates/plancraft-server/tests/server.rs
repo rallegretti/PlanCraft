@@ -583,3 +583,32 @@ fn a_few_computers_cannot_hold_every_place_for_signing_in() {
     assert!(matches!(ana.request(&ClientMsg::Ping).unwrap(), ServerMsg::Pong));
     server.stop();
 }
+
+/// Regression: every editor connection could hold a 65 MB frame (and what it parses into) at
+/// once, so one editor account could make the server use gigabytes. Large frames share one
+/// budget; one that does not fit closes its connection (the client sends it again later).
+#[test]
+fn large_frames_share_one_budget() {
+    use plancraft_server::protocol::{ClientId, ClientMsg};
+    let s = setup();
+    let mut o = s.options();
+    o.max_inbound_bytes = 2 * 1024 * 1024;
+    let server = plancraft_server::server::start(o).unwrap();
+    let mut c = signed_in(&server, "ana");
+    c.open("Plan.plancraft", ClientId::new(), None, None).unwrap();
+    // A frame over the budget (any frame over 1 MiB asks for room): the connection closes.
+    let mut big = vec![b' '; 3 * 1024 * 1024];
+    big.extend_from_slice(br#"{"type":"ping"}"#);
+    // Closed as soon as its length is read: sending the rest, or the next read, fails.
+    let sent = c.send_raw(&big);
+    assert!(sent.is_err() || c.recv().is_err(), "no room: closed");
+    // One that fits is read (and the room is given back: a second one too).
+    let mut c = signed_in(&server, "ana");
+    c.open("Plan.plancraft", ClientId::new(), None, None).unwrap();
+    for _ in 0..2 {
+        let mut fits = vec![b' '; 1536 * 1024];
+        fits.extend_from_slice(&serde_json::to_vec(&ClientMsg::Ping).unwrap());
+        c.send_raw(&fits).unwrap();
+        assert!(matches!(c.recv().unwrap(), plancraft_server::protocol::ServerMsg::Pong));
+    }
+}

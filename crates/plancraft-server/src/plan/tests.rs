@@ -123,7 +123,7 @@ fn a_crash_after_the_plan_file_was_written_does_not_apply_changes_twice() {
     // The first two steps of a save, then the power fails.
     let text = io::to_json(plan.host().project()).unwrap();
     plan.journal.append(&Record::Saving { version, plan_hash: plan_hash(text.as_bytes()) }).unwrap();
-    write_atomic(&path, text.as_bytes(), Privacy::KeepExisting).unwrap();
+    io::write_atomic(&path, text.as_bytes(), Privacy::KeepExisting).unwrap();
     drop(plan);
 
     let plan = open(&path);
@@ -223,6 +223,29 @@ fn a_file_changed_outside_while_shared_is_not_overwritten() {
     let copy = hidden_files(&path, "shared copy").pop().expect("a copy");
     assert!(has_task(&io::load(&copy).unwrap(), "Shared work"), "the shared plan goes to a copy");
     assert!(copy.file_name().unwrap().to_string_lossy().starts_with('.'), "hidden: not a plan to share, with other access rules");
+}
+
+/// Regression: after the shared plan was saved to a hidden copy, opening the plan again (a
+/// restart, or everyone left) started afresh from the outside file, silently: every shared change
+/// stayed in the copy, mentioned once in an old log line.
+#[test]
+fn a_plan_whose_shared_work_went_to_a_copy_is_not_reopened_from_the_outside_file() {
+    let (_dir, path) = setup();
+    let mut plan = open(&path);
+    let (mut r, rx) = join(&mut plan, 1, ClientId::new());
+    add_task(&mut plan, 1, &mut r, &rx, "Shared work");
+    let mut outside = io::load(&path).unwrap();
+    outside.name = "Changed outside".into();
+    io::save(&outside, &path).unwrap();
+    plan.save().unwrap();
+    plan.close("bye");
+    let e = SharedPlan::open(&path, "Plan.plancraft", crate::quiet()).err().expect("refused until a person picks a version");
+    assert!(e.contains("shared copy") && e.contains("Keep the version you want"), "{e}");
+    // Kept as the plan: it opens, with the shared work.
+    let copy = hidden_files(&path, "shared copy").pop().unwrap();
+    std::fs::rename(&copy, &path).unwrap();
+    let again = open(&path);
+    assert!(has_task(again.host.project(), "Shared work"));
 }
 
 fn hidden_files(near: &Path, what: &str) -> Vec<PathBuf> {
@@ -521,11 +544,29 @@ fn viewers_get_no_ids_and_people_see_who_is_where() {
     assert!(opened.lease.is_none());
     assert_eq!(opened.people.len(), 2);
     let task = plan.host().project().tasks.first().unwrap().id;
-    plan.presence(2, Some(task));
+    let other = plan.host().project().tasks.get(1).unwrap().id;
+    let _ = messages(&rx);
+    // Places go out from upkeep, once however often they changed meanwhile (a person flipping
+    // between tasks must not flood the others' queues).
+    for _ in 0..50 {
+        plan.presence(2, Some(other));
+        plan.presence(2, Some(task));
+    }
+    assert!(messages(&rx).is_empty(), "not once per message");
+    plan.maintain(Instant::now()).unwrap();
     let seen = messages(&rx);
+    assert_eq!(seen.iter().filter(|m| matches!(m, ServerMsg::People { .. })).count(), 1);
     assert!(
         seen.iter().any(|m| matches!(m, ServerMsg::People { people } if people.iter().any(|p| p.user == "viewer" && p.task == Some(task))))
     );
+    // The whole plan, asked for again and again: at most once per gap, the rest from upkeep.
+    let _ = messages(&rx2);
+    for _ in 0..20 {
+        plan.resync(2, false).unwrap();
+    }
+    assert_eq!(messages(&rx2).iter().filter(|m| matches!(m, ServerMsg::Snapshot { .. })).count(), 1);
+    plan.maintain(Instant::now() + MIN_SNAPSHOT_GAP).unwrap();
+    assert_eq!(messages(&rx2).iter().filter(|m| matches!(m, ServerMsg::Snapshot { .. })).count(), 1, "the one held back");
     plan.leave(2);
     assert!(messages(&rx).iter().any(|m| matches!(m, ServerMsg::People { people } if people.len() == 1)));
 }

@@ -17,8 +17,9 @@
 //!   ([`MAX_REQUESTS`]), so parallel tool calls from several agents aren't refused;
 //! * the request line and headers are checked (origin, host, token) *before* the body is read,
 //!   so an unauthenticated client can't make the server read a large body;
-//! * each read waits at most [`READ_TIMEOUT`], and the whole request (headers and body) must
-//!   arrive within [`REQUEST_DEADLINE`], so a client sending one byte at a time is cut off;
+//! * each read waits at most [`READ_TIMEOUT`], the request line and headers must arrive within
+//!   [`HEAD_DEADLINE`] and the whole request within [`REQUEST_DEADLINE`], so a client sending one
+//!   byte at a time is cut off (and cannot hold a pre-authentication slot for long);
 //! * headers are limited to [`MAX_HEAD`] bytes and the body to [`MAX_BODY`] bytes.
 //!
 //! Each connection carries one request and is closed after the reply (`Connection: close`).
@@ -54,6 +55,9 @@ const DRAIN_BYTES: u64 = 64 * 1024;
 pub const READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// Time a client has to send the whole request (headers and body).
 pub const REQUEST_DEADLINE: Duration = Duration::from_secs(60);
+/// Time a client has to send the request line and headers: the pre-authentication slot it holds
+/// meanwhile is one of few, so a client dripping header bytes must not keep it long.
+pub const HEAD_DEADLINE: Duration = Duration::from_secs(10);
 /// Longest wait for a client to take the reply.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -140,6 +144,8 @@ pub struct HttpLimits {
     pub read_timeout: Duration,
     /// Time a client has to send the whole request (headers and body).
     pub request_deadline: Duration,
+    /// Time a client has to send the request line and headers.
+    pub head_deadline: Duration,
 }
 
 impl Default for HttpLimits {
@@ -149,6 +155,7 @@ impl Default for HttpLimits {
             max_requests: MAX_REQUESTS,
             read_timeout: READ_TIMEOUT,
             request_deadline: REQUEST_DEADLINE,
+            head_deadline: HEAD_DEADLINE,
         }
     }
 }
@@ -327,6 +334,8 @@ fn serve_connection(server: &McpServer, mut stream: TcpStream, loopback: bool, t
     if stream.write_all(&reply.to_bytes()).and_then(|()| stream.flush()).is_err() {
         return;
     }
+    // Answered: its slots go back now, not after the drain below.
+    drop(slots);
     // A request refused before its body was read leaves the body unread; closing with unread
     // data can reset the connection before the client sees the reply, so drain a little first,
     // for at most DRAIN_TIME in all (a client dripping bytes can't keep its slot).
@@ -344,7 +353,6 @@ fn serve_connection(server: &McpServer, mut stream: TcpStream, loopback: bool, t
             Ok(n) => left = left.saturating_sub(u64::try_from(n).unwrap_or(u64::MAX)),
         }
     }
-    drop(slots);
 }
 
 /// A client connection being read, with everything received so far in `buf`.
@@ -573,7 +581,10 @@ fn read_and_route(
     limits: HttpLimits,
     slots: &mut Slots,
 ) -> Result<Reply, Reply> {
+    let full = conn.deadline;
+    conn.deadline = Instant::now().checked_add(limits.head_deadline).map_or(full, |d| d.min(full));
     let body_start = conn.read_head()?;
+    conn.deadline = full;
     let head = parse_head(conn.buf.get(..body_start.saturating_sub(4)).unwrap_or_default())?;
 
     // Everything that can refuse the request is checked before the body is read.
@@ -589,7 +600,29 @@ fn read_and_route(
         return Ok(Reply::text(401, "Unauthorized: send the PlanCraft session token as 'Authorization: Bearer <token>'")
             .header("WWW-Authenticate", "Bearer realm=\"plancraft\""));
     }
-    // Past the token check: free the pre-authentication slot and take a request slot.
+    // Past the token check: the reply proves this server knows the token, when asked.
+    let proof = head
+        .header(crate::session::NONCE_HEADER)
+        .map(str::trim)
+        .filter(|n| crate::session::valid_nonce(n))
+        .map(|n| crate::session::proof(token, n));
+    let proved = |r: Reply| match &proof {
+        Some(p) => r.header(crate::session::PROOF_HEADER, p),
+        None => r,
+    };
+    authorized_route(server, conn, &head, body_start, limits, slots).map(proved).map_err(proved)
+}
+
+/// [`read_and_route`] past the token check.
+fn authorized_route(
+    server: &McpServer,
+    conn: &mut Conn<'_>,
+    head: &Head,
+    body_start: usize,
+    limits: HttpLimits,
+    slots: &mut Slots,
+) -> Result<Reply, Reply> {
+    // Free the pre-authentication slot and take a request slot.
     slots.pending = None;
     match Active::take(&slots.busy, limits.max_requests) {
         Some(slot) => slots.request = Some(slot),
@@ -622,7 +655,7 @@ fn read_and_route(
         if !te.eq_ignore_ascii_case("chunked") || !lengths.is_empty() {
             return Ok(Reply::text(501, "Not Implemented: only a chunked or Content-Length body is accepted"));
         }
-        continue_if_asked(conn, &head)?;
+        continue_if_asked(conn, head)?;
         conn.body_chunked(body_start)?
     } else {
         let len = match lengths.as_slice() {
@@ -635,7 +668,7 @@ fn read_and_route(
         if len > MAX_BODY {
             return Ok(too_large());
         }
-        continue_if_asked(conn, &head)?;
+        continue_if_asked(conn, head)?;
         conn.body_with_length(body_start, len)?
     };
 

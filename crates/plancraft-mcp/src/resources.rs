@@ -64,6 +64,10 @@ fn find_doc<'a>(ws: &'a Workspace, key: &str) -> Option<&'a Document> {
 }
 
 pub fn read(server: &McpServer, uri: &str) -> Result<Value, RpcError> {
+    crate::views::checking_disk_first(server.workspace(), || read_checked(server, uri))
+}
+
+fn read_checked(server: &McpServer, uri: &str) -> Result<Value, RpcError> {
     let not_found = || {
         let mut e = RpcError::new(RESOURCE_NOT_FOUND, format!("Resource not found: {uri}"));
         e.data = Some(json!({ "uri": uri }));

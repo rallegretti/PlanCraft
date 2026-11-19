@@ -244,7 +244,7 @@ Started your plan in a spreadsheet? Open it with **File ▸ Open** (or **File �
 | `Alt+Shift+→` / `Alt+Shift+←` | Indent / outdent |
 | `Alt+Shift+↑` / `Alt+Shift+↓` | Move a task up / down (or drag its row number) |
 | `Ctrl+D` | Fill down: copy the top selected cell into the selected cells below it |
-| `Ctrl+F` / `Ctrl+H` | Find / replace |
+| `Ctrl+F` / `Ctrl+H` | Find / replace (on a Mac, Cmd+Option+F replaces: Cmd+H hides the app) |
 | `F5` | Go to a task ID or a date |
 | `Ctrl+F2` / `Ctrl+Shift+F2` | Link / unlink the selected tasks |
 | `Shift+F2` | Task Information (several tasks selected: change them all at once) |

@@ -200,6 +200,42 @@ fn attach_bridge_relays_large_replies() {
     handle.shutdown();
 }
 
+/// Regression: `--attach` trusted whatever answered at the session's address. After a crash left
+/// the session file behind, another program listening there got every request and its forged
+/// replies reached the agent. The app now proves it knows the token; a reply without the proof
+/// is refused.
+#[test]
+fn attach_refuses_a_program_that_does_not_know_the_session() {
+    use plancraft_mcp::attach::run_attach_with;
+    use plancraft_mcp::session::{SessionInfo, new_token};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let impostor = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let Ok((mut s, _)) = listener.accept() else { return };
+            // The whole request (closing with some of it unread would reset the connection).
+            s.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+            let mut buf = [0u8; 65536];
+            while s.read(&mut buf).is_ok_and(|n| n > 0) {}
+            let body = r#"{"jsonrpc":"2.0","id":1,"result":{"forged":true}}"#;
+            let _ = write!(
+                s,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+        }
+    });
+    let token = new_token();
+    let session = || Ok(SessionInfo { url: url.clone(), token: token.clone(), pid: 1 });
+    let input = json!({ "jsonrpc": "2.0", "id": 1, "method": "ping" }).to_string();
+    let mut out = Vec::new();
+    run_attach_with(std::io::Cursor::new(input), &mut out, &session).unwrap();
+    let reply: Value = serde_json::from_slice(&out).unwrap();
+    assert!(reply.get("result").is_none(), "the forged reply never reaches the agent: {reply}");
+    assert!(reply["error"]["message"].as_str().unwrap().contains("not this PlanCraft"), "{reply}");
+    drop(impostor);
+}
+
 fn server() -> Arc<McpServer> {
     Arc::new(McpServer::new(Workspace::default().shared()))
 }
@@ -244,6 +280,7 @@ fn slow_unauthenticated_and_excess_clients_are_cut_off() {
         max_requests: 4,
         read_timeout: Duration::from_millis(300),
         request_deadline: Duration::from_secs(2),
+        ..HttpLimits::default()
     };
     let handle = serve_http_with(server(), "127.0.0.1:0", TOKEN, limits).unwrap();
     let port = handle.port();
@@ -306,6 +343,7 @@ fn slow_unauthenticated_and_excess_clients_are_cut_off() {
         max_requests: 4,
         read_timeout: Duration::from_secs(30),
         request_deadline: Duration::from_secs(30),
+        head_deadline: Duration::from_secs(30),
     };
     let handle = serve_http_with(server(), "127.0.0.1:0", TOKEN, limits).unwrap();
     let port = handle.port();
@@ -424,8 +462,13 @@ fn attach_bridge_answers_each_request_of_a_failed_batch() {
 /// for days. The drain now ends after a second, and the slot frees.
 #[test]
 fn a_client_dripping_after_its_reply_loses_its_slot() {
-    let limits =
-        HttpLimits { max_connections: 1, max_requests: 4, read_timeout: Duration::from_secs(5), request_deadline: Duration::from_secs(5) };
+    let limits = HttpLimits {
+        max_connections: 1,
+        max_requests: 4,
+        read_timeout: Duration::from_secs(5),
+        request_deadline: Duration::from_secs(5),
+        ..HttpLimits::default()
+    };
     let handle = serve_http_with(server(), "127.0.0.1:0", TOKEN, limits).unwrap();
     let port = handle.port();
     let mut drip = TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -477,6 +520,7 @@ fn sweep_port() -> u16 {
                 max_requests: 8,
                 read_timeout: Duration::from_millis(300),
                 request_deadline: Duration::from_secs(1),
+                ..HttpLimits::default()
             };
             serve_http_with(server(), "127.0.0.1:0", TOKEN, limits).unwrap()
         })
@@ -559,4 +603,34 @@ proptest::proptest! {
         proptest::prop_assert_eq!(status, 200);
         proptest::prop_assert_eq!(SERVER_PANICS.load(std::sync::atomic::Ordering::SeqCst), before, "a server thread panicked");
     }
+}
+
+/// Regression: a client without the token could hold a pre-authentication slot for up to the
+/// whole request deadline (a minute) by dripping header bytes, so a few such clients kept the
+/// endpoint at 503. Headers have their own, shorter deadline.
+#[test]
+fn headers_dripped_slowly_lose_their_slot_at_the_head_deadline() {
+    let limits = HttpLimits {
+        max_connections: 4,
+        max_requests: 4,
+        read_timeout: Duration::from_secs(5),
+        request_deadline: Duration::from_secs(20),
+        head_deadline: Duration::from_millis(600),
+    };
+    let handle = serve_http_with(server(), "127.0.0.1:0", TOKEN, limits).unwrap();
+    let mut s = TcpStream::connect(("127.0.0.1", handle.port())).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+    let started = std::time::Instant::now();
+    for b in b"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Slow: " {
+        if s.write_all(&[*b]).is_err() || started.elapsed() > Duration::from_secs(3) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let mut raw = Vec::new();
+    let _ = s.read_to_end(&mut raw);
+    assert!(started.elapsed() < Duration::from_secs(5), "cut off near the head deadline, not the request deadline");
+    let text = String::from_utf8_lossy(&raw);
+    assert!(text.is_empty() || text.contains("408"), "{text}");
+    handle.shutdown();
 }

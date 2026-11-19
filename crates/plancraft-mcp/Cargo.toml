@@ -20,6 +20,8 @@ serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 thiserror.workspace = true
+# Pure Rust: the app proves to `--attach` that it knows the session token.
+sha2 = "0.10"
 
 [dev-dependencies]
 proptest = "1"

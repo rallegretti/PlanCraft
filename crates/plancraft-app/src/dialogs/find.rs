@@ -48,13 +48,15 @@ fn columns(p: &Project, st: &UiState, only: Option<&str>) -> Vec<(usize, Field)>
     fields::table_fields(p, st.table).into_iter().enumerate().filter(|(_, f)| only.is_none_or(|k| f.key() == k)).collect()
 }
 
-/// A cell's text as shown (for finding) and as edited (for replacing, `None` when the cell can't
-/// be edited).
+/// A cell's text as shown (for finding) and, when Replace may change it, as edited. Replace works
+/// only where the two are the same text (names, notes, text fields): a date shows as
+/// "Mon 11/02/26" but edits as "2026-11-02", so replacing in it would change what Find never
+/// showed (and typing a start date pins an automatic task).
 fn cell_texts(p: &Project, idx: usize, field: Field) -> (String, Option<String>) {
     let ctx = CellCtx { overallocated: &|_| false, others_on: None };
     let cell = field.cell(p, idx, &ctx);
     let editable = !cell.read_only && matches!(field.def(p).editor, Editor::Text);
-    let edit = editable.then(|| cell.edit_text.clone().unwrap_or_else(|| cell.text.clone()));
+    let edit = editable.then(|| cell.edit_text.clone().unwrap_or_else(|| cell.text.clone())).filter(|e| *e == cell.text);
     (cell.text, edit)
 }
 
@@ -415,5 +417,27 @@ mod tests {
         assert_eq!(replace_all("aaa", "aa", "b", false), ("ba".into(), 1));
         assert_eq!(replace_all("abc", "", "x", false), ("abc".into(), 0));
         assert!(contains("Kick-off", "KICK", false) && !contains("Kick-off", "KICK", true));
+    }
+
+    /// Regression: Replace All in every column changed dates (edited as "2026-11-02", shown as
+    /// "Mon 11/02/26") that Find never showed, pinning automatic tasks with constraints.
+    #[test]
+    fn replace_changes_only_what_find_shows() {
+        let mut doc = Document::new(1, plancraft_core::sample::demo_project(plancraft_core::dates::ymd(2026, 11, 2).unwrap()), None);
+        doc.edit("recalculate", |_| {}).unwrap();
+        let mut st = UiState::default();
+        let before = doc.project.clone();
+        let mut f = FindReplace::new(true);
+        f.field = None;
+        f.find = "2026".into();
+        f.replace = "2027".into();
+        f.replace_everywhere(&mut doc, &mut st);
+        assert_eq!(doc.project, before, "no date was rewritten: {:?}", f.message);
+        // Names still are.
+        let name = doc.project.tasks[1].name.clone();
+        f.find = name.clone();
+        f.replace = "Renamed".into();
+        f.replace_everywhere(&mut doc, &mut st);
+        assert!(doc.project.tasks.iter().any(|t| t.name == "Renamed"), "{:?}", f.message);
     }
 }

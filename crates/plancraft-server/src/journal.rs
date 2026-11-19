@@ -42,6 +42,10 @@ pub enum Record {
         plan_hash: String,
         #[serde(default)]
         applied: Vec<ChangeId>,
+        /// The hidden copy the plan was saved to instead of its file (someone changed the file
+        /// outside the server), by file name: on opening again, that copy holds the shared plan.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        saved_to: Option<String>,
     },
     Entry {
         entry: Entry,
@@ -204,7 +208,7 @@ mod tests {
     use super::*;
 
     fn header(v: Version) -> Record {
-        Record::Header { epoch: Uuid::nil(), version: v, plan_hash: "h".into(), applied: vec![ChangeId(Uuid::nil())] }
+        Record::Header { epoch: Uuid::nil(), version: v, plan_hash: "h".into(), applied: vec![ChangeId(Uuid::nil())], saved_to: None }
     }
 
     #[test]

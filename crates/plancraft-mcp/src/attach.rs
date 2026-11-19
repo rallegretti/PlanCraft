@@ -149,9 +149,12 @@ fn post(info: &SessionInfo, body: &str, version: Option<&str>) -> io::Result<(u1
         .filter(|v| crate::protocol::SUPPORTED_PROTOCOL_VERSIONS.contains(v))
         .map(|v| format!("MCP-Protocol-Version: {v}\r\n"))
         .unwrap_or_default();
+    // A fresh value the app must answer with proof of knowing the token (`session::proof`).
+    let nonce = uuid::Uuid::new_v4().simple().to_string();
     let head = format!(
-        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nAccept: application/json\r\n{version_header}Content-Length: {}\r\nConnection: close\r\n\r\n",
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer {}\r\n{}: {nonce}\r\nContent-Type: application/json\r\nAccept: application/json\r\n{version_header}Content-Length: {}\r\nConnection: close\r\n\r\n",
         info.token,
+        session::NONCE_HEADER,
         body.len()
     );
     s.write_all(head.as_bytes())?;
@@ -175,6 +178,23 @@ fn post(info: &SessionInfo, body: &str, version: Option<&str>) -> io::Result<(u1
             name.trim().eq_ignore_ascii_case("transfer-encoding") && value.split(',').any(|v| v.trim().eq_ignore_ascii_case("chunked"))
         })
     });
+    // A reply the app gave past the token check carries the proof; one without it (or with a
+    // wrong one) comes from another program listening where PlanCraft was (it crashed and left
+    // its session file), whose replies must never reach the agent.
+    if matches!(status, 200 | 202 | 400 | 413) {
+        let shown = head.lines().skip(1).find_map(|l| {
+            l.split_once(':').filter(|(name, _)| name.trim().eq_ignore_ascii_case(session::PROOF_HEADER)).map(|(_, v)| v.trim().to_string())
+        });
+        if !shown.is_some_and(|p| session::tokens_match(&p, &session::proof(&info.token, &nonce))) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!(
+                    "the program answering at {} is not this PlanCraft (it does not know the session); open PlanCraft and start the server in Project ▸ AI Agents",
+                    info.url
+                ),
+            ));
+        }
+    }
     let body = if chunked { decode_chunked(body)? } else { body.to_vec() };
     Ok((status, body))
 }

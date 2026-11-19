@@ -43,6 +43,8 @@ pub enum WireError {
     TooLarge(usize, usize),
     #[error("the other side sent a damaged frame")]
     Damaged,
+    #[error("no room for a frame of {0} bytes now (others are being read)")]
+    NoRoom(usize),
     #[error(
         "the server's key is not the one this computer knows (fingerprint {found}); it may be another computer pretending to be the server"
     )]
@@ -265,6 +267,12 @@ impl Sender {
 impl Receiver {
     /// Reads one frame of at most `max` bytes.
     pub fn recv(&mut self, max: usize) -> Result<Vec<u8>, WireError> {
+        self.recv_with(max, &|_| true)
+    }
+
+    /// [`Receiver::recv`], asking `reserve` for room for the frame once its length is known: a
+    /// frame refused room is [`WireError::NoRoom`] (the connection is no use after it).
+    pub fn recv_with(&mut self, max: usize, reserve: &dyn Fn(usize) -> bool) -> Result<Vec<u8>, WireError> {
         let mut plain: Vec<u8> = Vec::new();
         let mut want: Option<usize> = None;
         let mut buf = vec![0u8; MAX_NOISE];
@@ -281,6 +289,9 @@ impl Receiver {
                 let len = usize::try_from(u32::from_be_bytes(head)).map_err(|_| WireError::Damaged)?;
                 if len > max {
                     return Err(WireError::TooLarge(len, max));
+                }
+                if !reserve(len) {
+                    return Err(WireError::NoRoom(len));
                 }
                 want = Some(len);
             }

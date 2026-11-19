@@ -32,6 +32,29 @@ pub fn tokens_match(a: &str, b: &str) -> bool {
     a.len() == b.len() && a.bytes().zip(b.bytes()).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
+/// The header `plancraft mcp --attach` sends a fresh random value in, and the app answers in
+/// [`PROOF_HEADER`] with [`proof`]: only the app holding the session token can, so a leftover
+/// session file never makes the relay trust whatever program now listens at its address.
+pub const NONCE_HEADER: &str = "X-PlanCraft-Nonce";
+pub const PROOF_HEADER: &str = "X-PlanCraft-Proof";
+
+/// The proof of knowing `token` for `nonce` (hex SHA-256 of both; the token itself never travels
+/// back).
+pub fn proof(token: &str, nonce: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(b"plancraft-mcp-proof\0");
+    h.update(token.as_bytes());
+    h.update(b"\0");
+    h.update(nonce.as_bytes());
+    h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A nonce as the relay sends it: 1 to 64 letters, digits or dashes (anything else is ignored).
+pub fn valid_nonce(nonce: &str) -> bool {
+    (1..=64).contains(&nonce.len()) && nonce.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
 fn path() -> io::Result<PathBuf> {
     plancraft_core::paths::mcp_session_file().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no home or config directory"))
 }

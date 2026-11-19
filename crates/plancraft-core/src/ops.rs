@@ -238,8 +238,56 @@ impl Project {
         }
     }
 
+    /// Links between a task and one of its own summaries (either way round): [`Project::link`]
+    /// refuses them, since a summary's dates come from its subtasks.
+    pub fn summary_self_links(&self) -> std::collections::HashSet<(TaskId, TaskId)> {
+        let mut open: Vec<(u16, TaskId)> = Vec::new();
+        let mut ancestors: std::collections::HashMap<TaskId, Vec<TaskId>> = std::collections::HashMap::with_capacity(self.tasks.len());
+        for t in &self.tasks {
+            while open.last().is_some_and(|(l, _)| *l >= t.outline_level) {
+                open.pop();
+            }
+            ancestors.insert(t.id, open.iter().map(|(_, id)| *id).collect());
+            open.push((t.outline_level, t.id));
+        }
+        let under = |a: TaskId, b: TaskId| ancestors.get(&a).is_some_and(|v| v.contains(&b));
+        let mut out = std::collections::HashSet::new();
+        for t in &self.tasks {
+            for d in &t.predecessors {
+                if let TaskRef::Local(p) = d.predecessor
+                    && (under(t.id, p) || under(p, t.id))
+                {
+                    out.insert((p, t.id));
+                }
+            }
+        }
+        out
+    }
+
+    /// Runs an outline change `f`, refusing it (and putting the tasks back) when it makes a task a
+    /// subtask of a summary it is linked to, or a summary of a task linked to it.
+    fn keeping_summaries_unlinked<R>(&mut self, f: impl FnOnce(&mut Self) -> PlanResult<R>) -> PlanResult<R> {
+        let had = self.summary_self_links();
+        let tasks = self.tasks.clone();
+        let r = f(self)?;
+        if let Some((p, s)) = self.summary_self_links().into_iter().find(|l| !had.contains(l)) {
+            self.tasks = tasks;
+            let name = |id: TaskId| self.task(id).map(|t| t.name.clone()).unwrap_or_default();
+            return invalid(format!(
+                "'{}' is linked to '{}', and a task cannot be linked to its own summary; remove the link first",
+                name(s),
+                name(p)
+            ));
+        }
+        Ok(r)
+    }
+
     /// Demotes a task (and its subtasks) one outline level.
     pub fn indent(&mut self, id: TaskId) -> PlanResult<()> {
+        self.keeping_summaries_unlinked(|p| p.indent_unchecked(id))
+    }
+
+    fn indent_unchecked(&mut self, id: TaskId) -> PlanResult<()> {
         let idx = self.require_task(id)?;
         let Some(above_idx) = idx.checked_sub(1) else {
             return invalid("the first task cannot be indented");
@@ -265,6 +313,10 @@ impl Project {
 
     /// Promotes a task (and its subtasks) one outline level.
     pub fn outdent(&mut self, id: TaskId) -> PlanResult<()> {
+        self.keeping_summaries_unlinked(|p| p.outdent_unchecked(id))
+    }
+
+    fn outdent_unchecked(&mut self, id: TaskId) -> PlanResult<()> {
         let idx = self.require_task(id)?;
         if self.row(idx)?.outline_level <= 1 {
             return invalid("task is already at the top level");
@@ -276,6 +328,10 @@ impl Project {
 
     /// Moves a task with its subtasks so that it starts at `new_index` in the current ordering.
     pub fn move_task(&mut self, id: TaskId, new_index: usize) -> PlanResult<()> {
+        self.keeping_summaries_unlinked(|p| p.move_task_unchecked(id, new_index))
+    }
+
+    fn move_task_unchecked(&mut self, id: TaskId, new_index: usize) -> PlanResult<()> {
         let idx = self.require_task(id)?;
         let range = idx..self.descendants_range(idx).end;
         let block: Vec<Task> = self.tasks.drain(range).collect();
@@ -303,6 +359,10 @@ impl Project {
     /// keeps its shape (at the end, they become top-level tasks). Selected subtasks of a selected
     /// summary travel with it. Moving tasks above one of their own subtasks is refused.
     pub fn move_tasks_before(&mut self, ids: &[TaskId], before: Option<TaskId>) -> PlanResult<()> {
+        self.keeping_summaries_unlinked(|p| p.move_tasks_before_unchecked(ids, before))
+    }
+
+    fn move_tasks_before_unchecked(&mut self, ids: &[TaskId], before: Option<TaskId>) -> PlanResult<()> {
         let mut roots: Vec<usize> = Vec::new();
         for id in ids {
             let idx = self.require_task(*id)?;
@@ -322,11 +382,30 @@ impl Project {
             Some(b) => {
                 let bi = self.require_task(b)?;
                 if let Some(block) = blocks.iter().find(|r| r.contains(&bi)) {
-                    if block.start == bi {
+                    if block.start != bi {
+                        return invalid("tasks cannot be moved inside themselves");
+                    }
+                    if blocks.len() == 1 {
                         // Dropped onto its own first task: nothing moves.
                         return Ok(());
                     }
-                    return invalid("tasks cannot be moved inside themselves");
+                    // Several blocks dropped onto the first row of one of them: they gather there,
+                    // in order, above the anchor's next sibling that is not moving (with none,
+                    // nothing moves, as for one block).
+                    let level = self.row(bi)?.outline_level;
+                    let next_sibling = self
+                        .tasks
+                        .iter()
+                        .enumerate()
+                        .skip(block.end)
+                        .take_while(|(_, t)| t.outline_level >= level)
+                        .find(|(i, t)| t.outline_level == level && !blocks.iter().any(|r| r.contains(i)))
+                        .map(|(_, t)| t.id);
+                    if let Some(next) = next_sibling {
+                        let all: Vec<TaskId> = blocks.iter().filter_map(|r| self.tasks.get(r.start).map(|t| t.id)).collect();
+                        return self.move_tasks_before_unchecked(&all, Some(next));
+                    }
+                    return Ok(());
                 }
                 Some((b, self.row(bi)?.outline_level))
             }

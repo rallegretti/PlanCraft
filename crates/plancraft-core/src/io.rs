@@ -238,9 +238,14 @@ pub fn load_with_notes(path: impl AsRef<Path>) -> FileResult<(Project, Vec<Strin
 
 /// Saves a project document atomically (see [`write_atomic`]).
 pub fn save(p: &Project, path: impl AsRef<Path>) -> FileResult<()> {
+    save_stamped(p, path).map(|_| ())
+}
+
+/// [`save`], returning the stamp of the file as written (see [`write_atomic_stamped`]).
+pub fn save_stamped(p: &Project, path: impl AsRef<Path>) -> FileResult<DiskStamp> {
     let path = path.as_ref();
     let text = to_json(p)?;
-    write_atomic(path, text.as_bytes(), Privacy::KeepExisting).map_err(|source| FileError::Io { path: path.into(), source })
+    write_atomic_stamped(path, text.as_bytes(), Privacy::KeepExisting).map_err(|source| FileError::Io { path: path.into(), source })
 }
 
 /// Who may read a file written by [`write_atomic`].
@@ -295,6 +300,13 @@ fn resolve_symlinks(path: &Path) -> std::io::Result<PathBuf> {
 /// The replaced file's permissions and group are kept; its access control lists (ACLs) and other
 /// extended attributes are not, as copying them needs platform code beyond the standard library.
 pub fn write_atomic(path: &Path, bytes: &[u8], privacy: Privacy) -> std::io::Result<()> {
+    write_atomic_stamped(path, bytes, privacy).map(|_| ())
+}
+
+/// [`write_atomic`], returning the stamp of the file written, taken from the new file itself just
+/// before it took the name (a rename keeps the time and size). Reading it by name afterwards could
+/// take another program's write, landing in between, for this one.
+pub fn write_atomic_stamped(path: &Path, bytes: &[u8], privacy: Privacy) -> std::io::Result<DiskStamp> {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let resolved;
     let path = match privacy {
@@ -354,10 +366,12 @@ pub fn write_atomic(path: &Path, bytes: &[u8], privacy: Privacy) -> std::io::Res
             f.set_permissions(m.permissions())?;
         }
         f.sync_all()?;
+        let m = f.metadata()?;
+        let stamp = DiskStamp { modified: m.modified().ok(), len: m.len() };
         drop(f);
         rename_over(&tmp, path)?;
         sync_dir(&dir);
-        Ok(())
+        Ok(stamp)
     })();
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
@@ -947,6 +961,19 @@ mod tests {
         let (back, _) = from_json_with_notes(&to_json(&p).unwrap(), Path::new("x.plancraft")).unwrap();
         assert!(back.ids.task >= back.tasks.iter().map(|t| t.id.0).max().unwrap());
         assert!(back.ids.custom_field >= field.0, "custom field counter {} below field {}", back.ids.custom_field, field.0);
+    }
+
+    /// Regression: a save read its file's stamp by name after the rename, so another program's
+    /// write landing in between passed for the save (never reported, never refused).
+    #[test]
+    fn a_save_knows_its_own_file_by_the_file_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("p.plancraft");
+        let p = crate::sample::demo_project(crate::dates::ymd(2026, 1, 5).unwrap());
+        let stamp = save_stamped(&p, &path).unwrap();
+        assert_eq!(Some(stamp), disk_stamp(&path), "the rename keeps the time and size");
+        std::fs::write(&path, "written by someone else, longer than before or not").unwrap();
+        assert_ne!(Some(stamp), disk_stamp(&path));
     }
 
     #[test]
