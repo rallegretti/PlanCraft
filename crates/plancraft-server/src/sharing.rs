@@ -1,0 +1,261 @@
+//! A server run as a separate program for PlanCraft's *File › Share Folder…*.
+//!
+//! The desktop app runs `plancraft serve FOLDER --watch-stdin` rather than a server inside its own
+//! process:
+//!
+//! - the server has its own lock identity, so a plan open in one of the app's windows is refused
+//!   by the server ("open elsewhere") and a plan the server shares warns in the app, exactly as
+//!   between two computers;
+//! - a crash in one never takes the other down with it;
+//! - closing the server's standard input stops it cleanly (every plan saved, everyone told), and
+//!   that happens by itself if the app quits or crashes.
+
+use std::collections::VecDeque;
+use std::ffi::OsString;
+use std::io::{BufRead, BufReader, Read};
+use std::path::{Path, PathBuf};
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::{Arc, Mutex, PoisonError};
+
+use crate::cli::Ready;
+
+/// Log lines kept for the window.
+pub const MAX_LOG_LINES: usize = 500;
+/// Longest log line kept.
+const MAX_LINE_CHARS: usize = 1_000;
+/// Longest line read from the server (longer lines are cut).
+const MAX_LINE_BYTES: u64 = 64 * 1024;
+
+/// Wakes the window when something changed (the server is ready, wrote to its log, or stopped).
+pub type Waker = Arc<dyn Fn() + Send + Sync>;
+
+/// Where the server is.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum State {
+    Starting,
+    Sharing(Ready),
+    /// Asked to stop: saving its plans.
+    Stopping,
+    /// Stopped; with why, when it stopped on its own (it could not start, or it crashed).
+    Stopped(Option<String>),
+}
+
+#[derive(Default)]
+struct Inner {
+    ready: Option<Ready>,
+    log: VecDeque<String>,
+}
+
+fn lock(m: &Mutex<Inner>) -> std::sync::MutexGuard<'_, Inner> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// How to start the server program: `plancraft serve` (`program` = PlanCraft, `args` = `serve`)
+/// or `plancraft-server`.
+#[derive(Clone, Debug)]
+pub struct Program {
+    pub program: PathBuf,
+    pub args: Vec<OsString>,
+}
+
+impl Program {
+    /// This PlanCraft's own program, as `plancraft serve`.
+    pub fn this_plancraft() -> Result<Program, String> {
+        let program = std::env::current_exe().map_err(|e| format!("cannot find PlanCraft's own program: {e}"))?;
+        Ok(Program { program, args: vec!["serve".into()] })
+    }
+}
+
+/// A folder being shared by a server program this PlanCraft started.
+pub struct Sharing {
+    folder: PathBuf,
+    /// Taken by the thread that reaps it when this is dropped.
+    child: Option<Child>,
+    /// Dropped to stop the server.
+    stdin: Option<ChildStdin>,
+    inner: Arc<Mutex<Inner>>,
+    /// Set once the program has ended, with what to say about it.
+    ended: Option<Option<String>>,
+}
+
+impl std::fmt::Debug for Sharing {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Sharing").field("folder", &self.folder).field("pid", &self.child.as_ref().map(Child::id)).finish_non_exhaustive()
+    }
+}
+
+/// Reads a line of at most [`MAX_LINE_BYTES`] (the rest of a longer line is dropped). `None` at
+/// the end.
+fn read_line(r: &mut impl BufRead) -> Option<String> {
+    let mut buf = Vec::new();
+    match r.by_ref().take(MAX_LINE_BYTES).read_until(b'\n', &mut buf) {
+        Ok(0) | Err(_) => return None,
+        Ok(_) => {}
+    }
+    if buf.last() != Some(&b'\n') {
+        // Cut short: skip to the end of the line.
+        let mut rest = Vec::new();
+        let _ = r.read_until(b'\n', &mut rest);
+    }
+    let text = String::from_utf8_lossy(&buf);
+    Some(text.trim_end_matches(['\r', '\n']).chars().filter(|c| !c.is_control() || *c == '\t').take(MAX_LINE_CHARS).collect())
+}
+
+fn spawn_reader(name: &str, f: impl FnOnce() + Send + 'static) -> Result<(), String> {
+    std::thread::Builder::new().name(name.into()).spawn(f).map(|_| ()).map_err(|e| format!("cannot start the server: {e}"))
+}
+
+impl Sharing {
+    /// Starts sharing `folder` on `port` (0: any free port) with the server's private files in
+    /// `config`, announcing it on the network unless `announce` is false.
+    pub fn start(program: &Program, folder: &Path, config: &Path, port: u16, announce: bool, waker: Waker) -> Result<Sharing, String> {
+        let mut cmd = Command::new(&program.program);
+        cmd.args(&program.args)
+            .arg(folder)
+            .arg("--config")
+            .arg(config)
+            .arg("--port")
+            .arg(port.to_string())
+            .arg("--watch-stdin")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if !announce {
+            cmd.arg("--no-announce");
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            // CREATE_NO_WINDOW: no console window flashes up for the server.
+            cmd.creation_flags(0x0800_0000);
+        }
+        let mut child = cmd.spawn().map_err(|e| format!("cannot start the server ({}): {e}", program.program.display()))?;
+        let inner = Arc::new(Mutex::new(Inner::default()));
+        let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
+        let started = (|| {
+            if let Some(out) = stdout {
+                let (inner, waker) = (Arc::clone(&inner), Arc::clone(&waker));
+                spawn_reader("plancraft-share-stdout", move || {
+                    let mut r = BufReader::new(out);
+                    while let Some(line) = read_line(&mut r) {
+                        if let Some(ready) = Ready::parse(&line) {
+                            lock(&inner).ready = Some(ready);
+                            waker();
+                        }
+                    }
+                    waker();
+                })?;
+            }
+            if let Some(err) = stderr {
+                let (inner, waker) = (Arc::clone(&inner), Arc::clone(&waker));
+                spawn_reader("plancraft-share-log", move || {
+                    let mut r = BufReader::new(err);
+                    while let Some(line) = read_line(&mut r) {
+                        let mut i = lock(&inner);
+                        i.log.push_back(line);
+                        while i.log.len() > MAX_LOG_LINES {
+                            i.log.pop_front();
+                        }
+                        drop(i);
+                        waker();
+                    }
+                    waker();
+                })?;
+            }
+            Ok::<(), String>(())
+        })();
+        let stdin = child.stdin.take();
+        let sharing = Sharing { folder: folder.to_path_buf(), child: Some(child), stdin, inner, ended: None };
+        // Dropping it stops the program again.
+        started.map(|()| sharing)
+    }
+
+    /// The folder shared.
+    pub fn folder(&self) -> &Path {
+        &self.folder
+    }
+
+    /// Where the server is now.
+    pub fn state(&mut self) -> State {
+        if let Some(why) = &self.ended {
+            return State::Stopped(why.clone());
+        }
+        let Some(child) = self.child.as_mut() else { return State::Stopped(None) };
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                // Stopped when asked: nothing to explain. Otherwise the server's last words say why.
+                let why = if self.stdin.is_none() && status.success() {
+                    None
+                } else {
+                    let last = lock(&self.inner).log.back().cloned().unwrap_or_default();
+                    let last = last.strip_prefix("plancraft-server: ").unwrap_or(&last).to_string();
+                    Some(if last.is_empty() { format!("The server stopped ({status}).") } else { last })
+                };
+                self.stdin = None;
+                self.ended = Some(why.clone());
+                State::Stopped(why)
+            }
+            Ok(None) if self.stdin.is_none() => State::Stopping,
+            Ok(None) => match lock(&self.inner).ready.clone() {
+                Some(r) => State::Sharing(r),
+                None => State::Starting,
+            },
+            Err(e) => {
+                let why = Some(format!("Cannot tell whether the server is running: {e}"));
+                self.ended = Some(why.clone());
+                State::Stopped(why)
+            }
+        }
+    }
+
+    /// The server's log, oldest first.
+    pub fn log(&self) -> Vec<String> {
+        lock(&self.inner).log.iter().cloned().collect()
+    }
+
+    /// Asks the server to stop: it saves every plan, tells everyone and ends ([`State::Stopping`]
+    /// until it has).
+    pub fn stop(&mut self) {
+        self.stdin = None;
+    }
+}
+
+impl Drop for Sharing {
+    /// Stops the server (it goes on saving its plans after this PlanCraft is gone) and reaps the
+    /// program once it ends, on a thread of its own.
+    fn drop(&mut self) {
+        self.stdin = None;
+        if let Some(mut child) = self.child.take()
+            && !matches!(child.try_wait(), Ok(Some(_)))
+        {
+            let _ = std::thread::Builder::new().name("plancraft-share-reap".into()).spawn(move || {
+                let _ = child.wait();
+            });
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn long_and_odd_lines_are_cut() {
+        let long = format!("{}\nnext\n", "x".repeat(200_000));
+        let mut r = BufReader::new(long.as_bytes());
+        assert_eq!(read_line(&mut r).unwrap().chars().count(), MAX_LINE_CHARS);
+        assert_eq!(read_line(&mut r).as_deref(), Some("next"));
+        assert_eq!(read_line(&mut r), None);
+        let mut r = BufReader::new(&b"a\x1b[2Jb\r\n\xff\xfe\n"[..]);
+        assert_eq!(read_line(&mut r).as_deref(), Some("a[2Jb"));
+        assert_eq!(read_line(&mut r).as_deref(), Some("\u{fffd}\u{fffd}"));
+    }
+
+    #[test]
+    fn the_ready_line_reads_back() {
+        let r = Ready { addr: "0.0.0.0:47340".parse().unwrap(), fingerprint: "ab cd".into() };
+        assert_eq!(Ready::parse(&r.line()), Some(r));
+        assert_eq!(Ready::parse("2026-11-19 10:00:00  Listening on 0.0.0.0:47340"), None);
+        assert_eq!(Ready::parse("{\"ready\":{}}"), None);
+    }
+}

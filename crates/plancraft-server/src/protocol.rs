@@ -62,7 +62,8 @@ pub enum Role {
     Viewer,
     /// Also changes it.
     Editor,
-    /// Also manages people and their access (from the app, in a later phase).
+    /// Also manages people and their access (for now: whoever runs the server, in *Share Folder*
+    /// or on the command line, whatever their role).
     Admin,
 }
 

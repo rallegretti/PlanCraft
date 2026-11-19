@@ -71,6 +71,9 @@ pub struct Options {
     pub not_signed_in_per_address: usize,
     /// Bytes of large frames read at once from all connections ([`MAX_INBOUND_BYTES`]).
     pub max_inbound_bytes: usize,
+    /// Announce the server on the office network (mDNS), so *Open from Server* lists it. Off by
+    /// default (tests); the command line turns it on unless `--no-announce`.
+    pub announce: bool,
 }
 
 impl Options {
@@ -83,6 +86,7 @@ impl Options {
             login_timeout: LOGIN_TIMEOUT,
             not_signed_in_per_address: MAX_NOT_SIGNED_IN_PER_ADDRESS,
             max_inbound_bytes: MAX_INBOUND_BYTES,
+            announce: false,
         }
     }
 }
@@ -155,6 +159,8 @@ struct Shared {
     allowances: Allowances,
     /// Counts up whenever the users file was read again.
     users_generation: AtomicU64,
+    /// The server's announcement on the network, withdrawn first thing when stopping.
+    announcer: Mutex<Option<crate::discovery::Announcer>>,
     stop: AtomicBool,
     stopped: Stopped,
     log: Log,
@@ -233,11 +239,24 @@ pub fn start(options: Options) -> Result<Running, String> {
         max_inbound: options.max_inbound_bytes,
         allowances: Allowances::default(),
         users_generation: AtomicU64::new(0),
+        announcer: Mutex::new(None),
         stop: AtomicBool::new(false),
         stopped: Stopped::default(),
         log: options.log,
     });
     let fingerprint = shared.keys.fingerprint();
+    if options.announce {
+        let folder_name = shared.folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = crate::discovery::instance_name(&folder_name, &shared.name);
+        match crate::discovery::Announcer::start(&name, &shared.name, addr) {
+            Ok(a) => {
+                (shared.log)(&format!("Announced on the network as \"{name}\""));
+                *lock(&shared.announcer) = Some(a);
+            }
+            // Not fatal: people can still type the address.
+            Err(e) => (shared.log)(&e),
+        }
+    }
     let mut threads = Vec::new();
     let s = Arc::clone(&shared);
     threads.push(spawn("plancraft-server-accept", move || accept_loop(&s, &listener)).map_err(|e| e.to_string())?);
@@ -246,7 +265,8 @@ pub fn start(options: Options) -> Result<Running, String> {
     Ok(Running { addr, fingerprint, shared, threads })
 }
 
-fn host_name() -> String {
+/// This computer's name, as the server gives it (no control characters, at most 80 characters).
+pub fn host_name() -> String {
     let name: String = ::gethostname::gethostname().to_string_lossy().chars().filter(|c| !c.is_control()).take(80).collect();
     if name.trim().is_empty() { "PlanCraft Server".into() } else { name }
 }
@@ -269,6 +289,8 @@ impl Stopper {
         if self.shared.stop.swap(true, Ordering::SeqCst) {
             return;
         }
+        // Withdrawn first, so nobody picks the server from a list while it stops.
+        drop(lock(&self.shared.announcer).take());
         // Wake the accept loop.
         let wake = match self.addr.ip() {
             IpAddr::V4(ip) if ip.is_unspecified() => SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), self.addr.port()),

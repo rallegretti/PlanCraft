@@ -227,6 +227,15 @@ impl Users {
         Ok(())
     }
 
+    /// Takes away someone's rule for one plan, so the role for the whole folder applies to it.
+    pub fn clear_plan_role(&mut self, name: &str, plan: &str) -> Result<(), String> {
+        let user = self.get_mut(name)?;
+        let key = plan_key(plan);
+        let before = user.plans.len();
+        user.plans.retain(|existing, _| plan_key(existing) != key);
+        if user.plans.len() == before { Err(format!("{} has no rule for {plan}", user.name)) } else { Ok(()) }
+    }
+
     /// The user, if the password is theirs. Takes as long for an unknown name.
     pub fn verify(&self, name: &str, password: &str) -> Option<&User> {
         if password.chars().count() > MAX_PASSWORD_CHARS {
@@ -507,6 +516,12 @@ mod tests {
         assert!(users.add("", "long enough", Role::Viewer).is_err());
         assert!(users.add("tab\tname", "long enough", Role::Viewer).is_err());
         users.set_role("ana", Role::Viewer, Some("Secret.plancraft")).unwrap();
+        // A rule taken away (whatever case it is named in) lets the folder's role apply again.
+        users.set_role("ana", Role::None, Some("Gone.plancraft")).unwrap();
+        users.clear_plan_role("ana", "GONE.plancraft").unwrap();
+        assert!(users.clear_plan_role("ana", "Gone.plancraft").is_err());
+        assert!(users.clear_plan_role("nobody", "Secret.plancraft").is_err());
+        assert_eq!(users.get("ana").unwrap().role_for("Gone.plancraft"), Role::Editor);
         users.save().unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("correct horse"), "only the hash is saved");

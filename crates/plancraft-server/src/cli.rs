@@ -22,6 +22,11 @@ Usage:
       --bind ADDRESS   the address to listen on (default 0.0.0.0, every network)
       --config DIR     the server's private folder: its key and users
                        (default: PlanCraft's settings folder, under 'server')
+      --no-announce    don't announce the server on the network (people then
+                       type its address in Open from Server)
+      --watch-stdin    stop (saving every plan) when standard input closes, and
+                       say on standard output when listening; PlanCraft's
+                       File > Share Folder runs the server this way
 
   plancraft-server user add NAME [--role viewer|editor|admin] [--password-stdin]
   plancraft-server user passwd NAME [--password-stdin]
@@ -45,10 +50,22 @@ struct Args {
     role: Option<String>,
     plan: Option<String>,
     password_stdin: bool,
+    no_announce: bool,
+    watch_stdin: bool,
 }
 
 fn parse(args: Vec<String>) -> Result<Args, String> {
-    let mut out = Args { rest: Vec::new(), config: None, port: None, bind: None, role: None, plan: None, password_stdin: false };
+    let mut out = Args {
+        rest: Vec::new(),
+        config: None,
+        port: None,
+        bind: None,
+        role: None,
+        plan: None,
+        password_stdin: false,
+        no_announce: false,
+        watch_stdin: false,
+    };
     let mut it = args.into_iter();
     while let Some(a) = it.next() {
         let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} needs a value"));
@@ -59,6 +76,8 @@ fn parse(args: Vec<String>) -> Result<Args, String> {
             "--role" => out.role = Some(value("--role")?),
             "--plan" => out.plan = Some(value("--plan")?),
             "--password-stdin" => out.password_stdin = true,
+            "--no-announce" => out.no_announce = true,
+            "--watch-stdin" => out.watch_stdin = true,
             "--help" | "--version" => out.rest.push(a),
             s if s.starts_with("--") => return Err(format!("unknown option {s}")),
             _ => out.rest.push(a),
@@ -77,7 +96,10 @@ fn config(args: &Args) -> Result<PathBuf, String> {
 fn stderr_log() -> Log {
     Arc::new(|line: &str| {
         let when = plancraft_core::dates::format("%Y-%m-%d %H:%M:%S", plancraft_core::dates::now());
-        eprintln!("{when}  {line}");
+        // Never `eprintln!`: it panics when standard error is gone (the PlanCraft that started
+        // the server quit), and the server must still save its plans then.
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr().lock(), "{when}  {line}");
     })
 }
 
@@ -100,7 +122,8 @@ pub fn run(args: Vec<String>) -> i32 {
     match run_inner(args) {
         Ok(()) => 0,
         Err(e) => {
-            eprintln!("plancraft-server: {e}");
+            use std::io::Write;
+            let _ = writeln!(std::io::stderr().lock(), "plancraft-server: {e}");
             1
         }
     }
@@ -189,6 +212,60 @@ fn user(args: &Args) -> Result<(), String> {
     Ok(())
 }
 
+/// What a server run with `--watch-stdin` says on standard output once it listens: one line of
+/// JSON (`{"ready":{"addr":"0.0.0.0:47340","fingerprint":"…"}}`).
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Ready {
+    pub addr: SocketAddr,
+    pub fingerprint: String,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ReadyLine {
+    ready: Ready,
+}
+
+impl Ready {
+    /// The line printed.
+    pub fn line(&self) -> String {
+        serde_json::to_string(&ReadyLine { ready: self.clone() }).unwrap_or_default()
+    }
+
+    /// Reads a line printed by [`Ready::line`] (`None` for any other line).
+    pub fn parse(line: &str) -> Option<Ready> {
+        serde_json::from_str::<ReadyLine>(line.trim()).ok().map(|l| l.ready)
+    }
+}
+
+/// `--watch-stdin`: says it is ready on standard output, and stops the server once standard
+/// input closes (the program that started it quit, or crashed).
+fn watch_stdin(running: &server::Running, log: &Log) {
+    use std::io::{Read, Write};
+    let ready = Ready { addr: running.addr(), fingerprint: running.fingerprint().0.clone() };
+    let mut out = std::io::stdout().lock();
+    let _ = writeln!(out, "{}", ready.line()).and_then(|()| out.flush());
+    let stopper = running.stopper();
+    let on_close = log.clone();
+    let watcher = std::thread::Builder::new().name("plancraft-server-stdin".into()).spawn(move || {
+        let mut sink = [0u8; 256];
+        let mut stdin = std::io::stdin().lock();
+        loop {
+            match stdin.read(&mut sink) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+        }
+        on_close("Stopping: PlanCraft closed the server's input; saving the shared plans");
+        stopper.stop();
+    });
+    if let Err(e) = watcher {
+        // Without the watcher nothing would ever stop the server: stop now rather than run on
+        // with no one able to stop it.
+        log(&format!("cannot watch standard input ({e}); stopping"));
+        running.stopper().stop();
+    }
+}
+
 fn serve(args: &Args) -> Result<(), String> {
     let folder = PathBuf::from(args.rest.first().ok_or("which folder?")?);
     if args.rest.len() > 1 {
@@ -204,10 +281,15 @@ fn serve(args: &Args) -> Result<(), String> {
     };
     plancraft_core::lock::set_app_name(format!("PlanCraft Server {}", env!("CARGO_PKG_VERSION")));
     let log = stderr_log();
-    let running = server::start(Options::new(folder.clone(), config(args)?, SocketAddr::new(ip, port), log.clone()))?;
+    let mut options = Options::new(folder.clone(), config(args)?, SocketAddr::new(ip, port), log.clone());
+    options.announce = !args.no_announce;
+    let running = server::start(options)?;
     log(&format!("PlanCraft Server {} is sharing {}", env!("CARGO_PKG_VERSION"), folder.display()));
     log(&format!("Listening on {}", running.addr()));
     log(&format!("Key fingerprint: {}  (people check this when they first connect)", running.fingerprint()));
+    if args.watch_stdin {
+        watch_stdin(&running, &log);
+    }
     // Ctrl+C, or a service manager stopping the server: save every plan, tell everyone, give
     // back the lock files.
     let stopper = running.stopper();

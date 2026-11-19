@@ -6,8 +6,9 @@ order, checks and recalculates each one, saves it safely, and passes it on to ev
 The model is the multi-user setup of desktop accounting programs: one copy is the real one, and
 any PlanCraft can be the host.
 
-Status: phase 1 (the sync engine, `plancraft_core::sync`), phase 2 (the server, `plancraft-server`)
-and phase 3 (PlanCraft as a client) are built. Phases 4–5 are planned below.
+Status: phase 1 (the sync engine, `plancraft_core::sync`), phase 2 (the server, `plancraft-server`),
+phase 3 (PlanCraft as a client) and phase 4 (discovery and *Share Folder*) are built. Phase 5 is
+planned below.
 
 ## Off unless someone turns it on
 
@@ -232,6 +233,9 @@ plancraft serve "/srv/Plans"                     # the same server, from PlanCra
   from the journals.
 - Its private folder (`--config`, by default `server` in PlanCraft's settings folder) holds its key
   pair (`server-key.json`) and the users file (`users.json`), both owner-only.
+- It announces itself on the network (mDNS) unless `--no-announce`. `--watch-stdin` is for
+  *Share Folder* (phase 4): it says on standard output when it listens, and stops cleanly once its
+  standard input closes.
 - `plancraft-server user add|passwd|role|remove|list` manages people; `--password-stdin` reads
   the password from a script. `plancraft-server fingerprint` shows the key's fingerprint.
 
@@ -364,8 +368,8 @@ One JSON object per frame, tagged by `type`; see the types for the fields.
   output. The file is read again when it changes, so user commands take effect without a restart,
   on open connections too: someone removed or no longer allowed is disconnected within a moment,
   even if they only listen or ping.
-- Roles: `viewer` (opens and watches), `editor` (also changes), `admin` (also manages people, from
-  the app in phase 4), and `none`; one for the whole folder plus any per plan. A plan someone may
+- Roles: `viewer` (opens and watches), `editor` (also changes), `admin` (meant to manage people
+  from their own PlanCraft later; for now people are managed where the server runs), and `none`; one for the whole folder plus any per plan. A plan someone may
   not open is not listed, and opening it gives the same answer as a plan that does not exist.
 - Per-plan rules match plan names ignoring case and Unicode form (macOS stores accented names
   decomposed, people type them composed), one rule per plan: `--plan` must be a plan file name,
@@ -432,10 +436,9 @@ the target, with no hard limit below the connection caps.
 
 ### Left for later phases
 
-- A server running inside the app (phase 4) shares the app's lock identity, so it must refuse a
-  plan the app has open in a window.
-- Starting the server from the warning shown when a shared plan's file is opened directly
-  (phase 4, *Share Folder…*).
+Both items left here were settled in phase 4: *Share Folder* runs the server as a separate program,
+so it has its own lock identity, and the warning shown when a shared plan's file is opened directly
+points to *Share Folder*, which offers that plan's folder.
 
 ## Phase 3: PlanCraft as a client
 
@@ -563,11 +566,77 @@ the `Replica` and the connection. Merging never runs on the app's thread.
 
 ## Phase 4: discovery and sharing
 
-- mDNS (`mdns-sd`, pure Rust): a running server announces itself, and the *Open from Server*
-  dialog lists the servers it finds. Neither happens unless someone shares a folder or opens
-  the dialog.
-- *File › Share Folder…* starts a server inside the app, or launches `plancraft-server`, for a
-  chosen folder. It shows the address and fingerprint and has a user admin panel.
+### Finding servers (`plancraft_server::discovery`)
+
+- mDNS through `mdns-sd` (pure Rust). A server announces `_plancraft._tcp` as "*folder* on
+  *computer*", on each of the computer's addresses (kept up to date as they change) when it listens
+  on all of them, or on its one address. The announcement is withdrawn first thing when the server
+  stops, so lists drop it at once. `--no-announce` (and the *List it for others on the network*
+  box in *Share Folder*) turns it off.
+- The *Open from Server* window lists the servers it hears of under *On your network* (✔ for
+  servers whose key is already pinned); clicking one fills in its address. It listens only while
+  the window is open.
+- An announcement is anyone's word: its name is cut short with no control characters, at most 64
+  servers are listed, and only an address the window takes is offered (an IPv4 address on the
+  network first, then a global IPv6 one, then loopback; link-local IPv6 is passed over, as it needs
+  an interface named). It never vouches for a key: the fingerprint is still confirmed on the first
+  visit and checked against the pin after that.
+- Nothing announces or listens unless someone shares a folder or opens the window. Tests use a
+  private mDNS port and never reach the real network.
+
+### Share Folder (`plancraft_server::sharing`, the app's `dialogs::share`)
+
+*File › Share Folder…* shares a folder from this PlanCraft:
+
+- The server runs as a separate program, `plancraft serve FOLDER --watch-stdin` (from an
+  AppImage, the AppImage file: the executable's temporary mount goes away when PlanCraft quits,
+  while the server is still saving). So:
+  - the server has its own lock identity: it refuses a plan open in one of this PlanCraft's
+    windows ("open elsewhere") until it is closed there, and a plan it shares warns when opened
+    here directly, exactly as between two computers. The window lists the folder's plans open
+    here;
+  - a crash in one never takes the other down;
+  - quitting PlanCraft, or a crash, closes the server's standard input and it stops cleanly: every
+    plan saved, everyone told. It finishes that after PlanCraft is gone; its log writes never panic
+    on a closed pipe.
+- The window shows the folder, the addresses people type (this computer's name and its addresses,
+  container and virtual-machine bridges left out), and the key fingerprint people confirm, with
+  copy buttons. *Open a Plan from It…* opens the *Open from Server* window on `127.0.0.1` with the
+  key already trusted (this PlanCraft started that server); *Stop Sharing* saves and stops. The
+  status bar shows *Sharing folder* while it runs. Sharing never starts by itself: the folder, port
+  and the announcing choice are remembered for next time, nothing else.
+- If the server stops by itself (it could not listen, the folder is gone, nobody may sign in) the
+  window and a message say why, in the server's own words.
+- The same window manages people: add (name, password, role), change a role, set or take away a
+  role for one plan (*Plans…*, *Same as other plans*), change a password, remove (asked twice).
+  It edits the server's users file directly (the one `plancraft serve user …` manages), so
+  changes apply at once, also to people signed in now; passwords are hashed on a background
+  thread and not kept once used. Starting needs at least one person.
+- A plan's file opened directly while a server's journal sits beside it says so, and *Share
+  Folder* then offers that plan's folder: once the plan is closed here, sharing the folder saves
+  the journal's changes into the file.
+
+### Tests
+
+- `crates/plancraft-server/tests/sharing.rs`: a folder shared through the real server program
+  (ready line, signing in with the fingerprint shown, the plan's lock held and given back on
+  stopping); a server that cannot start says why; dropping the sharing (as when PlanCraft quits)
+  stops the server and gives back the locks; a server announced on a private mDNS port is found
+  and goes away when stopped; any announcement reads safely (property test).
+- `discovery` unit tests: the best address, names made safe, names that fit in one DNS label,
+  container bridges left out, this computer's addresses are ones the window takes.
+- The app: `dialogs::share` tests add, change and remove people (and see people added from the
+  command line), list only plans directly in the folder, and draw the window with the reason the
+  last server stopped; `dialogs::server` tests open the PlanCraft's own server without asking about
+  its key (even over an old pin) and fill in a found server's address; `shared_tests` checks that
+  the journal warning offers the folder; `tests/cli.rs` runs Share Folder's server from the
+  `plancraft` binary itself and sees it stop once let go.
+
+### Left for later
+
+- Managing people from another computer (an `admin` signed in from their own PlanCraft): for now
+  people are managed where the server runs, in *Share Folder* or with `plancraft serve user …`.
+- Moving the plans open here onto the server in one step (closing them and opening them from it).
 
 ## Phase 5: packaging and services
 

@@ -9,14 +9,18 @@
 //! - [`users`]: sign-ins (Argon2id hashes, roles, slowing down guessing).
 //! - [`journal`] and [`plan`]: one shared plan, kept safe on disk.
 //! - [`server`]: connections and requests; [`client`]: the other end.
+//! - [`sharing`]: a server run as a separate program for the app's *Share Folder*.
+//! - [`discovery`]: announcing a running server on the office network, and finding servers.
 
 pub mod cli;
 pub mod client;
+pub mod discovery;
 pub mod journal;
 pub mod link;
 pub mod plan;
 pub mod protocol;
 pub mod server;
+pub mod sharing;
 pub mod users;
 pub mod wire;
 
