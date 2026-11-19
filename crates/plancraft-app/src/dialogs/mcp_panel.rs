@@ -30,17 +30,16 @@ fn heading(ui: &mut egui::Ui, text: &str) {
 
 /// The running executable, quoted for a shell command line.
 fn exe() -> String {
-    format!("\"{}\"", exe_path(std::env::var_os("APPIMAGE"), std::env::current_exe().ok()))
+    format!("\"{}\"", exe_path(std::env::var_os("APPIMAGE"), std::env::var_os("APPDIR"), std::env::current_exe().ok()))
 }
 
 /// The program to start PlanCraft with: the AppImage file when running from one (the AppImage
 /// runtime names it in `$APPIMAGE`; the executable itself sits in a temporary mount that is gone
 /// once PlanCraft closes), else the executable.
-fn exe_path(appimage: Option<std::ffi::OsString>, current: Option<std::path::PathBuf>) -> String {
-    match (appimage.filter(|a| !a.is_empty()), current) {
-        (Some(a), _) => std::path::PathBuf::from(a).display().to_string(),
-        (None, Some(p)) => p.display().to_string(),
-        (None, None) => "plancraft".into(),
+fn exe_path(appimage: Option<std::ffi::OsString>, appdir: Option<std::ffi::OsString>, current: Option<std::path::PathBuf>) -> String {
+    match current {
+        Some(exe) => crate::dialogs::share::running_appimage(&exe, appimage, appdir).unwrap_or(exe).display().to_string(),
+        None => "plancraft".into(),
     }
 }
 
@@ -122,7 +121,8 @@ pub fn show(
     });
 }
 
-#[cfg(test)]
+// AppImages are Linux only.
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 
@@ -131,9 +131,13 @@ mod tests {
     #[test]
     fn the_command_names_the_appimage_when_there_is_one() {
         let mounted = Some(std::path::PathBuf::from("/tmp/.mount_PlanCrAbc/usr/bin/plancraft"));
-        assert_eq!(exe_path(Some("/home/a/PlanCraft.AppImage".into()), mounted.clone()), "/home/a/PlanCraft.AppImage");
-        assert_eq!(exe_path(None, mounted.clone()), "/tmp/.mount_PlanCrAbc/usr/bin/plancraft");
-        assert_eq!(exe_path(Some("".into()), mounted), "/tmp/.mount_PlanCrAbc/usr/bin/plancraft");
-        assert_eq!(exe_path(None, None), "plancraft");
+        let dir = || Some("/tmp/.mount_PlanCrAbc".into());
+        assert_eq!(exe_path(Some("/home/a/PlanCraft.AppImage".into()), dir(), mounted.clone()), "/home/a/PlanCraft.AppImage");
+        assert_eq!(exe_path(None, dir(), mounted.clone()), "/tmp/.mount_PlanCrAbc/usr/bin/plancraft");
+        assert_eq!(exe_path(Some("".into()), dir(), mounted), "/tmp/.mount_PlanCrAbc/usr/bin/plancraft");
+        assert_eq!(exe_path(None, None, None), "plancraft");
+        // Inherited from another AppImage: this PlanCraft is installed.
+        let installed = Some(std::path::PathBuf::from("/usr/bin/plancraft"));
+        assert_eq!(exe_path(Some("/home/a/Editor.AppImage".into()), Some("/tmp/.mount_EditorX".into()), installed), "/usr/bin/plancraft");
     }
 }

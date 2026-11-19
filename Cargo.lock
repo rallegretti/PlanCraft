@@ -1739,6 +1739,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "if-addrs"
+version = "0.15.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0a05c691e1fae256cf7013d99dad472dc52d5543322761f83ec8d47eab40d2b"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "image"
 version = "0.25.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2813,12 +2823,14 @@ dependencies = [
  "ctrlc",
  "curve25519-dalek",
  "gethostname",
+ "if-addrs",
  "plancraft-core",
  "proptest",
  "rpassword",
  "serde",
  "serde_json",
  "snow",
+ "socket2",
  "tempfile",
  "thiserror 2.0.21",
  "unicode-normalization",
@@ -3485,6 +3497,16 @@ dependencies = [
  "getrandom 0.3.4",
  "rustc_version",
  "subtle",
+]
+
+[[package]]
+name = "socket2"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

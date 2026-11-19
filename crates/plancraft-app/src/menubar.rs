@@ -219,6 +219,7 @@ fn file_menu(ui: &mut Ui, info: &MenuInfo, settings: &AppSettings, push: &dyn Fn
     item(ui, "New from Sample", "", true, Command::NewDemo);
     item(ui, "Open…", "Ctrl+O", true, Command::Open);
     item(ui, "Open from Server…", "", true, Command::OpenFromServer);
+    item(ui, "Share Folder…", "", true, Command::ShareFolder);
     ui.menu_button("Open Recent", |ui| {
         if settings.recent.is_empty() {
             ui.label(egui::RichText::new("No recent projects").color(theme::pal().TEXT_WEAK));

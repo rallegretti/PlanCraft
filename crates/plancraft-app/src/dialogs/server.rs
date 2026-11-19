@@ -83,6 +83,12 @@ pub struct OpenFromServer {
     /// A key confirmed in this window whose sign-in then failed (a mistyped password): signing in
     /// again with it does not ask to confirm it again.
     confirmed: Option<(String, Fingerprint)>,
+    /// Listening for servers announced on the network while the window is open (`None`: it
+    /// could not, or in tests).
+    browser: Option<plancraft_server::discovery::Browser>,
+    /// The browser redraws the window when it hears something.
+    browser_wakes: bool,
+    found: Vec<plancraft_server::discovery::Found>,
 }
 
 /// A sentence for a failed connection or sign-in.
@@ -108,10 +114,16 @@ fn sign_in(address: &str, trust: &Trust, user: &str, password: &str) -> Result<C
 }
 
 impl OpenFromServer {
-    /// The window, filled in with the server used last.
+    /// The window, filled in with the server used last (tests; the app says whether to browse).
+    #[cfg(test)]
     pub fn new(settings: &AppSettings) -> Self {
+        Self::new_with(settings, true)
+    }
+
+    /// The window; `browse`: look for servers on the network while it is open.
+    pub fn new_with(settings: &AppSettings, browse: bool) -> Self {
         let last = settings.servers.first().cloned().unwrap_or_default();
-        OpenFromServer {
+        let mut d = OpenFromServer {
             address: last.address,
             user: last.user,
             password: String::new(),
@@ -120,7 +132,43 @@ impl OpenFromServer {
             busy: None,
             wrong_key: None,
             confirmed: None,
+            // Opening this window is what lets PlanCraft look for servers on the network; it stops
+            // when the window closes. Tests never touch the network.
+            browser: if cfg!(test) || !browse { None } else { plancraft_server::discovery::Browser::start().ok() },
+            found: Vec::new(),
+            browser_wakes: false,
+        };
+        // Servers whose key is trusted here always make the list, first.
+        if let Some(b) = d.browser.as_mut() {
+            b.set_trusted(settings.servers.iter().filter(|k| !k.fingerprint.is_empty()).map(|k| k.address.as_str()));
         }
+        d
+    }
+
+    /// The window for a server this PlanCraft started (Share Folder): its key is known, so it is
+    /// not asked about.
+    pub fn for_own_server(settings: &AppSettings, address: &str, fingerprint: &str) -> Self {
+        // Its address is known: no looking for servers on the network.
+        let mut w = Self::new_with(settings, false);
+        w.address = address.to_string();
+        if let Some(k) = settings.servers.iter().find(|k| same_address(&k.address, address)) {
+            w.user = k.user.clone();
+        }
+        if let Ok(a) = normalise_address(address) {
+            w.confirmed = Some((a, Fingerprint(fingerprint.to_string())));
+        }
+        w
+    }
+
+    /// Signing in or opening a plan is going on.
+    pub fn is_busy(&self) -> bool {
+        self.busy.is_some()
+    }
+
+    /// Servers heard of on the network (tests).
+    #[cfg(test)]
+    pub fn set_found(&mut self, found: Vec<plancraft_server::discovery::Found>) {
+        self.found = found;
     }
 
     fn run(&mut self, ctx: &Context, what: &str, job: impl FnOnce() -> Done + Send + 'static) {
@@ -150,10 +198,15 @@ impl OpenFromServer {
                 return;
             }
         };
-        let known = settings
-            .fingerprint_for(&address)
-            .map(|f| Fingerprint(f.to_string()))
-            .or_else(|| self.confirmed.as_ref().filter(|(a, _)| *a == address).map(|(_, f)| f.clone()));
+        // A key confirmed in this window (or known because this PlanCraft runs the server) comes
+        // first: a server started again on this computer keeps its key, but a stale pin for the
+        // same address must not hide the one just shown.
+        let known = self
+            .confirmed
+            .as_ref()
+            .filter(|(a, _)| *a == address)
+            .map(|(_, f)| f.clone())
+            .or_else(|| settings.fingerprint_for(&address).map(|f| Fingerprint(f.to_string())));
         let (user, password) = (self.user.trim().to_string(), self.password.clone());
         self.run(ctx, &format!("Connecting to {address}…"), move || match known {
             None => match Client::connect(address.as_str(), &Trust::FirstUse, "PlanCraft") {
@@ -250,6 +303,17 @@ impl OpenFromServer {
         if let Some(opened) = self.collect(settings) {
             return Outcome::Opened(opened);
         }
+        if let Some(b) = self.browser.as_mut() {
+            if !self.browser_wakes {
+                // News from the network redraws the window; nothing to look for otherwise.
+                let repaint = ctx.clone();
+                b.set_waker(Arc::new(move || repaint.request_repaint()));
+                self.browser_wakes = true;
+            }
+            if b.poll() {
+                self.found = b.found();
+            }
+        }
         let mut open = true;
         let mut cancel = false;
         egui::Window::new("Open from Server")
@@ -311,6 +375,50 @@ impl OpenFromServer {
             submit = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             ui.end_row();
         });
+        if !self.found.is_empty() {
+            ui.label(RichText::new("On your network:").color(theme::pal().TEXT_WEAK));
+            // All of them (trusted ones first), scrolling: a long list never hides one.
+            egui::ScrollArea::vertical().id_salt("found_servers").max_height(84.0).show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for f in &self.found {
+                        // An address already trusted, if the server gave one, before the best: anyone
+                        // can add addresses to another server's announcement.
+                        let pinned = |a: &String| settings.fingerprint_for(&normalise_address(a).unwrap_or_default()).is_some();
+                        let known = f.addresses.iter().find(|a| pinned(a));
+                        let address = known.unwrap_or(&f.address).clone();
+                        // A trusted server by the name it had when its key was confirmed (an
+                        // announcement may pair a trusted address with any name).
+                        let remembered = known
+                            .and_then(|a| settings.servers.iter().find(|k| same_address(&k.address, a)))
+                            .map(|k| k.name.clone())
+                            .filter(|n| !n.is_empty());
+                        let full = remembered.unwrap_or_else(|| f.name.clone());
+                        // Cut, not squeezed: a name near the end of a row would shrink to "…".
+                        let shown: String = match full.char_indices().nth(40) {
+                            Some((cut, _)) => format!("{}…", full.get(..cut).unwrap_or(&full)),
+                            None => full.clone(),
+                        };
+                        let r = ui
+                            .add_enabled(!busy, egui::Button::new(RichText::new(shown)).small())
+                            .on_hover_text(format!("{full}\n{address}"));
+                        // The address, always: two servers can call themselves the same.
+                        ui.label(RichText::new(&address).small().color(theme::pal().TEXT_WEAK));
+                        // Drawn by PlanCraft, beside the name (a name can't fake it).
+                        if known.is_some() {
+                            ui.label(RichText::new("✔").small().color(theme::pal().OK)).on_hover_text("Its key is already trusted here");
+                        }
+                        if r.clicked() {
+                            self.address = address.clone();
+                            if let Some(k) = settings.servers.iter().find(|k| same_address(&k.address, &address)) {
+                                self.user = k.user.clone();
+                            }
+                        }
+                    }
+                })
+            });
+        } else if self.browser.is_some() {
+            ui.label(RichText::new("Looking for servers on your network…").small().color(theme::pal().TEXT_WEAK));
+        }
         if settings.servers.len() > 1 {
             ui.horizontal_wrapped(|ui| {
                 ui.label(RichText::new("Recent:").color(theme::pal().TEXT_WEAK));
@@ -537,5 +645,91 @@ mod tests {
         d.connect(&ctx, &settings);
         settle(&mut d, &mut settings);
         assert!(matches!(d.stage, Stage::Plans { .. }), "{:?}", d.error);
+    }
+
+    #[test]
+    fn a_server_this_plancraft_runs_opens_without_asking_about_its_key() {
+        // Share Folder knows its server's key, so it is trusted as is, even over an old pin for
+        // the same address (a server run here before with another key).
+        let server = TestServer::start();
+        let ctx = Context::default();
+        let mut settings = AppSettings::default();
+        settings.servers.push(KnownServer {
+            address: server.address(),
+            user: "ana".into(),
+            fingerprint: "0000 0000 0000 0000 0000 0000 0000 0000".into(),
+            plan: String::new(),
+            name: String::new(),
+        });
+        let mut d = OpenFromServer::for_own_server(&settings, &server.address(), &server.running.fingerprint().0);
+        assert_eq!(d.user, "ana", "the user name used there before is filled in");
+        d.password = PASSWORD.into();
+        d.connect(&ctx, &settings);
+        settle(&mut d, &mut settings);
+        assert!(matches!(d.stage, Stage::Plans { .. }), "{:?}", d.error);
+        assert_eq!(settings.fingerprint_for(&server.address()), Some(server.running.fingerprint().0.as_str()));
+    }
+
+    #[test]
+    fn servers_found_on_the_network_fill_in_the_address() {
+        use egui_kittest::kittest::Queryable;
+        let mut d = OpenFromServer::new(&AppSettings::default());
+        d.address.clear();
+        d.set_found(vec![
+            plancraft_server::discovery::Found {
+                name: "Plans on studio-pc".into(),
+                address: "10.0.0.2".into(),
+                addresses: vec!["10.0.0.2".into()],
+            },
+            plancraft_server::discovery::Found {
+                name: "Office on desk-7".into(),
+                address: "10.0.0.7:47400".into(),
+                addresses: vec!["10.0.0.7:47400".into()],
+            },
+        ]);
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1000.0, 800.0)).build_ui_state(
+            |ui, (d, settings): &mut (OpenFromServer, AppSettings)| {
+                let _ = d.show(ui.ctx(), settings);
+            },
+            (d, AppSettings::default()),
+        );
+        h.run();
+        h.get_by_label("Office on desk-7").click();
+        h.run();
+        assert_eq!(h.state().0.address, "10.0.0.7:47400");
+        // Only the address: the key is still checked on the first visit.
+        assert!(h.state().0.confirmed.is_none());
+    }
+
+    /// Regression: anyone on the network can add an address to another server's announcement;
+    /// the address already trusted is used, not the "best" one an impostor added.
+    #[test]
+    fn a_trusted_address_wins_over_one_added_by_someone_else() {
+        use egui_kittest::kittest::Queryable;
+        let mut settings = AppSettings::default();
+        settings.servers.push(crate::settings::KnownServer {
+            address: "192.168.1.9".into(),
+            user: "ana".into(),
+            fingerprint: "aa bb".into(),
+            ..Default::default()
+        });
+        let mut d = OpenFromServer::new(&settings);
+        d.address.clear();
+        d.set_found(vec![plancraft_server::discovery::Found {
+            name: "Plans on studio-pc".into(),
+            address: "1.0.0.1".into(),
+            addresses: vec!["1.0.0.1".into(), "192.168.1.9".into()],
+        }]);
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1000.0, 800.0)).build_ui_state(
+            |ui, (d, settings): &mut (OpenFromServer, AppSettings)| {
+                let _ = d.show(ui.ctx(), settings);
+            },
+            (d, settings),
+        );
+        h.run();
+        h.get_by_label("Plans on studio-pc").click();
+        h.run();
+        assert_eq!(h.state().0.address, "192.168.1.9");
+        assert_eq!(h.state().0.user, "ana");
     }
 }

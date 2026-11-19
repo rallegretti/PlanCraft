@@ -28,6 +28,11 @@ unicode-normalization = "0.1"
 ctrlc = { version = "3.5", features = ["termination"] }
 # Checks that a key file's public key belongs to its private key (already used by snow).
 curve25519-dalek = { version = "4.1", default-features = false }
+# Socket options the standard library lacks, for PlanCraft's own mDNS (`mdns.rs`: sharing the
+# port with the system's responder, choosing the network to send on). Pure Rust.
+socket2 = { version = "0.6", features = ["all"] }
+# This computer's networks (addresses and netmasks), for mDNS and Share Folder.
+if-addrs = "0.15"
 
 [dev-dependencies]
 uuid.workspace = true

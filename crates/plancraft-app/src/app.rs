@@ -1,7 +1,7 @@
 //! The PlanCraft desktop application: layout, command execution and document management.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration as StdDuration, Instant};
 
@@ -74,6 +74,13 @@ pub struct PlanCraftApp {
     remotes: crate::remote::Remotes,
     /// The Open from Server window, while open.
     server_dialog: Option<dialogs::server::OpenFromServer>,
+    /// The PlanCraft Server this PlanCraft runs for File › Share Folder, if any.
+    share: dialogs::share::ShareHost,
+    /// The Share Folder window, while open.
+    share_dialog: Option<dialogs::share::ShareFolder>,
+    /// A folder to offer in Share Folder: a plan was opened from it with a server's journal
+    /// beside it.
+    share_suggest: Option<PathBuf>,
     /// "Open your version" was clicked in a shared plan's bar (by handle), acted on unlocked.
     open_dropped: Option<u64>,
     /// Plans of the person's own work the server could not take, opened when the shared plan
@@ -117,6 +124,19 @@ enum DiskAction {
 /// their plans, so a poisoned lock is simply taken over.
 pub fn lock(ws: &SharedWorkspace) -> MutexGuard<'_, Workspace> {
     ws.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// The plans of `folder` open in this PlanCraft from their files, by file name (a server can't share
+/// them while they are open here).
+fn open_in_folder(paths: &[PathBuf], folder: &Path) -> Vec<String> {
+    let Ok(folder) = std::fs::canonicalize(folder) else { return Vec::new() };
+    // A plan opened by a bare file name sits in the current folder.
+    let dir_of = |p: &Path| p.parent().map(|d| if d.as_os_str().is_empty() { Path::new(".") } else { d }).map(Path::to_path_buf);
+    paths
+        .iter()
+        .filter(|p| dir_of(p).and_then(|dir| std::fs::canonicalize(dir).ok()).as_deref() == Some(folder.as_path()))
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect()
 }
 
 /// Whether a summary task above task `i` is one of `sel`.
@@ -440,6 +460,9 @@ impl PlanCraftApp {
             lock_dismissed: HashSet::new(),
             remotes: Default::default(),
             server_dialog: None,
+            share: Default::default(),
+            share_dialog: None,
+            share_suggest: None,
             open_dropped: None,
             kept_dropped: Vec::new(),
             allow_exit: false,
@@ -628,8 +651,10 @@ impl PlanCraftApp {
                     self.st.toast(
                         ToastKind::Warning,
                         "A PlanCraft Server shares this plan, or stopped before saving its changes into the file. Open it from the \
-                         server (File › Open from Server…) to see every change; if the server is not running, starting it saves them.",
+                         server (File › Open from Server…) to see every change; if no server is running, close the plan and share \
+                         its folder (File › Share Folder…): the server saves them.",
                     );
+                    self.share_suggest = path.parent().map(Path::to_path_buf);
                 }
             }
             Err(e) => self.st.toast(ToastKind::Error, e.to_string()),
@@ -972,7 +997,20 @@ impl PlanCraftApp {
             }
             Command::OpenFromServer => {
                 if self.server_dialog.is_none() {
-                    self.server_dialog = Some(dialogs::server::OpenFromServer::new(&self.settings));
+                    // Screenshots never look for servers on the network.
+                    let browse = self.shot.is_none();
+                    self.server_dialog = Some(dialogs::server::OpenFromServer::new_with(&self.settings, browse));
+                }
+            }
+            Command::ShareFolder => {
+                if self.share_dialog.is_none() {
+                    match plancraft_server::server::default_config() {
+                        Some(config) => {
+                            let suggested = if self.share.sharing.is_none() { self.share_suggest.clone() } else { None };
+                            self.share_dialog = Some(dialogs::share::ShareFolder::new(&self.settings, config, suggested));
+                        }
+                        None => self.st.toast(ToastKind::Error, "Cannot tell where to keep the server's files (no settings folder)."),
+                    }
                 }
             }
             Command::About => self.dialogs.about = true,
@@ -1642,6 +1680,23 @@ impl PlanCraftApp {
                 _ => "Ready".to_string(),
             };
             ui.label(RichText::new(msg).size(12.0));
+            // Stopped: about to be taken away this frame (and redrawn), not "stopping".
+            if let Some((folder, state)) = self.share.status().filter(|(_, s)| !matches!(s, plancraft_server::sharing::State::Stopped(_))) {
+                ui.separator();
+                let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let (dot, text) = match state {
+                    plancraft_server::sharing::State::Sharing(_) => (theme::pal().OK, format!("Sharing {name}")),
+                    plancraft_server::sharing::State::Starting => (theme::pal().WARN, format!("Starting to share {name}")),
+                    _ => (theme::pal().WARN, format!("Stopping sharing {name}")),
+                };
+                dialogs::share::status_dot(ui, dot);
+                let r = ui.add(egui::Label::new(RichText::new(text).size(12.0)).sense(Sense::click()));
+                if r.on_hover_text(format!("{}\nClick for the addresses, the key fingerprint and who may sign in", folder.display()))
+                    .clicked()
+                {
+                    out.push(Command::ShareFolder);
+                }
+            }
             if let Some(doc) = doc {
                 if let Some(r) = self.remotes.get(doc.handle) {
                     ui.separator();
@@ -1989,6 +2044,7 @@ impl PlanCraftApp {
                     "Statistics" => Command::Statistics,
                     "Mcp" => Command::McpPanel,
                     "OpenServer" => Command::OpenFromServer,
+                    "Share" => Command::ShareFolder,
                     "Assign" => Command::AssignResources,
                     "External" => Command::ExternalLinks,
                     "About" => Command::About,
@@ -1996,6 +2052,21 @@ impl PlanCraftApp {
                     "McpStart" => {
                         self.mcp.start(self.ws.clone(), ctx.clone(), self.settings.mcp_port);
                         continue;
+                    }
+                    // Shares the folder shared last (screenshots of a running server).
+                    "ShareStart" => {
+                        if let (Some(folder), Some(config), Ok(program)) = (
+                            self.settings.share_folder.clone(),
+                            plancraft_server::server::default_config(),
+                            dialogs::share::server_program(),
+                        ) {
+                            // Never announced, and on this computer only: screenshots must not
+                            // offer a server to the network.
+                            let mut program = program;
+                            program.args.extend(["--bind".into(), "127.0.0.1".into()]);
+                            self.share.start(&program, &folder, &config, self.settings.share_port, false, ctx);
+                        }
+                        Command::ShareFolder
                     }
                     "Critical" => {
                         self.st.gantt.show_critical = true;
@@ -2183,6 +2254,9 @@ impl PlanCraftApp {
             self.settings.save();
         }
         self.mcp.stop();
+        // The server stops by itself once its input closes, saving every plan and telling
+        // everyone; it finishes that after this PlanCraft is gone.
+        self.share.sharing = None;
         self.disk.stop();
         lock(&self.ws).release_locks();
         self.rec().forget_all();
@@ -2838,6 +2912,45 @@ impl PlanCraftApp {
                     self.server_dialog = None;
                     self.add_remote(*opened);
                 }
+            }
+        }
+        if self.share_dialog.is_none() {
+            // Nobody looks at the server's log: its new lines don't redraw the app.
+            self.share.watch_log(false);
+        }
+        if let Some(d) = self.share_dialog.as_mut() {
+            let ws = self.ws.clone();
+            // The plans' paths are taken under the lock; the disk is looked at after.
+            let open_here = move |folder: &Path| {
+                let paths: Vec<PathBuf> = lock(&ws).docs.iter().filter_map(|d| d.path.clone()).collect();
+                open_in_folder(&paths, folder)
+            };
+            match d.show(&ctx, &mut self.settings, &mut self.share, &open_here) {
+                dialogs::share::Outcome::Open => {}
+                dialogs::share::Outcome::Closed => self.share_dialog = None,
+                dialogs::share::Outcome::OpenFromServer { address, fingerprint } => {
+                    if self.server_dialog.as_ref().is_some_and(dialogs::server::OpenFromServer::is_busy) {
+                        // Not over a sign-in or an opening still going on there.
+                        self.st.toast(ToastKind::Info, "Open from Server is busy: try again once it is done.");
+                    } else {
+                        self.server_dialog = Some(dialogs::server::OpenFromServer::for_own_server(&self.settings, &address, &fingerprint));
+                    }
+                }
+            }
+        }
+        if self.share.sharing.is_some() {
+            // Shared now: the folder suggested by a server's journal has served its purpose.
+            self.share_suggest = None;
+        }
+        if let Some(why) = self.share.poll() {
+            self.st.toast(ToastKind::Error, format!("Sharing stopped: {why}"));
+        }
+        // A change to who may sign in, made in a Share Folder window since closed.
+        if self.share_dialog.is_none() {
+            match self.share.take_answer() {
+                Some(Ok(said)) => self.st.toast(ToastKind::Info, said),
+                Some(Err(e)) => self.st.toast(ToastKind::Error, format!("Changing who may sign in: {e}")),
+                None => {}
             }
         }
         self.open_dropped_version();
@@ -5777,8 +5890,14 @@ mod shared_tests {
         let ctx = h.ctx.clone();
         h.state_mut().exec(&ctx, Command::Close);
         std::fs::write(plancraft_server::journal::path_for(&path).unwrap(), "{}\n").unwrap();
-        h.state_mut().open_path(path);
+        h.state_mut().open_path(path.clone());
         assert!(h.state().st.toasts.iter().any(|t| t.text.contains("PlanCraft Server shares this plan")));
+        // Share Folder offers the plan's folder (where starting a server saves the journal).
+        assert_eq!(h.state().share_suggest.as_deref(), Some(dir.0.as_path()));
+        // The plan is open here, so a server for that folder could not share it yet.
+        let paths: Vec<PathBuf> = lock(&h.state().ws).docs.iter().filter_map(|d| d.path.clone()).collect();
+        assert_eq!(open_in_folder(&paths, &dir.0), ["Plan.plancraft"]);
+        assert!(open_in_folder(&paths, &dir.0.join("elsewhere")).is_empty());
     }
 
     #[test]

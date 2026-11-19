@@ -20,6 +20,12 @@ pub struct AppSettings {
     pub theme: crate::theme::ThemeChoice,
     /// Servers plans were opened from, last used first (never a password).
     pub servers: Vec<KnownServer>,
+    /// The folder last shared with File › Share Folder (sharing never starts by itself).
+    pub share_folder: Option<PathBuf>,
+    /// The port Share Folder's server listens on.
+    pub share_port: u16,
+    /// Whether Share Folder announces the server on the network, so others find it in the list.
+    pub share_announce: bool,
 }
 
 /// A PlanCraft Server this person opened plans from.
@@ -57,6 +63,9 @@ impl Default for AppSettings {
             table_width: 720.0,
             theme: crate::theme::ThemeChoice::System,
             servers: Vec::new(),
+            share_folder: None,
+            share_port: plancraft_server::protocol::DEFAULT_PORT,
+            share_announce: true,
         }
     }
 }
@@ -98,6 +107,9 @@ impl AppSettings {
         }
         if self.mcp_port == 0 {
             self.mcp_port = defaults.mcp_port;
+        }
+        if self.share_port == 0 {
+            self.share_port = defaults.share_port;
         }
         self.recent.truncate(12);
         self.servers.truncate(MAX_SERVERS);

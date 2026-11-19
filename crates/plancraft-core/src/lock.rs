@@ -433,7 +433,8 @@ pub fn spawn_keeper(ws: Weak<Mutex<Workspace>>, on_change: impl Fn() + Send + 's
         }
     });
     if let Err(e) = spawned {
-        eprintln!("plancraft: could not start keeping lock files ({e})");
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr().lock(), "plancraft: could not start keeping lock files ({e})");
     }
 }
 

@@ -11,6 +11,7 @@ pub mod project_info;
 pub mod recurring;
 pub mod resource_info;
 pub mod server;
+pub mod share;
 pub mod task_info;
 pub mod update_project;
 pub mod working_time;

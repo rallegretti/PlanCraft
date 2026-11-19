@@ -22,7 +22,10 @@ pub fn catch<T>(what: &str, f: impl FnOnce() -> T) -> Result<T, Panicked> {
             .map(|s| (*s).to_string())
             .or_else(|| payload.downcast_ref::<String>().cloned())
             .unwrap_or_else(|| "panic".to_string());
-        eprintln!("plancraft: {what} panicked: {message}");
+        // Never `eprintln!`: it panics when standard error is gone (a server PlanCraft started
+        // goes on saving after PlanCraft quit), and this is the net that catches panics.
+        use std::io::Write;
+        let _ = writeln!(std::io::stderr().lock(), "plancraft: {what} panicked: {message}");
         Panicked { what: what.to_string(), message }
     })
 }
@@ -41,5 +44,36 @@ mod tests {
         #[allow(clippy::indexing_slicing)]
         let e = catch("index", || v[3]).unwrap_err();
         assert!(e.message.contains("index out of bounds"), "{}", e.message);
+    }
+
+    /// A server PlanCraft started goes on saving its plans after PlanCraft quit and its standard
+    /// error is gone: a caught panic must still come back as an error then, not panic again while
+    /// saying so.
+    #[test]
+    fn a_caught_panic_survives_a_closed_stderr() {
+        const CHILD: &str = "PLANCRAFT_GUARD_CLOSED_STDERR";
+        if std::env::var_os(CHILD).is_some() {
+            // Wait until standard error is surely gone: a write to it fails.
+            use std::io::Write;
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            while writeln!(std::io::stderr().lock(), "waiting for the reader to go").is_ok() {
+                if std::time::Instant::now() > deadline {
+                    std::process::exit(4);
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let caught = catch("closed stderr", || -> i32 { panic!("kaput") });
+            std::process::exit(if caught.is_err() { 0 } else { 3 });
+        }
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "guard::tests::a_caught_panic_survives_a_closed_stderr", "--nocapture", "--test-threads=1"])
+            .env(CHILD, "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        drop(child.stderr.take());
+        let status = child.wait().unwrap();
+        assert!(status.success(), "{status}");
     }
 }

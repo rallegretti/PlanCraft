@@ -88,7 +88,8 @@ fn main() -> anyhow::Result<()> {
     }
     if args.first().map(String::as_str) == Some("serve") {
         // PlanCraft Server, built in: `plancraft serve FOLDER`, the same as `plancraft-server`.
-        std::process::exit(plancraft_server::cli::run(args.iter().skip(1).cloned().collect()));
+        // As given: a folder whose name is not valid UTF-8 is still that folder.
+        std::process::exit(plancraft_server::cli::run(raw.iter().skip(1).cloned().collect()));
     }
     plancraft_core::lock::set_app_name(format!("PlanCraft {}", env!("CARGO_PKG_VERSION")));
     if args.first().map(String::as_str) == Some("--version") {

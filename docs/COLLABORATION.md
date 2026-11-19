@@ -6,8 +6,9 @@ order, checks and recalculates each one, saves it safely, and passes it on to ev
 The model is the multi-user setup of desktop accounting programs: one copy is the real one, and
 any PlanCraft can be the host.
 
-Status: phase 1 (the sync engine, `plancraft_core::sync`), phase 2 (the server, `plancraft-server`)
-and phase 3 (PlanCraft as a client) are built. Phases 4–5 are planned below.
+Status: phase 1 (the sync engine, `plancraft_core::sync`), phase 2 (the server, `plancraft-server`),
+phase 3 (PlanCraft as a client) and phase 4 (discovery and *Share Folder*) are built. Phase 5 is
+planned below.
 
 ## Off unless someone turns it on
 
@@ -232,6 +233,9 @@ plancraft serve "/srv/Plans"                     # the same server, from PlanCra
   from the journals.
 - Its private folder (`--config`, by default `server` in PlanCraft's settings folder) holds its key
   pair (`server-key.json`) and the users file (`users.json`), both owner-only.
+- It announces itself on the network (mDNS) unless `--no-announce`. `--watch-stdin` is for
+  *Share Folder* (phase 4): it says on standard output when it listens, and stops cleanly once its
+  standard input closes.
 - `plancraft-server user add|passwd|role|remove|list` manages people; `--password-stdin` reads
   the password from a script. `plancraft-server fingerprint` shows the key's fingerprint.
 
@@ -364,8 +368,8 @@ One JSON object per frame, tagged by `type`; see the types for the fields.
   output. The file is read again when it changes, so user commands take effect without a restart,
   on open connections too: someone removed or no longer allowed is disconnected within a moment,
   even if they only listen or ping.
-- Roles: `viewer` (opens and watches), `editor` (also changes), `admin` (also manages people, from
-  the app in phase 4), and `none`; one for the whole folder plus any per plan. A plan someone may
+- Roles: `viewer` (opens and watches), `editor` (also changes), `admin` (meant to manage people
+  from their own PlanCraft later; for now people are managed where the server runs), and `none`; one for the whole folder plus any per plan. A plan someone may
   not open is not listed, and opening it gives the same answer as a plan that does not exist.
 - Per-plan rules match plan names ignoring case and Unicode form (macOS stores accented names
   decomposed, people type them composed), one rule per plan: `--plan` must be a plan file name,
@@ -432,10 +436,9 @@ the target, with no hard limit below the connection caps.
 
 ### Left for later phases
 
-- A server running inside the app (phase 4) shares the app's lock identity, so it must refuse a
-  plan the app has open in a window.
-- Starting the server from the warning shown when a shared plan's file is opened directly
-  (phase 4, *Share Folder…*).
+Both items left here were settled in phase 4: *Share Folder* runs the server as a separate program,
+so it has its own lock identity, and the warning shown when a shared plan's file is opened directly
+points to *Share Folder*, which offers that plan's folder.
 
 ## Phase 3: PlanCraft as a client
 
@@ -563,11 +566,183 @@ the `Replica` and the connection. Merging never runs on the app's thread.
 
 ## Phase 4: discovery and sharing
 
-- mDNS (`mdns-sd`, pure Rust): a running server announces itself, and the *Open from Server*
-  dialog lists the servers it finds. Neither happens unless someone shares a folder or opens
-  the dialog.
-- *File › Share Folder…* starts a server inside the app, or launches `plancraft-server`, for a
-  chosen folder. It shows the address and fingerprint and has a user admin panel.
+### Finding servers (`plancraft_server::discovery`)
+
+- PlanCraft's own mDNS (`plancraft_server::mdns`, pure Rust on the standard library's sockets and
+  `socket2`; IPv4, 224.0.0.251). It replaced the `mdns-sd` library, which kept every record anyone
+  sent with no limit on how many or for how long: a hostile computer on the network could fill
+  memory in seconds. Ours does only what PlanCraft needs:
+  - the responder answers questions about its one server (PTR, SRV, TXT, A; and the DNS-SD list
+    of service types), announces it three times when it starts and on each network it joins
+    (networks looked at again every 5 seconds, so starting before the network is up is fine),
+    answers by multicast after a random 20–120 ms and at most once a second per network (put off,
+    not dropped), answers one-shot queriers directly (their id and only their questions about us
+    back, 10-second lifetimes, no cache-flush; 20 a second in all, 2 per querier, never to this
+    computer's own addresses), sends everything with IP TTL 255, says goodbye when it stops (its
+    PTR, SRV and TXT; not the host's address, which other servers on the computer share), and keeps
+    nothing it hears;
+  - the listener asks for PlanCraft servers (at once, then after 1, 2, 4… seconds, 30 seconds
+    apart at most, so a server is heard again well within its records' 2-minute lifetime) and
+    keeps only their records. Each server belongs to the computer that announced it (the packet's
+    sender): only that computer can point it elsewhere, give its addresses or say goodbye for it.
+    One computer holds at most 8 servers, 256 in all; a server not yet told where it is goes after
+    20 seconds (and is the first to make room); 8 addresses each; nothing kept more than 3 minutes
+    without being heard again, whatever lifetime it was sent with. A goodbye takes effect after a
+    second, and the listener asks again at once (the server answers if it is still there). A fresh
+    address with cache-flush replaces the old ones. Answers count only from the mDNS port. It wakes
+    the window a few times a second at most when the list changes (no polling);
+  - both drop, unread, every packet from a computer outside this computer's own networks (its
+    address and the network's prefix length, so on Windows too; not network or broadcast
+    addresses; RFC 6762 §11), so nothing from beyond the local network is heard or answered;
+  - packets are read with every length, count, label and compression pointer checked (pointers
+    only backwards, 64 at most; names of at most 255 bytes; 64 questions and 256 records read at
+    most; 4 KiB of names decoded per packet at most, so a packet of long names pointing at each
+    other costs little), and each side reads only what it needs (the responder a query's
+    questions, the listener a response's records); `tests/mdns.rs` sweeps random bytes,
+    mDNS-like packets and what several hostile computers could say.
+  - IPv4 only: a server listening on one IPv6 address is not announced (people type its address);
+    one listening on `[::]` is announced with its IPv4 addresses, which it accepts only where the
+    system lets IPv6 sockets take IPv4 too (not by default on Windows: bind `0.0.0.0` there).
+- A server announces `_plancraft._tcp` as "*folder* on *computer*", on each of the computer's
+  networks (looked at again every 5 seconds, so new ones are announced on) when it listens on all
+  of them, or on its one address's network. The announcement is withdrawn first thing when the server
+  stops, so lists drop it at once. `--no-announce` (and the *List it for others on the network*
+  box in *Share Folder*) turns it off; a server listening only on this computer (`--bind
+  127.0.0.1`) never announces. The announcement points to `computer-plancraft.local`, not the
+  computer's own `.local` name, which the system answers for (two answers with different addresses
+  could make the system think another computer took its name). Container and virtual-machine
+  interfaces, and VPN and overlay networks (WireGuard, Tailscale, ZeroTier, tunnels), are left out
+  of announcing and listening.
+- Announcing tells everyone on the network the folder's and the computer's names, on every
+  network the computer joins while sharing (a laptop taken from the office to a café): the box's
+  tooltip says so, and sharing stops when PlanCraft quits. The server also accepts connections on
+  every network the computer is on (it listens on all of them; signing in is still needed).
+- The *Open from Server* window lists the servers it hears of under *On your network*, each with
+  its address; clicking one fills in its address. A ✔ (drawn beside the name, so no name can fake
+  it) marks a server with an address whose key is already pinned, and that address is used over
+  the "best" one, since anyone can add addresses to another server's announcement. It listens only
+  while the window is open, and closing it never waits for the network.
+- An announcement is anyone's word: its name is cut short with no control or invisible characters
+  (direction overrides, zero-width and blank-looking characters, combining marks, variation
+  selectors, tags) and no check marks or locks anywhere, and only addresses the window takes are
+  offered (IPv4 addresses on the network first, then global IPv6; link-local IPv6 is passed over,
+  as it needs an interface named, and loopback, which would point at whoever connects).
+  It never vouches for a key: the fingerprint is still confirmed on the first visit and checked
+  against the pin after that.
+- No one computer can fill the list: the listener keeps 8 servers per sending computer (above),
+  and `discovery::FoundList` counts what announcements say, at most 4 per host name and 4 per address
+  (whatever the port), 64 in all, first come first kept. One computer sharing more than 4 folders
+  shows 4 of them; the others are opened by typing the address. A server at an address whose key
+  is trusted here always gets in and is listed first, once per trusted address (anyone can add a
+  trusted address to an announcement; a second one claiming it is not taken in), under the name
+  it had when its key was confirmed; trust is looked for among all the addresses given, not only
+  the best few. The window shows them all, scrolling.
+- Nothing announces or listens unless someone shares a folder or opens the window. Tests announce
+  on a private mDNS port, so nothing reaches anyone listening on the usual one (the messages still
+  go out on the network), with names unique to the run.
+- System prompts: on Windows, the firewall asks the first time a folder is shared (the server
+  listens on every network) and may ask when *Open from Server* first looks for servers (mDNS
+  listens on UDP 5353). On macOS 15 and later, the first use of the local network asks for
+  permission; the app's `Info.plist` explains why (`NSLocalNetworkUsageDescription`) and names the
+  service (`NSBonjourServices`). Saying no there stops discovery and connections on the network.
+
+### Share Folder (`plancraft_server::sharing`, the app's `dialogs::share`)
+
+*File › Share Folder…* shares a folder from this PlanCraft:
+
+- The server runs as a separate program, `plancraft serve --watch-stdin … -- FOLDER` (from an
+  AppImage, the AppImage file: the executable's temporary mount goes away when PlanCraft quits,
+  while the server is still saving; `APPIMAGE` counts only when PlanCraft runs inside that
+  AppImage's mount, since every program an AppImage starts inherits it). It starts in the
+  server's private folder, with the environment PlanCraft was started with (not its bundled
+  libraries); the folder goes after `--`, so a name starting with "-", or reading like a command
+  (`help`, `user`), is still a folder. Its fatal error is always one line (control characters in a
+  folder's name become spaces). So:
+  - the server has its own lock identity: it refuses a plan open in one of this PlanCraft's
+    windows ("open elsewhere") until it is closed there, and a plan it shares warns when opened
+    here directly, exactly as between two computers. The window lists the folder's plans open
+    here;
+  - a crash in one never takes the other down;
+  - quitting PlanCraft, or a crash, closes the server's standard input and it stops cleanly: every
+    plan saved, everyone told. It finishes that after PlanCraft is gone; its log writes, and the
+    panic guard's, never panic on a closed pipe.
+- The window shows the folder, the addresses people type (this computer's addresses, container
+  and virtual-machine bridges left out, then its name as `computer.local`, looked up again every
+  5 seconds, so a laptop moving between networks shows where it is now), and the key fingerprint
+  people confirm, with
+  copy buttons. *Open a Plan from It…* opens the *Open from Server* window on `127.0.0.1` with the
+  key already trusted (this PlanCraft started that server); *Stop Sharing* saves and stops. The
+  status bar shows *Sharing folder* while it runs. Sharing never starts by itself: the folder, port
+  and the announcing choice are remembered for next time, nothing else.
+- If the server stops by itself (it could not listen, the folder is gone, nobody may sign in) the
+  window and a message say why, in the server's own words (its last log line, read to the end
+  before deciding, and only when it is the server's own error; otherwise "stopped unexpectedly"
+  or "stopped from outside PlanCraft"). Its log stays in the window. Starting can be cancelled.
+- The server's state (ready, stopped) redraws the app at once; its log lines only while the log is
+  unfolded in the open window, at most 4 times a second (a busy server logs a line per sign-in,
+  plan and change). A server whose output has ended but that is not gone yet counts as stopping,
+  so the app looks again rather than waiting for news that already came. The server's log never
+  holds a name that is not a user's (it may be a password typed in the wrong box).
+- The window scrolls when it is taller than the screen. A change to who may sign in still being
+  made when the window closes is told when it is done (and the window shows it if reopened); the
+  window looks at the users file every 2 seconds for changes made from the command line.
+- The same window manages people: add (name, password, role), change a role, set or take away a
+  role for one plan (*Plans…*, *Same as other plans*), change a password, remove (asked twice).
+  It edits the server's users file directly (the one `plancraft serve user …` manages), so
+  changes apply at once, also to people signed in now; passwords are hashed on a background
+  thread and not kept once used. Changes take turns on a lock file beside the users file
+  (`users::Users::change`: load, change, save while holding it; passwords are hashed before, so it
+  is held briefly), in this PlanCraft and with `plancraft serve user …` alike, so no change is
+  saved over by another made at the same moment. A change clears only the form it came from.
+  Starting needs at least one person.
+- A plan's file opened directly while a server's journal sits beside it says so, and *Share
+  Folder* then offers that plan's folder: once the plan is closed here, sharing the folder saves
+  the journal's changes into the file.
+
+### Tests
+
+- `crates/plancraft-server/tests/sharing.rs`: a folder shared through the real server program
+  (ready line, signing in with the fingerprint shown, the plan's lock held and given back on
+  stopping); a server that cannot start says why (also for a folder named "-…"); dropping the
+  sharing (as when PlanCraft quits) stops the server and gives back the locks; a server whose
+  output nobody reads any more still saves its plans and gives back their locks; a shared folder
+  announced by the server itself, and an announcement on its own, are found on a private mDNS port
+  and go away when stopped; any announcement reads safely (property test).
+- `users` tests: changes made at the same time are all kept, a failed one saves nothing, the lock
+  file is owner-only and never one a link points to; `tests/cli.rs`: `plancraft-server user add`
+  waits for a change PlanCraft is making and keeps both.
+- `discovery` tests: one computer cannot fill the list (per host name, per address), trusted
+  servers still get in and come first.
+- By hand, between two computers: `announce_for_others` on one and `hear_another_computer` on
+  the other (`tests/sharing.rs`, ignored; `PLANCRAFT_MDNS_TEST_PORT` and `PLANCRAFT_MDNS_TEST_NAME`
+  set on both). Checked Linux ↔ macOS and Linux ↔ Windows on one office network, each way.
+- `sharing` unit tests: long lines cut without keeping the rest, a program replaced by an upgrade
+  started from its name. `guard` tests: a caught panic still comes back with standard error closed.
+- `mdns` unit tests: an announcement reads back and resolves, goodbyes remove at once, questions
+  about the server are recognised, one-shot queriers get their id and short lifetimes, only
+  neighbours are heard, a flood of records stays bounded and is forgotten in time, bad names
+  (pointers to themselves or forwards, overlong names, reserved bits) are refused, compressed
+  names read. `tests/mdns.rs`: random bytes and mDNS-like packets (property tests).
+- `discovery` unit tests: the best address, names made safe (control and invisible characters,
+  fake trust marks), every address kept best first, names that fit in one DNS label, container
+  bridges left out (a Hyper-V external switch kept), this computer's addresses are ones the window
+  takes.
+- The app: `dialogs::share` tests add, change and remove people (and see people added from the
+  command line), clear only the form a change came from, list only plans directly in the folder,
+  run the AppImage only from inside it, offer this computer's `.local` name only when it can be
+  typed, and draw the window with the reason and log of the last server (new log lines redraw
+  the app only while it is unfolded); `dialogs::server` tests
+  open the PlanCraft's own server without asking about its key (even over an old pin), fill in a
+  found server's address (and only that), and prefer a trusted address an announcement gave over
+  the "best" one; `shared_tests` checks that
+  the journal warning offers the folder; `tests/cli.rs` runs Share Folder's server from the
+  `plancraft` binary itself and sees it stop once let go.
+
+### Left for later
+
+- Managing people from another computer (an `admin` signed in from their own PlanCraft): for now
+  people are managed where the server runs, in *Share Folder* or with `plancraft serve user …`.
+- Moving the plans open here onto the server in one step (closing them and opening them from it).
 
 ## Phase 5: packaging and services
 
