@@ -332,10 +332,18 @@ mod tests {
         assert_eq!(fp, keys.fingerprint());
         for size in [0, 1, 3, 4, 5, MAX_CHUNK - 5, MAX_CHUNK - 4, MAX_CHUNK - 3, MAX_CHUNK, MAX_CHUNK * 3 + 7, 1_000_000] {
             let payload: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
-            cs.send(&payload).unwrap();
-            assert_eq!(sr.recv(2_000_000).unwrap(), payload, "{size} bytes to the server");
-            ss.send(&payload).unwrap();
-            assert_eq!(cr.recv(2_000_000).unwrap(), payload, "{size} bytes to the client");
+            // Send on another thread: a frame larger than the socket buffers (about 64 KiB on
+            // Windows) only finishes sending while the other end reads it.
+            std::thread::scope(|t| {
+                let sending = t.spawn(|| cs.send(&payload));
+                assert_eq!(sr.recv(2_000_000).unwrap(), payload, "{size} bytes to the server");
+                sending.join().unwrap().unwrap();
+            });
+            std::thread::scope(|t| {
+                let sending = t.spawn(|| ss.send(&payload));
+                assert_eq!(cr.recv(2_000_000).unwrap(), payload, "{size} bytes to the client");
+                sending.join().unwrap().unwrap();
+            });
         }
     }
 
@@ -344,8 +352,12 @@ mod tests {
         let (server, client, _) = pair(Trust::FirstUse);
         let (_, mut sr) = server.unwrap();
         let (mut cs, _, _) = client.unwrap();
-        cs.send(&vec![7u8; 70_000]).unwrap();
+        // The receiver stops after the length, so the rest may never fit the socket buffers
+        // (about 64 KiB on Windows): send on another thread, which ends when the socket closes.
+        let sending = std::thread::spawn(move || cs.send(&vec![7u8; 70_000]));
         assert!(matches!(sr.recv(65_536), Err(WireError::TooLarge(70_000, 65_536))));
+        drop(sr);
+        let _ = sending.join().unwrap();
     }
 
     #[test]

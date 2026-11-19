@@ -143,7 +143,7 @@ fn a_large_frame_before_signing_in_closes_the_connection() {
     let s = setup();
     let server = s.start();
     let mut c = connect(&server);
-    c.send_raw(&vec![b' '; 200_000]).unwrap();
+    let _ = c.send_raw(&vec![b' '; 200_000]); // the server may close before it is all sent
     assert!(c.recv().is_err());
     // The server carries on.
     let mut d = signed_in(&server, "ana");
