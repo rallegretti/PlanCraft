@@ -86,6 +86,8 @@ pub struct OpenFromServer {
     /// Listening for servers announced on the network while the window is open (`None`: it
     /// could not, or in tests).
     browser: Option<plancraft_server::discovery::Browser>,
+    /// The browser redraws the window when it hears something.
+    browser_wakes: bool,
     found: Vec<plancraft_server::discovery::Found>,
 }
 
@@ -134,6 +136,7 @@ impl OpenFromServer {
             // when the window closes. Tests never touch the network.
             browser: if cfg!(test) || !browse { None } else { plancraft_server::discovery::Browser::start().ok() },
             found: Vec::new(),
+            browser_wakes: false,
         };
         // Servers whose key is trusted here always make the list, first.
         if let Some(b) = d.browser.as_mut() {
@@ -301,11 +304,15 @@ impl OpenFromServer {
             return Outcome::Opened(opened);
         }
         if let Some(b) = self.browser.as_mut() {
+            if !self.browser_wakes {
+                // News from the network redraws the window; nothing to look for otherwise.
+                let repaint = ctx.clone();
+                b.set_waker(Arc::new(move || repaint.request_repaint()));
+                self.browser_wakes = true;
+            }
             if b.poll() {
                 self.found = b.found();
             }
-            // Announcements arrive on another thread: look again in a moment.
-            ctx.request_repaint_after(std::time::Duration::from_millis(500));
         }
         let mut open = true;
         let mut cancel = false;

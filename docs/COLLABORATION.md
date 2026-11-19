@@ -568,16 +568,34 @@ the `Replica` and the connection. Merging never runs on the app's thread.
 
 ### Finding servers (`plancraft_server::discovery`)
 
-- mDNS through `mdns-sd` (pure Rust). A server announces `_plancraft._tcp` as "*folder* on
-  *computer*", on each of the computer's addresses (kept up to date as they change) when it listens
-  on all of them, or on its one address. The announcement is withdrawn first thing when the server
+- PlanCraft's own mDNS (`plancraft_server::mdns`, pure Rust on the standard library's sockets and
+  `socket2`; IPv4, 224.0.0.251). It replaced the `mdns-sd` library, which kept every record anyone
+  sent with no limit on how many or for how long: a hostile computer on the network could fill
+  memory in seconds. Ours does only what PlanCraft needs:
+  - the responder answers questions about its one server (PTR, SRV, TXT, A), announces it three
+    times when it starts and on each network it joins, answers on one network at most once a
+    second (one-shot queriers directly, 20 a second at most), says goodbye when it stops, and keeps
+    nothing it hears;
+  - the listener asks for PlanCraft servers (at once, then after 1, 2, 4… seconds, a minute apart
+    at most) and keeps only their records: 256 servers, 256 host names, 32 addresses each, every
+    record forgotten after 75 minutes whatever lifetime it was sent with. It wakes the window when
+    the list changes (no polling);
+  - both drop, unread, every packet from a computer outside this computer's own networks (an
+    address and its netmask, RFC 6762 §11), so nothing from beyond the local network is heard or
+    answered;
+  - packets are read with every length, count, label and compression pointer checked (pointers
+    only backwards, 64 at most; names of at most 255 bytes; 64 questions and 256 records read at
+    most); `tests/mdns.rs` sweeps random bytes and mDNS-like packets.
+- A server announces `_plancraft._tcp` as "*folder* on *computer*", on each of the computer's
+  networks (looked at again every 5 seconds, so new ones are announced on) when it listens on all
+  of them, or on its one address's network. The announcement is withdrawn first thing when the server
   stops, so lists drop it at once. `--no-announce` (and the *List it for others on the network*
   box in *Share Folder*) turns it off; a server listening only on this computer (`--bind
   127.0.0.1`) never announces. The announcement points to `computer-plancraft.local`, not the
   computer's own `.local` name, which the system answers for (two answers with different addresses
   could make the system think another computer took its name). Container and virtual-machine
   interfaces, and VPN and overlay networks (WireGuard, Tailscale, ZeroTier, tunnels), are left out
-  of announcing and listening (interfaces as they are when it starts).
+  of announcing and listening.
 - Announcing tells everyone on the network the folder's and the computer's names, on every
   network the computer joins while sharing (a laptop taken from the office to a café): the box's
   tooltip says so, and sharing stops when PlanCraft quits. The server also accepts connections on
@@ -681,6 +699,11 @@ the `Replica` and the connection. Merging never runs on the app's thread.
   servers still get in and come first.
 - `sharing` unit tests: long lines cut without keeping the rest, a program replaced by an upgrade
   started from its name. `guard` tests: a caught panic still comes back with standard error closed.
+- `mdns` unit tests: an announcement reads back and resolves, goodbyes remove at once, questions
+  about the server are recognised, one-shot queriers get their id and short lifetimes, only
+  neighbours are heard, a flood of records stays bounded and is forgotten in time, bad names
+  (pointers to themselves or forwards, overlong names, reserved bits) are refused, compressed
+  names read. `tests/mdns.rs`: random bytes and mDNS-like packets (property tests).
 - `discovery` unit tests: the best address, names made safe (control and invisible characters,
   fake trust marks), every address kept best first, names that fit in one DNS label, container
   bridges left out (a Hyper-V external switch kept), this computer's addresses are ones the window

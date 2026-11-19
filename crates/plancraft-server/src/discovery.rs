@@ -1,6 +1,6 @@
 //! Finding servers on the office network: a running server announces itself over mDNS (DNS
 //! service discovery, `_plancraft._tcp`), and *Open from Server* lists the servers it hears of.
-//! Pure Rust (`mdns-sd`).
+//! The protocol is PlanCraft's own (`crate::mdns`): it keeps only what it needs, bounded.
 //!
 //! Neither runs unless someone shares a folder or opens the *Open from Server* window: nothing
 //! announces itself or listens for announcements otherwise.
@@ -11,10 +11,8 @@
 
 use std::collections::BTreeMap;
 use std::net::IpAddr;
-use std::time::Duration;
 
-use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
-
+use crate::mdns::{self, Name, Net};
 use crate::protocol::DEFAULT_PORT;
 
 /// The service type PlanCraft servers announce.
@@ -31,12 +29,9 @@ pub const MAX_PER_HOST: usize = 4;
 const MAX_NAME_CHARS: usize = 80;
 /// A DNS label holds at most 63 bytes.
 const MAX_LABEL_BYTES: usize = 63;
-/// How long stopping waits for the goodbye message to go out.
-const GOODBYE_WAIT: Duration = Duration::from_secs(1);
-
-/// A server's announcement on the network, until dropped.
+/// A server's announcement on the network, until dropped (then it says goodbye).
 pub struct Announcer {
-    daemon: ServiceDaemon,
+    _responder: mdns::Responder,
     fullname: String,
 }
 
@@ -44,6 +39,55 @@ impl std::fmt::Debug for Announcer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Announcer").field("fullname", &self.fullname).finish_non_exhaustive()
     }
+}
+
+/// The service type as a name.
+fn service_name() -> Name {
+    Name::dotted(SERVICE)
+}
+
+/// A server's full name as it is keyed (`Plans\.2 on pc._plancraft._tcp.local.`).
+fn fullname_of(label: &[u8]) -> String {
+    format!("{}.{SERVICE}", mdns::escape_label(label))
+}
+
+/// The instance name in a full name, unescaped (`Plans.2 on pc`).
+fn instance_unescaped(fullname: &str) -> String {
+    let label = fullname
+        .len()
+        .checked_sub(SERVICE.len())
+        .and_then(|cut| fullname.get(cut..).filter(|t| t.eq_ignore_ascii_case(SERVICE)).and(fullname.get(..cut)))
+        .map(|l| l.strip_suffix('.').unwrap_or(l))
+        .unwrap_or(fullname);
+    let mut out = String::new();
+    let mut chars = label.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\\' => out.extend(chars.next()),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// The networks mDNS uses: this computer's IPv4 networks, but not loopback, container and
+/// virtual-machine bridges, or VPN and overlay networks.
+fn mdns_nets() -> Vec<Net> {
+    let mut nets: Vec<Net> = if_addrs::get_if_addrs()
+        .map(|l| {
+            l.into_iter()
+                .filter(|i| !virtual_interface(&i.name) && !overlay_interface(&i.name))
+                .filter_map(|i| match i.addr {
+                    if_addrs::IfAddr::V4(v4) if !v4.ip.is_loopback() && !v4.ip.is_link_local() => Some(Net { ip: v4.ip, mask: v4.netmask }),
+                    _ => None,
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    nets.sort_by_key(|n| u32::from(n.ip));
+    nets.dedup();
+    nets.truncate(16);
+    nets
 }
 
 /// `text` cut to at most `max` bytes, on a character boundary.
@@ -98,33 +142,28 @@ impl Announcer {
         Self::start_on(name, host, addr, MDNS_PORT)
     }
 
-    /// [`Announcer::start`] on another mDNS port (tests, so they never reach the real network).
+    /// [`Announcer::start`] on another mDNS port (tests: nothing reaches anyone listening on the
+    /// usual one).
     pub fn start_on(name: &str, host: &str, addr: std::net::SocketAddr, mdns_port: u16) -> Result<Announcer, String> {
-        let daemon = ServiceDaemon::new_with_port(mdns_port).map_err(|e| format!("cannot announce the server on the network: {e}"))?;
-        skip_virtual_interfaces(&daemon);
-        let ip = if addr.ip().is_unspecified() { String::new() } else { addr.ip().to_string() };
-        let properties = [("v", crate::protocol::PROTOCOL.to_string())];
-        let info = ServiceInfo::new(SERVICE, &instance_name(name, ""), &mdns_host(host), ip.as_str(), addr.port(), &properties[..])
-            .map_err(|e| format!("cannot announce the server on the network: {e}"))?;
-        let info = if addr.ip().is_unspecified() { info.enable_addr_auto() } else { info };
-        let fullname = info.get_fullname().to_string();
-        if let Err(e) = daemon.register(info) {
-            let _ = daemon.shutdown();
-            return Err(format!("cannot announce the server on the network: {e}"));
-        }
-        Ok(Announcer { daemon, fullname })
-    }
-}
-
-impl Drop for Announcer {
-    /// Says goodbye (so lists drop the server at once), then stops.
-    fn drop(&mut self) {
-        if let Ok(done) = self.daemon.unregister(&self.fullname) {
-            let _ = done.recv_timeout(GOODBYE_WAIT);
-        }
-        if let Ok(done) = self.daemon.shutdown() {
-            let _ = done.recv_timeout(GOODBYE_WAIT);
-        }
+        let only = match addr.ip() {
+            IpAddr::V4(v4) if !v4.is_unspecified() => Some(v4),
+            IpAddr::V4(_) => None,
+            IpAddr::V6(v6) if v6.is_unspecified() => None,
+            IpAddr::V6(_) => return Err("servers listening on one IPv6 address are not announced (people type the address)".into()),
+        };
+        let label = instance_name(name, "").into_bytes();
+        let fullname = fullname_of(&label);
+        let service = mdns::Service {
+            service: service_name(),
+            instance: label,
+            host: Name::dotted(&mdns_host(host)),
+            port: addr.port(),
+            txt: vec![format!("v={}", crate::protocol::PROTOCOL)],
+            only,
+        };
+        let responder =
+            mdns::Responder::start(service, mdns_port, mdns_nets).map_err(|e| format!("cannot announce the server on the network: {e}"))?;
+        Ok(Announcer { _responder: responder, fullname })
     }
 }
 
@@ -227,17 +266,6 @@ fn overlay_interface(name: &str) -> bool {
     ["tun", "utun", "tap", "wg", "tailscale", "zt", "ipsec", "ppp"].iter().any(|p| name.starts_with(p))
 }
 
-/// Keeps a daemon off this computer's virtual interfaces (it would announce, and hear, addresses
-/// only this computer reaches) and off VPN and overlay networks.
-fn skip_virtual_interfaces(daemon: &ServiceDaemon) {
-    let names: std::collections::BTreeSet<String> = if_addrs::get_if_addrs()
-        .map(|l| l.into_iter().map(|i| i.name).filter(|n| virtual_interface(n) || overlay_interface(n)).collect())
-        .unwrap_or_default();
-    if !names.is_empty() {
-        let _ = daemon.disable_interface(names.into_iter().map(mdns_sd::IfKind::Name).collect::<Vec<_>>());
-    }
-}
-
 /// The addresses of this computer that others on the network can type to reach a server on
 /// `port`: IPv4 first, then IPv6.
 pub fn local_addresses(port: u16) -> Vec<String> {
@@ -275,7 +303,7 @@ fn trust_mark(c: char) -> bool {
 pub fn found_from(fullname: &str, port: u16, addresses: &[IpAddr]) -> Option<Found> {
     let addresses = ranked_addresses(addresses, port);
     let address = addresses.first()?.clone();
-    let name: String = mdns_sd::instance_name_unescaped(fullname)
+    let name: String = instance_unescaped(fullname)
         .chars()
         .filter(|c| !c.is_control() && !invisible(*c) && !trust_mark(*c))
         .take(MAX_NAME_CHARS)
@@ -401,8 +429,9 @@ impl FoundList {
 
 /// Listens for servers' announcements until dropped.
 pub struct Browser {
-    daemon: ServiceDaemon,
-    events: mdns_sd::Receiver<ServiceEvent>,
+    listener: mdns::Listener,
+    /// The listener's news last taken in.
+    seen: Option<u64>,
     found: FoundList,
 }
 
@@ -414,43 +443,32 @@ impl Browser {
 
     /// [`Browser::start`] on another mDNS port (tests).
     pub fn start_on(mdns_port: u16) -> Result<Browser, String> {
-        let daemon = ServiceDaemon::new_with_port(mdns_port).map_err(|e| format!("cannot look for servers on the network: {e}"))?;
-        skip_virtual_interfaces(&daemon);
-        let events = match daemon.browse(SERVICE) {
-            Ok(r) => r,
-            Err(e) => {
-                let _ = daemon.shutdown();
-                return Err(format!("cannot look for servers on the network: {e}"));
-            }
-        };
-        Ok(Browser { daemon, events, found: FoundList::default() })
+        let listener = mdns::Listener::start(service_name(), mdns_port, mdns_nets)
+            .map_err(|e| format!("cannot look for servers on the network: {e}"))?;
+        Ok(Browser { listener, seen: None, found: FoundList::default() })
     }
 
-    /// Takes in the announcements heard since the last call; returns whether the list changed.
+    /// Called (from another thread) whenever the servers heard of change: no need to look
+    /// otherwise.
+    pub fn set_waker(&self, waker: std::sync::Arc<dyn Fn() + Send + Sync>) {
+        self.listener.set_waker(waker);
+    }
+
+    /// Takes in what was heard since the last call; returns whether the list changed.
     pub fn poll(&mut self) -> bool {
+        let (generation, resolved) = self.listener.resolved();
+        if self.seen == Some(generation) {
+            return false;
+        }
+        self.seen = Some(generation);
+        let now: Vec<String> = resolved.iter().map(|r| fullname_of(&r.instance)).collect();
+        let gone: Vec<String> = self.found.heard.keys().filter(|k| !now.contains(k)).cloned().collect();
         let mut changed = false;
-        // Everything waiting (the daemon gives up on a listener that lets 1,000 pile up), up to a
-        // bound, so a flood never holds up a frame for long.
-        for _ in 0..4096 {
-            let event = match self.events.try_recv() {
-                Ok(e) => e,
-                Err(mdns_sd::TryRecvError::Empty) => break,
-                Err(mdns_sd::TryRecvError::Disconnected) => {
-                    // Given up on (flooded), or its thread ended: listen afresh.
-                    if let Ok(events) = self.daemon.browse(SERVICE) {
-                        self.events = events;
-                    }
-                    break;
-                }
-            };
-            match event {
-                ServiceEvent::ServiceResolved(s) if s.ty_domain == SERVICE => {
-                    let addresses: Vec<IpAddr> = s.addresses.iter().map(mdns_sd::ScopedIp::to_ip_addr).collect();
-                    changed |= self.found.heard(&s.fullname, &s.host, s.port, &addresses);
-                }
-                ServiceEvent::ServiceRemoved(_, fullname) => changed |= self.found.removed(&fullname),
-                _ => {}
-            }
+        for k in gone {
+            changed |= self.found.removed(&k);
+        }
+        for (r, fullname) in resolved.iter().zip(&now) {
+            changed |= self.found.heard(fullname, &r.host, r.port, &r.addresses);
         }
         changed
     }
@@ -463,23 +481,6 @@ impl Browser {
     /// The addresses whose key is trusted already: their servers always get in, and come first.
     pub fn set_trusted<'a>(&mut self, addresses: impl IntoIterator<Item = &'a str>) {
         self.found.set_trusted(addresses);
-    }
-}
-
-impl Drop for Browser {
-    /// Stops listening, waiting for the daemon on a thread of its own (closing the window must not
-    /// wait for it).
-    fn drop(&mut self) {
-        fn stop(daemon: &ServiceDaemon) {
-            let _ = daemon.stop_browse(SERVICE);
-            if let Ok(done) = daemon.shutdown() {
-                let _ = done.recv_timeout(GOODBYE_WAIT);
-            }
-        }
-        let daemon = self.daemon.clone();
-        if std::thread::Builder::new().name("plancraft-mdns-stop".into()).spawn(move || stop(&daemon)).is_err() {
-            stop(&self.daemon);
-        }
     }
 }
 

@@ -17,6 +17,7 @@ pub mod client;
 pub mod discovery;
 pub mod journal;
 pub mod link;
+pub mod mdns;
 pub mod plan;
 pub mod protocol;
 pub mod server;

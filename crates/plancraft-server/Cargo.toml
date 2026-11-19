@@ -28,10 +28,10 @@ unicode-normalization = "0.1"
 ctrlc = { version = "3.5", features = ["termination"] }
 # Checks that a key file's public key belongs to its private key (already used by snow).
 curve25519-dalek = { version = "4.1", default-features = false }
-# Announcing servers on the office network and finding them (mDNS, pure Rust), only while someone
-# shares a folder or has the Open from Server window open.
-mdns-sd = "0.22"
-# This computer's addresses, shown in Share Folder (already used by mdns-sd).
+# Socket options the standard library lacks, for PlanCraft's own mDNS (`mdns.rs`: sharing the
+# port with the system's responder, choosing the network to send on). Pure Rust.
+socket2 = { version = "0.6", features = ["all"] }
+# This computer's networks (addresses and netmasks), for mDNS and Share Folder.
 if-addrs = "0.15"
 
 [dev-dependencies]
