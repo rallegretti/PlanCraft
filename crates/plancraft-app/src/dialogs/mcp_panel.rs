@@ -121,14 +121,14 @@ pub fn show(
     });
 }
 
-#[cfg(test)]
+// AppImages are Linux only.
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use super::*;
 
     /// Regression: from an AppImage the panel offered the temporary mount's path, which stops
     /// existing when PlanCraft closes, so the agent setup command it showed never worked.
     #[test]
-    #[cfg(target_os = "linux")]
     fn the_command_names_the_appimage_when_there_is_one() {
         let mounted = Some(std::path::PathBuf::from("/tmp/.mount_PlanCrAbc/usr/bin/plancraft"));
         let dir = || Some("/tmp/.mount_PlanCrAbc".into());
