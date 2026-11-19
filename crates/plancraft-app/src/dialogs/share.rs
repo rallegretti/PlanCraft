@@ -96,6 +96,10 @@ pub fn server_program() -> Result<Program, String> {
 /// `exe` sits inside that mount (PlanCraft started from another AppImage's terminal must not run
 /// that AppImage).
 pub fn running_appimage(exe: &Path, appimage: Option<std::ffi::OsString>, appdir: Option<std::ffi::OsString>) -> Option<PathBuf> {
+    // AppImages are Linux only.
+    if !cfg!(target_os = "linux") {
+        return None;
+    }
     let image = PathBuf::from(appimage.filter(|a| !a.is_empty())?);
     let dir = PathBuf::from(appdir.filter(|d| !d.is_empty())?);
     (image.is_absolute() && dir.is_absolute() && exe.starts_with(&dir)).then_some(image)
@@ -823,6 +827,7 @@ mod tests {
     /// Regression: `APPIMAGE` was trusted whenever it was set, so PlanCraft started from another
     /// AppImage's terminal ran that AppImage as its server.
     #[test]
+    #[cfg(target_os = "linux")]
     fn the_appimage_runs_the_server_only_when_plancraft_runs_from_it() {
         let mounted = Path::new("/tmp/.mount_PlanCrAbc/usr/bin/plancraft");
         let image = Some("/home/a/PlanCraft.AppImage".into());
