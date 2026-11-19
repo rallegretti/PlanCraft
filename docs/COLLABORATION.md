@@ -713,6 +713,9 @@ the `Replica` and the connection. Merging never runs on the app's thread.
   waits for a change PlanCraft is making and keeps both.
 - `discovery` tests: one computer cannot fill the list (per host name, per address), trusted
   servers still get in and come first.
+- By hand, between two computers: `announce_for_others` on one and `hear_another_computer` on
+  the other (`tests/sharing.rs`, ignored; `PLANCRAFT_MDNS_TEST_PORT` and `PLANCRAFT_MDNS_TEST_NAME`
+  set on both). Checked Linux ↔ macOS and Linux ↔ Windows on one office network, each way.
 - `sharing` unit tests: long lines cut without keeping the rest, a program replaced by an upgrade
   started from its name. `guard` tests: a caught panic still comes back with standard error closed.
 - `mdns` unit tests: an announcement reads back and resolves, goodbyes remove at once, questions
