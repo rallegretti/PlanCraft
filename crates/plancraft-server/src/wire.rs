@@ -334,15 +334,27 @@ mod tests {
             let payload: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
             // Send on another thread: a frame larger than the socket buffers (about 64 KiB on
             // Windows) only finishes sending while the other end reads it.
+            // If receiving fails, the socket is shut so the sender stops too (the test fails
+            // instead of hanging).
             std::thread::scope(|t| {
                 let sending = t.spawn(|| cs.send(&payload));
-                assert_eq!(sr.recv(2_000_000).unwrap(), payload, "{size} bytes to the server");
-                sending.join().unwrap().unwrap();
+                let got = sr.recv(2_000_000);
+                if got.as_ref().ok() != Some(&payload) {
+                    let _ = sr.stream.shutdown(std::net::Shutdown::Both);
+                }
+                let sent = sending.join().unwrap();
+                assert_eq!(got.unwrap(), payload, "{size} bytes to the server");
+                sent.unwrap();
             });
             std::thread::scope(|t| {
                 let sending = t.spawn(|| ss.send(&payload));
-                assert_eq!(cr.recv(2_000_000).unwrap(), payload, "{size} bytes to the client");
-                sending.join().unwrap().unwrap();
+                let got = cr.recv(2_000_000);
+                if got.as_ref().ok() != Some(&payload) {
+                    let _ = cr.stream.shutdown(std::net::Shutdown::Both);
+                }
+                let sent = sending.join().unwrap();
+                assert_eq!(got.unwrap(), payload, "{size} bytes to the client");
+                sent.unwrap();
             });
         }
     }

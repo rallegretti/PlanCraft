@@ -272,9 +272,12 @@ An editor cannot make a plan unusable:
   refused (`Host::submit_checked`, before anything changes). Past a sixteenth of that, by an
   estimate counting each change eight times its size, the plan a change would make is measured
   exactly. Adding tasks grows a saved plan about 3.5 times the change; hostile minimal tasks
-  about 40 times; overshooting would take over 120.
+  about 40 times; overshooting would take over 120. The size starts from what the plan saves at
+  when it opens, not the file's bytes (a compact file grows when saved), and a plan already
+  over 56 MB as saved is not shared.
 - While saves keep failing (a plan file made read-only), changes are refused once the journal
-  holds 512 MB, half of what recovery reads, so the plan always opens again.
+  holds 512 MB, half of what recovery reads, so the plan always opens again; until then they
+  are accepted, and a save is tried at most every 30 seconds, not after each change.
 - Each person gets 20 blocks of new ids in a row per plan, then one every 30 seconds, kept by the
   server across reopenings, so the ids (about a million blocks) cannot be used up.
 - The host keeps at most 64 MB of recent changes for catching up (`sync::LOG_BYTES`), whatever
@@ -322,14 +325,17 @@ One JSON object per frame, tagged by `type`; see the types for the fields.
   not open is not listed, and opening it gives the same answer as a plan that does not exist.
 - Per-plan rules match plan names ignoring case and Unicode form (macOS stores accented names
   decomposed, people type them composed), one rule per plan: `--plan` must be a plan file name,
-  and replaces a rule written another way.
+  and replaces a rule written another way. If a hand-edited file holds two rules for one plan,
+  the stricter applies.
 - After five failed sign-ins for one name from one address, or from one address for any names,
   each try waits twice as long as the last (1 s up to 15 minutes). A try counts as failed from
   the moment it starts, so tries sent at once cannot all slip through; names count per address,
   so nobody can lock someone out from another computer. Addresses count exactly, IPv6 too: on
   an office network every computer shares one /64. After 30 failures for one name from all
-  addresses together, each try for that name waits up to a minute: someone guessing from many
-  addresses gets a few tries a minute, and the real person is never locked out for long.
+  addresses together, each try for that name waits up to a minute, so someone guessing from many
+  addresses gets about a try a minute. Addresses where that name signed in during the last 30
+  days skip this wait (the server remembers them until it restarts), so the guesser cannot keep
+  the real person out.
   Unknown names take as long to check as known ones; at most two passwords are checked at once.
 - On Unix the key and users files are 0600 and made so again if loosened. On Windows they rely on
   the folder's permissions (owner-only access lists need platform code: phase 5).
@@ -361,8 +367,8 @@ the target, with no hard limit below the connection caps.
   connection, a full disk for a change and for a save and nothing written after it (`/dev/full`,
   Linux), large journals saved early, catch-up too large, a plan grown too large and the size
   estimate's margin (hostile minimal items too), the shared queue budget (closing the connection
-  holding the most, a broadcast counted once) and its byte counts, changes waiting while saves
-  fail, a FIFO in place of the plan or journal, rationed leases across reopenings, access taken
+  holding the most, a broadcast counted once) and its byte counts, changes refused while saves
+  fail and no save retried before its wait, the size measured as saved when a plan opens, a FIFO in place of the plan or journal, rationed leases across reopenings, access taken
   away.
 - `tests/server.rs`: a real server over the network: sign-ins and access, refused requests,
   another protocol, a pinned client meeting another key, password guessing (one at a time and

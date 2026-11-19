@@ -332,10 +332,8 @@ pub struct SharedPlan {
 }
 
 fn read_plan(path: &Path) -> Result<(Vec<u8>, Project, Vec<String>), String> {
-    let meta = std::fs::symlink_metadata(path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
-    if !meta.is_file() {
-        return Err(format!("{} is not a regular file", path.display()));
-    }
+    // No check of the name first: `open_regular` checks the file it opened (a link, FIFO or
+    // folder put there is refused, and the open never blocks).
     let mut bytes = Vec::new();
     io::open_regular(path, false, io::Links::Refuse)
         .and_then(|f| f.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes))
@@ -483,6 +481,16 @@ impl SharedPlan {
                 }
             }
         }
+        // The size the plan saves at, not the file's: a compact file can grow many times over
+        // when saved, past what may be shared or even opened again.
+        let size = io::to_json(host.project()).map_err(|e| format!("cannot share {name}: {e}"))?.len();
+        if size > MAX_SHARED_BYTES {
+            return Err(format!(
+                "{name} is too large to share: it saves at {} MB, and a shared plan may hold at most {} MB",
+                size / (1024 * 1024),
+                MAX_SHARED_BYTES / (1024 * 1024)
+            ));
+        }
         let mut records = back.records.clone();
         if damaged {
             let kept = keep_aside(&jpath);
@@ -512,7 +520,7 @@ impl SharedPlan {
             journal,
             stamp: io::disk_stamp(path),
             save_to: path.to_path_buf(),
-            size: bytes.len(),
+            size,
             dirty: false,
             last_change: now,
             last_save: now,
@@ -751,7 +759,8 @@ impl SharedPlan {
             return Err(b.clone());
         }
         if self.journal.written() > self.max_unsaved_journal {
-            let reason = "the server cannot save this plan at the moment (see its log); changes wait until it can".to_string();
+            let reason =
+                "the server cannot save this plan at the moment (see its log), so your change was not applied; try again later".to_string();
             self.send(conn, &ServerMsg::Rejected { change: change.id, conflicts: Vec::new(), reason: Some(reason) });
             return Ok(());
         }
@@ -783,10 +792,17 @@ impl SharedPlan {
                 self.dirty = true;
                 self.last_change = Instant::now();
                 self.broadcast(&ServerMsg::Entry { entry });
-                if self.journal.written() > self.journal_save_bytes {
+                // A long journal is saved away now, unless saving just failed: then each change
+                // would write the whole plan again for nothing (upkeep tries after the wait).
+                let now = Instant::now();
+                let waiting = self.retry_save.is_some_and(|t| now < t);
+                if self.journal.written() > self.journal_save_bytes && !waiting {
                     match self.save() {
-                        Ok(()) => {}
-                        Err(SaveError::Retry(e)) => (self.log)(&format!("{}: saving failed ({e}); trying again shortly", self.name)),
+                        Ok(()) => self.retry_save = None,
+                        Err(SaveError::Retry(e)) => {
+                            (self.log)(&format!("{}: saving failed ({e}); trying again in 30 seconds", self.name));
+                            self.retry_save = now.checked_add(SAVE_RETRY);
+                        }
                         Err(SaveError::Broken(b)) => return Err(b),
                     }
                 }
@@ -888,7 +904,7 @@ impl SharedPlan {
                 Ok(()) => self.retry_save = None,
                 Err(SaveError::Retry(e)) => {
                     (self.log)(&format!("{}: saving failed ({e}); trying again in 30 seconds", self.name));
-                    self.retry_save = Some(now + SAVE_RETRY);
+                    self.retry_save = now.checked_add(SAVE_RETRY);
                 }
                 Err(SaveError::Broken(b)) => return Err(b),
             }

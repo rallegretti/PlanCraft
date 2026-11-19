@@ -727,11 +727,12 @@ fn hostile_minimal_items_stay_within_the_estimate_margin() {
     let incoming = serde_json::to_vec(&change.patch).unwrap().len();
     let before = io::to_json(plan.host().project()).unwrap().len();
     plan.submit(1, &change).unwrap();
-    let applied = messages(&rx).iter().any(|m| matches!(m, ServerMsg::Entry { .. }));
-    if applied {
-        let grown = io::to_json(plan.host().project()).unwrap().len() - before;
-        assert!(grown < 120 * incoming, "grew {grown} bytes from {incoming}");
-    }
+    assert!(messages(&rx).iter().any(|m| matches!(m, ServerMsg::Entry { .. })), "the change was applied");
+    // Unmeasured means size + incoming × GROWTH ≤ limit / 16, so incoming ≤ limit / (16 × GROWTH):
+    // overshooting the limit would take growing by about 15 × 16 × GROWTH / 16 = 120 times that.
+    let grown = io::to_json(plan.host().project()).unwrap().len() - before;
+    let margin = 15 * GROWTH;
+    assert!(grown < margin * incoming, "grew {grown} bytes from {incoming}");
 }
 
 #[test]
@@ -764,4 +765,43 @@ fn a_fifo_in_place_of_a_plan_or_journal_is_refused_at_once() {
     std::process::Command::new("mkfifo").arg(&path).status().unwrap();
     assert!(SharedPlan::open(&path, "Plan.plancraft", crate::quiet()).is_err(), "a FIFO plan");
     drop(dir);
+}
+
+#[test]
+fn the_size_is_what_the_plan_saves_at_not_the_files() {
+    let (_dir, path) = setup();
+    // The same plan written compactly: far fewer bytes than it saves at.
+    let project = io::load(&path).unwrap();
+    let compact = serde_json::to_vec(&serde_json::from_str::<serde_json::Value>(&io::to_json(&project).unwrap()).unwrap()).unwrap();
+    std::fs::write(&path, &compact).unwrap();
+    let plan = open(&path);
+    let saved = io::to_json(plan.host().project()).unwrap().len();
+    assert!(saved > compact.len(), "the test needs a compact file");
+    assert_eq!(plan.size, saved);
+}
+
+#[cfg(unix)]
+#[test]
+fn after_a_failed_save_changes_do_not_try_again_at_once() {
+    use std::os::unix::fs::PermissionsExt;
+    let (dir, path) = setup();
+    let mut plan = open(&path);
+    let (mut r, rx) = join(&mut plan, 1, ClientId::new());
+    plan.journal_save_bytes = 1;
+    // A folder nobody may write in: every save fails, while the open journal still takes records.
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+    let writable = std::fs::File::create(dir.path().join("probe")).is_ok();
+    if !writable {
+        for name in ["One", "Two", "Three"] {
+            add_task(&mut plan, 1, &mut r, &rx, name);
+        }
+    }
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    if writable {
+        return; // running as root: the folder cannot be made read-only
+    }
+    let journal = std::fs::read_to_string(journal::path_for(&path).unwrap()).unwrap();
+    assert_eq!(journal.matches("\"record\":\"saving\"").count(), 1, "one try, then the wait: {journal}");
+    assert!(plan.dirty);
+    assert!(has_task(plan.host().project(), "Three"), "the changes were still accepted");
 }

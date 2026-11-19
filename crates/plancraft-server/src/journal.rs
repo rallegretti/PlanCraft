@@ -78,18 +78,17 @@ pub struct ReadBack {
 
 /// Reads the journal at `path` (none: no records).
 pub fn read(path: &Path) -> std::io::Result<ReadBack> {
-    let meta = match std::fs::symlink_metadata(path) {
-        Ok(m) => m,
+    // No check of the name first: `open_regular` checks the file it opened (a link, FIFO or
+    // folder put there is refused, and the open never blocks).
+    let file = match plancraft_core::io::open_regular(path, false, plancraft_core::io::Links::Refuse) {
+        Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(ReadBack::default()),
         Err(e) => return Err(e),
     };
-    if !meta.is_file() {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "the journal is not a regular file"));
-    }
-    if meta.len() > MAX_JOURNAL_BYTES {
+    if file.metadata()?.len() > MAX_JOURNAL_BYTES {
         return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "the journal is too large"));
     }
-    let mut reader = BufReader::new(plancraft_core::io::open_regular(path, false, plancraft_core::io::Links::Refuse)?);
+    let mut reader = BufReader::new(file);
     let mut out = ReadBack::default();
     loop {
         let mut line = Vec::new();

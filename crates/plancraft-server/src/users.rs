@@ -53,9 +53,10 @@ impl User {
     /// The role for one plan. Plan names are compared ignoring case: a rule written as
     /// `secret.plancraft` must not miss the file `Secret.plancraft` where the file system
     /// ignores case (and two plans told apart only by case share their rules, never escape them).
+    /// Should a hand-edited file hold two rules for one plan, the stricter one applies.
     pub fn role_for(&self, plan: &str) -> Role {
         let plan = plan_key(plan);
-        self.plans.iter().find(|(p, _)| plan_key(p) == plan).map_or(self.role, |(_, r)| *r)
+        self.plans.iter().filter(|(p, _)| plan_key(p) == plan).map(|(_, r)| *r).min().unwrap_or(self.role)
     }
 }
 
@@ -274,9 +275,15 @@ impl Failures {
 /// A try counts as failed from the moment it starts ([`Throttle::begin`]) and is forgiven when the
 /// password was right, so many tries sent at once cannot all slip through before the first fails.
 /// Names are tracked per address, so a stranger cannot lock someone out from elsewhere.
+///
+/// One name guessed from many addresses waits too, except at addresses where that name signed in
+/// recently: otherwise someone spending one failed try a minute could keep the real person out
+/// for good.
 #[derive(Debug, Default)]
 pub struct Throttle {
     failures: HashMap<String, Failures>,
+    /// When each name last signed in from each address (`user:name@ip:addr`).
+    trusted: HashMap<String, Instant>,
 }
 
 fn address_key(ip: Option<IpAddr>) -> String {
@@ -300,15 +307,20 @@ fn name_key(user: &str) -> String {
 
 /// Failed sign-ins for one name from all addresses together before that name waits too.
 const NAME_FREE_FAILURES: u32 = 30;
-/// The longest such wait: short, so someone guessing from many addresses is slowed to a few
-/// tries a minute while the real person is never locked out for long.
+/// The longest such wait: someone guessing from many addresses is slowed to a try a minute.
 const NAME_MAX_WAIT: Duration = Duration::from_secs(60);
+/// How long a sign-in keeps the name-wide wait away from its address (the server remembers it
+/// until it restarts).
+const TRUSTED_FOR: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 impl Throttle {
     /// How long `user` from `ip` must wait before trying again (zero: may try now).
     pub fn wait(&self, user: &str, ip: Option<IpAddr>) -> Duration {
         let now = Instant::now();
         let local = keys(user, ip).iter().filter_map(|k| self.failures.get(k)).map(|f| f.wait(now)).max().unwrap_or(Duration::ZERO);
+        if self.is_trusted(user, ip, now) {
+            return local;
+        }
         let everywhere = self.failures.get(&format!("name:{}", name_key(user))).map_or(Duration::ZERO, |f| {
             if f.count < NAME_FREE_FAILURES {
                 return Duration::ZERO;
@@ -316,6 +328,11 @@ impl Throttle {
             NAME_MAX_WAIT.saturating_sub(now.saturating_duration_since(f.last))
         });
         local.max(everywhere)
+    }
+
+    /// Whether `user` signed in from `ip` lately (never for an unknown address).
+    fn is_trusted(&self, user: &str, ip: Option<IpAddr>, now: Instant) -> bool {
+        ip.is_some() && self.trusted.get(&keys(user, ip)[0]).is_some_and(|t| now.saturating_duration_since(*t) < TRUSTED_FOR)
     }
 
     /// Starts a try: counts it as failed until [`Throttle::succeeded`]. `Err` with the wait when
@@ -350,6 +367,15 @@ impl Throttle {
     pub fn succeeded(&mut self, user: &str, ip: Option<IpAddr>) {
         let [name, addr] = keys(user, ip);
         self.failures.remove(&name);
+        if ip.is_some() {
+            let now = Instant::now();
+            self.trusted.retain(|_, t| now.saturating_duration_since(*t) < TRUSTED_FOR);
+            while self.trusted.len() >= MAX_TRACKED {
+                let Some(oldest) = self.trusted.iter().min_by_key(|(_, t)| **t).map(|(k, _)| k.clone()) else { break };
+                self.trusted.remove(&oldest);
+            }
+            self.trusted.insert(name, now);
+        }
         if let Some(f) = self.failures.get_mut(&format!("name:{}", name_key(user))) {
             f.count = f.count.saturating_sub(1);
         }
@@ -510,6 +536,23 @@ mod tests {
     }
 
     #[test]
+    fn guessing_from_many_addresses_never_locks_out_where_the_person_signs_in() {
+        let mut t = Throttle::default();
+        let home: IpAddr = "10.0.0.5".parse().unwrap();
+        t.begin("ana", Some(home)).unwrap();
+        t.succeeded("ana", Some(home));
+        for i in 0..NAME_FREE_FAILURES * 4 {
+            let ip: IpAddr = format!("fd00::{i:x}").parse().unwrap();
+            t.failed("ana", Some(ip));
+            assert_eq!(t.wait("ana", Some(home)), Duration::ZERO, "ana can still sign in where she always does");
+        }
+        assert!(t.begin("ana", Some(home)).is_ok());
+        let new_place: IpAddr = "fd01::1".parse().unwrap();
+        assert!(t.wait("ana", Some(new_place)) > Duration::ZERO, "a new address still waits");
+        assert!(t.wait("ana", None) > Duration::ZERO, "so does an unknown one");
+    }
+
+    #[test]
     fn rules_match_names_in_either_unicode_form() {
         let dir = tempfile::tempdir().unwrap();
         let mut users = Users::load(&dir.path().join("u.json")).unwrap();
@@ -531,6 +574,18 @@ mod tests {
         let eve = users.get("eve").unwrap();
         assert_eq!(eve.role_for("Secret.plancraft"), Role::None);
         assert_eq!(eve.plans.len(), 1);
+    }
+
+    #[test]
+    fn two_rules_for_one_plan_in_a_hand_edited_file_give_the_stricter_role() {
+        let eve = User {
+            name: "eve".into(),
+            hash: String::new(),
+            role: Role::Editor,
+            plans: [("Secret.plancraft".to_string(), Role::Editor), ("secret.plancraft".to_string(), Role::None)].into_iter().collect(),
+        };
+        assert_eq!(eve.role_for("SECRET.plancraft"), Role::None);
+        assert_eq!(eve.role_for("Other.plancraft"), Role::Editor);
     }
 
     #[test]
