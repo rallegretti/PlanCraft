@@ -20,7 +20,7 @@ fn program() -> Program {
 }
 
 fn waker() -> plancraft_server::sharing::Waker {
-    Arc::new(|| {})
+    Arc::new(|_| {})
 }
 
 /// Waits (up to 30 s) until `done` says yes about the sharing's state.

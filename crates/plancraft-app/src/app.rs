@@ -2907,6 +2907,10 @@ impl PlanCraftApp {
                 }
             }
         }
+        if self.share_dialog.is_none() {
+            // Nobody looks at the server's log: its new lines don't redraw the app.
+            self.share.watch_log(false);
+        }
         if let Some(d) = self.share_dialog.as_mut() {
             let ws = self.ws.clone();
             let open_here = move |folder: &Path| open_in_folder(&lock(&ws), folder);

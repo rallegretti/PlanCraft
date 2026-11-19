@@ -39,7 +39,7 @@ fn share_folder_runs_the_server_from_plancraft_itself() {
         args: vec!["serve".into(), "--bind".into(), "127.0.0.1".into()],
         prepare: None,
     };
-    let mut s = Sharing::start(&program, &folder, &config, 0, false, std::sync::Arc::new(|| {})).unwrap();
+    let mut s = Sharing::start(&program, &folder, &config, 0, false, std::sync::Arc::new(|_| {})).unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
     let ready = loop {
         match s.state() {

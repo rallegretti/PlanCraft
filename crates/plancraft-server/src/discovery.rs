@@ -21,8 +21,12 @@ use crate::protocol::DEFAULT_PORT;
 pub const SERVICE: &str = "_plancraft._tcp.local.";
 /// The standard mDNS port.
 pub const MDNS_PORT: u16 = 5353;
-/// Servers listed at most (announcements come from anyone on the network).
+/// Servers listed at most (announcements come from anyone on the network), besides those already
+/// trusted.
 pub const MAX_FOUND: usize = 64;
+/// Servers listed at most per host name, and per address: one computer announcing many names
+/// can't fill the list.
+pub const MAX_PER_HOST: usize = 4;
 /// Longest server name shown.
 const MAX_NAME_CHARS: usize = 80;
 /// A DNS label holds at most 63 bytes.
@@ -246,11 +250,94 @@ pub fn found_from(fullname: &str, port: u16, addresses: &[IpAddr]) -> Option<Fou
     Some(Found { name, address, addresses })
 }
 
+/// One server heard of, and what it is counted by.
+#[derive(Clone, Debug)]
+struct Heard {
+    found: Found,
+    /// The host name its announcement points to, lower case.
+    host: String,
+    /// One of its addresses is trusted already.
+    trusted: bool,
+}
+
+/// The servers heard of, kept so no one computer can crowd out the others: at most
+/// [`MAX_PER_HOST`] per host name and per address, [`MAX_FOUND`] in all, first come first kept.
+/// Servers at an address already trusted (their key was confirmed before) always get in (up to
+/// [`MAX_FOUND`] of those too) and come first.
+#[derive(Default)]
+pub struct FoundList {
+    heard: BTreeMap<String, Heard>,
+    /// Addresses whose key is trusted already, normalised.
+    trusted: std::collections::HashSet<String>,
+}
+
+fn normalised(address: &str) -> String {
+    crate::link::normalise_address(address).unwrap_or_else(|_| address.to_lowercase())
+}
+
+impl FoundList {
+    /// The addresses whose key is trusted already (as typed in *Open from Server*).
+    pub fn set_trusted<'a>(&mut self, addresses: impl IntoIterator<Item = &'a str>) {
+        self.trusted = addresses.into_iter().map(normalised).collect();
+        let trusted = &self.trusted;
+        for h in self.heard.values_mut() {
+            h.trusted = h.found.addresses.iter().any(|a| trusted.contains(&normalised(a)));
+        }
+    }
+
+    /// Takes in a server's announcement (`fullname` as announced, the host name it points to,
+    /// its port and addresses). Returns whether the list changed.
+    pub fn heard(&mut self, fullname: &str, host: &str, port: u16, addresses: &[IpAddr]) -> bool {
+        let Some(found) = found_from(fullname, port, addresses) else { return self.heard.remove(fullname).is_some() };
+        let host = host.trim_end_matches('.').to_lowercase();
+        let trusted = found.addresses.iter().any(|a| self.trusted.contains(&normalised(a)));
+        if self.heard.get(fullname).is_some_and(|h| h.found == found && h.host == host) {
+            return false;
+        }
+        // Counted without this server's own earlier announcement.
+        let others = || self.heard.iter().filter(|(name, _)| name.as_str() != fullname).map(|(_, h)| h);
+        let admitted = if trusted {
+            others().filter(|h| h.trusted).count() < MAX_FOUND
+        } else if others().filter(|h| !h.trusted).count() >= MAX_FOUND {
+            // Full (checked first: cheap, and what a flood mostly meets).
+            false
+        } else {
+            let same_host = others().filter(|h| !h.trusted && h.host == host).count();
+            let same_address =
+                found.addresses.iter().map(|a| others().filter(|h| !h.trusted && h.found.addresses.contains(a)).count()).max().unwrap_or(0);
+            same_host < MAX_PER_HOST && same_address < MAX_PER_HOST
+        };
+        if !admitted {
+            // Not taken in (an earlier announcement of it stays as it was).
+            return false;
+        }
+        self.heard.insert(fullname.to_string(), Heard { found, host, trusted });
+        true
+    }
+
+    /// Forgets a server (it said goodbye). Returns whether the list changed.
+    pub fn removed(&mut self, fullname: &str) -> bool {
+        self.heard.remove(fullname).is_some()
+    }
+
+    /// The servers, those already trusted first, then by name.
+    pub fn list(&self) -> Vec<Found> {
+        let mut list: Vec<&Heard> = self.heard.values().collect();
+        list.sort_by(|a, b| {
+            b.trusted
+                .cmp(&a.trusted)
+                .then_with(|| a.found.name.to_lowercase().cmp(&b.found.name.to_lowercase()))
+                .then_with(|| a.found.address.cmp(&b.found.address))
+        });
+        list.into_iter().map(|h| h.found.clone()).collect()
+    }
+}
+
 /// Listens for servers' announcements until dropped.
 pub struct Browser {
     daemon: ServiceDaemon,
     events: mdns_sd::Receiver<ServiceEvent>,
-    found: BTreeMap<String, Found>,
+    found: FoundList,
 }
 
 impl Browser {
@@ -270,7 +357,7 @@ impl Browser {
                 return Err(format!("cannot look for servers on the network: {e}"));
             }
         };
-        Ok(Browser { daemon, events, found: BTreeMap::new() })
+        Ok(Browser { daemon, events, found: FoundList::default() })
     }
 
     /// Takes in the announcements heard since the last call; returns whether the list changed.
@@ -293,27 +380,23 @@ impl Browser {
             match event {
                 ServiceEvent::ServiceResolved(s) if s.ty_domain == SERVICE => {
                     let addresses: Vec<IpAddr> = s.addresses.iter().map(mdns_sd::ScopedIp::to_ip_addr).collect();
-                    let Some(found) = found_from(&s.fullname, s.port, &addresses) else { continue };
-                    if self.found.len() >= MAX_FOUND && !self.found.contains_key(&s.fullname) {
-                        continue;
-                    }
-                    if self.found.get(&s.fullname) != Some(&found) {
-                        self.found.insert(s.fullname.clone(), found);
-                        changed = true;
-                    }
+                    changed |= self.found.heard(&s.fullname, &s.host, s.port, &addresses);
                 }
-                ServiceEvent::ServiceRemoved(_, fullname) => changed |= self.found.remove(&fullname).is_some(),
+                ServiceEvent::ServiceRemoved(_, fullname) => changed |= self.found.removed(&fullname),
                 _ => {}
             }
         }
         changed
     }
 
-    /// The servers heard of, by name.
+    /// The servers heard of: those at an address already trusted first, then by name.
     pub fn found(&self) -> Vec<Found> {
-        let mut list: Vec<Found> = self.found.values().cloned().collect();
-        list.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()).then_with(|| a.address.cmp(&b.address)));
-        list
+        self.found.list()
+    }
+
+    /// The addresses whose key is trusted already: their servers always get in, and come first.
+    pub fn set_trusted<'a>(&mut self, addresses: impl IntoIterator<Item = &'a str>) {
+        self.found.set_trusted(addresses);
     }
 }
 
@@ -358,6 +441,62 @@ mod tests {
         for a in [pick_address(&[lan], 47400), pick_address(&[global6], DEFAULT_PORT), pick_address(&[global6], 9)] {
             assert!(crate::link::normalise_address(&a.unwrap()).is_ok());
         }
+    }
+
+    /// Regression: one computer announcing many names filled the list (64, first come), so
+    /// servers heard of later never showed.
+    #[test]
+    fn one_computer_cannot_fill_the_list() {
+        let ip = |n: u8| IpAddr::V4(Ipv4Addr::new(192, 168, 1, n));
+        let name = |i: usize| format!("Flood {i}._plancraft._tcp.local.");
+        let mut list = FoundList::default();
+        // One host name, one address: four names at most.
+        for i in 0..100 {
+            list.heard(&name(i), "flood.local.", DEFAULT_PORT, &[ip(66)]);
+        }
+        assert_eq!(list.list().len(), MAX_PER_HOST);
+        // Other host names but the same address: still that address's four.
+        for i in 100..200 {
+            list.heard(&name(i), &format!("flood-{i}.local."), DEFAULT_PORT, &[ip(66)]);
+        }
+        assert_eq!(list.list().len(), MAX_PER_HOST);
+        // One host name, many addresses: still that host's four.
+        for i in 200..250u8 {
+            list.heard(&name(usize::from(i)), "flood.local.", DEFAULT_PORT, &[ip(i)]);
+        }
+        assert_eq!(list.list().len(), MAX_PER_HOST);
+        // A real server heard afterwards gets in.
+        assert!(list.heard("Plans on studio-pc._plancraft._tcp.local.", "studio-pc-plancraft.local.", DEFAULT_PORT, &[ip(20)]));
+        assert!(list.list().iter().any(|f| f.name == "Plans on studio-pc"));
+        // A server saying goodbye leaves; a changed announcement of one listed is taken in.
+        assert!(list.heard("Plans on studio-pc._plancraft._tcp.local.", "studio-pc-plancraft.local.", 47400, &[ip(20)]));
+        assert!(list.list().iter().any(|f| f.address == "192.168.1.20:47400"));
+        assert!(list.removed("Plans on studio-pc._plancraft._tcp.local."));
+        assert!(!list.list().iter().any(|f| f.name == "Plans on studio-pc"));
+    }
+
+    #[test]
+    fn many_computers_fill_the_list_but_trusted_servers_still_get_in_first() {
+        let mut list = FoundList::default();
+        list.set_trusted(["10.0.0.9", "office-pc"]);
+        for i in 0..200u16 {
+            let [a, b] = i.to_be_bytes();
+            let addr = IpAddr::V4(Ipv4Addr::new(10, 1, a, b));
+            list.heard(&format!("Z{i}._plancraft._tcp.local."), &format!("h{i}.local."), DEFAULT_PORT, &[addr]);
+        }
+        assert_eq!(list.list().len(), MAX_FOUND);
+        let trusted = IpAddr::V4(Ipv4Addr::new(10, 0, 0, 9));
+        assert!(list.heard("Office._plancraft._tcp.local.", "office.local.", DEFAULT_PORT, &[trusted]));
+        let first = list.list().into_iter().next().unwrap();
+        assert_eq!((first.name.as_str(), first.address.as_str()), ("Office", "10.0.0.9"));
+        assert_eq!(list.list().len(), MAX_FOUND + 1);
+        // Trusting it later moves it up too.
+        let mut list = FoundList::default();
+        list.heard("B._plancraft._tcp.local.", "b.local.", DEFAULT_PORT, &[IpAddr::V4(Ipv4Addr::new(10, 0, 0, 2))]);
+        list.heard("A._plancraft._tcp.local.", "a.local.", DEFAULT_PORT, &[IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))]);
+        assert_eq!(list.list().first().unwrap().name, "A");
+        list.set_trusted(["10.0.0.2"]);
+        assert_eq!(list.list().first().unwrap().name, "B");
     }
 
     #[test]

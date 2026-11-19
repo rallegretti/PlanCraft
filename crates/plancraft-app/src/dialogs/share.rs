@@ -18,8 +18,8 @@ use egui::{Context, RichText};
 use plancraft_core::io::DiskStamp;
 use plancraft_server::protocol::{DEFAULT_PORT, Role};
 use plancraft_server::server::users_path;
-use plancraft_server::sharing::{Program, Sharing, State};
-use plancraft_server::users::{User, Users};
+use plancraft_server::sharing::{Program, Sharing, State, Wake};
+use plancraft_server::users::{NewPassword, User, Users};
 
 use crate::settings::AppSettings;
 use crate::theme;
@@ -32,12 +32,26 @@ pub struct ShareHost {
     pub error: Option<String>,
     /// The last server's log, kept once it stopped (to see why it could not start).
     pub last_log: Vec<String>,
+    /// Someone is looking at the server's log (the window is open with it unfolded): only then
+    /// does a new log line redraw the app, at most a few times a second.
+    log_shown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// To look again while the server starts or stops.
+    ctx: Option<Context>,
 }
+
+/// How often the app is redrawn at most for new log lines while the log is shown.
+const LOG_REDRAW: std::time::Duration = std::time::Duration::from_millis(250);
 
 impl ShareHost {
     /// Looks at the server. Returns why it stopped, once, when it stopped on its own.
     pub fn poll(&mut self) -> Option<String> {
         let state = self.sharing.as_mut()?.state();
+        if matches!(state, State::Starting | State::Stopping)
+            && let Some(ctx) = &self.ctx
+        {
+            // Its end may be decided without news from the server (its last log lines never came).
+            ctx.request_repaint_after(LOG_REDRAW);
+        }
         match state {
             State::Stopped(why) => {
                 self.last_log = self.sharing.take().map(|s| s.log()).unwrap_or_default();
@@ -58,13 +72,32 @@ impl ShareHost {
     /// Starts sharing `folder`.
     pub fn start(&mut self, program: &Program, folder: &Path, config: &Path, port: u16, announce: bool, ctx: &Context) {
         let repaint = ctx.clone();
-        let waker: plancraft_server::sharing::Waker = std::sync::Arc::new(move || repaint.request_repaint());
+        let log_shown = std::sync::Arc::clone(&self.log_shown);
+        // The server's state redraws at once; its log only while someone looks at it, a few
+        // times a second at most (a busy server logs a line per sign-in, plan and change).
+        let waker: plancraft_server::sharing::Waker = std::sync::Arc::new(move |wake| match wake {
+            Wake::State => repaint.request_repaint(),
+            Wake::Log if log_shown.load(std::sync::atomic::Ordering::Relaxed) => repaint.request_repaint_after(LOG_REDRAW),
+            Wake::Log => {}
+        });
+        self.ctx = Some(ctx.clone());
         self.error = None;
         self.last_log.clear();
         match Sharing::start(program, folder, config, port, announce, waker) {
             Ok(s) => self.sharing = Some(s),
             Err(e) => self.error = Some(e),
         }
+    }
+
+    /// Whether someone is looking at the server's log (set every frame).
+    pub fn watch_log(&self, shown: bool) {
+        self.log_shown.store(shown, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether a new log line redraws the app now.
+    #[cfg(test)]
+    fn log_watched(&self) -> bool {
+        self.log_shown.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Asks the server to stop (it saves every plan first).
@@ -147,43 +180,38 @@ enum Form {
     Rule,
 }
 
-/// One change to the users file at a time in this PlanCraft: a change still being made when its
-/// window was closed must not be overwritten by one made after reopening it (both would load the
-/// file before either saved it).
-static USERS_FILE: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Makes a change to the users file; returns what to say.
+/// Makes a change to the users file; returns what to say. New passwords are hashed first, then
+/// the file is changed while no one else changes it (`Users::change`: another window of this
+/// PlanCraft, a change still finishing after its window was closed, `plancraft serve user …`).
 fn apply(path: &Path, op: UserOp) -> Result<String, String> {
-    let _one_at_a_time = USERS_FILE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut users = Users::load(path)?;
-    let said = match op {
+    match op {
         UserOp::Add { name, password, role } => {
-            users.add(&name, &password, role)?;
-            format!("Added {} ({}).", name.trim(), role.name())
+            let password = NewPassword::new(&password)?;
+            Users::change(path, |u| u.add_with(&name, &password, role))?;
+            Ok(format!("Added {} ({}).", name.trim(), role.name()))
         }
         UserOp::Password { name, password } => {
-            users.set_password(&name, &password)?;
-            format!("Changed the password of {name}.")
+            let password = NewPassword::new(&password)?;
+            Users::change(path, |u| u.set_password_with(&name, &password))?;
+            Ok(format!("Changed the password of {name}."))
         }
         UserOp::Role { name, role, plan: None } => {
-            users.set_role(&name, role, None)?;
-            format!("{name} is now {}.", role.name())
+            Users::change(path, |u| u.set_role(&name, role, None))?;
+            Ok(format!("{name} is now {}.", role.name()))
         }
         UserOp::Role { name, role, plan: Some(plan) } => {
-            users.set_role(&name, role, Some(&plan))?;
-            format!("{name} is now {} for {plan}.", role.name())
+            Users::change(path, |u| u.set_role(&name, role, Some(&plan)))?;
+            Ok(format!("{name} is now {} for {plan}.", role.name()))
         }
         UserOp::ClearPlan { name, plan } => {
-            users.clear_plan_role(&name, &plan)?;
-            format!("{name} has the same access to {plan} as to the other plans again.")
+            Users::change(path, |u| u.clear_plan_role(&name, &plan))?;
+            Ok(format!("{name} has the same access to {plan} as to the other plans again."))
         }
         UserOp::Remove { name } => {
-            users.remove(&name)?;
-            format!("Removed {name}.")
+            Users::change(path, |u| u.remove(&name))?;
+            Ok(format!("Removed {name}."))
         }
-    };
-    users.save()?;
-    Ok(said)
+    }
 }
 
 /// The `.plancraft` files directly in `folder` (what the server shares), by name.
@@ -268,8 +296,9 @@ pub struct ShareFolder {
     busy: Option<(String, Form, Answer)>,
     /// What the last change said (`Err`: it failed).
     note: Option<Result<String, String>>,
-    /// The addresses shown for the server, worked out once for its port.
-    addresses: Option<(u16, Vec<String>)>,
+    /// The addresses shown for the server: its port, when they were looked up (again every few
+    /// seconds: a laptop moves between networks), and them.
+    addresses: Option<(u16, std::time::Instant, Vec<String>)>,
     /// The shared folder's plans open in this PlanCraft, and when that was looked at (once a
     /// second: it reads the disk).
     open_here: Option<(std::time::Instant, Vec<String>)>,
@@ -380,6 +409,8 @@ impl ShareFolder {
     ) -> Outcome {
         self.collect();
         self.reload_users();
+        // Set again below while the log is unfolded.
+        host.watch_log(false);
         let mut open = true;
         let mut outcome = Outcome::Open;
         egui::Window::new("Share Folder")
@@ -401,6 +432,8 @@ impl ShareFolder {
                 if has_log {
                     ui.add_space(4.0);
                     egui::CollapsingHeader::new("Server log").id_salt("share_log").show(ui, |ui| {
+                        // Unfolded: new lines redraw the app.
+                        host.watch_log(true);
                         let log = host.sharing.as_ref().map_or_else(|| host.last_log.clone(), Sharing::log);
                         egui::ScrollArea::vertical().max_height(160.0).stick_to_bottom(true).show(ui, |ui| {
                             for line in log.iter().rev().take(200).rev() {
@@ -455,14 +488,16 @@ impl ShareFolder {
                         .on_hover_text(folder.display().to_string());
                         let port = ready.addr.port();
                         ui.label("People open its plans with File › Open from Server… at one of these addresses:");
-                        if self.addresses.as_ref().is_none_or(|(p, _)| *p != port) {
-                            let mut list = plancraft_server::discovery::local_addresses(port);
-                            if let Some(name) = local_name() {
-                                list.push(if port == DEFAULT_PORT { name } else { format!("{name}:{port}") });
-                            }
-                            self.addresses = Some((port, list));
+                        if self.addresses.as_ref().is_none_or(|(p, at, _)| *p != port || at.elapsed() >= ADDRESSES_REFRESH) {
+                            self.addresses = Some((port, std::time::Instant::now(), addresses_for(port)));
+                            // Looked at again even while nothing else moves.
+                            ctx.request_repaint_after(ADDRESSES_REFRESH);
                         }
-                        let addresses = self.addresses.as_ref().map(|(_, a)| a.clone()).unwrap_or_default();
+                        let addresses = self.addresses.as_ref().map(|(_, _, a)| a.clone()).unwrap_or_default();
+                        // Only this computer's name left (no address on any network).
+                        if addresses.iter().all(|a| a.contains(".local")) {
+                            ui.colored_label(theme::pal().WARN, "This computer is on no network right now.");
+                        }
                         for a in &addresses {
                             copy_box(ui, a);
                         }
@@ -751,6 +786,19 @@ impl ShareFolder {
     }
 }
 
+/// How often the addresses shown are looked up again.
+const ADDRESSES_REFRESH: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The addresses people type to reach a server on `port` here: this computer's addresses, then
+/// its name.
+fn addresses_for(port: u16) -> Vec<String> {
+    let mut list = plancraft_server::discovery::local_addresses(port);
+    if let Some(name) = local_name() {
+        list.push(if port == DEFAULT_PORT { name } else { format!("{name}:{port}") });
+    }
+    list
+}
+
 /// This computer's name on the local network (`NAME.local`), when it is one people can type.
 fn local_name() -> Option<String> {
     local_name_of(&plancraft_server::server::host_name())
@@ -890,6 +938,7 @@ mod tests {
             sharing: None,
             error: Some("cannot listen on 0.0.0.0:47340: address in use".into()),
             last_log: vec!["plancraft-server: cannot listen on 0.0.0.0:47340: address in use".into()],
+            ..ShareHost::default()
         };
         let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1000.0, 800.0)).build_ui_state(
             |ui, (w, settings, host): &mut (ShareFolder, AppSettings, ShareHost)| {
@@ -900,6 +949,11 @@ mod tests {
         h.run();
         assert!(h.query_by_label_contains("Sharing stopped: cannot listen").is_some(), "why the last server stopped is shown");
         assert!(h.query_by_label_contains("Server log").is_some(), "its log is still there to read");
+        // New log lines redraw the app only while someone reads the log.
+        assert!(!h.state().2.log_watched(), "folded");
+        h.get_by_label("Server log").click();
+        h.run();
+        assert!(h.state().2.log_watched(), "unfolded");
         assert!(h.query_by_label_contains("Add at least one person").is_some());
         h.state_mut().0.new_name = "Ana".into();
         h.state_mut().0.new_password = "correct horse".into();

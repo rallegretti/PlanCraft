@@ -115,7 +115,7 @@ impl OpenFromServer {
     /// The window, filled in with the server used last.
     pub fn new(settings: &AppSettings) -> Self {
         let last = settings.servers.first().cloned().unwrap_or_default();
-        OpenFromServer {
+        let mut d = OpenFromServer {
             address: last.address,
             user: last.user,
             password: String::new(),
@@ -128,7 +128,12 @@ impl OpenFromServer {
             // when the window closes. Tests never touch the network.
             browser: if cfg!(test) { None } else { plancraft_server::discovery::Browser::start().ok() },
             found: Vec::new(),
+        };
+        // Servers whose key is trusted here always make the list, first.
+        if let Some(b) = d.browser.as_mut() {
+            b.set_trusted(settings.servers.iter().filter(|k| !k.fingerprint.is_empty()).map(|k| k.address.as_str()));
         }
+        d
     }
 
     /// The window for a server this PlanCraft started (Share Folder): its key is known, so it is
@@ -352,30 +357,33 @@ impl OpenFromServer {
             ui.end_row();
         });
         if !self.found.is_empty() {
-            ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new("On your network:").color(theme::pal().TEXT_WEAK));
-                for f in self.found.iter().take(12) {
-                    // An address already trusted, if the server gave one, before the best: anyone
-                    // can add addresses to another server's announcement.
-                    let pinned = |a: &String| settings.fingerprint_for(&normalise_address(a).unwrap_or_default()).is_some();
-                    let known = f.addresses.iter().find(|a| pinned(a));
-                    let address = known.unwrap_or(&f.address).clone();
-                    let name = RichText::new(&f.name);
-                    let button = egui::Button::new(name).small().truncate();
-                    let r = ui.add_enabled(!busy, button).on_hover_text(format!("{}\n{address}", f.name));
-                    // The address, always: two servers can call themselves the same.
-                    ui.label(RichText::new(&address).small().color(theme::pal().TEXT_WEAK));
-                    // Drawn by PlanCraft, beside the name (a name can't fake it).
-                    if known.is_some() {
-                        ui.label(RichText::new("✔").small().color(theme::pal().OK)).on_hover_text("Its key is already trusted here");
-                    }
-                    if r.clicked() {
-                        self.address = address.clone();
-                        if let Some(k) = settings.servers.iter().find(|k| same_address(&k.address, &address)) {
-                            self.user = k.user.clone();
+            ui.label(RichText::new("On your network:").color(theme::pal().TEXT_WEAK));
+            // All of them (trusted ones first), scrolling: a long list never hides one.
+            egui::ScrollArea::vertical().id_salt("found_servers").max_height(84.0).show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    for f in &self.found {
+                        // An address already trusted, if the server gave one, before the best: anyone
+                        // can add addresses to another server's announcement.
+                        let pinned = |a: &String| settings.fingerprint_for(&normalise_address(a).unwrap_or_default()).is_some();
+                        let known = f.addresses.iter().find(|a| pinned(a));
+                        let address = known.unwrap_or(&f.address).clone();
+                        let name = RichText::new(&f.name);
+                        let button = egui::Button::new(name).small().truncate();
+                        let r = ui.add_enabled(!busy, button).on_hover_text(format!("{}\n{address}", f.name));
+                        // The address, always: two servers can call themselves the same.
+                        ui.label(RichText::new(&address).small().color(theme::pal().TEXT_WEAK));
+                        // Drawn by PlanCraft, beside the name (a name can't fake it).
+                        if known.is_some() {
+                            ui.label(RichText::new("✔").small().color(theme::pal().OK)).on_hover_text("Its key is already trusted here");
+                        }
+                        if r.clicked() {
+                            self.address = address.clone();
+                            if let Some(k) = settings.servers.iter().find(|k| same_address(&k.address, &address)) {
+                                self.user = k.user.clone();
+                            }
                         }
                     }
-                }
+                })
             });
         } else if self.browser.is_some() {
             ui.label(RichText::new("Looking for servers on your network…").small().color(theme::pal().TEXT_WEAK));

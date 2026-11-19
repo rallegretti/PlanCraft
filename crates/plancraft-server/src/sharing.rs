@@ -26,8 +26,17 @@ const MAX_LINE_CHARS: usize = 1_000;
 /// Longest line read from the server (longer lines are cut).
 const MAX_LINE_BYTES: u64 = 64 * 1024;
 
-/// Wakes the window when something changed (the server is ready, wrote to its log, or stopped).
-pub type Waker = Arc<dyn Fn() + Send + Sync>;
+/// What changed, for the [`Waker`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Wake {
+    /// The server is ready, or has ended: [`Sharing::state`] may say something new.
+    State,
+    /// A line was added to the server's log (only worth drawing while someone looks at it).
+    Log,
+}
+
+/// Wakes the app when something changed.
+pub type Waker = Arc<dyn Fn(Wake) + Send + Sync>;
 
 /// Where the server is.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -185,10 +194,10 @@ impl Sharing {
                     while let Some(line) = read_line(&mut r) {
                         if let Some(ready) = Ready::parse(&line) {
                             lock(&inner).ready = Some(ready);
-                            waker();
+                            waker(Wake::State);
                         }
                     }
-                    waker();
+                    waker(Wake::State);
                 })?;
             }
             if let Some(err) = stderr {
@@ -202,10 +211,10 @@ impl Sharing {
                             i.log.pop_front();
                         }
                         drop(i);
-                        waker();
+                        waker(Wake::Log);
                     }
                     lock(&inner).log_done = true;
-                    waker();
+                    waker(Wake::State);
                 })?;
             }
             Ok::<(), String>(())

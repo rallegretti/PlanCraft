@@ -19,6 +19,35 @@ fn run(config: &std::path::Path, args: &[&str], stdin: &str) -> (bool, String, S
     (out.status.success(), String::from_utf8_lossy(&out.stdout).into_owned(), String::from_utf8_lossy(&out.stderr).into_owned())
 }
 
+/// Regression: `plancraft-server user add` while PlanCraft's *Share Folder* was changing the
+/// users file: whichever saved last lost the other's change. Changes now take turns.
+#[test]
+fn the_command_line_waits_for_a_change_made_elsewhere() {
+    use plancraft_server::protocol::Role;
+    use plancraft_server::users::{NewPassword, Users};
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    let path = plancraft_server::server::users_path(&config);
+    let password = NewPassword::new("correct horse").unwrap();
+    let (inside, wait) = std::sync::mpsc::channel();
+    let app = {
+        let path = path.clone();
+        std::thread::spawn(move || {
+            Users::change(&path, |u| {
+                inside.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(1500));
+                u.add_with("Ana", &password, Role::Editor)
+            })
+        })
+    };
+    wait.recv().unwrap();
+    let (ok, _, err) = run(&config, &["user", "add", "ben", "--password-stdin"], "correct horse\n");
+    assert!(ok, "{err}");
+    app.join().unwrap().unwrap();
+    let names: Vec<String> = Users::load(&path).unwrap().list().iter().map(|u| u.name.clone()).collect();
+    assert_eq!(names, ["Ana", "ben"]);
+}
+
 #[test]
 fn users_are_managed_from_the_command_line() {
     let dir = tempfile::tempdir().unwrap();

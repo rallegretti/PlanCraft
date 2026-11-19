@@ -123,6 +123,49 @@ fn check_password(password: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// A new password, checked and hashed (Argon2id takes a moment: do it before
+/// [`Users::change`], so the users file is held only briefly). No `Debug`: nothing to print.
+#[derive(Clone)]
+pub struct NewPassword {
+    hash: String,
+}
+
+impl NewPassword {
+    pub fn new(password: &str) -> Result<NewPassword, String> {
+        check_password(password)?;
+        Ok(NewPassword { hash: hash_password(password)? })
+    }
+}
+
+/// How long [`Users::change`] waits for another change to the users file to finish.
+const CHANGE_WAIT: Duration = Duration::from_secs(15);
+
+/// The lock file beside the users file at `path` that changes take turns on.
+fn change_lock_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().map(std::ffi::OsStr::to_os_string).unwrap_or_else(|| "users.json".into());
+    name.push(".lock");
+    path.with_file_name(name)
+}
+
+/// Opens (or makes, owner-only) the lock file changes take turns on; never one a link points to.
+fn open_change_lock(path: &Path) -> std::io::Result<std::fs::File> {
+    let mut create = std::fs::OpenOptions::new();
+    // `create_new` never follows a link: an existing file (or link) is left alone here.
+    create.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        create.mode(0o600);
+    }
+    match create.open(path) {
+        Ok(f) => Ok(f),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            plancraft_core::io::open_regular(path, true, plancraft_core::io::Links::Refuse)
+        }
+        Err(e) => Err(e),
+    }
+}
+
 fn hash_password(password: &str) -> Result<String, String> {
     Argon2::default().hash_password(password.as_bytes()).map(|h| h.to_string()).map_err(|e| format!("cannot hash the password: {e}"))
 }
@@ -139,6 +182,35 @@ fn verify_hash(hash: &str, password: &str) -> bool {
 }
 
 impl Users {
+    /// Changes the users file at `path`: loads it, lets `f` change it and saves it, while no one
+    /// else does (this program's other threads, PlanCraft's *Share Folder*, `plancraft serve
+    /// user …`): each change takes turns on a lock file beside it, so none is lost by being
+    /// saved over. Hash new passwords before ([`NewPassword`]). Nothing is saved if `f` fails.
+    pub fn change<T>(path: &Path, f: impl FnOnce(&mut Users) -> Result<T, String>) -> Result<T, String> {
+        if let Some(dir) = path.parent() {
+            plancraft_core::io::create_private_dir(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+        }
+        let lock_path = change_lock_path(path);
+        let lock = open_change_lock(&lock_path).map_err(|e| format!("cannot open {}: {e}", lock_path.display()))?;
+        let deadline = Instant::now() + CHANGE_WAIT;
+        loop {
+            match lock.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    return Err("the list of people is being changed elsewhere; try again in a moment".into());
+                }
+                Err(std::fs::TryLockError::Error(e)) => return Err(format!("cannot lock {}: {e}", lock_path.display())),
+            }
+        }
+        let mut users = Users::load(path)?;
+        let out = f(&mut users)?;
+        users.save()?;
+        // Closing the file gives the lock back (also if the program stops meanwhile).
+        drop(lock);
+        Ok(out)
+    }
+
     /// Loads the users file at `path` (no file: no users yet).
     pub fn load(path: &Path) -> Result<Users, String> {
         let users = match std::fs::symlink_metadata(path) {
@@ -186,6 +258,11 @@ impl Users {
     }
 
     pub fn add(&mut self, name: &str, password: &str, role: Role) -> Result<(), String> {
+        self.add_with(name, &NewPassword::new(password)?, role)
+    }
+
+    /// [`Users::add`] with a password hashed beforehand.
+    pub fn add_with(&mut self, name: &str, password: &NewPassword, role: Role) -> Result<(), String> {
         let name = clean_name(name)?;
         if self.get(&name).is_some() {
             return Err(format!("there is already a user '{name}'"));
@@ -193,9 +270,7 @@ impl Users {
         if self.users.len() >= MAX_USERS {
             return Err(format!("a server can have at most {MAX_USERS} users"));
         }
-        check_password(password)?;
-        let hash = hash_password(password)?;
-        self.users.push(User { name, hash, role, plans: BTreeMap::new() });
+        self.users.push(User { name, hash: password.hash.clone(), role, plans: BTreeMap::new() });
         Ok(())
     }
 
@@ -206,9 +281,12 @@ impl Users {
     }
 
     pub fn set_password(&mut self, name: &str, password: &str) -> Result<(), String> {
-        check_password(password)?;
-        let hash = hash_password(password)?;
-        self.get_mut(name)?.hash = hash;
+        self.set_password_with(name, &NewPassword::new(password)?)
+    }
+
+    /// [`Users::set_password`] with a password hashed beforehand.
+    pub fn set_password_with(&mut self, name: &str, password: &NewPassword) -> Result<(), String> {
+        self.get_mut(name)?.hash = password.hash.clone();
         Ok(())
     }
 
@@ -503,6 +581,52 @@ impl Gate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression: a change loaded the file, hashed a password (a second) and saved: another
+    /// change made meanwhile (another window, the command line) was saved over and lost.
+    #[test]
+    fn changes_made_at_the_same_time_are_all_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server/users.json");
+        let password = NewPassword::new("correct horse").unwrap();
+        let (inside, wait) = std::sync::mpsc::channel();
+        let slow = {
+            let (path, password) = (path.clone(), password.clone());
+            std::thread::spawn(move || {
+                Users::change(&path, |u| {
+                    inside.send(()).unwrap();
+                    std::thread::sleep(Duration::from_millis(400));
+                    u.add_with("Ana", &password, Role::Editor)
+                })
+            })
+        };
+        wait.recv().unwrap();
+        // Waits for Ana's change, then makes its own on what that saved.
+        Users::change(&path, |u| u.add_with("Ben", &password, Role::Viewer)).unwrap();
+        slow.join().unwrap().unwrap();
+        let users = Users::load(&path).unwrap();
+        assert_eq!(users.list().iter().map(|u| u.name.as_str()).collect::<Vec<_>>(), ["Ana", "Ben"]);
+
+        // A failed change saves nothing and lets the next one go ahead.
+        let before = std::fs::read(&path).unwrap();
+        assert!(Users::change(&path, |u| u.remove("nobody")).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        Users::change(&path, |u| u.remove("ben")).unwrap();
+        assert_eq!(Users::load(&path).unwrap().list().len(), 1);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let lock = change_lock_path(&path);
+            assert_eq!(std::fs::metadata(&lock).unwrap().permissions().mode() & 0o777, 0o600);
+            // Never a lock file a link points to.
+            std::fs::remove_file(&lock).unwrap();
+            let elsewhere = dir.path().join("elsewhere");
+            std::fs::write(&elsewhere, "").unwrap();
+            std::os::unix::fs::symlink(&elsewhere, &lock).unwrap();
+            assert!(Users::change(&path, |u| u.remove("ana")).is_err());
+            assert_eq!(Users::load(&path).unwrap().list().len(), 1);
+        }
+    }
 
     #[test]
     fn add_verify_change_and_remove() {

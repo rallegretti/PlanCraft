@@ -8,7 +8,7 @@ use std::sync::Arc;
 use crate::Log;
 use crate::protocol::{DEFAULT_PORT, Role};
 use crate::server::{self, Options};
-use crate::users::Users;
+use crate::users::{NewPassword, Users};
 use crate::wire::Keys;
 
 const HELP: &str = "\
@@ -190,23 +190,20 @@ fn run_inner(args: Vec<std::ffi::OsString>) -> Result<(), String> {
 
 fn user(args: &Args) -> Result<(), String> {
     let path = server::users_path(&config(args)?);
-    let mut users = Users::load(&path)?;
     let arg = |i: usize, what: &str| args.rest.get(i).cloned().ok_or_else(|| format!("{what} is missing (see plancraft-server --help)"));
     let role = |s: &str| Role::parse(s).ok_or_else(|| format!("'{s}' is not a role: use viewer, editor, admin or none"));
     match args.rest.get(1).map(String::as_str) {
         Some("add") => {
             let name = arg(2, "the user name")?;
             let r = role(args.role.as_deref().unwrap_or("editor"))?;
-            let password = read_password(args, &format!("Password for {name}: "))?;
-            users.add(&name, &password, r)?;
-            users.save()?;
+            let password = NewPassword::new(&read_password(args, &format!("Password for {name}: "))?)?;
+            Users::change(&path, |users| users.add_with(&name, &password, r))?;
             println!("Added {name} ({}).", r.name());
         }
         Some("passwd") => {
             let name = arg(2, "the user name")?;
-            let password = read_password(args, &format!("New password for {name}: "))?;
-            users.set_password(&name, &password)?;
-            users.save()?;
+            let password = NewPassword::new(&read_password(args, &format!("New password for {name}: "))?)?;
+            Users::change(&path, |users| users.set_password_with(&name, &password))?;
             println!("Changed the password of {name}.");
         }
         Some("role") => {
@@ -219,8 +216,7 @@ fn user(args: &Args) -> Result<(), String> {
                     "'{p}' is not a plan's file name: give it as the shared folder shows it, e.g. 'Office move.plancraft'"
                 ));
             }
-            users.set_role(&name, r, args.plan.as_deref())?;
-            users.save()?;
+            Users::change(&path, |users| users.set_role(&name, r, args.plan.as_deref()))?;
             match &args.plan {
                 Some(p) => println!("{name} is now {} for {p}.", r.name()),
                 None => println!("{name} is now {}.", r.name()),
@@ -228,11 +224,11 @@ fn user(args: &Args) -> Result<(), String> {
         }
         Some("remove") => {
             let name = arg(2, "the user name")?;
-            users.remove(&name)?;
-            users.save()?;
+            Users::change(&path, |users| users.remove(&name))?;
             println!("Removed {name}.");
         }
         Some("list") => {
+            let users = Users::load(&path)?;
             if users.is_empty() {
                 println!("No users yet.");
             }

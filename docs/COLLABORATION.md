@@ -586,12 +586,16 @@ the `Replica` and the connection. Merging never runs on the app's thread.
   the "best" one, since anyone can add addresses to another server's announcement. It listens only
   while the window is open, and closing it never waits for the network.
 - An announcement is anyone's word: its name is cut short with no control or invisible characters
-  (direction overrides, zero-width characters) and no trust mark in front, at most 64 servers are
-  listed, and only addresses the window takes are offered (IPv4 addresses on the network first,
+  (direction overrides, zero-width characters) and no trust mark in front, and only addresses the
+  window takes are offered (IPv4 addresses on the network first,
   then global IPv6, then loopback; link-local IPv6 is passed over, as it needs an interface named).
   It never vouches for a key: the fingerprint is still confirmed on the first visit and checked
   against the pin after that. A flood is taken in a bounded amount at a time; if the listener is
   given up on, it listens afresh.
+- No one computer can fill the list (`discovery::FoundList`): an announcement does not say who
+  sent it, so servers are counted by what it does say, at most 4 per host name and 4 per address,
+  64 in all, first come first kept. Servers at an address whose key is trusted here always get in
+  (64 of those too) and are listed first. The window shows them all, scrolling.
 - Nothing announces or listens unless someone shares a folder or opens the window. Tests announce
   on a private mDNS port, so nothing reaches anyone listening on the usual one (the messages still
   go out on the network), with names unique to the run.
@@ -620,7 +624,8 @@ the `Replica` and the connection. Merging never runs on the app's thread.
     plan saved, everyone told. It finishes that after PlanCraft is gone; its log writes, and the
     panic guard's, never panic on a closed pipe.
 - The window shows the folder, the addresses people type (this computer's addresses, container
-  and virtual-machine bridges left out, then its name as `computer.local`), and the key fingerprint
+  and virtual-machine bridges left out, then its name as `computer.local`, looked up again every
+  5 seconds, so a laptop moving between networks shows where it is now), and the key fingerprint
   people confirm, with
   copy buttons. *Open a Plan from It…* opens the *Open from Server* window on `127.0.0.1` with the
   key already trusted (this PlanCraft started that server); *Stop Sharing* saves and stops. The
@@ -630,13 +635,18 @@ the `Replica` and the connection. Merging never runs on the app's thread.
   window and a message say why, in the server's own words (its last log line, read to the end
   before deciding, and only when it is the server's own error; otherwise "stopped unexpectedly"
   or "stopped from outside PlanCraft"). Its log stays in the window. Starting can be cancelled.
+- The server's state (ready, stopped) redraws the app at once; its log lines only while the log is
+  unfolded in the open window, at most 4 times a second (a busy server logs a line per sign-in,
+  plan and change).
 - The same window manages people: add (name, password, role), change a role, set or take away a
   role for one plan (*Plans…*, *Same as other plans*), change a password, remove (asked twice).
   It edits the server's users file directly (the one `plancraft serve user …` manages), so
   changes apply at once, also to people signed in now; passwords are hashed on a background
-  thread and not kept once used. Changes are made one at a time (also one made after closing and
-  reopening the window while another was still hashing); a change clears only the form it came
-  from. Starting needs at least one person.
+  thread and not kept once used. Changes take turns on a lock file beside the users file
+  (`users::Users::change`: load, change, save while holding it; passwords are hashed before, so it
+  is held briefly), in this PlanCraft and with `plancraft serve user …` alike, so no change is
+  saved over by another made at the same moment. A change clears only the form it came from.
+  Starting needs at least one person.
 - A plan's file opened directly while a server's journal sits beside it says so, and *Share
   Folder* then offers that plan's folder: once the plan is closed here, sharing the folder saves
   the journal's changes into the file.
@@ -650,6 +660,11 @@ the `Replica` and the connection. Merging never runs on the app's thread.
   output nobody reads any more still saves its plans and gives back their locks; a shared folder
   announced by the server itself, and an announcement on its own, are found on a private mDNS port
   and go away when stopped; any announcement reads safely (property test).
+- `users` tests: changes made at the same time are all kept, a failed one saves nothing, the lock
+  file is owner-only and never one a link points to; `tests/cli.rs`: `plancraft-server user add`
+  waits for a change PlanCraft is making and keeps both.
+- `discovery` tests: one computer cannot fill the list (per host name, per address), trusted
+  servers still get in and come first.
 - `sharing` unit tests: long lines cut without keeping the rest, a program replaced by an upgrade
   started from its name. `guard` tests: a caught panic still comes back with standard error closed.
 - `discovery` unit tests: the best address, names made safe (control and invisible characters,
@@ -659,7 +674,8 @@ the `Replica` and the connection. Merging never runs on the app's thread.
 - The app: `dialogs::share` tests add, change and remove people (and see people added from the
   command line), clear only the form a change came from, list only plans directly in the folder,
   run the AppImage only from inside it, offer this computer's `.local` name only when it can be
-  typed, and draw the window with the reason and log of the last server; `dialogs::server` tests
+  typed, and draw the window with the reason and log of the last server (new log lines redraw
+  the app only while it is unfolded); `dialogs::server` tests
   open the PlanCraft's own server without asking about its key (even over an old pin), fill in a
   found server's address (and only that), and prefer a trusted address an announcement gave over
   the "best" one; `shared_tests` checks that
