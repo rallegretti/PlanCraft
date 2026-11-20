@@ -11,8 +11,9 @@
 //! like in Microsoft Project.
 //!
 //! A manually scheduled summary task (top-down planning) keeps the dates typed for it: its
-//! subtasks don't move it, links into it stop at it, its auto-scheduled subtasks start no
-//! earlier than its start, and its successors follow its own dates. The span of its subtasks is
+//! subtasks don't move it, links into it stop at it, its auto-scheduled subtasks that have no
+//! links or date constraint of their own start at its start, and its successors follow its own
+//! dates. The span of its subtasks is
 //! kept separately ([`TaskSchedule::rollup_start`]).
 //!
 //! The engine never indexes out of bounds and clamps date arithmetic; as a last resort
@@ -414,12 +415,15 @@ struct Engine<'a> {
 struct Inherited {
     snet: Option<DateTime>,
     deadline: Option<DateTime>,
+    /// The latest start of the manually scheduled summaries around the task: where it starts
+    /// when it has no links or date constraint of its own.
+    manual_start: Option<DateTime>,
 }
 
 /// Constraints a summary passes to its subtasks: its Start No Earlier Than date drives their
 /// starts, and its deadline bounds their late finish (and so their slack). A manually scheduled
-/// summary's start drives its subtasks' starts in the same way (its constraint is ignored, like
-/// any manual task's).
+/// summary's start places the subtasks that have nothing else to go by (its constraint is
+/// ignored, like any manual task's).
 fn inherited_from_summaries(p: &Project, parent: &[Option<usize>], manual_summary: &[Option<(DateTime, DateTime)>]) -> Vec<Inherited> {
     let mut out = vec![Inherited::default(); p.tasks.len()];
     // Parents come before their children, so each parent's value is final when a child reads it.
@@ -427,12 +431,16 @@ fn inherited_from_summaries(p: &Project, parent: &[Option<usize>], manual_summar
         let Some(pi) = parent.get(i).copied().flatten() else { continue };
         let (Some(par), Some(up)) = (p.tasks.get(pi), out.get(pi).copied()) else { continue };
         // An inactive summary passes on what its own summaries set, not its own date or deadline.
-        let own_snet = match manual_summary.get(pi).copied().flatten() {
-            Some((start, _)) => par.active.then_some(start),
-            None => par.constraint.date.filter(|_| par.active && par.constraint.kind == ConstraintKind::Snet),
+        let (own_snet, own_manual) = match manual_summary.get(pi).copied().flatten() {
+            Some((start, _)) => (None, par.active.then_some(start)),
+            None => (par.constraint.date.filter(|_| par.active && par.constraint.kind == ConstraintKind::Snet), None),
         };
         let own_deadline = par.deadline.filter(|_| par.active);
-        let v = Inherited { snet: up.snet.max(own_snet), deadline: min_opt(up.deadline, own_deadline) };
+        let v = Inherited {
+            snet: up.snet.max(own_snet),
+            deadline: min_opt(up.deadline, own_deadline),
+            manual_start: up.manual_start.max(own_manual),
+        };
         if let Some(slot) = out.get_mut(i) {
             *slot = v;
         }
@@ -655,7 +663,7 @@ impl<'a> Engine<'a> {
             // Own links, links inherited from ancestor summaries, and milestone membership.
             let mut deps: Vec<Dependency> = task.predecessors.clone();
             // Links into a manually scheduled summary stop at it (it doesn't move, and its
-            // subtasks follow its start instead), and so do links into the summaries around it.
+            // unlinked subtasks start at its start instead), and so do links into the summaries around it.
             let mut anc = self.parent.get(succ).copied().flatten();
             while let Some(a) = anc {
                 if self.manual_summary(a).is_some() {
@@ -852,8 +860,17 @@ impl<'a> Engine<'a> {
             }
 
             // A Start No Earlier Than date on a summary drives its subtasks' starts.
-            if let Some(snet) = self.inherited(i).snet {
+            let inherited = self.inherited(i);
+            if let Some(snet) = inherited.snet {
                 es = es.max(snet);
+            }
+            // A manually scheduled summary's start places the subtasks with no links or date
+            // constraint of their own; the others keep their own dates, even before it (issue 21).
+            if let Some(manual_start) = inherited.manual_start
+                && self.incoming(i).is_empty()
+                && !t.constraint.kind.needs_date()
+            {
+                es = es.max(manual_start);
             }
 
             let mut warnings = Vec::new();

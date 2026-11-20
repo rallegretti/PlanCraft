@@ -40,10 +40,20 @@ pub fn tools() -> Vec<Tool> {
                     "children": { "type": "array", "items": { "type": "object" }, "description": "Nested subtasks (same item format)." },
                     "level": { "type": "integer", "description": "Relative outline level (1 = top of batch) for flat lists instead of 'children'." },
                     "duration": { "type": ["string", "number"] },
-                    "predecessors": { "type": ["array", "string"], "description": "Like create_task; may use batch keys." },
-                    "resources": { "type": ["string", "array"], "description": "Text like \"Ana[50%], Bob\" or an array of names/ids/{resource, units}. Unknown names create resources." },
+                    "predecessors": predecessors("Like create_task; may use batch keys."),
+                    "resources": {
+                        "type": ["string", "array"],
+                        "items": {
+                            "type": ["string", "integer", "object"],
+                            "properties": {
+                                "resource": { "type": ["integer", "string"], "description": "Resource id or name." },
+                                "units": { "type": ["string", "number"], "description": "Assignment units, e.g. \"50%\" or 0.5." }
+                            }
+                        },
+                        "description": "Text like \"Ana[50%], Bob\" or an array of names/ids/{resource, units}. Unknown names create resources."
+                    },
                     "milestone": { "type": "boolean" },
-                    "members": { "type": "array", "description": "Milestone members: ids, names or batch keys." }
+                    "members": super::milestones::member_refs_schema("Milestone members: ids, names or batch keys.")
                 },
                 "required": ["name"]
             },

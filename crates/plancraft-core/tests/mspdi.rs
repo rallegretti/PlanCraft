@@ -474,3 +474,30 @@ fn manual_summaries_survive_a_round_trip() {
     recalculate(&mut r);
     assert_eq!(r.tasks[0].sched, p.tasks[0].sched.clone());
 }
+
+/// Issue 21: a plan whose tasks land on other days in PlanCraft than the file stores says so,
+/// naming one of them; one that schedules the same says nothing.
+#[test]
+fn tasks_scheduled_on_other_days_than_the_file_are_noted() {
+    let task = |uid: u32, name: &str, start: &str, finish: &str, inner: &str| {
+        format!(
+            "<Task><UID>{uid}</UID><Name>{name}</Name><OutlineLevel>1</OutlineLevel><Duration>PT16H0M0S</Duration>\
+             <Start>{start}T08:00:00</Start><Finish>{finish}T17:00:00</Finish>{inner}</Task>"
+        )
+    };
+    let link = "<PredecessorLink><PredecessorUID>1</PredecessorUID><Type>1</Type></PredecessorLink>";
+    let file = |second_start: &str, second_finish: &str| {
+        let tasks = task(1, "Design", "2026-03-02", "2026-03-03", "") + &task(2, "Build", second_start, second_finish, link);
+        format!("<Project><StartDate>2026-03-02T08:00:00</StartDate><Tasks>{tasks}</Tasks></Project>")
+    };
+    let (p, notes) = mspdi::from_xml(&file("2026-03-04", "2026-03-05"), "x").unwrap();
+    assert!(notes.is_empty(), "{notes:?}");
+    assert_eq!(p.tasks[1].sched.start, Some(dt(2026, 3, 4, 8)), "the plan comes back scheduled");
+    let (_, notes) = mspdi::from_xml(&file("2026-03-09", "2026-03-10"), "x").unwrap();
+    assert_eq!(notes, ["1 task is scheduled on other days than the file gives: 'Build' starts 2026-03-04 here and 2026-03-09 in the file"]);
+    let (_, notes) = mspdi::from_xml(&file("2026-03-04", "2026-03-06"), "x").unwrap();
+    assert_eq!(
+        notes,
+        ["1 task is scheduled on other days than the file gives: 'Build' finishes 2026-03-05 here and 2026-03-06 in the file"]
+    );
+}

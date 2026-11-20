@@ -62,6 +62,30 @@ fn basic_jsonrpc_behaviour() {
     assert!(c.server.handle_message(json!([{ "jsonrpc": "2.0", "method": "notifications/initialized" }])).is_none());
 }
 
+/// Issue 21: some clients (VS Code's agent mode) refuse the whole server when any schema, at
+/// any depth, declares an array type without `items`.
+fn every_array_has_items(path: &str, schema: &Value) {
+    match schema {
+        Value::Object(o) => {
+            let is_array = match o.get("type") {
+                Some(Value::String(t)) => t == "array",
+                Some(Value::Array(ts)) => ts.iter().any(|t| t == "array"),
+                _ => false,
+            };
+            assert!(!is_array || o.get("items").is_some_and(Value::is_object), "{path}: an array type without items");
+            for (k, v) in o {
+                every_array_has_items(&format!("{path}.{k}"), v);
+            }
+        }
+        Value::Array(vs) => {
+            for (i, v) in vs.iter().enumerate() {
+                every_array_has_items(&format!("{path}[{i}]"), v);
+            }
+        }
+        _ => {}
+    }
+}
+
 #[test]
 fn tool_schemas_are_valid() {
     let c = Client::new();
@@ -87,6 +111,7 @@ fn tool_schemas_are_valid() {
                 assert!(props.contains_key(r.as_str().unwrap()), "{name}: required '{r}' not in properties");
             }
         }
+        every_array_has_items(name, schema);
         assert!(t["annotations"]["readOnlyHint"].is_boolean());
         // Round-trips as JSON text.
         let text = serde_json::to_string(schema).unwrap();

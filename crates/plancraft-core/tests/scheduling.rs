@@ -758,6 +758,54 @@ fn manual_summaries_from_a_project_xml_file_keep_their_dates() {
     }
 }
 
+/// Issue 21, second report: a manual summary's start places only the subtasks that have nothing
+/// else to go by. A subtask with its own constraint keeps its own date, even before the
+/// summary's start, and so do its successors.
+#[test]
+fn a_subtask_with_its_own_constraint_is_not_held_to_a_manual_summarys_start() {
+    let xml = "<Project><StartDate>2026-03-02T08:00:00</StartDate><Tasks>\
+        <Task><UID>1</UID><Name>Build phase</Name><OutlineLevel>1</OutlineLevel><Summary>1</Summary><Manual>1</Manual>\
+          <Start>2026-04-13T08:00:00</Start><Finish>2026-04-17T17:00:00</Finish><Duration>PT40H0M0S</Duration></Task>\
+        <Task><UID>2</UID><Name>Preliminary checks</Name><OutlineLevel>2</OutlineLevel><Duration>PT24H0M0S</Duration>\
+          <ConstraintType>4</ConstraintType><ConstraintDate>2026-03-09T08:00:00</ConstraintDate></Task>\
+        <Task><UID>3</UID><Name>Assembly</Name><OutlineLevel>2</OutlineLevel><Duration>PT16H0M0S</Duration></Task>\
+        <Task><UID>4</UID><Name>Review</Name><OutlineLevel>1</OutlineLevel><Duration>PT8H0M0S</Duration>\
+          <PredecessorLink><PredecessorUID>2</PredecessorUID><Type>1</Type></PredecessorLink></Task>\
+        </Tasks></Project>";
+    let (mut p, notes) = plancraft_core::mspdi::from_xml(xml, "x").unwrap();
+    assert!(notes.is_empty(), "every task lands where the file has it: {notes:?}");
+    recalculate(&mut p);
+    let dates = |i: usize| (p.tasks[i].sched.start.unwrap(), p.tasks[i].sched.finish.unwrap());
+    assert_eq!(dates(0), (dt(2026, 4, 13, 8), dt(2026, 4, 17, 17)));
+    assert_eq!(dates(1), (dt(2026, 3, 9, 8), dt(2026, 3, 11, 17)));
+    assert_eq!(dates(2), (dt(2026, 4, 13, 8), dt(2026, 4, 14, 17)));
+    assert_eq!(dates(3), (dt(2026, 3, 12, 8), dt(2026, 3, 12, 17)));
+    // The summary keeps its dates; its subtasks' span runs from the early one.
+    let sched = &p.tasks[0].sched;
+    assert_eq!((sched.rollup_start, sched.rollup_finish), (Some(dt(2026, 3, 9, 8)), Some(dt(2026, 4, 14, 17))));
+}
+
+/// A subtask driven by its own link follows the link, not the manual summary's start; a
+/// summary Start No Earlier Than date (on an automatic summary) still holds every subtask.
+#[test]
+fn a_linked_subtask_follows_its_link_not_a_manual_summarys_start() {
+    let mut p = project();
+    let driver = top(&mut p, "Driver", 2);
+    let (s, a) = manual_phase(&mut p);
+    let linked = task(&mut p, "Linked", 1);
+    assert_eq!(p.task(linked).unwrap().outline_level, 2);
+    p.link(driver.into(), linked, LinkType::FS, Lag::None).unwrap();
+    recalculate(&mut p);
+    assert_eq!(start(&p, s), dt(2026, 11, 2, 8));
+    assert_eq!(start(&p, a), dt(2026, 11, 2, 8), "nothing else to go by: the summary's start");
+    assert_eq!(start(&p, linked), dt(2026, 10, 21, 8), "after Driver, before the summary's start");
+    // An automatic summary's Start No Earlier Than date is a constraint on every subtask.
+    p.set_schedule_mode(&[s], ScheduleMode::Auto).unwrap();
+    p.task_mut(s).unwrap().constraint = Constraint { kind: ConstraintKind::Snet, date: Some(dt(2026, 11, 2, 8)) };
+    recalculate(&mut p);
+    assert_eq!(start(&p, linked), dt(2026, 11, 2, 8));
+}
+
 // ---------------------------------------------------------------------------
 // Elapsed durations
 // ---------------------------------------------------------------------------
@@ -783,6 +831,23 @@ fn an_elapsed_task_ending_on_a_weekend_is_critical_and_its_successor_starts_on_m
     assert_eq!(t.sched.total_slack, 0);
     assert!(t.sched.critical);
     assert_eq!(t.sched.late_start, Some(dt(2026, 10, 21, 8)), "late finish Monday 08:00, less 5 elapsed days");
+}
+
+/// Issue 21: the reporter checked this plan in Project. An elapsed task starts the moment its
+/// predecessor finishes, outside working time too (Friday 17:00), and runs over the weekend; the
+/// working task after it starts on Monday morning.
+#[test]
+fn an_elapsed_task_starts_when_its_predecessor_finishes_even_outside_working_time() {
+    let mut p = project();
+    let a = top(&mut p, "A", 5);
+    let b = elapsed_task(&mut p, "B", "2ed");
+    let c = top(&mut p, "C", 1);
+    p.link(a.into(), b, LinkType::FS, Lag::None).unwrap();
+    p.link(b.into(), c, LinkType::FS, Lag::None).unwrap();
+    recalculate(&mut p);
+    assert_eq!(finish(&p, a), dt(2026, 10, 23, 17));
+    assert_eq!((start(&p, b), finish(&p, b)), (dt(2026, 10, 23, 17), dt(2026, 10, 25, 17)));
+    assert_eq!((start(&p, c), finish(&p, c)), (dt(2026, 10, 26, 8), dt(2026, 10, 26, 17)));
 }
 
 #[test]
