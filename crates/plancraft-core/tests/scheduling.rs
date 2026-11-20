@@ -785,6 +785,91 @@ fn a_subtask_with_its_own_constraint_is_not_held_to_a_manual_summarys_start() {
     assert_eq!((sched.rollup_start, sched.rollup_finish), (Some(dt(2026, 3, 9, 8)), Some(dt(2026, 4, 14, 17))));
 }
 
+/// Review of issue 21's fix: a manual summary's start stands in for the project start, so a
+/// subtask whose constraint only limits its start (Start or Finish No Later Than) still starts
+/// there, not on the project start.
+#[test]
+fn a_no_later_than_limit_does_not_take_a_subtask_away_from_a_manual_summarys_start() {
+    for kind in [ConstraintKind::Snlt, ConstraintKind::Fnlt] {
+        let mut p = project();
+        let (_, a) = manual_phase(&mut p);
+        p.task_mut(a).unwrap().constraint = Constraint { kind, date: Some(dt(2026, 11, 30, 17)) };
+        recalculate(&mut p);
+        assert_eq!(start(&p, a), dt(2026, 11, 2, 8), "{kind:?}");
+    }
+}
+
+/// The nearest manual summary places its subtasks; an automatic summary between them passes on
+/// its start date and links like a subtask's own, and an automatic summary around the manual one
+/// stops at it.
+#[test]
+fn nested_summaries_around_a_subtask_of_a_manual_summary() {
+    let manual = |p: &mut Project, s: TaskId, from: DateTime, to: DateTime| {
+        p.set_manual_date(s, from, false).unwrap();
+        p.set_manual_date(s, to, true).unwrap();
+    };
+    // Manual inside manual: the inner one's start, though the outer starts later.
+    let mut p = project();
+    let outer = top(&mut p, "Outer", 1);
+    let inner = task(&mut p, "Inner", 1);
+    p.indent(inner).unwrap();
+    let leaf = task(&mut p, "Leaf", 1);
+    p.indent(leaf).unwrap();
+    recalculate(&mut p);
+    manual(&mut p, outer, dt(2026, 11, 9, 8), dt(2026, 11, 20, 17));
+    manual(&mut p, inner, dt(2026, 11, 2, 8), dt(2026, 11, 6, 17));
+    recalculate(&mut p);
+    assert_eq!(start(&p, leaf), dt(2026, 11, 2, 8));
+
+    // Automatic inside manual: its Start No Earlier Than date or its link places the leaf.
+    let mut p = project();
+    let driver = top(&mut p, "Driver", 3);
+    let m = top(&mut p, "M", 1);
+    let auto = task(&mut p, "Auto", 1);
+    p.indent(auto).unwrap();
+    let leaf = task(&mut p, "Leaf", 1);
+    p.indent(leaf).unwrap();
+    recalculate(&mut p);
+    manual(&mut p, m, dt(2026, 11, 9, 8), dt(2026, 11, 20, 17));
+    recalculate(&mut p);
+    assert_eq!(start(&p, leaf), dt(2026, 11, 9, 8));
+    p.task_mut(auto).unwrap().constraint = Constraint { kind: ConstraintKind::Snet, date: Some(dt(2026, 10, 26, 8)) };
+    recalculate(&mut p);
+    assert_eq!(start(&p, leaf), dt(2026, 10, 26, 8));
+    p.task_mut(auto).unwrap().constraint = Constraint::default();
+    p.link(driver.into(), auto, LinkType::FS, Lag::None).unwrap();
+    recalculate(&mut p);
+    assert_eq!(start(&p, leaf), dt(2026, 10, 22, 8));
+
+    // Manual inside automatic: the outer summary's Start No Earlier Than stops at the manual one.
+    let mut p = project();
+    let o = top(&mut p, "O", 1);
+    let m = task(&mut p, "M", 1);
+    p.indent(m).unwrap();
+    let leaf = task(&mut p, "Leaf", 1);
+    p.indent(leaf).unwrap();
+    recalculate(&mut p);
+    manual(&mut p, m, dt(2026, 11, 2, 8), dt(2026, 11, 6, 17));
+    p.task_mut(o).unwrap().constraint = Constraint { kind: ConstraintKind::Snet, date: Some(dt(2026, 12, 1, 8)) };
+    recalculate(&mut p);
+    assert_eq!(start(&p, leaf), dt(2026, 11, 2, 8));
+}
+
+/// A link that gives no date (from a summary whose subtasks are all inactive) is no link: the
+/// subtask still starts at the manual summary's start.
+#[test]
+fn a_link_without_dates_leaves_a_subtask_at_its_manual_summarys_start() {
+    let mut p = project();
+    let g = top(&mut p, "G", 1);
+    let gi = task(&mut p, "Gi", 1);
+    p.indent(gi).unwrap();
+    p.task_mut(gi).unwrap().active = false;
+    let (_, a) = manual_phase(&mut p);
+    p.link(g.into(), a, LinkType::SS, Lag::None).unwrap();
+    recalculate(&mut p);
+    assert_eq!(start(&p, a), dt(2026, 11, 2, 8));
+}
+
 /// A subtask driven by its own link follows the link, not the manual summary's start; a
 /// summary Start No Earlier Than date (on an automatic summary) still holds every subtask.
 #[test]

@@ -11,7 +11,7 @@ use crate::tools::dependencies::{LinkedDocs, linked_doc, read_linked_docs};
 use crate::tools::tasks::{apply_task_fields, apply_task_links, insert_new_task, insert_position};
 use crate::views;
 
-pub(crate) fn member_refs_schema(desc: &str) -> Value {
+fn member_refs_schema(desc: &str) -> Value {
     json!({
         "type": "array",
         "items": {

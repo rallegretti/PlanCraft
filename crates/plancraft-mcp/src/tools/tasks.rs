@@ -50,10 +50,14 @@ pub fn tools() -> Vec<Tool> {
                                 "units": { "type": ["string", "number"], "description": "Assignment units, e.g. \"50%\" or 0.5." }
                             }
                         },
-                        "description": "Text like \"Ana[50%], Bob\" or an array of names/ids/{resource, units}. Unknown names create resources."
+                        "description": "Text like \"Ana[50%], Bob\" or an array of names/ids/{resource, units}. Unknown names in text create resources; ids and {resource, units} must name existing resources."
                     },
                     "milestone": { "type": "boolean" },
-                    "members": super::milestones::member_refs_schema("Milestone members: ids, names or batch keys.")
+                    "members": {
+                        "type": "array",
+                        "items": { "type": ["integer", "string"] },
+                        "description": "Milestone members: task ids, names or batch keys. Tasks in other projects are added afterwards with update_milestone_members."
+                    }
                 },
                 "required": ["name"]
             },
@@ -473,7 +477,13 @@ pub fn apply_task_links(p: &mut Project, id: TaskId, a: &Args, keys: Option<&Tas
     if let Some(members) = a.array("members")? {
         let mut refs = Vec::new();
         for m in members {
-            refs.push(resolve_task_ref(p, m, keys)?);
+            let r = resolve_task_ref(p, m, keys)?;
+            // Tasks in other projects need their project read first, which only the milestone
+            // tools do; taken here, they would go unchecked and without their dates.
+            if matches!(r, TaskRef::External { .. }) {
+                return err("members in other projects can't be added here; add them with update_milestone_members");
+            }
+            refs.push(r);
         }
         if !p.task(id).is_some_and(|t| t.is_milestone()) {
             p.set_milestone(id, true)?;

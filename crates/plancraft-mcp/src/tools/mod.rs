@@ -262,7 +262,7 @@ pub fn task_field_props() -> Map<String, Value> {
         "name": string("Task name."),
         "duration": duration("Planned duration: working time like \"3d\", or elapsed time like \"33ed\" (calendar time: nights, weekends and holidays count). On a summary task (working time only) it makes the summary manually scheduled (top-down planning), keeping its start."),
         "estimated": boolean("Mark the duration as a tentative estimate (shown with '?')."),
-        "mode": string_enum("Scheduling mode: 'auto' (engine computes dates) or 'manual' (uses start/finish as entered; switching keeps the current dates). A manual summary keeps its own dates: its subtasks don't move it, links into it stop at it, its auto subtasks without links or a date constraint of their own start at its start, and the others keep their own dates (subtasks_start/subtasks_finish report their span).", &["auto", "manual"]),
+        "mode": string_enum("Scheduling mode: 'auto' (engine computes dates) or 'manual' (uses start/finish as entered; switching keeps the current dates). A manual summary keeps its own dates: its subtasks don't move it, links into it stop at it, its start stands in for the project start for the auto subtasks under it, and those with links or a start date keep their own dates (subtasks_start/subtasks_finish report their span).", &["auto", "manual"]),
         "active": boolean("Inactive tasks stay in the plan but do not affect the schedule or workload."),
         "task_type": string_enum("Which of units/duration/work stays fixed when another changes.", &["fixed_units", "fixed_duration", "fixed_work"]),
         "effort_driven": boolean("When true, adding resources keeps total work constant and shortens the task."),

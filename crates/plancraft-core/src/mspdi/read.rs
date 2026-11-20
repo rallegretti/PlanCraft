@@ -165,35 +165,65 @@ pub fn import(text: &str, fallback_name: &str) -> Result<(Project, Vec<String>),
     limits::check_counts(&p).map_err(|e| e.to_string())?;
     let mut out = notes.into_vec();
     out.extend(limits::sanitize(&mut p));
-    out.extend(moved_note(&mut p, &stored));
+    // First, so a long list of notes never hides it.
+    if let Some(note) = moved_note(&mut p, &stored) {
+        out.insert(0, note);
+    }
     Ok((p, out))
 }
 
-/// Recalculates the plan and says how many tasks land on other days than the file stores for
-/// them, naming the first, so a plan that schedules differently in PlanCraft never opens
-/// silently with other dates (issue 21). Summaries scheduled automatically are left out: their
-/// dates follow their subtasks'.
+/// Recalculates the plan and says how many tasks land at other times than the file stores for
+/// them (working time apart, or another day for an elapsed task), naming the first, so a plan
+/// that schedules differently in PlanCraft never opens silently with other dates (issue 21).
+/// Summaries scheduled automatically are left out: their dates follow their subtasks'.
 fn moved_note(p: &mut Project, stored: &[(TaskId, DateTime, DateTime)]) -> Option<String> {
     crate::schedule::try_recalculate(p).ok()?;
+    let cal = crate::schedule::project_calendar(p);
     let rows: HashMap<TaskId, usize> = p.tasks.iter().enumerate().map(|(i, t)| (t.id, i)).collect();
     let mut moved = stored.iter().filter_map(|&(id, start, finish)| {
         let i = *rows.get(&id)?;
         let t = p.tasks.get(i)?;
         let auto_summary = p.has_children(i) && t.sched.rollup_start.is_none();
+        if !t.active || auto_summary {
+            return None;
+        }
+        // The end of one working day and the start of the next are the same moment in a plan.
+        let apart = |a: DateTime, b: DateTime| if t.elapsed { a.date() != b.date() } else { cal.between(a, b) != 0 };
         let (s, f) = (t.sched.start?, t.sched.finish?);
-        let day = |a: DateTime, b: DateTime| a.date() != b.date();
-        let differs = if day(s, start) { Some(("starts", s, start)) } else { day(f, finish).then_some(("finishes", f, finish)) };
-        differs.filter(|_| t.active && !auto_summary).map(|d| (t, d))
+        let differs = if apart(s, start) { Some(("starts", s, start)) } else { apart(f, finish).then_some(("finishes", f, finish)) };
+        differs.map(|d| (t, d))
     });
     let (first, (what, here, there)) = moved.next()?;
     let others = moved.count();
-    let name: String = first.name.chars().filter(|c| !c.is_control()).take(60).collect();
     let fmt = |d: DateTime| d.strftime("%Y-%m-%d").to_string();
-    let example = format!("'{name}' {what} {} here and {} in the file", fmt(here), fmt(there));
+    let example = format!("{} {what} {} in PlanCraft and {} in the file", shown_name(first), fmt(here), fmt(there));
     Some(match others {
-        0 => format!("1 task is scheduled on other days than the file gives: {example}"),
-        n => format!("{} tasks are scheduled on other days than the file gives, for example {example}", n.saturating_add(1)),
+        0 => format!("1 task is scheduled at another time than the file gives: {example}"),
+        n => format!("{} tasks are scheduled at other times than the file gives, for example {example}", n.saturating_add(1)),
     })
+}
+
+/// A task's name as a note shows it: quoted, without control, direction or invisible
+/// characters (a file's names must not garble the note), cut short; its id when that leaves
+/// nothing.
+fn shown_name(t: &Task) -> String {
+    const LONGEST: usize = 60;
+    let hidden = |c: char| {
+        c.is_control()
+            || matches!(c, '\u{00ad}' | '\u{061c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}'
+                | '\u{feff}' | '\u{fff9}'..='\u{fffb}')
+    };
+    let clean: Vec<char> = t.name.chars().filter(|c| !hidden(*c)).collect();
+    let name: String = clean.iter().collect();
+    let name = name.trim();
+    if name.is_empty() {
+        return format!("task {}", t.id);
+    }
+    if name.chars().count() > LONGEST {
+        let cut: String = name.chars().take(LONGEST.saturating_sub(1)).collect();
+        return format!("'{}…'", cut.trim_end());
+    }
+    format!("'{name}'")
 }
 
 // ---------------------------------------------------------------------------

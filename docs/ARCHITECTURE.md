@@ -71,7 +71,7 @@ So a vacation of any assigned person pauses the task. Lags and summary durations
    - Adds leveling delays.
    - Uses actual start and finish when they are set.
    - A task with an elapsed duration (`33ed`) runs around the clock: it starts as soon as it may, even outside working time, and finishes the elapsed time later; its work is spread over every hour of that time.
-   - Manual tasks keep their entered dates. A manually scheduled summary keeps its own dates too: links into it (and into the summaries around it) stop at it, its auto-scheduled subtasks without links or a date constraint of their own start at its start (the others keep their own dates, even before it), and its successors follow its own dates.
+   - Manual tasks keep their entered dates. A manually scheduled summary keeps its own dates too: links and Start No Earlier Than dates of the summaries around it stop at it, its start stands in for the project start for the auto-scheduled tasks under it (the nearest manual summary's, for nested ones), and its successors follow its own dates. Tasks under it with links or a start date (Start/Finish No Earlier Than, Must Start/Finish On; their own or from automatic summaries between) keep their own dates, even before its start.
 6. **Backward pass.** It computes late dates, limited by the project finish, deadlines (a task's own and its summaries') and constraints. Inactive successors are skipped. A link from a summary's start binds only the subtask that sets that start.
 7. **ALAP pass.** As-late-as-possible tasks are pinned to their late start, and the passes run again so successors stay consistent.
 8. **Slack.** Total and free slack are computed per leaf. A task is critical when total slack ≤ the threshold.

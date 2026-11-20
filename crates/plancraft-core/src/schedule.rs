@@ -11,9 +11,9 @@
 //! like in Microsoft Project.
 //!
 //! A manually scheduled summary task (top-down planning) keeps the dates typed for it: its
-//! subtasks don't move it, links into it stop at it, its auto-scheduled subtasks that have no
-//! links or date constraint of their own start at its start, and its successors follow its own
-//! dates. The span of its subtasks is
+//! subtasks don't move it, links into it (and the summaries around it) stop at it, its start
+//! stands in for the project start for the subtasks under it (those with links or a start date
+//! keep their own dates, even before it), and its successors follow its own dates. The span of its subtasks is
 //! kept separately ([`TaskSchedule::rollup_start`]).
 //!
 //! The engine never indexes out of bounds and clamps date arithmetic; as a last resort
@@ -404,8 +404,7 @@ struct Engine<'a> {
     dates: Vec<Dates>,
     /// Working parts of split tasks (by task index).
     segments: HashMap<usize, Vec<(DateTime, DateTime)>>,
-    /// Per task: the latest Start No Earlier Than date and the earliest deadline set on its
-    /// ancestor summaries (both apply to every subtask).
+    /// Per task: what its summaries pass down (see [`Inherited`]).
     inherited: Vec<Inherited>,
     /// The dates of each manually scheduled summary (see [`manual_summary_dates`]).
     manual_summary: Vec<Option<(DateTime, DateTime)>>,
@@ -413,17 +412,21 @@ struct Engine<'a> {
 
 #[derive(Clone, Copy, Debug, Default)]
 struct Inherited {
+    /// The latest Start No Earlier Than date of the automatic summaries around the task, up to
+    /// the nearest manually scheduled one.
     snet: Option<DateTime>,
+    /// The earliest deadline of all the summaries around the task.
     deadline: Option<DateTime>,
-    /// The latest start of the manually scheduled summaries around the task: where it starts
-    /// when it has no links or date constraint of its own.
+    /// The start of the nearest manually scheduled summary around the task: where it starts in
+    /// place of the project start.
     manual_start: Option<DateTime>,
 }
 
-/// Constraints a summary passes to its subtasks: its Start No Earlier Than date drives their
+/// What summaries pass to their subtasks. A summary's Start No Earlier Than date drives their
 /// starts, and its deadline bounds their late finish (and so their slack). A manually scheduled
-/// summary's start places the subtasks that have nothing else to go by (its constraint is
-/// ignored, like any manual task's).
+/// summary stands in for the project start for the subtasks under it, and stops the start dates
+/// of the summaries around it, as it stops their links (its own constraint is ignored, like any
+/// manual task's).
 fn inherited_from_summaries(p: &Project, parent: &[Option<usize>], manual_summary: &[Option<(DateTime, DateTime)>]) -> Vec<Inherited> {
     let mut out = vec![Inherited::default(); p.tasks.len()];
     // Parents come before their children, so each parent's value is final when a child reads it.
@@ -431,15 +434,14 @@ fn inherited_from_summaries(p: &Project, parent: &[Option<usize>], manual_summar
         let Some(pi) = parent.get(i).copied().flatten() else { continue };
         let (Some(par), Some(up)) = (p.tasks.get(pi), out.get(pi).copied()) else { continue };
         // An inactive summary passes on what its own summaries set, not its own date or deadline.
-        let (own_snet, own_manual) = match manual_summary.get(pi).copied().flatten() {
-            Some((start, _)) => (None, par.active.then_some(start)),
-            None => (par.constraint.date.filter(|_| par.active && par.constraint.kind == ConstraintKind::Snet), None),
-        };
         let own_deadline = par.deadline.filter(|_| par.active);
-        let v = Inherited {
-            snet: up.snet.max(own_snet),
-            deadline: min_opt(up.deadline, own_deadline),
-            manual_start: up.manual_start.max(own_manual),
+        let deadline = min_opt(up.deadline, own_deadline);
+        let v = match manual_summary.get(pi).copied().flatten().filter(|_| par.active) {
+            Some((start, _)) => Inherited { snet: None, deadline, manual_start: Some(start) },
+            None => {
+                let own_snet = par.constraint.date.filter(|_| par.active && par.constraint.kind == ConstraintKind::Snet);
+                Inherited { snet: up.snet.max(own_snet), deadline, manual_start: up.manual_start }
+            }
         };
         if let Some(slot) = out.get_mut(i) {
             *slot = v;
@@ -842,11 +844,13 @@ impl<'a> Engine<'a> {
 
             let mut es = project_start;
             let mut driven_by_link = false;
+            let mut linked = false;
             for &e in self.incoming(i) {
                 let Some(edge) = self.edges.get(e) else { continue };
                 let Some((ps, pf, pdur)) = self.pred_dates(&edge.pred) else {
                     continue;
                 };
+                linked = true;
                 let cand_start = match edge.kind {
                     LinkType::FS => apply_lag(&self.proj_cal, pf, edge.lag, pdur),
                     LinkType::SS => apply_lag(&self.proj_cal, ps, edge.lag, pdur),
@@ -864,11 +868,17 @@ impl<'a> Engine<'a> {
             if let Some(snet) = inherited.snet {
                 es = es.max(snet);
             }
-            // A manually scheduled summary's start places the subtasks with no links or date
-            // constraint of their own; the others keep their own dates, even before it (issue 21).
+            // A manually scheduled summary's start stands in for the project start: it places the
+            // subtasks with nothing else giving them a start. Those with links or a start date
+            // (their own, or from the summaries between them and it) keep their own dates, even
+            // before it (issue 21). Start and Finish No Later Than only limit a start.
+            let dated =
+                matches!(t.constraint.kind, ConstraintKind::Snet | ConstraintKind::Fnet | ConstraintKind::Mso | ConstraintKind::Mfo)
+                    && t.constraint.date.is_some();
             if let Some(manual_start) = inherited.manual_start
-                && self.incoming(i).is_empty()
-                && !t.constraint.kind.needs_date()
+                && !linked
+                && !dated
+                && inherited.snet.is_none()
             {
                 es = es.max(manual_start);
             }
