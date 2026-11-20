@@ -69,8 +69,8 @@ fn first_element(text: &str) -> Option<&str> {
 }
 
 /// Reads a plan from MSPDI text, treating it as untrusted. `fallback_name` names the plan when
-/// the file does not. Returns the plan (not yet recalculated) and notes on what could not be
-/// carried over or was clamped into range.
+/// the file does not. Returns the plan, scheduled, and notes on what could not be carried over,
+/// was clamped into range, or schedules at other times than the file gives.
 pub fn from_xml(text: &str, fallback_name: &str) -> Result<(Project, Vec<String>), String> {
     crate::guard::catch("reading a Microsoft Project XML file", || read::import(text, fallback_name))
         .map_err(|p| format!("PlanCraft hit an internal error reading the file ({})", p.message))?
@@ -96,7 +96,7 @@ fn decode(bytes: &[u8]) -> Option<String> {
 }
 
 /// Reads a plan from the bytes of an MSPDI file (UTF-8, or UTF-16 with a byte order mark),
-/// treating them as untrusted. The plan is not yet recalculated.
+/// treating them as untrusted. The plan comes back scheduled (see [`from_xml`]).
 pub fn from_bytes(bytes: &[u8], fallback_name: &str) -> Result<(Project, Vec<String>), String> {
     let text = decode(bytes).ok_or_else(|| "the file is not UTF-8 or UTF-16 text".to_string())?;
     from_xml(&text, fallback_name)

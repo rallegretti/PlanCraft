@@ -152,9 +152,10 @@ pub fn import(text: &str, fallback_name: &str) -> Result<(Project, Vec<String>),
         p.calendar = id;
     }
     let fields = definitions(&mut p, &r.definitions, &mut notes);
-    let links = tasks(&mut p, &r.tasks, &cals, fields, &mut notes);
+    let mut links = tasks(&mut p, &r.tasks, &cals, fields, &mut notes);
     let resources = resources(&mut p, &r.resources, &cals, &mut notes);
     assignments(&mut p, &r.assignments, &links.ids, &resources, &mut notes);
+    let stored = std::mem::take(&mut links.stored);
     predecessors(&mut p, links, &mut notes);
 
     p.ids.task = p.tasks.iter().map(|t| t.id.0).max().unwrap_or(0);
@@ -164,7 +165,65 @@ pub fn import(text: &str, fallback_name: &str) -> Result<(Project, Vec<String>),
     limits::check_counts(&p).map_err(|e| e.to_string())?;
     let mut out = notes.into_vec();
     out.extend(limits::sanitize(&mut p));
+    // First, so a long list of notes never hides it.
+    if let Some(note) = moved_note(&mut p, &stored) {
+        out.insert(0, note);
+    }
     Ok((p, out))
+}
+
+/// Recalculates the plan and says how many tasks land at other times than the file stores for
+/// them (working time apart, or another day for an elapsed task), naming the first, so a plan
+/// that schedules differently in PlanCraft never opens silently with other dates (issue 21).
+/// Summaries scheduled automatically are left out: their dates follow their subtasks'.
+fn moved_note(p: &mut Project, stored: &[(TaskId, DateTime, DateTime)]) -> Option<String> {
+    crate::schedule::try_recalculate(p).ok()?;
+    let cal = crate::schedule::project_calendar(p);
+    let rows: HashMap<TaskId, usize> = p.tasks.iter().enumerate().map(|(i, t)| (t.id, i)).collect();
+    let mut moved = stored.iter().filter_map(|&(id, start, finish)| {
+        let i = *rows.get(&id)?;
+        let t = p.tasks.get(i)?;
+        let auto_summary = p.has_children(i) && t.sched.rollup_start.is_none();
+        if !t.active || auto_summary {
+            return None;
+        }
+        // The end of one working day and the start of the next are the same moment in a plan.
+        let apart = |a: DateTime, b: DateTime| if t.elapsed { a.date() != b.date() } else { cal.between(a, b) != 0 };
+        let (s, f) = (t.sched.start?, t.sched.finish?);
+        let differs = if apart(s, start) { Some(("starts", s, start)) } else { apart(f, finish).then_some(("finishes", f, finish)) };
+        differs.map(|d| (t, d))
+    });
+    let (first, (what, here, there)) = moved.next()?;
+    let others = moved.count();
+    let fmt = |d: DateTime| d.strftime("%Y-%m-%d").to_string();
+    let example = format!("{} {what} {} in PlanCraft and {} in the file", shown_name(first), fmt(here), fmt(there));
+    Some(match others {
+        0 => format!("1 task is scheduled at another time than the file gives: {example}"),
+        n => format!("{} tasks are scheduled at other times than the file gives, for example {example}", n.saturating_add(1)),
+    })
+}
+
+/// A task's name as a note shows it: quoted, without control, direction or invisible
+/// characters (a file's names must not garble the note), cut short; its id when that leaves
+/// nothing.
+fn shown_name(t: &Task) -> String {
+    const LONGEST: usize = 60;
+    let hidden = |c: char| {
+        c.is_control()
+            || matches!(c, '\u{00ad}' | '\u{061c}' | '\u{180e}' | '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}'
+                | '\u{feff}' | '\u{fff9}'..='\u{fffb}')
+    };
+    let clean: Vec<char> = t.name.chars().filter(|c| !hidden(*c)).collect();
+    let name: String = clean.iter().collect();
+    let name = name.trim();
+    if name.is_empty() {
+        return format!("task {}", t.id);
+    }
+    if name.chars().count() > LONGEST {
+        let cut: String = name.chars().take(LONGEST.saturating_sub(1)).collect();
+        return format!("'{}…'", cut.trim_end());
+    }
+    format!("'{name}'")
 }
 
 // ---------------------------------------------------------------------------
@@ -691,6 +750,8 @@ struct RawLink {
 struct Links {
     ids: HashMap<i64, TaskId>,
     links: Vec<RawLink>,
+    /// The start and finish the file stores for each task, to compare with PlanCraft's.
+    stored: Vec<(TaskId, DateTime, DateTime)>,
 }
 
 /// Minutes of `value` in `format`'s unit (working time; elapsed units use 24-hour days).
@@ -729,11 +790,15 @@ fn tasks(p: &mut Project, records: &[Element], cals: &Calendars, mut fields: Fie
     let uids: Vec<Option<i64>> = rows.iter().map(|t| int(t, "UID")).collect();
     let (ids, map) = assign_ids(&uids);
     let mut links = Vec::new();
+    let mut stored = Vec::new();
     let mut prev_level = 0u16;
     let now = crate::dates::now();
     let mpd = p.settings.time.minutes_per_day;
     for (t, id) in rows.iter().zip(ids) {
         let id = TaskId(id);
+        if let (Some(start), Some(finish)) = (when(t, "Start"), when(t, "Finish")) {
+            stored.push((id, start, finish));
+        }
         let mut task = Task::new(id, text(t, "Name"), mpd);
         let level = int(t, "OutlineLevel").unwrap_or(1).clamp(1, i64::from(limits::MAX_OUTLINE_LEVEL));
         let level = u16::try_from(level).unwrap_or(1).min(prev_level.saturating_add(1));
@@ -903,7 +968,7 @@ fn tasks(p: &mut Project, records: &[Element], cals: &Calendars, mut fields: Fie
         notes.add(format!("the plan has more than {MAX_TASKS} tasks"));
     }
     let ids = map.into_iter().map(|(u, i)| (u, TaskId(i))).collect();
-    Links { ids, links }
+    Links { ids, links, stored }
 }
 
 fn predecessors(p: &mut Project, links: Links, notes: &mut Notes) {

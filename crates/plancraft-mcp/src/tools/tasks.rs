@@ -40,10 +40,24 @@ pub fn tools() -> Vec<Tool> {
                     "children": { "type": "array", "items": { "type": "object" }, "description": "Nested subtasks (same item format)." },
                     "level": { "type": "integer", "description": "Relative outline level (1 = top of batch) for flat lists instead of 'children'." },
                     "duration": { "type": ["string", "number"] },
-                    "predecessors": { "type": ["array", "string"], "description": "Like create_task; may use batch keys." },
-                    "resources": { "type": ["string", "array"], "description": "Text like \"Ana[50%], Bob\" or an array of names/ids/{resource, units}. Unknown names create resources." },
+                    "predecessors": predecessors("Like create_task; may use batch keys."),
+                    "resources": {
+                        "type": ["string", "array"],
+                        "items": {
+                            "type": ["string", "integer", "object"],
+                            "properties": {
+                                "resource": { "type": ["integer", "string"], "description": "Resource id or name." },
+                                "units": { "type": ["string", "number"], "description": "Assignment units, e.g. \"50%\" or 0.5." }
+                            }
+                        },
+                        "description": "Text like \"Ana[50%], Bob\" or an array of names/ids/{resource, units}. Unknown names in text create resources; ids and {resource, units} must name existing resources."
+                    },
                     "milestone": { "type": "boolean" },
-                    "members": { "type": "array", "description": "Milestone members: ids, names or batch keys." }
+                    "members": {
+                        "type": "array",
+                        "items": { "type": ["integer", "string"] },
+                        "description": "Milestone members: task ids, names or batch keys. Tasks in other projects are added afterwards with update_milestone_members."
+                    }
                 },
                 "required": ["name"]
             },
@@ -463,7 +477,13 @@ pub fn apply_task_links(p: &mut Project, id: TaskId, a: &Args, keys: Option<&Tas
     if let Some(members) = a.array("members")? {
         let mut refs = Vec::new();
         for m in members {
-            refs.push(resolve_task_ref(p, m, keys)?);
+            let r = resolve_task_ref(p, m, keys)?;
+            // Tasks in other projects need their project read first, which only the milestone
+            // tools do; taken here, they would go unchecked and without their dates.
+            if matches!(r, TaskRef::External { .. }) {
+                return err("members in other projects can't be added here; add them with update_milestone_members");
+            }
+            refs.push(r);
         }
         if !p.task(id).is_some_and(|t| t.is_milestone()) {
             p.set_milestone(id, true)?;

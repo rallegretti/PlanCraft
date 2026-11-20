@@ -432,6 +432,16 @@ fn cross_document_external_links() {
         c.call("create_milestone", json!({ "name": "Platform done (alias)", "members": [{ "project": "Platform", "task": api_id }] }));
     assert_eq!(alias["finish"], "2026-10-30 17:00");
     c.call("delete_tasks", json!({ "tasks": ["Platform done (alias)"] }));
+    // Regression (review of issue 21's fix): create_tasks took members in other projects without
+    // reading them, so a missing task went unnoticed and a real one lent the milestone no date.
+    for task in [json!(api_id), json!(999)] {
+        let e = c.call_err(
+            "create_tasks",
+            json!({ "tasks": [{ "name": "Bulk", "members": [{ "external_project": "Platform", "task": task }] }] }),
+        );
+        assert!(e.contains("update_milestone_members"), "{e}");
+    }
+    assert!(c.call_err("get_task", json!({ "task": "Bulk" })).contains("Bulk"));
     c.call_err("link_external_task", json!({ "external_project": "Platform", "task": 999, "successor": "Integrate" }));
     c.call_err("link_external_task", json!({ "external_project": "Nope", "task": 1, "successor": "Integrate" }));
     c.call("save_project", json!({}));

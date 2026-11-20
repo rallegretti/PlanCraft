@@ -474,3 +474,45 @@ fn manual_summaries_survive_a_round_trip() {
     recalculate(&mut r);
     assert_eq!(r.tasks[0].sched, p.tasks[0].sched.clone());
 }
+
+/// Issue 21: a plan whose tasks land at other times in PlanCraft than the file stores says so
+/// first, naming one of them; one that schedules the same says nothing. The end of one working
+/// day and the start of the next are the same moment.
+#[test]
+fn tasks_scheduled_at_other_times_than_the_file_are_noted() {
+    let task = |uid: u32, name: &str, start: &str, finish: &str, inner: &str| {
+        format!(
+            "<Task><UID>{uid}</UID><Name>{name}</Name><OutlineLevel>1</OutlineLevel><Duration>PT16H0M0S</Duration>\
+             <Start>{start}</Start><Finish>{finish}</Finish>{inner}</Task>"
+        )
+    };
+    let link = "<PredecessorLink><PredecessorUID>1</PredecessorUID><Type>1</Type></PredecessorLink>";
+    let file = |name: &str, start: &str, finish: &str, extra: &str| {
+        let tasks = task(1, "Design", "2026-03-02T08:00:00", "2026-03-03T17:00:00", "") + &task(2, name, start, finish, link) + extra;
+        format!("<Project><StartDate>2026-03-02T08:00:00</StartDate><Tasks>{tasks}</Tasks></Project>")
+    };
+    let note = |what: &str, here: &str, there: &str| {
+        format!("1 task is scheduled at another time than the file gives: 'Build' {what} {here} in PlanCraft and {there} in the file")
+    };
+
+    let (p, notes) = mspdi::from_xml(&file("Build", "2026-03-04T08:00:00", "2026-03-05T17:00:00", ""), "x").unwrap();
+    assert!(notes.is_empty(), "{notes:?}");
+    assert_eq!(p.tasks[1].sched.start, Some(dt(2026, 3, 4, 8)), "the plan comes back scheduled");
+    // Starting at the end of the day before, or finishing at midnight after, is no difference.
+    let (_, notes) = mspdi::from_xml(&file("Build", "2026-03-03T17:00:00", "2026-03-06T00:00:00", ""), "x").unwrap();
+    assert!(notes.is_empty(), "{notes:?}");
+
+    let (_, notes) = mspdi::from_xml(&file("Build", "2026-03-09T08:00:00", "2026-03-10T17:00:00", ""), "x").unwrap();
+    assert_eq!(notes, [note("starts", "2026-03-04", "2026-03-09")]);
+    let (_, notes) = mspdi::from_xml(&file("Build", "2026-03-04T08:00:00", "2026-03-06T17:00:00", ""), "x").unwrap();
+    assert_eq!(notes, [note("finishes", "2026-03-05", "2026-03-06")]);
+
+    // Direction and invisible characters in the name never reach the note; it comes first.
+    let blank = "<Task><UID>9</UID><IsNull>1</IsNull></Task>";
+    let (_, notes) =
+        mspdi::from_xml(&file("\u{202e}Bu\u{200b}ild\u{2066}", "2026-03-09T08:00:00", "2026-03-10T17:00:00", blank), "x").unwrap();
+    assert_eq!(notes.len(), 2, "{notes:?}");
+    assert_eq!(notes[0], note("starts", "2026-03-04", "2026-03-09"));
+    let (_, notes) = mspdi::from_xml(&file("\u{202e}", "2026-03-09T08:00:00", "2026-03-10T17:00:00", ""), "x").unwrap();
+    assert!(notes[0].contains(": task T2 starts"), "{notes:?}");
+}
