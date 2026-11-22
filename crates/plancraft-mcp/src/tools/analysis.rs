@@ -109,7 +109,7 @@ pub fn tools() -> Vec<Tool> {
         Tool::new(
             "set_interim_plan",
             "Set interim plan",
-            "Copy plan values between the current schedule, baselines and interim plans (Start1/Finish1 .. Start10/Finish10). Copying into an interim plan copies start and finish only; copying a baseline into another baseline copies all its values; tasks with no value in the source lose theirs in the target. An interim plan can't be copied into a baseline.",
+            "Copy plan values between the current schedule, baselines and interim plans (Start1/Finish1 .. Start10/Finish10). Copying into an interim plan copies start and finish only; copying a baseline into another baseline copies all its values; tasks with no value in the source lose theirs in the target. Copying an interim plan into a baseline copies its start and finish; the baseline keeps its other values (a new one gets the duration between the dates, no work or cost).",
             schema(
                 json!({
                     "copy": string("Source: \"scheduled\" (current start/finish), \"baseline\", \"baseline1\"..\"baseline10\" or \"interim1\"..\"interim10\"."),

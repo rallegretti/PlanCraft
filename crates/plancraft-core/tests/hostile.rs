@@ -271,6 +271,28 @@ proptest! {
     }
 }
 
+proptest! {
+    #![proptest_config(ProptestConfig { cases: cases(48), ..ProptestConfig::default() })]
+
+    /// Issue 21: whatever random edits leave, a plan that goes out to Microsoft Project XML with
+    /// nothing lost comes back scheduled the same, so opening it says nothing about tasks at other
+    /// times. (An export that loses something, such as splits or milestone members, says so, and
+    /// then the import may too.)
+    #[test]
+    fn a_plan_sent_through_project_xml_without_losses_schedules_the_same(ops in prop::collection::vec(edit_op(), 1..40)) {
+        let mut doc = Document::new(1, demo_project(start()), None);
+        for op in ops {
+            let _ = doc.try_edit("junk", ChangeSource::Agent, |p| apply(p, &op));
+        }
+        let (xml, lost) = plancraft_core::mspdi::to_xml(&doc.project);
+        let (_, notes) = plancraft_core::mspdi::from_xml(&xml, "x").map_err(TestCaseError::fail)?;
+        let (moved, other): (Vec<&String>, Vec<&String>) = notes.iter().partition(|n| n.contains("than the file gives"));
+        if lost.is_empty() && other.is_empty() {
+            prop_assert!(moved.is_empty(), "a lossless round trip moved tasks: {moved:?}");
+        }
+    }
+}
+
 fn collect_leaves<'a>(v: &'a mut serde_json::Value, out: &mut Vec<&'a mut serde_json::Value>) {
     match v {
         serde_json::Value::Array(items) => items.iter_mut().for_each(|i| collect_leaves(i, out)),

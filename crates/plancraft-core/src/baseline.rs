@@ -245,7 +245,9 @@ impl Project {
     /// - A task with no value in the source baseline or interim plan loses its value in the
     ///   target, so the target ends up matching the source. A source with no values at all for the
     ///   tasks in scope is refused: the copy would only erase the target.
-    /// - An interim plan holds no duration, work or cost, so it can't be copied into a baseline.
+    /// - Copying an interim plan into a baseline copies its start and finish. A baseline the task
+    ///   already has keeps its duration, work and cost; a new one gets the working time between
+    ///   the two dates (project calendar) as its duration, and no work or cost.
     /// - The roll-up options in `scope` apply only when saving the schedule into a baseline for
     ///   selected tasks.
     ///
@@ -261,9 +263,6 @@ impl Project {
         if copy == into {
             return invalid(format!("{} can't be copied into itself", copy.name()));
         }
-        if matches!((copy, into), (PlanSlot::Interim(_), PlanSlot::Baseline(_))) {
-            return invalid("an interim plan holds only start and finish dates, so it can't be copied into a baseline");
-        }
         let rows = self.scope_rows(&scope.tasks)?;
         let in_scope = |i: usize| rows.as_ref().is_none_or(|r| r.contains(&i));
         if copy != PlanSlot::Scheduled && !self.tasks.iter().enumerate().any(|(i, t)| in_scope(i) && t.dates_in(copy).is_some()) {
@@ -271,6 +270,14 @@ impl Project {
             return invalid(format!("{} holds no values{which}, so there is nothing to copy into {}", copy.name(), into.name()));
         }
         let now = now_minute();
+        // An interim plan's dates going into a new baseline: the working time between them.
+        let spans: Vec<Minutes> = match copy {
+            PlanSlot::Interim(m) => {
+                let cal = crate::schedule::project_calendar(self);
+                self.tasks.iter().map(|t| t.interim_in(m).map_or(0, |d| cal.between(d.start, d.finish).max(0))).collect()
+            }
+            _ => Vec::new(),
+        };
         let mut written: HashSet<usize> = HashSet::new();
         for (i, t) in self.tasks.iter_mut().enumerate() {
             if rows.as_ref().is_some_and(|r| !r.contains(&i)) {
@@ -285,7 +292,17 @@ impl Project {
                             None => continue,
                         },
                         PlanSlot::Baseline(m) => t.baseline_in(m).map(|b| Baseline { saved: now, ..*b }),
-                        PlanSlot::Interim(_) => continue,
+                        PlanSlot::Interim(m) => t.interim_in(m).copied().map(|d| match t.baseline_in(n) {
+                            Some(b) => Baseline { start: d.start, finish: d.finish, saved: now, ..*b },
+                            None => Baseline {
+                                start: d.start,
+                                finish: d.finish,
+                                duration: spans.get(i).copied().unwrap_or(0),
+                                work: 0,
+                                cost: 0.0,
+                                saved: now,
+                            },
+                        }),
                     };
                     let wrote = value.is_some();
                     t.put_baseline(n, value);

@@ -166,14 +166,15 @@ impl SetBaseline {
                         ui.checkbox(&mut self.from_subtasks, "From subtasks into selected summary task(s)");
                     });
                 });
-                if matches!((copy, into), (PlanSlot::Interim(_), PlanSlot::Baseline(_))) {
-                    ui.colored_label(theme::pal().ERROR, "An interim plan holds only dates, so it can't be copied into a baseline.");
-                } else if copy == into {
+                if copy == into {
                     ui.colored_label(theme::pal().ERROR, "Choose a different plan to copy into.");
                 } else if copy != PlanSlot::Scheduled && p.plan_info(copy).tasks == 0 {
                     ui.colored_label(theme::pal().ERROR, format!("{} holds no values to copy.", copy.name()));
                 } else if p.plan_info(into).tasks > 0 {
                     note(ui, format!("{} already holds values; they will be replaced (Undo restores them).", into.name()));
+                }
+                if matches!((copy, into), (PlanSlot::Interim(_), PlanSlot::Baseline(_))) {
+                    note(ui, "Only the start and finish dates are copied; the baseline keeps its duration, work and cost.");
                 }
                 if !self.interim {
                     note(ui, "Variance is measured against Baseline. Keep earlier snapshots in Baseline1–10.");

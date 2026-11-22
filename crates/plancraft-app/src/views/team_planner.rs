@@ -140,7 +140,8 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
         cp.vline(xt, chart.y_range(), Stroke::new(1.5, theme::pal().TODAY));
     }
 
-    let pointer = ui.input(|i| i.pointer.hover_pos());
+    // Not where a window or notice covers the lanes: a drop there isn't on them.
+    let pointer = ui.input(|i| i.pointer.hover_pos()).filter(|p| !crate::widgets::covered(ui, *p));
     let drag_id = egui::Id::new("team_planner_drag");
     let dragging: Option<(TaskId, Option<ResourceId>)> = ui.ctx().data(|d| d.get_temp(drag_id));
     let mut hover_lane: Option<Option<ResourceId>> = None;

@@ -8,3 +8,9 @@ pub mod timescale;
 pub fn pointer_on_area(ctx: &egui::Context, area: &egui::Response) -> bool {
     ctx.pointer_interact_pos().is_some_and(|p| area.rect.contains(p))
 }
+
+/// Whether something drawn above `ui` (a window, a menu, a notice) covers point `p`, so a drop
+/// or hover there belongs to it, not to the view underneath.
+pub fn covered(ui: &egui::Ui, p: egui::Pos2) -> bool {
+    ui.ctx().layer_id_at(p).is_some_and(|l| l != ui.layer_id())
+}

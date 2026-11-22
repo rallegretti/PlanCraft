@@ -1792,7 +1792,9 @@ impl PlanCraftApp {
             return;
         }
         let screen = ctx.content_rect();
-        egui::Area::new(egui::Id::new("toasts")).order(egui::Order::Foreground).anchor(Align2::RIGHT_BOTTOM, vec2(-16.0, -36.0)).show(
+        // With the windows, under menus and lists: a notice that appears while a menu is open
+        // must not cover it and take a click meant for it.
+        egui::Area::new(egui::Id::new("toasts")).order(egui::Order::Middle).anchor(Align2::RIGHT_BOTTOM, vec2(-16.0, -36.0)).show(
             ctx,
             |ui| {
                 ui.set_max_width(420.0f32.min(screen.width() - 40.0));
@@ -4433,6 +4435,92 @@ mod ui_tests {
             }
         }
         assert!(seen.is_empty(), "a table tooltip showed over the menu at {seen:?}");
+    }
+
+    /// Review of issue 42's fix: a card dropped where a window covers the Task Board stays where
+    /// it was (the drop is on the window, not on the column underneath).
+    #[test]
+    fn a_card_dropped_on_a_window_over_the_board_stays_put() {
+        let mut h = harness();
+        let ctx = h.ctx.clone();
+        h.state_mut().exec(&ctx, Command::SetView(ViewKind::Board));
+        h.run_steps(3);
+        h.state_mut().exec(&ctx, Command::SetBaseline);
+        h.run_steps(3);
+        let window = h.ctx.memory(|m| m.area_rect(egui::Id::new("set_baseline"))).unwrap();
+        let (body, scroll) = (h.state().st.board.body, h.state().st.board.scroll);
+        let column_of = |h: &Harness<'static, PlanCraftApp>| {
+            let ws = h.state().ws.lock().unwrap();
+            let p = &ws.active_doc().unwrap().project;
+            let (_, rows) = p.board().into_iter().next().unwrap();
+            let i = rows[0];
+            (p.tasks[i].id, p.board_column_of(i))
+        };
+        let (card, before) = column_of(&h);
+        let from = views::board::card_centre(body, scroll, 0, 0);
+        assert!(!window.contains(from), "the card is clear of the window");
+        // A point in the window, over another column of the board.
+        let to = (1..4)
+            .map(|k| views::board::header_centre(body, scroll, k))
+            .map(|p| egui::pos2(p.x, window.center().y))
+            .find(|p| window.contains(*p))
+            .expect("the window covers a column");
+        let press =
+            |pos, pressed| egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        h.run_steps(30);
+        h.event(egui::Event::PointerMoved(from));
+        h.run_steps(1);
+        h.event(press(from, true));
+        h.run_steps(1);
+        for k in 1..=10 {
+            h.event(egui::Event::PointerMoved(from + (to - from) * (k as f32 / 10.0)));
+            h.run_steps(1);
+        }
+        h.event(press(to, false));
+        h.run_steps(3);
+        let (same, after) = column_of(&h);
+        assert_eq!((same, after), (card, before), "the card stays in its column");
+    }
+
+    /// Review of issue 42's fix: a notice that appears while a menu is open stays under the menu,
+    /// so a click on a menu item where the notice overlaps it still chooses the item.
+    #[test]
+    fn a_notice_stays_under_an_open_menu() {
+        use egui_kittest::kittest::Queryable;
+        let mut ws = Workspace::default();
+        ws.add(plancraft_core::sample::demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap()), None);
+        let shared = ws.shared();
+        // Narrow enough for a notice in the bottom-right corner to reach the menu.
+        let mut h = Harness::builder().with_size(vec2(480.0, 600.0)).build_eframe(move |cc| PlanCraftApp::new(cc, shared));
+        h.run_steps(3);
+        let button = |pos, b, pressed| egui::Event::PointerButton { pos, button: b, pressed, modifiers: Modifiers::NONE };
+        let at = row_number_at(&h, 6);
+        h.event(egui::Event::PointerMoved(at));
+        h.run_steps(1);
+        for pressed in [true, false] {
+            h.event(button(at, egui::PointerButton::Secondary, pressed));
+            h.run_steps(1);
+        }
+        h.run_steps(2);
+        h.state_mut().st.toast(ToastKind::Info, "A notice long enough to reach across to the open menu on the left");
+        h.run_steps(3);
+        let notice = h.ctx.memory(|m| m.area_rect(egui::Id::new("toasts"))).unwrap();
+        let task = h.state().st.sel.single_task().unwrap();
+        let active = |h: &Harness<'static, PlanCraftApp>| lock(&h.state().ws).active_doc().unwrap().project.task(task).unwrap().active;
+        let was = active(&h);
+        let point = h.get_by_label("⏸  Inactivate / Activate").rect().center();
+        assert!(notice.contains(point), "the notice overlaps the item ({point:?} in {notice:?}), or this tests nothing");
+        h.event(egui::Event::PointerMoved(point));
+        h.run_steps(2);
+        h.event(button(point, egui::PointerButton::Primary, true));
+        h.run_steps(1);
+        h.event(button(point, egui::PointerButton::Primary, false));
+        h.run_steps(3);
+        assert_eq!(active(&h), !was, "the menu item under the notice was chosen");
+        assert!(!h.state().st.toasts.is_empty(), "and the notice was left alone");
+        // Away from the menu, the notice is still on top of the views.
+        let clear = egui::pos2(notice.right() - 10.0, notice.center().y);
+        assert_eq!(h.ctx.layer_id_at(clear).map(|l| l.id), Some(egui::Id::new("toasts")), "the notice shows over the chart");
     }
 
     /// The middle of row `row`'s row number in the task table (where rows are dragged).

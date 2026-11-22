@@ -268,7 +268,12 @@ fn full_project_workflow() {
     let interim = c.call("set_interim_plan", json!({ "copy": "baseline", "into": "interim2", "tasks": [fe] }));
     assert_eq!((interim["tasks"].as_u64(), interim["tasks_written"].as_u64()), (Some(1), Some(1)));
     assert_eq!(c.call("get_task", json!({ "task": fe }))["interim_plans"]["interim2"]["finish"], fe_var["baseline_finish"]);
-    c.call_err("set_interim_plan", json!({ "copy": "interim2", "into": "baseline3" }));
+    // An interim plan's dates copy into a baseline (Microsoft's pjSaveBaselineFrom lists Start1-10 as
+    // sources); a new baseline gets no work or cost. Cleared again so the counts below hold.
+    let copied = c.call("set_interim_plan", json!({ "copy": "interim2", "into": "baseline3" }));
+    assert_eq!(copied["tasks_written"], 1);
+    assert_eq!(c.call("get_task", json!({ "task": fe }))["other_baselines"]["baseline3"]["finish"], fe_var["baseline_finish"]);
+    assert_eq!(c.call("clear_baseline", json!({ "baseline": 3 }))["tasks_cleared"], 1);
     c.call_err("set_interim_plan", json!({ "copy": "baseline", "into": "scheduled" }));
     c.call_err("set_baseline", json!({ "baseline": 11 }));
     c.call_err("clear_baseline", json!({ "baseline": 1, "interim_plan": 2 }));
