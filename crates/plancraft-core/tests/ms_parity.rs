@@ -1001,10 +1001,8 @@ fn interim_plans_hold_dates_and_baseline_copies_hold_everything() {
 // Source: https://learn.microsoft.com/en-us/office/vba/api/project.pjsavebaselinefrom — the constants table
 // (with https://learn.microsoft.com/en-us/office/vba/api/project.application.baselinesave — "Parameters")
 // The Start1/Finish1 … Start10/Finish10 dates are listed as a source to copy from, and a baseline
-// is a target, so an interim plan's dates can be copied into a baseline. PlanCraft refuses this
-// because an interim plan has no duration, work or cost to put in the baseline.
+// is a target, so an interim plan's dates can be copied into a baseline.
 #[test]
-#[ignore = "parity gap: an interim plan can't be copied into a baseline"]
 fn interim_plans_can_be_copied_into_a_baseline() {
     let mut p = project();
     let a = task(&mut p, "A", 2 * DAY);

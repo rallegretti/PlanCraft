@@ -346,7 +346,8 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
                     painter.line_segment([start, pos], Stroke::new(1.5, theme::pal().ACCENT));
                 }
                 let (x, y) = to_diagram(pos);
-                if let Some(to) = d.node_at(x, y).and_then(task_of).filter(|to| *to != from)
+                // Not over a window or notice covering the diagram: a drop there isn't on a box.
+                if let Some(to) = d.node_at(x, y).filter(|_| !crate::widgets::covered(ui, pos)).and_then(task_of).filter(|to| *to != from)
                     && let Some(b) = p.task_index(to).and_then(|i| d.node_of(i)).and_then(|n| d.rect(n))
                 {
                     painter.rect_stroke(screen_rect(b).expand(2.0), 3.0 * z, Stroke::new(2.0, theme::pal().ACCENT), StrokeKind::Outside);

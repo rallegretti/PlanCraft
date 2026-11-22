@@ -145,9 +145,10 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
         let card = (n >= 0.0).then_some(n as usize).filter(|&n| card_rect(k, n).contains(pos)).and_then(|n| rows.get(n).copied());
         card.map(Hit::Card).or(Some(Hit::Column(k)))
     };
-    let pointer = ui.input(|i| i.pointer.hover_pos());
+    // Not where a window or notice covers the board: a drop there isn't on it.
+    let pointer = ui.input(|i| i.pointer.hover_pos()).filter(|p| !crate::widgets::covered(ui, *p));
     // Where a drag ends (a touch release leaves no hover position).
-    let latest = ui.input(|i| i.pointer.latest_pos());
+    let latest = ui.input(|i| i.pointer.latest_pos()).filter(|p| !crate::widgets::covered(ui, *p));
     let hovered = pointer.and_then(hit_at);
     let dragging = st.board.drag.clone();
     let drop_col = match (&dragging, latest.and_then(hit_at)) {

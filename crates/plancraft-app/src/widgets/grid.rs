@@ -661,7 +661,8 @@ pub fn show(
         }
     }
     if let Some((from, key)) = state.row_drag {
-        let latest = ui.input(|i| i.pointer.latest_pos());
+        // Not where a window or notice covers the table: a drop there isn't on it.
+        let latest = ui.input(|i| i.pointer.latest_pos()).filter(|p| !super::covered(ui, *p));
         // The boundary between rows nearest the pointer: the dragged rows go above that row.
         let drop_at = |p: Pos2, scroll: f32| {
             let b = ((p.y - body.top() + scroll) / cfg.row_height).round();

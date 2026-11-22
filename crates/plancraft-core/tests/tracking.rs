@@ -261,3 +261,67 @@ fn logged_time_starts_on_the_workers_calendar() {
     p.log_time(a, ben, d(10, 24), 60, "").unwrap();
     assert_eq!(p.task(a).unwrap().actual_start, Some(dt(10, 24, 0)), "Ben works Saturdays");
 }
+
+// ---------------------------------------------------------------------------
+// Interim plans copied into a baseline (PlanCraft's choices beyond Microsoft's pages, which say
+// only that the dates are copied; see ms_parity.rs)
+// ---------------------------------------------------------------------------
+
+/// "Phase" over A (2 days, fixed cost 100) and B (3 elapsed days), recalculated.
+fn costed_phase() -> (Project, TaskId, TaskId, TaskId) {
+    let mut p = project();
+    let s = p.add_task("Phase", None);
+    let a = task(&mut p, "A", 2 * DAY);
+    let b = p.add_task("B", None);
+    let typed = p.parse_task_duration("3ed").unwrap();
+    p.set_typed_duration(b, typed).unwrap();
+    p.indent(a).unwrap();
+    p.indent(b).unwrap();
+    p.task_mut(a).unwrap().fixed_cost = 100.0;
+    plancraft_core::schedule::recalculate(&mut p);
+    (p, s, a, b)
+}
+
+/// Only the dates come from the interim plan: a baseline the task has keeps its other values, a
+/// new one takes them from the schedule (as saving the baseline would: an elapsed task's elapsed
+/// duration, a summary's cost with its subtasks'), and a task without the interim plan loses the
+/// baseline, as with every other copy.
+#[test]
+fn an_interim_plan_copied_into_a_baseline_moves_only_its_dates() {
+    use plancraft_core::baseline::{PlanSlot, Scope, baseline_totals};
+    let (mut p, s, a, b) = costed_phase();
+    let all = Scope::entire_project();
+    p.set_baseline_in(0, &all).unwrap();
+    let before = p.task(a).unwrap().baseline_in(0).copied().unwrap();
+    // The plan moves on; an interim plan saves where it is now.
+    p.task_mut(a).unwrap().constraint = Constraint { kind: ConstraintKind::Snet, date: Some(dt(11, 2, 8)) };
+    p.task_mut(a).unwrap().fixed_cost = 250.0;
+    p.set_duration(a, 3 * DAY, false).unwrap();
+    plancraft_core::schedule::recalculate(&mut p);
+    p.save_plan(PlanSlot::Scheduled, PlanSlot::Interim(3), &all).unwrap();
+    let (start, finish) = (sched(&p, a).start.unwrap(), sched(&p, a).finish.unwrap());
+    assert_eq!(start, dt(11, 2, 8));
+
+    p.save_plan(PlanSlot::Interim(3), PlanSlot::Baseline(0), &all).unwrap();
+    let kept = p.task(a).unwrap().baseline_in(0).copied().unwrap();
+    assert_eq!((kept.start, kept.finish), (start, finish));
+    assert_eq!(before.duration, 2 * DAY, "the old baseline differs from the schedule now (3 days, cost 250)");
+    assert_eq!((kept.duration, kept.work, kept.cost), (before.duration, before.work, before.cost), "the other values stay");
+
+    // Into an empty baseline: the same values saving the baseline now would give.
+    p.save_plan(PlanSlot::Interim(3), PlanSlot::Baseline(7), &all).unwrap();
+    p.set_baseline_in(8, &all).unwrap();
+    for id in [s, a, b] {
+        let (copied, saved) = (p.task(id).unwrap().baseline_in(7).copied().unwrap(), p.task(id).unwrap().baseline_in(8).copied().unwrap());
+        assert_eq!((copied.duration, copied.work, copied.cost), (saved.duration, saved.work, saved.cost), "{id}");
+    }
+    assert_eq!(p.task(a).unwrap().baseline_in(7).unwrap().duration, 3 * DAY, "the schedule's duration, not the old baseline's");
+    assert_eq!(p.task(b).unwrap().baseline_in(7).unwrap().duration, 3 * 1440, "elapsed time for an elapsed task");
+    assert_eq!(baseline_totals(&p, 7), baseline_totals(&p, 8), "a summary's cost includes its subtasks'");
+    assert_eq!(baseline_totals(&p, 7).0, 250.0);
+
+    // A task without the interim plan loses its value in the target.
+    p.clear_plan(PlanSlot::Interim(3), &[b]).unwrap();
+    p.save_plan(PlanSlot::Interim(3), PlanSlot::Baseline(7), &all).unwrap();
+    assert!(p.task(b).unwrap().baseline_in(7).is_none());
+}

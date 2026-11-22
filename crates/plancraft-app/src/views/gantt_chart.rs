@@ -819,7 +819,12 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
             BarDrag::Link { from } => {
                 if let Some(sg) = geom.get(&from) {
                     bp.line_segment([pos2(sg.x1, sg.y), pp], Stroke::new(1.5, theme::pal().ACCENT));
-                    let target = row_at(pp.y).and_then(|r| super::task_at(p, input.rows, r)).map(|t| t.id).filter(|id| *id != from);
+                    // Not over a window or notice covering the chart.
+                    let target = row_at(pp.y)
+                        .filter(|_| !crate::widgets::covered(ui, pp))
+                        .and_then(|r| super::task_at(p, input.rows, r))
+                        .map(|t| t.id)
+                        .filter(|id| *id != from);
                     let msg = match target {
                         Some(to) => format!(
                             "Link: {} – {}",
