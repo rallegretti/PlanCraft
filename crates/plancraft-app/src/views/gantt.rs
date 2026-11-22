@@ -286,7 +286,8 @@ fn popup_area(ctx: &egui::Context, id: egui::Id, pos: egui::Pos2, add: impl FnOn
             chosen = add(ui);
         });
     });
-    let clicked_outside = ctx.input(|i| i.pointer.any_pressed()) && !resp.response.contains_pointer() && resp.response.rect.width() > 0.0;
+    let clicked_outside =
+        ctx.input(|i| i.pointer.any_pressed()) && !crate::widgets::pointer_on_area(ctx, &resp.response) && resp.response.rect.width() > 0.0;
     let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
     // The first frame after opening sees the opening click; ignore it.
     let fresh = ctx.data_mut(|d| {

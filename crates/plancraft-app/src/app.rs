@@ -4298,6 +4298,52 @@ mod ui_tests {
         assert!(h.state().disk_bars.is_empty());
     }
 
+    /// Issue 42: right-clicking a row of the task table and choosing Task Information with the
+    /// mouse opens it on every row and from every column.
+    #[test]
+    fn task_information_from_the_table_menu_opens_on_every_row() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = harness();
+        let mut failed = Vec::new();
+        let rows = lock(&h.state().ws).active_doc().unwrap().project.tasks.len().min(24);
+        for row in 0..rows {
+            for dx in [40.0, 90.0, 160.0, 260.0, 380.0] {
+                let g = &h.state().st.task_grid;
+                let Some(body) = g.body else { continue };
+                let at = egui::pos2(body.left() + dx, body.top() + (row as f32 + 0.5) * theme::ROW_HEIGHT - g.scroll_y);
+                if !body.contains(at) {
+                    continue;
+                }
+                let button = |pos, b, pressed| egui::Event::PointerButton { pos, button: b, pressed, modifiers: Modifiers::NONE };
+                h.event(egui::Event::PointerMoved(at));
+                h.run_steps(1);
+                h.event(button(at, egui::PointerButton::Secondary, true));
+                h.run_steps(1);
+                h.event(button(at, egui::PointerButton::Secondary, false));
+                h.run_steps(3);
+                let item = h.get_by_label("ℹ  Task Information…").rect().center();
+                // The pointer travels to the item, resting on the way as a hand does.
+                for k in 1..=6 {
+                    h.event(egui::Event::PointerMoved(at + (item - at) * (k as f32 / 6.0)));
+                    h.run_steps(2);
+                }
+                h.run_steps(10);
+                h.event(button(item, egui::PointerButton::Primary, true));
+                h.run_steps(1);
+                h.event(button(item, egui::PointerButton::Primary, false));
+                h.run_steps(3);
+                if h.state().dialogs.task_info.is_none() && h.state().dialogs.recurring.is_none() {
+                    failed.push((row, dx));
+                }
+                h.state_mut().dialogs.task_info = None;
+                h.state_mut().dialogs.recurring = None;
+                h.event(egui::Event::PointerMoved(egui::pos2(5.0, 890.0)));
+                h.run_steps(3);
+            }
+        }
+        assert!(failed.is_empty(), "Task Information did not open for (row, x): {failed:?}");
+    }
+
     /// The middle of row `row`'s row number in the task table (where rows are dragged).
     fn row_number_at(h: &Harness<'static, PlanCraftApp>, row: usize) -> egui::Pos2 {
         let g = &h.state().st.task_grid;

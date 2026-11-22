@@ -739,7 +739,7 @@ pub fn show(
                 } else if ui.input(|i| i.key_pressed(Key::Escape))
                     || (edit.started
                         && ui.input(|i| i.pointer.any_pressed())
-                        && !area.response.contains_pointer()
+                        && !super::pointer_on_area(ui.ctx(), &area.response)
                         && !ui.rect_contains_pointer(r))
                 {
                     finished = Some((false, None));
@@ -1041,5 +1041,32 @@ mod tests {
         h.key_press(Key::F2);
         h.run_steps(2);
         assert_eq!(h.state().grid.editing.as_ref().map(|e| (e.row, e.col)), Some((1, 1)));
+    }
+
+    /// Issue 42: a list of choices opened on the bottom row doesn't fit below it, so egui moves
+    /// it up; picking an option in the part above the cell chose it instead of closing the list.
+    #[test]
+    fn a_choice_list_moved_up_to_fit_takes_the_click() {
+        let options: Vec<String> = (0..10).map(|k| format!("Option {k}")).collect();
+        let refs: Vec<&str> = options.iter().map(String::as_str).collect();
+        let columns = vec![ColumnDef::new("A", 100.0), ColumnDef::new("Pick", 140.0).choice(&refs)];
+        // 17 rows of 22 under a 24-pixel header fill the 400-pixel window.
+        let mut h = harness(columns, 17, None);
+        focus(&mut h, (16, 1));
+        h.key_press(Key::F2);
+        h.run_steps(3);
+        assert_eq!(h.state().grid.editing.as_ref().map(|e| (e.row, e.col)), Some((16, 1)));
+        use egui_kittest::kittest::Queryable;
+        let item = h.get_by_label("Option 0").rect().center();
+        assert!(item.y < 24.0 + 16.0 * 22.0, "the list was moved up, above the cell: {item:?}");
+        let button =
+            |pressed| egui::Event::PointerButton { pos: item, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        h.event(egui::Event::PointerMoved(item));
+        h.run_steps(2);
+        h.event(button(true));
+        h.run_steps(1);
+        h.event(button(false));
+        h.run_steps(2);
+        assert!(h.state().events.contains(&GridEvent::Commit { row: 16, col: 1, text: "Option 0".into() }), "{:?}", h.state().events);
     }
 }
