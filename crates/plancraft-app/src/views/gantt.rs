@@ -283,10 +283,16 @@ fn popup_area(ctx: &egui::Context, id: egui::Id, pos: egui::Pos2, add: impl FnOn
     let resp = egui::Area::new(id.with("area")).order(egui::Order::Foreground).fixed_pos(pos).show(ctx, |ui| {
         egui::Frame::menu(ui.style()).show(ui, |ui| {
             ui.set_min_width(200.0);
-            chosen = add(ui);
+            // A menu taller than the window scrolls, so its last items stay in reach.
+            let room = (ctx.content_rect().height() - 24.0).max(80.0);
+            egui::ScrollArea::vertical().max_height(room).show(ui, |ui| chosen = add(ui));
         });
     });
-    let clicked_outside = ctx.input(|i| i.pointer.any_pressed()) && !resp.response.contains_pointer() && resp.response.rect.width() > 0.0;
+    // On the menu as drawn (egui may have moved it to fit, issue 42), or on a submenu opened from
+    // it (Insert Column), which egui draws as a popup of its own.
+    let on_menu = crate::widgets::pointer_on_area(ctx, &resp.response)
+        || ctx.pointer_interact_pos().and_then(|p| ctx.layer_id_at(p)).is_some_and(|l| l.order == egui::Order::Foreground);
+    let clicked_outside = ctx.input(|i| i.pointer.any_pressed()) && !on_menu && resp.response.rect.width() > 0.0;
     let esc = ctx.input(|i| i.key_pressed(egui::Key::Escape));
     // The first frame after opening sees the opening click; ignore it.
     let fresh = ctx.data_mut(|d| {

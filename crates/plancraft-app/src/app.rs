@@ -4298,6 +4298,143 @@ mod ui_tests {
         assert!(h.state().disk_bars.is_empty());
     }
 
+    /// Issue 42: right-clicking a row of the task table and choosing Task Information with the
+    /// mouse opens it on every row, also where the menu had to move up to fit the window (and
+    /// from any column there); a click away from the menu still closes it without choosing.
+    #[test]
+    fn task_information_from_the_table_menu_opens_on_every_row() {
+        use egui_kittest::kittest::Queryable;
+        const MENU: &str = "task_ctx_menu";
+        let button = |pos, b, pressed| egui::Event::PointerButton { pos, button: b, pressed, modifiers: Modifiers::NONE };
+        let menu_open = |h: &Harness<'static, PlanCraftApp>| h.ctx.data(|d| d.get_temp::<egui::Pos2>(egui::Id::new(MENU)).is_some());
+        let mut h = harness();
+        let cell = |h: &Harness<'static, PlanCraftApp>, row: usize, dx: f32| {
+            let g = &h.state().st.task_grid;
+            let body = g.body.unwrap();
+            let at = egui::pos2(body.left() + dx, body.top() + (row as f32 + 0.5) * theme::ROW_HEIGHT - g.scroll_y);
+            body.contains(at).then_some(at)
+        };
+        let right_click = |h: &mut Harness<'static, PlanCraftApp>, at: egui::Pos2| {
+            h.event(egui::Event::PointerMoved(at));
+            h.run_steps(1);
+            h.event(button(at, egui::PointerButton::Secondary, true));
+            h.run_steps(1);
+            h.event(button(at, egui::PointerButton::Secondary, false));
+            h.run_steps(2);
+            assert!(menu_open(h), "the menu opens at {at:?}");
+        };
+        // Every row from the Task Name column; the last row from every column too.
+        let rows = lock(&h.state().ws).active_doc().unwrap().project.tasks.len();
+        let shown: Vec<usize> = (0..rows).filter(|&r| cell(&h, r, 160.0).is_some()).collect();
+        let last = *shown.last().unwrap();
+        let cases = shown.iter().map(|&r| (r, 160.0)).chain([40.0, 90.0, 260.0, 380.0].map(|dx| (last, dx)));
+        let (mut failed, mut moved) = (Vec::new(), 0);
+        for (row, dx) in cases {
+            let Some(at) = cell(&h, row, dx) else { continue };
+            right_click(&mut h, at);
+            let item = h.get_by_label("ℹ  Task Information…").rect().center();
+            // The bug: an item moved up above the point clicked lost the click.
+            if item.y < at.y {
+                moved += 1;
+            }
+            for k in 1..=3 {
+                h.event(egui::Event::PointerMoved(at + (item - at) * (k as f32 / 3.0)));
+                h.run_steps(1);
+            }
+            h.event(button(item, egui::PointerButton::Primary, true));
+            h.run_steps(1);
+            h.event(button(item, egui::PointerButton::Primary, false));
+            h.run_steps(2);
+            if h.state().dialogs.task_info.is_none() && h.state().dialogs.recurring.is_none() {
+                failed.push((row, dx));
+            }
+            h.state_mut().dialogs.task_info = None;
+            h.state_mut().dialogs.recurring = None;
+            h.run_steps(1);
+        }
+        assert!(failed.is_empty(), "Task Information did not open for (row, x): {failed:?}");
+        assert!(moved >= 5, "the menu had to move up for the last rows ({moved} times), or this tests nothing");
+
+        // A click away from the menu closes it, choosing nothing.
+        let at = cell(&h, last, 160.0).unwrap();
+        right_click(&mut h, at);
+        let away = egui::pos2(1300.0, 120.0);
+        h.event(egui::Event::PointerMoved(away));
+        h.run_steps(1);
+        h.event(button(away, egui::PointerButton::Primary, true));
+        h.run_steps(1);
+        h.event(button(away, egui::PointerButton::Primary, false));
+        h.run_steps(2);
+        assert!(!menu_open(&h), "a click away from the menu closes it");
+        assert!(h.state().dialogs.task_info.is_none() && h.state().dialogs.recurring.is_none());
+    }
+
+    /// Review of issue 42's fix: a column picked from the column menu's Insert Column submenu is
+    /// inserted, also when it sits below the column menu (the submenu is a popup of its own, and
+    /// a press on it counted as a click outside the column menu).
+    #[test]
+    fn a_column_picked_from_the_insert_column_submenu_is_inserted() {
+        use egui_kittest::kittest::Queryable;
+        let button = |pos, b, pressed| egui::Event::PointerButton { pos, button: b, pressed, modifiers: Modifiers::NONE };
+        let click = |h: &mut Harness<'static, PlanCraftApp>, at: egui::Pos2, b: egui::PointerButton| {
+            h.event(egui::Event::PointerMoved(at));
+            h.run_steps(2);
+            h.event(button(at, b, true));
+            h.run_steps(1);
+            h.event(button(at, b, false));
+            h.run_steps(2);
+        };
+        let titles = |h: &Harness<'static, PlanCraftApp>| {
+            let ws = lock(&h.state().ws);
+            let p = &ws.active_doc().unwrap().project;
+            crate::fields::table_fields(p, h.state().st.table).iter().map(|f| f.title(p)).collect::<Vec<_>>()
+        };
+        let mut h = harness();
+        let pick = "Baseline Duration";
+        assert!(!titles(&h).iter().any(|t| t == pick));
+        let body = h.state().st.task_grid.body.unwrap();
+        click(&mut h, egui::pos2(body.left() + 160.0, body.top() - 10.0), egui::PointerButton::Secondary);
+        let menu_bottom = h.get_by_label("Custom Fields…").rect().bottom();
+        let insert = h.get_by_label("Insert Column").rect().center();
+        click(&mut h, insert, egui::PointerButton::Primary);
+        let item = h.get_by_label(pick).rect().center();
+        assert!(item.y > menu_bottom, "the item sits below the column menu ({item:?}, menu ends at {menu_bottom}), or this tests nothing");
+        // Across to the submenu, then down to the item, as a hand moves.
+        h.event(egui::Event::PointerMoved(egui::pos2(item.x, insert.y)));
+        h.run_steps(2);
+        click(&mut h, item, egui::PointerButton::Primary);
+        assert!(titles(&h).iter().any(|t| t == pick), "{pick} was inserted: {:?}", titles(&h));
+    }
+
+    /// Review of issue 42's fix: the table's tooltips (the Mode column's "Auto Scheduled") no
+    /// longer show through its right-click menu while the pointer moves over the menu.
+    #[test]
+    fn table_tooltips_stay_under_the_menu() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = harness();
+        let at = row_number_at(&h, 0);
+        h.event(egui::Event::PointerMoved(at));
+        h.run_steps(1);
+        for pressed in [true, false] {
+            h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: Modifiers::NONE });
+            h.run_steps(1);
+        }
+        h.run_steps(2);
+        let menu = h.get_by_label("ℹ  Task Information…").rect();
+        let mut seen = Vec::new();
+        for k in 0..12 {
+            for x in [menu.left() + 10.0, menu.center().x, menu.right() - 10.0] {
+                let p = egui::pos2(x, menu.bottom() + 22.0 * k as f32);
+                h.event(egui::Event::PointerMoved(p));
+                h.run_steps(2);
+                if h.query_by_label("Auto Scheduled").is_some() || h.query_by_label("Manually Scheduled").is_some() {
+                    seen.push(p);
+                }
+            }
+        }
+        assert!(seen.is_empty(), "a table tooltip showed over the menu at {seen:?}");
+    }
+
     /// The middle of row `row`'s row number in the task table (where rows are dragged).
     fn row_number_at(h: &Harness<'static, PlanCraftApp>, row: usize) -> egui::Pos2 {
         let g = &h.state().st.task_grid;
