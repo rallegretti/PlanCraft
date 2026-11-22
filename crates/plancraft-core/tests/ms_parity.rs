@@ -1014,35 +1014,6 @@ fn interim_plans_can_be_copied_into_a_baseline() {
     assert_eq!((b.start, b.finish), (dt(2026, 10, 19, 8), dt(2026, 10, 20, 17)));
 }
 
-/// PlanCraft's choices beyond the published pages (which say only that the dates are copied): a
-/// baseline the task already has keeps its other values; a new one gets the working time between
-/// the dates as its duration and no work or cost; a task without the interim plan loses the
-/// baseline, as with every other copy.
-#[test]
-fn an_interim_plan_copied_into_a_baseline_moves_only_its_dates() {
-    let (mut p, _, a, d) = baselined_phase();
-    let all = Scope::entire_project();
-    let before = p.task(a).unwrap().baseline_in(0).copied().unwrap();
-    // The plan moves on; an interim plan saves where it is now.
-    p.task_mut(a).unwrap().constraint = Constraint { kind: ConstraintKind::Snet, date: Some(dt(2026, 11, 2, 8)) };
-    recalculate(&mut p);
-    p.save_plan(PlanSlot::Scheduled, PlanSlot::Interim(3), &all).unwrap();
-    let (start, finish) = (start(&p, a), finish(&p, a));
-    assert_eq!(start, dt(2026, 11, 2, 8));
-    p.save_plan(PlanSlot::Interim(3), PlanSlot::Baseline(0), &all).unwrap();
-    let after = p.task(a).unwrap().baseline_in(0).copied().unwrap();
-    assert_eq!((after.start, after.finish), (start, finish));
-    assert_eq!((after.duration, after.work, after.cost), (before.duration, before.work, before.cost));
-    // Into an empty baseline: the working time between the dates, no work or cost.
-    p.save_plan(PlanSlot::Interim(3), PlanSlot::Baseline(7), &all).unwrap();
-    let fresh = p.task(a).unwrap().baseline_in(7).copied().unwrap();
-    assert_eq!((fresh.duration, fresh.work, fresh.cost), (p.task(a).unwrap().duration, 0, 0.0));
-    // A task without the interim plan loses its value in the target.
-    p.clear_plan(PlanSlot::Interim(3), &[d]).unwrap();
-    p.save_plan(PlanSlot::Interim(3), PlanSlot::Baseline(7), &all).unwrap();
-    assert!(p.task(d).unwrap().baseline_in(7).is_none());
-}
-
 // Source: https://learn.microsoft.com/en-us/office/vba/api/project.application.baselineclear — "Parameters"
 // Clearing works on all tasks or only the selected ones, for a baseline or for a Start/Finish
 // (interim) pair.

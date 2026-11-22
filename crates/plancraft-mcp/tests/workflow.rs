@@ -269,7 +269,7 @@ fn full_project_workflow() {
     assert_eq!((interim["tasks"].as_u64(), interim["tasks_written"].as_u64()), (Some(1), Some(1)));
     assert_eq!(c.call("get_task", json!({ "task": fe }))["interim_plans"]["interim2"]["finish"], fe_var["baseline_finish"]);
     // An interim plan's dates copy into a baseline (Microsoft's pjSaveBaselineFrom lists Start1-10 as
-    // sources); a new baseline gets no work or cost. Cleared again so the counts below hold.
+    // sources). Cleared again so the counts below hold.
     let copied = c.call("set_interim_plan", json!({ "copy": "interim2", "into": "baseline3" }));
     assert_eq!(copied["tasks_written"], 1);
     assert_eq!(c.call("get_task", json!({ "task": fe }))["other_baselines"]["baseline3"]["finish"], fe_var["baseline_finish"]);

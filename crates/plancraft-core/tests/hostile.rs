@@ -275,20 +275,41 @@ proptest! {
     #![proptest_config(ProptestConfig { cases: cases(48), ..ProptestConfig::default() })]
 
     /// Issue 21: whatever random edits leave, a plan that goes out to Microsoft Project XML with
-    /// nothing lost comes back scheduled the same, so opening it says nothing about tasks at other
-    /// times. (An export that loses something, such as splits or milestone members, says so, and
-    /// then the import may too.)
+    /// nothing lost comes back scheduled the same, task by task, and opening it says nothing about
+    /// tasks at other times. (An export that loses something, such as splits or milestone
+    /// members, says so, and then the dates may differ.) It starts from the demo plan without
+    /// what Project's XML can't carry, so most cases are lossless.
     #[test]
     fn a_plan_sent_through_project_xml_without_losses_schedules_the_same(ops in prop::collection::vec(edit_op(), 1..40)) {
-        let mut doc = Document::new(1, demo_project(start()), None);
+        let mut base = demo_project(start());
+        base.time_entries.clear();
+        for r in &mut base.resources {
+            r.category = ResourceCategory::TeamMember;
+        }
+        for t in &mut base.tasks {
+            t.deliverable.clear();
+            t.members.clear();
+            t.estimate = None;
+            t.board_status = None;
+            t.show_on_board = true;
+        }
+        plancraft_core::schedule::recalculate(&mut base);
+        prop_assert!(plancraft_core::mspdi::to_xml(&base).1.is_empty(), "the starting plan exports with nothing lost");
+        let mut doc = Document::new(1, base, None);
         for op in ops {
             let _ = doc.try_edit("junk", ChangeSource::Agent, |p| apply(p, &op));
         }
         let (xml, lost) = plancraft_core::mspdi::to_xml(&doc.project);
-        let (_, notes) = plancraft_core::mspdi::from_xml(&xml, "x").map_err(TestCaseError::fail)?;
+        let (back, notes) = plancraft_core::mspdi::from_xml(&xml, "x").map_err(TestCaseError::fail)?;
         let (moved, other): (Vec<&String>, Vec<&String>) = notes.iter().partition(|n| n.contains("than the file gives"));
         if lost.is_empty() && other.is_empty() {
             prop_assert!(moved.is_empty(), "a lossless round trip moved tasks: {moved:?}");
+            prop_assert_eq!(back.tasks.len(), doc.project.tasks.len());
+            for (a, b) in doc.project.tasks.iter().zip(&back.tasks) {
+                if a.active {
+                    prop_assert_eq!((a.sched.start, a.sched.finish), (b.sched.start, b.sched.finish), "{}", a.name);
+                }
+            }
         }
     }
 }

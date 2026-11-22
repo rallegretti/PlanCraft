@@ -140,10 +140,12 @@ pub fn show(ui: &mut Ui, rect: Rect, doc: &mut Document, st: &mut UiState, out: 
         cp.vline(xt, chart.y_range(), Stroke::new(1.5, theme::pal().TODAY));
     }
 
-    // Not where a window or notice covers the lanes: a drop there isn't on them.
-    let pointer = ui.input(|i| i.pointer.hover_pos()).filter(|p| !crate::widgets::covered(ui, *p));
     let drag_id = egui::Id::new("team_planner_drag");
     let dragging: Option<(TaskId, Option<ResourceId>)> = ui.ctx().data(|d| d.get_temp(drag_id));
+    // Where a drag ends too (a touch release leaves no hover position), but not where a window or
+    // notice covers the lanes: a drop there isn't on them.
+    let pointer =
+        ui.input(|i| i.pointer.hover_pos().or_else(|| dragging.and(i.pointer.latest_pos()))).filter(|p| !crate::widgets::covered(ui, *p));
     let mut hover_lane: Option<Option<ResourceId>> = None;
     let mut hovered_bar: Option<(usize, Option<ResourceId>)> = None;
     let mut y = body.top() - st.misc_grid.scroll_y;

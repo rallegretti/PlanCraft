@@ -174,7 +174,15 @@ impl SetBaseline {
                     note(ui, format!("{} already holds values; they will be replaced (Undo restores them).", into.name()));
                 }
                 if matches!((copy, into), (PlanSlot::Interim(_), PlanSlot::Baseline(_))) {
-                    note(ui, "Only the start and finish dates are copied; the baseline keeps its duration, work and cost.");
+                    note(
+                        ui,
+                        format!(
+                            "Only the start and finish dates are copied. Where {into} already has values, it keeps the other ones; \
+                             where not, it takes them from the current schedule. Tasks with no {copy} dates lose their {into} values.",
+                            into = into.name(),
+                            copy = copy.name()
+                        ),
+                    );
                 }
                 if !self.interim {
                     note(ui, "Variance is measured against Baseline. Keep earlier snapshots in Baseline1–10.");

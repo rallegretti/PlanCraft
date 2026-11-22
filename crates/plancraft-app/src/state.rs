@@ -443,6 +443,8 @@ pub struct UiState {
     pub timesheet_resource: Option<ResourceId>,
     pub calendar_month: Date,
     pub toasts: Vec<Toast>,
+    /// A notice came since the last frame: raise the notices above any window.
+    pub toast_new: bool,
     pub clipboard: Vec<Task>,
     /// In the active plan, if opened from a server: who else is on each task (names, joined).
     pub others_on: std::collections::HashMap<TaskId, String>,
@@ -483,6 +485,7 @@ impl Default for UiState {
             timesheet_resource: None,
             calendar_month: today.with_day(1).unwrap_or(today),
             toasts: Vec::new(),
+            toast_new: false,
             clipboard: Vec::new(),
             others_on: Default::default(),
         }
@@ -492,5 +495,6 @@ impl Default for UiState {
 impl UiState {
     pub fn toast(&mut self, kind: ToastKind, text: impl Into<String>) {
         self.toasts.push(Toast { text: text.into(), kind, at: Instant::now() });
+        self.toast_new = true;
     }
 }

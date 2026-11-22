@@ -1792,6 +1792,10 @@ impl PlanCraftApp {
             return;
         }
         let screen = ctx.content_rect();
+        // A new notice goes above the windows (it sits with them), so a dialog doesn't hide it.
+        if std::mem::take(&mut self.st.toast_new) {
+            ctx.move_to_top(egui::LayerId::new(egui::Order::Middle, egui::Id::new("toasts")));
+        }
         // With the windows, under menus and lists: a notice that appears while a menu is open
         // must not cover it and take a click meant for it.
         egui::Area::new(egui::Id::new("toasts")).order(egui::Order::Middle).anchor(Align2::RIGHT_BOTTOM, vec2(-16.0, -36.0)).show(
@@ -3912,6 +3916,36 @@ mod ui_tests {
         };
         assert!(!linked(&h), "one undoable edit");
 
+        // A link dropped where a window covers the other box isn't made (the drop is on the window).
+        {
+            h.state_mut().exec(&ctx, Command::SetBaseline);
+            h.run_steps(3);
+            let at_first = h.ctx.memory(|m| m.area_rect(egui::Id::new("set_baseline"))).unwrap();
+            // The title bar, clear of the close button.
+            let title = egui::pos2(at_first.left() + 60.0, at_first.top() + 10.0);
+            // Where the title goes so the window is centred over the target box.
+            let to = egui::pos2(b.x - at_first.width() / 2.0 + 60.0, b.y - 10.0);
+            h.run_steps(30);
+            pointer(&mut h, title, Some(true));
+            for k in 1..=10 {
+                pointer(&mut h, title + (to - title) * (k as f32 / 10.0), None);
+            }
+            pointer(&mut h, to, Some(false));
+            h.run_steps(3);
+            let window = h.ctx.memory(|m| m.area_rect(egui::Id::new("set_baseline"))).unwrap();
+            assert!(window.contains(b) && !window.contains(a), "the window covers the target box only: {window:?} {a:?} {b:?}");
+            h.run_steps(30);
+            pointer(&mut h, a, Some(true));
+            for k in 1..=10 {
+                pointer(&mut h, a + (b - a) * (k as f32 / 10.0), None);
+            }
+            pointer(&mut h, b, Some(false));
+            h.run_steps(2);
+            assert!(!linked(&h), "a drop on the window links nothing");
+            h.state_mut().dialogs.set_baseline = None;
+            h.run_steps(2);
+        }
+
         // Grouping applies to tables, not to the diagram (it kept a stale layout, then lost
         // every summary box on the next edit).
         let summaries = |h: &Harness<'static, PlanCraftApp>| {
@@ -4449,14 +4483,18 @@ mod ui_tests {
         h.run_steps(3);
         let window = h.ctx.memory(|m| m.area_rect(egui::Id::new("set_baseline"))).unwrap();
         let (body, scroll) = (h.state().st.board.body, h.state().st.board.scroll);
-        let column_of = |h: &Harness<'static, PlanCraftApp>| {
+        let card = {
             let ws = h.state().ws.lock().unwrap();
             let p = &ws.active_doc().unwrap().project;
             let (_, rows) = p.board().into_iter().next().unwrap();
-            let i = rows[0];
-            (p.tasks[i].id, p.board_column_of(i))
+            p.tasks[rows[0]].id
         };
-        let (card, before) = column_of(&h);
+        let column_of = |h: &Harness<'static, PlanCraftApp>| {
+            let ws = h.state().ws.lock().unwrap();
+            let p = &ws.active_doc().unwrap().project;
+            p.board_column_of(p.task_index(card).unwrap())
+        };
+        let before = column_of(&h);
         let from = views::board::card_centre(body, scroll, 0, 0);
         assert!(!window.contains(from), "the card is clear of the window");
         // A point in the window, over another column of the board.
@@ -4478,8 +4516,7 @@ mod ui_tests {
         }
         h.event(press(to, false));
         h.run_steps(3);
-        let (same, after) = column_of(&h);
-        assert_eq!((same, after), (card, before), "the card stays in its column");
+        assert_eq!(column_of(&h), before, "the card stays in its column");
     }
 
     /// Review of issue 42's fix: a notice that appears while a menu is open stays under the menu,
@@ -4521,6 +4558,50 @@ mod ui_tests {
         // Away from the menu, the notice is still on top of the views.
         let clear = egui::pos2(notice.right() - 10.0, notice.center().y);
         assert_eq!(h.ctx.layer_id_at(clear).map(|l| l.id), Some(egui::Id::new("toasts")), "the notice shows over the chart");
+    }
+
+    /// Review of the leftovers: rows dropped where a window covers the table don't move, and a new
+    /// notice goes above a window that was raised over an earlier one.
+    #[test]
+    fn a_window_takes_row_drops_and_new_notices_go_above_it() {
+        let mut h = harness();
+        let ctx = h.ctx.clone();
+        h.state_mut().exec(&ctx, Command::SetBaseline);
+        h.run_steps(3);
+        let id = egui::Id::new("set_baseline");
+        let window = |h: &Harness<'static, PlanCraftApp>| h.ctx.memory(|m| m.area_rect(id)).unwrap();
+        // Moves the window by its title bar so its top-left corner lands at `corner`.
+        let move_window = |h: &mut Harness<'static, PlanCraftApp>, corner: egui::Pos2| {
+            let w = window(h);
+            let grab = egui::pos2(w.left() + 60.0, w.top() + 10.0);
+            drag(h, grab, corner + (grab - w.min));
+        };
+
+        // Over the table's rows from the fifth down.
+        let body = h.state().st.task_grid.body.unwrap();
+        let corner = egui::pos2(body.left() - 10.0, row_number_at(&h, 4).y - 11.0);
+        move_window(&mut h, corner);
+        let (from, to) = (row_number_at(&h, 1), row_number_at(&h, 8));
+        assert!(!window(&h).contains(from) && window(&h).contains(to), "the window covers the drop only");
+        let before = tasks(&h);
+        h.run_steps(30);
+        drag(&mut h, from, to);
+        assert_eq!(tasks(&h), before, "a drop on the window moves no rows");
+
+        // A notice; then the window over it (raised by a click); then another notice.
+        h.state_mut().st.toast(ToastKind::Info, "First notice, long enough to sit where the window will go");
+        h.run_steps(2);
+        let notice = h.ctx.memory(|m| m.area_rect(egui::Id::new("toasts"))).unwrap();
+        move_window(&mut h, notice.center() - egui::vec2(100.0, 40.0));
+        let spot = egui::pos2(notice.center().x, notice.center().y);
+        assert!(window(&h).contains(spot));
+        assert_eq!(h.ctx.layer_id_at(spot).map(|l| l.id), Some(id), "the window was raised over the first notice");
+        h.state_mut().st.toast(ToastKind::Info, "Second notice");
+        h.run_steps(2);
+        let notices = h.ctx.memory(|m| m.area_rect(egui::Id::new("toasts"))).unwrap();
+        let spot = egui::pos2(notices.center().x, notices.bottom() - 6.0);
+        assert!(window(&h).contains(spot), "the window still covers where the notices are");
+        assert_eq!(h.ctx.layer_id_at(spot).map(|l| l.id), Some(egui::Id::new("toasts")), "the new notice shows above the window");
     }
 
     /// The middle of row `row`'s row number in the task table (where rows are dragged).
