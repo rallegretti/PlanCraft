@@ -446,7 +446,9 @@ pub fn show(
     let first = (state.scroll_y / cfg.row_height).floor().max(0.0) as usize;
     let visible = (body.height() / cfg.row_height).ceil() as usize + 1;
     let last = (first + visible).min(total_rows);
-    let pointer = ui.input(|i| i.pointer.hover_pos());
+    // Only where nothing covers the table (a menu, a dialog): tooltips and cursors under one
+    // would show through it.
+    let pointer = ui.input(|i| i.pointer.hover_pos()).filter(|_| ui.rect_contains_pointer(body));
     let cell_font = FontId::proportional(13.0);
     let mut edit_rect: Option<(Rect, usize, usize)> = None;
 
@@ -724,13 +726,20 @@ pub fn show(
                     .show(ui.ctx(), |ui| {
                         egui::Frame::popup(ui.style()).show(ui, |ui| {
                             ui.set_min_width(r.width().max(120.0));
-                            let mut picked = None;
-                            for o in &options {
-                                if ui.selectable_label(*o == edit.text, o).clicked() {
-                                    picked = Some(o.clone());
-                                }
-                            }
-                            picked
+                            // A long list scrolls rather than running off the window.
+                            let room = (ui.ctx().content_rect().height() - 24.0).max(80.0);
+                            egui::ScrollArea::vertical()
+                                .max_height(room)
+                                .show(ui, |ui| {
+                                    let mut picked = None;
+                                    for o in &options {
+                                        if ui.selectable_label(*o == edit.text, o).clicked() {
+                                            picked = Some(o.clone());
+                                        }
+                                    }
+                                    picked
+                                })
+                                .inner
                         })
                     });
                 if let Some(p) = area.inner.inner {
@@ -1068,5 +1077,60 @@ mod tests {
         h.event(button(false));
         h.run_steps(2);
         assert!(h.state().events.contains(&GridEvent::Commit { row: 16, col: 1, text: "Option 0".into() }), "{:?}", h.state().events);
+
+        // A press in another cell still closes the list, choosing nothing.
+        h.state_mut().events.clear();
+        focus(&mut h, (16, 1));
+        h.key_press(Key::F2);
+        h.run_steps(3);
+        assert!(h.state().grid.editing.is_some());
+        let away = pos2(50.0, 24.0 + 2.0 * 22.0 + 11.0);
+        let press =
+            |pressed| egui::Event::PointerButton { pos: away, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        h.event(egui::Event::PointerMoved(away));
+        h.run_steps(2);
+        h.event(press(true));
+        h.run_steps(1);
+        h.event(press(false));
+        h.run_steps(2);
+        assert!(h.state().grid.editing.is_none(), "a press elsewhere closes the list");
+        assert!(!h.state().events.iter().any(|e| matches!(e, GridEvent::Commit { .. })), "{:?}", h.state().events);
+    }
+
+    /// Review of issue 42's fix: a list of choices taller than the window scrolls, so its last
+    /// option can still be picked.
+    #[test]
+    fn a_long_choice_list_scrolls_to_its_last_option() {
+        use egui_kittest::kittest::Queryable;
+        let options: Vec<String> = (0..40).map(|k| format!("Choice {k}")).collect();
+        let refs: Vec<&str> = options.iter().map(String::as_str).collect();
+        let mut h = harness(vec![ColumnDef::new("A", 100.0), ColumnDef::new("Pick", 140.0).choice(&refs)], 5, None);
+        focus(&mut h, (0, 1));
+        h.key_press(Key::F2);
+        h.run_steps(3);
+        let first = h.get_by_label("Choice 0").rect();
+        h.event(egui::Event::PointerMoved(first.center()));
+        h.run_steps(1);
+        for _ in 0..20 {
+            h.event(egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Line,
+                delta: vec2(0.0, -10.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: Modifiers::NONE,
+            });
+            h.run_steps(1);
+        }
+        h.run_steps(5);
+        let last = h.get_by_label("Choice 39").rect().center();
+        assert!(last.y > 0.0 && last.y < 400.0, "the last option scrolled into the window: {last:?}");
+        let press =
+            |pressed| egui::Event::PointerButton { pos: last, button: egui::PointerButton::Primary, pressed, modifiers: Modifiers::NONE };
+        h.event(egui::Event::PointerMoved(last));
+        h.run_steps(2);
+        h.event(press(true));
+        h.run_steps(1);
+        h.event(press(false));
+        h.run_steps(2);
+        assert!(h.state().events.contains(&GridEvent::Commit { row: 0, col: 1, text: "Choice 39".into() }), "{:?}", h.state().events);
     }
 }

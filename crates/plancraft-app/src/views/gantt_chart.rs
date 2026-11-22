@@ -379,7 +379,9 @@ pub fn show(ui: &mut Ui, rect: Rect, g: &mut GanttState, scroll_y: &mut f32, inp
     let mut hovered: Option<(TaskId, &'static str)> = None;
     // The part of a split task under the pointer (with the "part" and "part_end" zones).
     let mut hovered_part: Option<usize> = None;
-    let pointer = ui.input(|i| i.pointer.hover_pos());
+    // Only where nothing covers the chart (a menu, a dialog): bar tooltips and cursors under one
+    // would show through it. Drags follow the pointer separately.
+    let pointer = ui.input(|i| i.pointer.hover_pos()).filter(|_| ui.rect_contains_pointer(body));
     for r in first..last.min(input.rows.len()) {
         let idx = match input.rows.get(r) {
             Some(super::Row::Task(idx)) => *idx,
