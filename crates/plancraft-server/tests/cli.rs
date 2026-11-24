@@ -155,3 +155,63 @@ fn help_says_what_it_does() {
     let (ok, _, err) = run(dir.path(), &["--bogus"], "");
     assert!(!ok && err.contains("unknown option"));
 }
+
+/// `--background` (Keep sharing at login): one server per private folder, saying where it
+/// listens; `stop` stops it with every plan saved; and why one could not start is in its log
+/// file, which a service's standard error is not.
+#[test]
+fn a_background_server_says_where_it_is_and_stops_when_asked() {
+    use plancraft_server::background::{self, Background};
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("config");
+    let folder = dir.path().join("shared");
+    std::fs::create_dir(&folder).unwrap();
+    let folder_arg = folder.to_str().unwrap();
+    // No `--`: the helper puts `--config` after these.
+    let serve = ["--background", "--port", "0", "--bind", "127.0.0.1", "--no-announce", folder_arg];
+
+    // Nobody may sign in yet: it cannot start, and its log says why.
+    let (ok, _, _) = run(&config, &serve, "");
+    assert!(!ok);
+    assert!(background::log_tail(&config, 5).iter().any(|l| l.contains("Could not start") && l.contains("user add")));
+    assert_eq!(background::status(&config), Background::NotRunning);
+
+    run(&config, &["user", "add", "ana", "--password-stdin"], "correct horse\n");
+    let (ok, out, _) = run(&config, &["stop"], "");
+    assert!(ok && out.contains("No server"), "{out}");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_plancraft-server"))
+        .args(serve)
+        .arg("--config")
+        .arg(&config)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let status = loop {
+        match background::status(&config) {
+            Background::Sharing(s) => break s,
+            _ if std::time::Instant::now() < deadline => std::thread::sleep(std::time::Duration::from_millis(50)),
+            other => panic!("not sharing: {other:?}"),
+        }
+    };
+    assert_eq!(status.folder, plancraft_core::io::canonical(&folder).unwrap());
+    assert!(!status.announced);
+    let mut c = plancraft_server::client::Client::connect(status.addr, &plancraft_server::wire::Trust::FirstUse, "test").unwrap();
+    assert_eq!(c.login("ana", "correct horse").unwrap(), "ana");
+
+    // A second one (a login while the first still runs) leaves it be, and is no failure.
+    let (ok, out, _) = run(&config, &serve, "");
+    assert!(ok && out.contains("already sharing"), "{out}");
+    assert!(matches!(background::status(&config), Background::Sharing(_)));
+
+    let (ok, out, err) = run(&config, &["stop"], "");
+    assert!(ok && out.contains("Stopped"), "{out}{err}");
+    // Ended cleanly: a service manager does not start it again.
+    assert!(child.wait().unwrap().success());
+    assert_eq!(background::status(&config), Background::NotRunning);
+    let log = background::log_tail(&config, 50);
+    assert!(log.iter().any(|l| l.contains("asked to stop sharing")), "{log:?}");
+    assert!(log.last().unwrap().ends_with("  Stopped"), "{log:?}");
+}

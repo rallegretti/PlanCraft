@@ -34,6 +34,10 @@ socket2 = { version = "0.6", features = ["all"] }
 # This computer's networks (addresses and netmasks), for mDNS and Share Folder.
 if-addrs = "0.15"
 
+# The person's Run key (Keep sharing at login), with no administrator rights: `login.rs`.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Registry"] }
+
 [dev-dependencies]
 uuid.workspace = true
 tempfile = "3"

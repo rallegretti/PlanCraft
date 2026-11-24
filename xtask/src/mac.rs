@@ -69,7 +69,7 @@ pub fn package() -> Result<Vec<PathBuf>> {
     fresh_dir(&stage)?;
     let bins = stage.join("bin");
     std::fs::create_dir_all(&bins)?;
-    for name in ["plancraft", "plancraft-mcp"] {
+    for name in ["plancraft", "plancraft-mcp", "plancraft-server"] {
         step(format!("creating universal {name}"));
         let mut lipo = Command::new("lipo");
         lipo.arg("-create").arg("-output").arg(bins.join(name));
@@ -90,6 +90,7 @@ pub fn package() -> Result<Vec<PathBuf>> {
     let contents = app.join("Contents");
     copy(&bins.join("plancraft"), &contents.join("MacOS/PlanCraft"), true)?;
     copy(&bins.join("plancraft-mcp"), &contents.join("MacOS/plancraft-mcp"), true)?;
+    copy(&bins.join("plancraft-server"), &contents.join("MacOS/plancraft-server"), true)?;
     std::fs::create_dir_all(contents.join("Resources"))?;
     std::fs::write(contents.join("Resources/PlanCraft.icns"), icns)?;
     std::fs::write(contents.join("Info.plist"), info_plist(&version))?;
@@ -102,6 +103,7 @@ pub fn package() -> Result<Vec<PathBuf>> {
             unlock_keychain()?;
             step("signing PlanCraft.app with the Developer ID (hardened runtime)");
             run(codesign(identity).args(["--identifier", "dev.plancraft.plancraft-mcp"]).arg(contents.join("MacOS/plancraft-mcp")))?;
+            run(codesign(identity).args(["--identifier", "dev.plancraft.plancraft-server"]).arg(contents.join("MacOS/plancraft-server")))?;
             run(codesign(identity).arg(&app))?;
             run(Command::new("codesign").args(["--verify", "--deep", "--strict", "--verbose=2"]).arg(&app))?;
             step("notarizing PlanCraft.app (Apple's notary service; usually a few minutes)");

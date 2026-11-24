@@ -515,6 +515,35 @@ pub fn add_external_project(p: &mut Project, doc_path: Option<&Path>, other: &Pa
     Ok(add_loaded_external_project(p, doc_path, &abs_other, &other_project))
 }
 
+/// `path` with every link and `..` resolved, as [`std::fs::canonicalize`], but in the form people
+/// type: on Windows `C:\x` and `\\server\share\x`, not `\\?\C:\x` (kept when the
+/// path needs it: longer than the old 260-character limit).
+pub fn canonical(path: &Path) -> std::io::Result<PathBuf> {
+    let full = std::fs::canonicalize(path)?;
+    if cfg!(windows)
+        && let Some(plain) = full.to_str().and_then(plain_windows_path)
+    {
+        return Ok(PathBuf::from(plain));
+    }
+    Ok(full)
+}
+
+/// A Windows `\\?\` path in its plain form, when it has one.
+fn plain_windows_path(s: &str) -> Option<String> {
+    let plain = if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else {
+        let rest = s.strip_prefix(r"\\?\")?;
+        let mut chars = rest.chars();
+        let drive = chars.next().is_some_and(|c| c.is_ascii_alphabetic()) && chars.next() == Some(':') && chars.next() == Some('\\');
+        if !drive {
+            return None;
+        }
+        rest.to_string()
+    };
+    (plain.chars().count() < 260).then_some(plain)
+}
+
 /// `path` made absolute against the current directory.
 pub fn absolute_path(path: &Path) -> PathBuf {
     if path.is_absolute() {
@@ -691,6 +720,18 @@ pub fn apply_external_projects(p: &mut Project, reads: ExternalReads) -> Vec<Str
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn windows_paths_are_given_in_their_plain_form() {
+        assert_eq!(plain_windows_path(r"\\?\C:\Users\Ana\Plans").as_deref(), Some(r"C:\Users\Ana\Plans"));
+        assert_eq!(plain_windows_path(r"\\?\UNC\server\share\Plans").as_deref(), Some(r"\\server\share\Plans"));
+        assert_eq!(plain_windows_path(r"C:\Plans"), None);
+        assert_eq!(plain_windows_path(r"\\?\Volume{0b1c}\Plans"), None);
+        let long = format!(r"\\?\C:\{}", "x".repeat(300));
+        assert_eq!(plain_windows_path(&long), None, "too long for the plain form");
+        let dir = std::env::temp_dir();
+        assert!(canonical(&dir).unwrap().is_absolute());
+    }
+
     use super::*;
 
     /// Regression: linking a task read whatever file now sits at the link's path, even when it

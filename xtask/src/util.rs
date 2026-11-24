@@ -72,10 +72,10 @@ pub fn cargo() -> Command {
     c
 }
 
-/// Builds the release binaries of the app and the standalone MCP server.
+/// Builds the release binaries of the app, the standalone MCP server and PlanCraft Server.
 pub fn build_release(target: Option<&str>, envs: &[(&str, &str)]) -> Result<()> {
     let mut c = cargo();
-    c.args(["build", "--release", "--locked", "-p", "plancraft-app", "-p", "plancraft-mcp"]);
+    c.args(["build", "--release", "--locked", "-p", "plancraft-app", "-p", "plancraft-mcp", "-p", "plancraft-server"]);
     if let Some(t) = target {
         c.args(["--target", t]);
     }

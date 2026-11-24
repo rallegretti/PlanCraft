@@ -26,6 +26,8 @@ pub struct AppSettings {
     pub share_port: u16,
     /// Whether Share Folder announces the server on the network, so others find it in the list.
     pub share_announce: bool,
+    /// Whether Share Folder keeps sharing after PlanCraft quits, and from every login on.
+    pub share_background: bool,
 }
 
 /// A PlanCraft Server this person opened plans from.
@@ -66,6 +68,7 @@ impl Default for AppSettings {
             share_folder: None,
             share_port: plancraft_server::protocol::DEFAULT_PORT,
             share_announce: true,
+            share_background: false,
         }
     }
 }

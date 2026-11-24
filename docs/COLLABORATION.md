@@ -7,8 +7,9 @@ The model is the multi-user setup of desktop accounting programs: one copy is th
 any PlanCraft can be the host.
 
 Status: phase 1 (the sync engine, `plancraft_core::sync`), phase 2 (the server, `plancraft-server`),
-phase 3 (PlanCraft as a client) and phase 4 (discovery and *Share Folder*) are built. Phase 5 is
-planned below.
+phase 3 (PlanCraft as a client) and phase 4 (discovery and *Share Folder*) are built. Of phase 5,
+the server program in every package and *Keep sharing* (from every login on) are built; the
+system-wide service is planned below.
 
 ## Off unless someone turns it on
 
@@ -235,7 +236,8 @@ plancraft serve "/srv/Plans"                     # the same server, from PlanCra
   pair (`server-key.json`) and the users file (`users.json`), both owner-only.
 - It announces itself on the network (mDNS) unless `--no-announce`. `--watch-stdin` is for
   *Share Folder* (phase 4): it says on standard output when it listens, and stops cleanly once its
-  standard input closes.
+  standard input closes. `--background` is for *Keep sharing* (phase 5): one per private folder,
+  logging to its `server.log`, and stopped with `plancraft-server stop`.
 - `plancraft-server user add|passwd|role|remove|list` manages people; `--password-stdin` reads
   the password from a script. `plancraft-server fingerprint` shows the key's fingerprint.
 
@@ -746,14 +748,81 @@ the `Replica` and the connection. Merging never runs on the app's thread.
 
 ## Phase 5: packaging and services
 
-- `cargo xtask dist` ships `plancraft-server` next to the app on every platform. On the Mac, it
-  is signed and notarized inside the bundle with the app.
-- *Start PlanCraft Server at login*, per user, with no admin rights:
-  - a systemd user unit on Linux;
-  - a LaunchAgent on macOS;
-  - a Task Scheduler logon task on Windows.
-- *Install PlanCraft Service*, system-wide for a dedicated office machine, with admin rights:
-  - a systemd system unit through `pkexec` on Linux;
-  - a LaunchDaemon on macOS;
-  - a Windows service through the `windows-service` crate (pure Rust).
-- Both can be removed from the same place they were installed from.
+### The server program in every package
+
+`cargo xtask dist` ships `plancraft-server` next to the app: `bin/plancraft-server` in the Linux
+tarball (and `install.sh` installs it), `plancraft-server.exe` in the Windows zip, and
+`Contents/MacOS/plancraft-server` in the Mac app, signed and notarized with it. It is for a
+computer with no desktop, where nobody runs PlanCraft (the Linux smoke test runs it on a clean
+system). The AppImage keeps `PlanCraft-….AppImage serve`, which is the same server. PlanCraft
+itself always runs its own program as `plancraft serve`, for *Share Folder* and *Keep sharing*.
+
+### Keep sharing (per user, no administrator rights)
+
+*Share Folder* has a box, *Keep sharing after PlanCraft quits, and whenever you log in*. With it
+ticked, *Start Sharing* runs the server on its own (`plancraft serve FOLDER --background`) and has
+the system start it at every login. It runs as the person, with their own private folder.
+
+- The server in the background (`plancraft_server::background`) keeps in its private folder:
+  - `background.lock`, locked for as long as it runs. The system gives the lock back when the
+    program ends, crashed or not, so a lock nobody holds means no server, whatever else is there.
+    One background server per private folder: a second one (a login while the first still runs)
+    says so and ends with success, so no service manager keeps starting it.
+  - `background.json`, written once it listens: the folder, address, fingerprint, version and
+    whether it is listed. PlanCraft reads it (once a second) to show the window and the status
+    bar as for its own server, also after PlanCraft restarts.
+  - `background.stop`, made to ask it to stop: it saves every plan, tells everyone and ends.
+    This is the same on every system, needs no signals or service manager, and only the private
+    folder's owner can do it. A request left from before is cleared when a server starts.
+  - `server.log`, its log (set aside as `server.log.1` at 1 MiB), since nobody reads a service's
+    standard error. Why it could not start is written there too.
+- The login item (`plancraft_server::login`) is the person's own and the only thing installed:
+  - Linux: a systemd user unit, `~/.config/systemd/user/plancraft-server.service`
+    (`Restart=on-failure`, 30 seconds apart; enabled and started with `systemctl --user`). It runs
+    while the person is logged in; `loginctl enable-linger` keeps it running after they log out.
+    Every word of its command line is quoted, with `%` and `$` doubled.
+  - macOS: a LaunchAgent, `~/Library/LaunchAgents/dev.plancraft.server.plist` (`RunAtLoad`,
+    `KeepAlive` only after a failure, 30-second throttle; loaded with `launchctl bootstrap`). It
+    shows under PlanCraft in System Settings › Login Items.
+  - Windows: a value named *PlanCraft Server* in the person's `Run` key (Task Scheduler's logon
+    tasks need an administrator), started now as a detached process with no window. It shows in
+    Task Manager › Startup apps, where it can also be turned off.
+  - Names that a command line cannot carry are refused rather than mangled: line breaks and
+    other control characters, names that are not valid text, and `%` on Windows. PlanCraft
+    running from a disk image, a translocated copy or the temporary folder is refused too (it
+    would be gone by the next login).
+- *Stop Sharing* takes the login item away, then asks the server to stop and waits for it (a
+  minute at most) while the window says it is saving. A server asked to start a moment ago is
+  first given time to take its folder, so the request is not cleared as stale.
+- PlanCraft says when a server it saw sharing in the background stops by itself, and when one is
+  set to start at login but is not running (with its log, and a *Don't Share at Login* button).
+- The folder, port and listing are fixed while it runs: stop, change them and start again.
+
+### Tests
+
+- `background.rs`: the lock, the status, a status left by a crashed server (not believed), stop
+  requests (seen once, one left from before ignored), someone looking while a server starts,
+  links in the private folder refused, and the log set aside and read back.
+- `login.rs`: the systemd unit, the LaunchAgent and the Windows command line each read back to
+  exactly the command (with systemd's and Windows' own quoting rules), whatever the folder's
+  name holds; names they cannot carry are refused.
+- `tests/cli.rs`: a real `--background` server says where it listens, refuses a second one, stops
+  on `plancraft-server stop`, and logs why it could not start.
+- `tests/login.rs` (ignored: it installs a login item for a moment; it refuses to touch one that
+  is already there): the system's own login item starts the server, a client signs in, and Stop
+  Sharing's steps stop it and leave nothing behind. Run on Linux, macOS and Windows.
+- The app's `dialogs::share` tests drive the window with a stand-in for the login items: start,
+  find it again after a restart, stop, and *Don't Share at Login*.
+
+### Left for later: the system-wide service
+
+*Install PlanCraft Service*, system-wide for a dedicated office machine, with administrator
+rights, removed from the same place it was installed from:
+
+- a systemd system unit through `pkexec` on Linux;
+- a LaunchDaemon on macOS;
+- a Windows service through the `windows-service` crate (pure Rust).
+
+It needs an account to run as, with access to the shared folder (on Windows, a virtual service
+account and access rights on the folder), and owner-only access lists for the server's key and
+users files on Windows.
