@@ -13,7 +13,7 @@ const USAGE: &str = "\
 plancraft-mcp — Model Context Protocol server for PlanCraft projects
 
 USAGE:
-    plancraft-mcp [FILE...] [--http [ADDR]] [--no-file-access]
+    plancraft-mcp [FILE...] [--http [ADDR]] [--no-file-access] [--read-only]
     plancraft-mcp --attach
 
 ARGS:
@@ -29,6 +29,8 @@ OPTIONS:
     --attach            Serve MCP on stdio by forwarding to the running PlanCraft
                         desktop app (Project > AI Agents > Start server).
     --no-file-access    Refuse tools that open, create or link arbitrary file paths.
+    --read-only         Offer only the tools that read: agents can look at the plans
+                        but not change, save or export them.
     -h, --help          Show this help.
     -V, --version       Show the version.
 
@@ -42,11 +44,12 @@ struct Cli {
     files: Vec<String>,
     http: Option<String>,
     file_access: bool,
+    read_only: bool,
     attach: bool,
 }
 
 fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Cli>, String> {
-    let mut cli = Cli { files: Vec::new(), http: None, file_access: true, attach: false };
+    let mut cli = Cli { files: Vec::new(), http: None, file_access: true, read_only: false, attach: false };
     let mut args = args.peekable();
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -63,6 +66,7 @@ fn parse_args(args: impl Iterator<Item = String>) -> Result<Option<Cli>, String>
                 cli.http = Some(explicit.unwrap_or_else(|| DEFAULT_HTTP_ADDR.to_string()));
             }
             "--no-file-access" => cli.file_access = false,
+            "--read-only" => cli.read_only = true,
             "--attach" => cli.attach = true,
             "--stdio" => cli.http = None,
             s if s.starts_with("--http=") => cli.http = s.strip_prefix("--http=").map(str::to_string),
@@ -88,6 +92,10 @@ pub fn run(args: Vec<String>) -> ExitCode {
     if cli.attach {
         if cli.http.is_some() || !cli.files.is_empty() {
             eprintln!("plancraft-mcp: --attach works with the documents open in the app; it takes no files or --http");
+            return ExitCode::from(2);
+        }
+        if cli.read_only {
+            eprintln!("plancraft-mcp: --attach uses the app's server: tick Read only in Project > AI Agents instead of --read-only");
             return ExitCode::from(2);
         }
         return match crate::attach::run_attach() {
@@ -117,7 +125,7 @@ pub fn run(args: Vec<String>) -> ExitCode {
             }
         }
     };
-    let options = ServerOptions { allow_file_access: cli.file_access, ..ServerOptions::default() };
+    let options = ServerOptions { allow_file_access: cli.file_access, read_only: cli.read_only, ..ServerOptions::default() };
     let server = McpServer::with_options(ws, options);
     match cli.http {
         None => {
@@ -165,5 +173,24 @@ pub fn run(args: Vec<String>) -> ExitCode {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    fn parse(args: &[&str]) -> Result<Option<Cli>, String> {
+        parse_args(args.iter().map(|a| a.to_string()))
+    }
+
+    #[test]
+    fn read_only_is_off_unless_asked() {
+        assert!(!parse(&["plan.plancraft"]).unwrap().unwrap().read_only);
+        let cli = parse(&["plan.plancraft", "--read-only", "--no-file-access"]).unwrap().unwrap();
+        assert!(cli.read_only && !cli.file_access);
+        assert_eq!(cli.files, ["plan.plancraft"]);
+        assert!(USAGE.contains("--read-only"));
     }
 }

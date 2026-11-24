@@ -1350,6 +1350,16 @@ fn check_csv_tables(p: &Project) -> Result<(), TestCaseError> {
         prop_assert_eq!(grid.rows.len(), table.rows(p), "{:?}: one row per item", table);
         let width = grid.headers.len();
         prop_assert!(grid.rows.iter().all(|r| r.len() <= width), "{:?}: a row wider than the headings", table);
+        // Every other column (the plan's own headings, whatever they hold): as many rows, and
+        // only those columns.
+        let chosen: Vec<String> = tabular::table_columns(p, table).into_iter().step_by(2).collect();
+        let csv = tabular::table_to_csv_columns(p, table, &chosen);
+        prop_assert_eq!(panics(), before, "exporting {:?} columns panicked", table);
+        let Ok(csv) = csv else { return Ok(()) };
+        let Ok(sheets) = tabular::read_bytes(csv.as_bytes(), "csv") else { return Ok(()) };
+        let grid = &sheets.sheets[0].1;
+        prop_assert_eq!(grid.rows.len(), table.rows(p), "{:?}: one row per item with columns chosen", table);
+        prop_assert!(grid.headers.len() <= chosen.len(), "{:?}: more columns than chosen", table);
     }
     Ok(())
 }

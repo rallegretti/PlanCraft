@@ -328,6 +328,18 @@ fn generated_from_key(key: &str) -> Option<TaskCol> {
     (generated().any(|c| c == col) && Field::Builtin(col).key() == key).then_some(col)
 }
 
+/// The fields task views can be sorted or grouped by, as (key, title): the table's columns, then
+/// the custom fields it does not show.
+pub fn sort_choices(p: &Project, table: TaskTable) -> Vec<(String, String)> {
+    let mut list = table_fields(p, table);
+    for f in p.custom_fields.iter().map(|f| Field::Custom(f.id)) {
+        if !list.contains(&f) {
+            list.push(f);
+        }
+    }
+    list.into_iter().filter(|f| *f != Field::Builtin(TaskCol::Indicators)).map(|f| (f.key(), f.title(p))).collect()
+}
+
 /// Every field a column can show: the built-in columns, the numbered baselines and interim plans,
 /// then the custom fields.
 pub fn all_fields(p: &Project) -> Vec<Field> {

@@ -505,7 +505,7 @@ impl PlanCraftApp {
             }
         }
         if app.settings.mcp_autostart {
-            app.mcp.start(app.ws.clone(), cc.egui_ctx.clone(), app.settings.mcp_port);
+            app.mcp.start(app.ws.clone(), cc.egui_ctx.clone(), app.settings.mcp_port, app.settings.mcp_read_only);
         }
         app
     }
@@ -893,11 +893,16 @@ impl PlanCraftApp {
         }
     }
 
-    fn export_csv(&mut self, table: plancraft_core::tabular::CsvTable) {
-        let Some((name, csv)) =
-            self.with_doc(|doc, _| (doc.project.name.clone(), plancraft_core::tabular::table_to_csv(&doc.project, table)))
-        else {
-            return;
+    /// Writes `table` of the plan `handle` with these `columns` to a file the person picks.
+    fn export_csv(&mut self, handle: u64, table: plancraft_core::tabular::CsvTable, columns: &[String]) {
+        let made = {
+            let ws = lock(&self.ws);
+            let Some(doc) = ws.index_of(handle).and_then(|i| ws.docs.get(i)) else { return };
+            plancraft_core::tabular::table_to_csv_columns(&doc.project, table, columns).map(|csv| (doc.project.name.clone(), csv))
+        };
+        let (name, csv) = match made {
+            Ok(m) => m,
+            Err(e) => return self.st.toast(ToastKind::Warning, format!("Could not export: {e}")),
         };
         let file = format!("{}{}.csv", file_stem(&name), table.file_suffix());
         let Some(path) = rfd::FileDialog::new().add_filter("CSV", &["csv"]).set_file_name(file).save_file() else { return };
@@ -979,7 +984,12 @@ impl PlanCraftApp {
                 self.rec().discard(&stem);
                 self.set_status("Recovery copy discarded");
             }
-            Command::ExportCsv(table) => self.export_csv(table),
+            Command::ExportCsv(table) => {
+                let doc = lock(&self.ws).active_doc().map(|d| d.handle);
+                if let Some(doc) = doc {
+                    self.dialogs.csv_export = Some(dialogs::Bound { doc, dialog: dialogs::csv_export::CsvExport::new(table) });
+                }
+            }
             Command::Print => {
                 let ws = self.ws.clone();
                 let ws = lock(&ws);
@@ -1022,7 +1032,8 @@ impl PlanCraftApp {
             }
             Command::Filter(f) => self.st.filter = f,
             Command::Table(t) => self.st.table = t,
-            Command::SortBy(s) => self.st.sort = s,
+            Command::SortBy(s) => self.st.sort = s.into_iter().collect(),
+            Command::SortKeys(keys) => self.st.sort = keys.into_iter().take(crate::state::MAX_SORT_KEYS).collect(),
             Command::GroupBy(g) => {
                 self.st.group = g;
                 self.st.collapsed_groups.clear();
@@ -1357,6 +1368,10 @@ impl PlanCraftApp {
                 None => self.dialogs.find = Some(Bound::new(doc, dialogs::find::FindReplace::new(replacing))),
             },
             Command::GoTo => self.dialogs.goto = Some(Bound::new(doc, dialogs::find::GoTo::new())),
+            Command::SortWindow => self.dialogs.sort = Some(Bound::new(doc, dialogs::view_options::SortWindow::new(st))),
+            Command::FilterWindow(ask) => {
+                self.dialogs.filter_ask = Some(Bound::new(doc, dialogs::view_options::FilterWindow::new(ask, &doc.project, st)))
+            }
             Command::ToggleTimeline => {
                 if !sel.is_empty() {
                     let r = doc.edit("Add to Timeline", |p| {
@@ -1596,21 +1611,7 @@ impl PlanCraftApp {
     fn menu_info(&self, ws: &Workspace) -> MenuInfo {
         let doc = ws.active_doc();
         // Sort/group choices: the table's columns, then custom fields not shown.
-        let fields = doc
-            .map(|d| {
-                let p = &d.project;
-                let mut list = crate::fields::table_fields(p, self.st.table);
-                for f in p.custom_fields.iter().map(|f| crate::fields::Field::Custom(f.id)) {
-                    if !list.contains(&f) {
-                        list.push(f);
-                    }
-                }
-                list.into_iter()
-                    .filter(|f| *f != crate::fields::Field::Builtin(crate::columns::TaskCol::Indicators))
-                    .map(|f| (f.key(), f.title(p)))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let fields = doc.map(|d| crate::fields::sort_choices(&d.project, self.st.table)).unwrap_or_default();
         MenuInfo {
             has_doc: doc.is_some(),
             title: doc.map(|d| d.title()).unwrap_or_default(),
@@ -1723,7 +1724,8 @@ impl PlanCraftApp {
                 }
                 if self.st.filter != crate::state::TaskFilter::All {
                     ui.separator();
-                    ui.label(RichText::new(format!("Filter: {}", self.st.filter.label())).size(12.0).color(theme::pal().ACCENT_MID));
+                    let shown = self.st.filter.describe(&doc.project);
+                    ui.label(RichText::new(format!("Filter: {shown}")).size(12.0).color(theme::pal().ACCENT_MID));
                 }
                 let warnings = doc.project.sched.warnings.len();
                 if warnings > 0 {
@@ -2062,7 +2064,7 @@ impl PlanCraftApp {
                     "About" => Command::About,
                     "Level" => Command::LevelAll,
                     "McpStart" => {
-                        self.mcp.start(self.ws.clone(), ctx.clone(), self.settings.mcp_port);
+                        self.mcp.start(self.ws.clone(), ctx.clone(), self.settings.mcp_port, self.settings.mcp_read_only);
                         continue;
                     }
                     // Shares the folder shared last (screenshots of a running server).
@@ -2118,6 +2120,10 @@ impl PlanCraftApp {
                     "CustomFields" => Command::CustomFields,
                     "Find" => Command::Find(true),
                     "GoTo" => Command::GoTo,
+                    "SortWindow" => Command::SortWindow,
+                    "FilterResource" => Command::FilterWindow(dialogs::view_options::FilterAsk::Resource),
+                    "FilterDates" => Command::FilterWindow(dialogs::view_options::FilterAsk::Dates),
+                    "ExportCsv" => Command::ExportCsv(plancraft_core::tabular::CsvTable::Tasks),
                     "Print" => Command::Print,
                     "UpdateProject" => Command::UpdateProject,
                     "SetBaseline" => Command::SetBaseline,
@@ -2196,7 +2202,8 @@ impl PlanCraftApp {
                         }
                         continue;
                     }
-                    // `GroupBy=<field>` and `SortBy=<field>[ desc]`, by column key or custom field name.
+                    // `GroupBy=<field>` and `SortBy=<field>[ desc][ then <field>[ desc]]…`, by column key or
+                    // custom field name.
                     other => {
                         let field_key = |name: &str| {
                             let ws = lock(&self.ws);
@@ -2208,8 +2215,15 @@ impl PlanCraftApp {
                         if let Some(name) = other.strip_prefix("GroupBy=") {
                             Command::GroupBy(field_key(name))
                         } else if let Some(spec) = other.strip_prefix("SortBy=") {
-                            let (name, desc) = spec.strip_suffix(" desc").map_or((spec, false), |n| (n, true));
-                            Command::SortBy(field_key(name).map(|k| (k, desc)))
+                            // Several fields: `SortBy=Duration desc then Name`.
+                            Command::SortKeys(
+                                spec.split(" then ")
+                                    .filter_map(|one| {
+                                        let (name, desc) = one.strip_suffix(" desc").map_or((one, false), |n| (n, true));
+                                        field_key(name.trim()).map(|k| (k, desc))
+                                    })
+                                    .collect(),
+                            )
                         } else {
                             continue;
                         }
@@ -2712,10 +2726,17 @@ impl PlanCraftApp {
                     b.dialog.commit_setup(doc);
                 }
             }
+            // A filter naming one plan's resource means nothing in another.
+            if self.st.filter.is_for_one_plan() {
+                self.st.filter = crate::state::TaskFilter::All;
+            }
             // Each document keeps its own sort and grouping.
             let st = &mut self.st;
-            let leaving =
-                ViewOrder { sort: st.sort.take(), group: st.group.take(), collapsed_groups: std::mem::take(&mut st.collapsed_groups) };
+            let leaving = ViewOrder {
+                sort: std::mem::take(&mut st.sort),
+                group: st.group.take(),
+                collapsed_groups: std::mem::take(&mut st.collapsed_groups),
+            };
             if let Some(old) = self.last_active {
                 st.view_orders.insert(old, leaving);
             }
@@ -2863,6 +2884,10 @@ impl PlanCraftApp {
             dialogs::show_bound(&mut self.dialogs.recurring, &mut ws, |d, doc| d.show(&ctx, doc, st));
             dialogs::show_bound(&mut self.dialogs.find, &mut ws, |d, doc| d.show(&ctx, doc, st));
             dialogs::show_bound(&mut self.dialogs.goto, &mut ws, |d, doc| d.show(&ctx, doc, st));
+            // Sorts the active plan's views: closes when another plan becomes active.
+            let active = ws.active_doc().map(|d| d.handle);
+            dialogs::show_bound(&mut self.dialogs.sort, &mut ws, |d, doc| Some(doc.handle) == active && d.show(&ctx, doc, st));
+            dialogs::show_bound(&mut self.dialogs.filter_ask, &mut ws, |d, doc| Some(doc.handle) == active && d.show(&ctx, doc, st));
             let st = &*st;
             dialogs::show_bound(&mut self.dialogs.print, &mut ws, |d, doc| d.show(&ctx, doc, st));
         }
@@ -2910,7 +2935,28 @@ impl PlanCraftApp {
                 dialogs::misc::history(&ctx, doc, &mut self.dialogs.history);
             }
         }
+        // Export CSV: the file is asked for once the plans are let go.
+        let mut export_csv = None;
+        if let Some(b) = self.dialogs.csv_export.as_mut() {
+            let outcome = match ws.index_of(b.doc).and_then(|i| ws.docs.get(i)) {
+                Some(doc) => b.dialog.show(&ctx, doc, &self.settings),
+                None => dialogs::csv_export::Outcome::Closed,
+            };
+            match outcome {
+                dialogs::csv_export::Outcome::Open => {}
+                dialogs::csv_export::Outcome::Closed => self.dialogs.csv_export = None,
+                dialogs::csv_export::Outcome::Export(table, columns) => {
+                    self.settings.csv_left_out.insert(table.key().to_string(), b.dialog.left_out());
+                    self.settings.save();
+                    export_csv = Some((b.doc, table, columns));
+                    self.dialogs.csv_export = None;
+                }
+            }
+        }
         drop(ws);
+        if let Some((doc, table, columns)) = export_csv {
+            self.export_csv(doc, table, &columns);
+        }
         if self.dialogs.about {
             dialogs::misc::about(&ctx, &mut self.dialogs.about);
         }
@@ -3161,6 +3207,28 @@ mod ui_tests {
         h
     }
 
+    /// File › Export CSV opens a window listing the table's columns; with none ticked it cannot
+    /// export.
+    #[test]
+    fn export_csv_asks_which_columns() {
+        use egui_kittest::kittest::Queryable;
+        let mut h = harness();
+        let ctx = h.ctx.clone();
+        h.state_mut().exec(&ctx, Command::ExportCsv(plancraft_core::tabular::CsvTable::Resources));
+        h.run_steps(2);
+        assert!(h.query_by_label("Max Units (%)").is_some(), "the resource sheet's columns are listed");
+        let b = h.state_mut().dialogs.csv_export.as_mut().unwrap();
+        b.dialog.columns.iter_mut().for_each(|(_, on)| *on = false);
+        h.run_steps(2);
+        // Nothing ticked: Export… does nothing (no file is asked for, the window stays).
+        h.get_by_label("Export…").click();
+        h.run_steps(2);
+        assert!(h.state().dialogs.csv_export.is_some());
+        h.get_by_label("Cancel").click();
+        h.run_steps(2);
+        assert!(h.state().dialogs.csv_export.is_none());
+    }
+
     /// Regression: CSV export wrote over whatever file was chosen (the open plan included), and
     /// suggested names with path separators in them.
     #[test]
@@ -3322,6 +3390,9 @@ mod ui_tests {
         let ctx = h.ctx.clone();
         h.state_mut().exec(&ctx, Command::SortBy(Some(("start".into(), true))));
         h.state_mut().exec(&ctx, Command::GroupBy(Some("custom:1".into())));
+        // A filter naming one plan's resource does not carry over to another plan.
+        let r = h.state().ws.lock().unwrap().active_doc().unwrap().project.resources[0].id;
+        h.state_mut().exec(&ctx, Command::Filter(crate::state::TaskFilter::UsingResource(r)));
         let activate = |h: &mut Harness<'static, PlanCraftApp>, handle: u64| {
             {
                 let mut ws = h.state().ws.lock().unwrap();
@@ -3330,9 +3401,10 @@ mod ui_tests {
             h.run_steps(2);
         };
         activate(&mut h, b);
-        assert_eq!((h.state().st.sort.clone(), h.state().st.group.clone()), (None, None), "the other plan starts unsorted");
+        assert_eq!((h.state().st.sort.clone(), h.state().st.group.clone()), (Vec::new(), None), "the other plan starts unsorted");
+        assert_eq!(h.state().st.filter, crate::state::TaskFilter::All);
         activate(&mut h, a);
-        assert_eq!(h.state().st.sort, Some(("start".into(), true)));
+        assert_eq!(h.state().st.sort, vec![("start".into(), true)]);
         assert_eq!(h.state().st.group.as_deref(), Some("custom:1"));
     }
 

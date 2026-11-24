@@ -112,19 +112,31 @@ pub enum TaskFilter {
     Critical,
     Incomplete,
     Completed,
+    /// Started and not finished.
+    InProgress,
     Milestones,
     Late,
+    /// Not finished, and finishing after its baseline finish.
+    Slipping,
     Unassigned,
     Summary,
+    /// Tasks this resource is assigned to (asked for: Using Resource…).
+    UsingResource(ResourceId),
+    /// Tasks that run at any time between these two days, both included (asked for: Date
+    /// Range…).
+    DateRange(Date, Date),
 }
 
 impl TaskFilter {
-    pub const ALL: [TaskFilter; 8] = [
+    /// The filters picked straight from the list (the others ask first).
+    pub const ALL: [TaskFilter; 10] = [
         TaskFilter::All,
         TaskFilter::Critical,
         TaskFilter::Incomplete,
         TaskFilter::Completed,
+        TaskFilter::InProgress,
         TaskFilter::Late,
+        TaskFilter::Slipping,
         TaskFilter::Milestones,
         TaskFilter::Summary,
         TaskFilter::Unassigned,
@@ -135,11 +147,32 @@ impl TaskFilter {
             TaskFilter::Critical => "Critical",
             TaskFilter::Incomplete => "Incomplete Tasks",
             TaskFilter::Completed => "Completed Tasks",
+            TaskFilter::InProgress => "In Progress Tasks",
             TaskFilter::Milestones => "Milestones",
             TaskFilter::Late => "Late Tasks",
+            TaskFilter::Slipping => "Slipping Tasks",
             TaskFilter::Unassigned => "Unassigned Tasks",
             TaskFilter::Summary => "Summary Tasks",
+            TaskFilter::UsingResource(_) => "Using Resource",
+            TaskFilter::DateRange(..) => "Date Range",
         }
+    }
+
+    /// What the filter shows, with what it was asked for (the status bar).
+    pub fn describe(self, p: &Project) -> String {
+        match self {
+            TaskFilter::UsingResource(r) => match p.resource(r) {
+                Some(r) => format!("Using {}", r.name),
+                None => "Using a removed resource".into(),
+            },
+            TaskFilter::DateRange(from, to) => format!("Between {from} and {to}"),
+            other => other.label().to_string(),
+        }
+    }
+
+    /// Whether it names a resource of one plan (it does not carry over to another).
+    pub fn is_for_one_plan(self) -> bool {
+        matches!(self, TaskFilter::UsingResource(_))
     }
 }
 
@@ -397,10 +430,13 @@ impl Selection {
     }
 }
 
+/// How many fields task views sort by at most (Sort by, Then by, Then by).
+pub const MAX_SORT_KEYS: usize = 3;
+
 /// How a document's task views are sorted and grouped (kept per document).
 #[derive(Clone, Debug, Default)]
 pub struct ViewOrder {
-    pub sort: Option<(String, bool)>,
+    pub sort: Vec<(String, bool)>,
     pub group: Option<String>,
     pub collapsed_groups: HashSet<String>,
 }
@@ -420,8 +456,9 @@ pub struct UiState {
     pub collapsed_resources: HashSet<ResourceId>,
     pub filter: TaskFilter,
     pub search: String,
-    /// Sort of task views: field key and descending.
-    pub sort: Option<(String, bool)>,
+    /// Sort of task views: field keys and descending, first key first (empty: the outline
+    /// order). At most [`MAX_SORT_KEYS`].
+    pub sort: Vec<(String, bool)>,
     /// Field key task views are grouped by.
     pub group: Option<String>,
     /// Collapsed group headers (by label).
@@ -468,7 +505,7 @@ impl Default for UiState {
             collapsed_resources: HashSet::new(),
             filter: TaskFilter::All,
             search: String::new(),
-            sort: None,
+            sort: Vec::new(),
             group: None,
             collapsed_groups: HashSet::new(),
             view_orders: Default::default(),

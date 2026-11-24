@@ -97,8 +97,14 @@ pub enum Command {
     ZoomSelected,
     Filter(TaskFilter),
     Table(TaskTable),
-    /// Sort task views by a field key (`true` = descending); `None` restores the outline order.
+    /// Sort task views by one field key (`true` = descending); `None` restores the outline order.
     SortBy(Option<(String, bool)>),
+    /// Sorts by these fields, the first first (the Sort window).
+    SortKeys(Vec<(String, bool)>),
+    /// Opens the Sort window.
+    SortWindow,
+    /// Asks for a filter's resource or dates, then filters.
+    FilterWindow(crate::dialogs::view_options::FilterAsk),
     /// Group task views by a field key; `None` ungroups.
     GroupBy(Option<String>),
     /// Insert a column showing field `key` before column `at` of the current table.

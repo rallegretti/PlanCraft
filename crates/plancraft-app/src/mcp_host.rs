@@ -40,10 +40,12 @@ impl McpHost {
         self.changes.load(Ordering::Relaxed)
     }
 
-    pub fn start(&mut self, ws: SharedWorkspace, ctx: egui::Context, port: u16) {
+    /// Starts the server on `port`; `read_only` offers only the tools that read.
+    pub fn start(&mut self, ws: SharedWorkspace, ctx: egui::Context, port: u16, read_only: bool) {
         self.stop();
         let changes = self.changes.clone();
         let options = ServerOptions {
+            read_only,
             extra_instructions: Some(
                 "You are connected to the PlanCraft desktop app. Edits appear live in the user's window and can be undone there; \
                  call save_project when the user wants changes written to disk."

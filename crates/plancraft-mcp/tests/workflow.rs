@@ -513,6 +513,45 @@ fn file_access_can_be_disabled() {
     assert_eq!(r["isError"], false);
 }
 
+/// Read-only: only the tools that read are offered, the others are refused, and none of the
+/// offered ones changes a plan (whatever it is given).
+#[test]
+fn a_read_only_server_offers_only_tools_that_read() {
+    use plancraft_core::workspace::Workspace;
+    use plancraft_mcp::{McpServer, ServerOptions};
+    let mut ws = Workspace::default();
+    ws.add(plancraft_core::sample::demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap()), None);
+    let shared = ws.shared();
+    let server = McpServer::with_options(shared.clone(), ServerOptions { read_only: true, ..Default::default() });
+    let init = server
+        .handle_message(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "t", "version": "1" } } }))
+        .unwrap();
+    assert!(init["result"]["instructions"].as_str().unwrap().contains("read-only"));
+    let list = server.handle_message(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })).unwrap();
+    let names: Vec<&str> = list["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"get_project") && names.contains(&"list_tasks"), "{names:?}");
+    assert!(!names.contains(&"update_task") && !names.contains(&"save_project") && !names.contains(&"export_csv"), "{names:?}");
+    assert!(list["result"]["tools"].as_array().unwrap().iter().all(|t| t["annotations"]["readOnlyHint"] == true));
+    assert!(names.len() < McpServer::new(Workspace::default().shared()).tools().len());
+
+    let revision = || {
+        let w = shared.lock().unwrap();
+        (w.docs[0].revision, w.docs[0].dirty, w.docs[0].project.tasks.len())
+    };
+    let before = revision();
+    let r = server.call_tool("update_task", &json!({ "task": 1, "name": "Renamed" }));
+    assert_eq!(r["isError"], true);
+    assert!(r["content"][0]["text"].as_str().unwrap().contains("read-only"), "{r}");
+    assert_eq!(server.call_tool("get_project", &json!({}))["isError"], false);
+    // Every offered tool, with nothing and with a task: the plan stays as it was.
+    for name in &names {
+        for args in [json!({}), json!({ "task": 2 }), json!({ "resource": 1, "task": 3 })] {
+            server.call_tool(name, &args);
+        }
+    }
+    assert_eq!(revision(), before, "a tool offered as read-only changed the plan");
+}
+
 #[test]
 fn workspace_from_files_handles_new_and_existing() {
     let dir = tempfile::tempdir().unwrap();
@@ -1096,6 +1135,17 @@ fn spreadsheet_import_and_csv_export() {
     assert!(rows[0].contains("\"Design\"") && rows[1..].iter().all(|l| l.contains("\"Build\"")), "in task order: {text}");
     let wrong = c.call_err("export_csv", json!({ "path": dir.path().join("x.csv").to_str().unwrap(), "table": "people" }));
     assert!(wrong.contains("unknown table"), "{wrong}");
+    // Only some columns: in the table's order, whatever order they are named in.
+    let names = dir.path().join("names.csv");
+    let exported = c.call("export_csv", json!({ "path": names.to_str().unwrap(), "table": "resources", "columns": ["Name", "ID"] }));
+    assert_eq!(exported["rows"], 2);
+    let text = std::fs::read_to_string(&names).unwrap();
+    assert!(text.starts_with("\u{feff}ID,Name\n") && text.contains("\"Ana\""), "{text}");
+    let wrong = c.call_err("export_csv", json!({ "path": dir.path().join("y.csv").to_str().unwrap(), "columns": ["Salary"] }));
+    assert!(wrong.contains("no column 'Salary'") && wrong.contains("Duration"), "{wrong}");
+    assert!(!dir.path().join("y.csv").exists());
+    let wrong = c.call_err("export_csv", json!({ "path": dir.path().join("z.csv").to_str().unwrap(), "columns": [3] }));
+    assert!(wrong.contains("array of strings"), "{wrong}");
     let back = c.call("import_spreadsheet", json!({ "path": out.to_str().unwrap() }));
     assert_eq!(back["project"]["name"], "again");
     assert_eq!(task(&c.call("list_tasks", json!({})), "Build")["predecessors"], "1");

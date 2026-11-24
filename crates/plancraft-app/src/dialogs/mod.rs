@@ -1,6 +1,7 @@
 //! Modal-style windows.
 
 pub mod baseline;
+pub mod csv_export;
 pub mod custom_fields;
 pub mod find;
 pub mod import;
@@ -14,6 +15,7 @@ pub mod server;
 pub mod share;
 pub mod task_info;
 pub mod update_project;
+pub mod view_options;
 pub mod working_time;
 
 use plancraft_core::workspace::{Document, Workspace};
@@ -50,6 +52,9 @@ pub struct Dialogs {
     pub task_info: Option<Bound<task_info::TaskInfo>>,
     pub find: Option<Bound<find::FindReplace>>,
     pub goto: Option<Bound<find::GoTo>>,
+    pub sort: Option<Bound<view_options::SortWindow>>,
+    pub filter_ask: Option<Bound<view_options::FilterWindow>>,
+    pub csv_export: Option<Bound<csv_export::CsvExport>>,
     pub resource_info: Option<Bound<resource_info::ResourceInfo>>,
     pub project_info: Option<Bound<project_info::ProjectInfo>>,
     pub working_time: Option<Bound<working_time::WorkingTime>>,

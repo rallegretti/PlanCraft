@@ -16,6 +16,8 @@ pub struct AppSettings {
     pub recent: Vec<PathBuf>,
     pub mcp_port: u16,
     pub mcp_autostart: bool,
+    /// The MCP server offers only the tools that read (agents look but do not change).
+    pub mcp_read_only: bool,
     pub table_width: f32,
     pub theme: crate::theme::ThemeChoice,
     /// Servers plans were opened from, last used first (never a password).
@@ -28,6 +30,9 @@ pub struct AppSettings {
     pub share_announce: bool,
     /// Whether Share Folder keeps sharing after PlanCraft quits, and from every login on.
     pub share_background: bool,
+    /// Columns left out of File › Export CSV, by table (`tasks`, `resources`, …): the headings
+    /// unticked last time (a column new since then is written).
+    pub csv_left_out: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// A PlanCraft Server this person opened plans from.
@@ -53,6 +58,8 @@ pub fn same_address(stored: &str, address: &str) -> bool {
 
 /// Servers remembered, at most.
 const MAX_SERVERS: usize = 10;
+/// Most columns remembered as left out of one CSV export.
+const MAX_CSV_LEFT_OUT: usize = 500;
 /// Longest text kept in a remembered server's fields.
 const MAX_SERVER_FIELD: usize = 300;
 
@@ -62,6 +69,7 @@ impl Default for AppSettings {
             recent: Vec::new(),
             mcp_port: 7878,
             mcp_autostart: false,
+            mcp_read_only: false,
             table_width: 720.0,
             theme: crate::theme::ThemeChoice::System,
             servers: Vec::new(),
@@ -69,6 +77,7 @@ impl Default for AppSettings {
             share_port: plancraft_server::protocol::DEFAULT_PORT,
             share_announce: true,
             share_background: false,
+            csv_left_out: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -125,6 +134,13 @@ impl AppSettings {
             short(&mut k.name);
         }
         self.servers.retain(|k| !k.address.is_empty());
+        self.csv_left_out.retain(|k, _| plancraft_core::tabular::CsvTable::from_key(k).is_some());
+        for names in self.csv_left_out.values_mut() {
+            names.truncate(MAX_CSV_LEFT_OUT);
+            for n in names.iter_mut() {
+                short(n);
+            }
+        }
         self
     }
 

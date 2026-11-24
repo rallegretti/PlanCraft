@@ -67,6 +67,14 @@ fn matches_filter(p: &Project, t: &Task, f: TaskFilter) -> bool {
         TaskFilter::Late => columns::is_late(p, t),
         TaskFilter::Summary => t.sched.is_summary,
         TaskFilter::Unassigned => !t.sched.is_summary && !t.is_milestone() && p.assignments_for_task(t.id).next().is_none(),
+        TaskFilter::InProgress => {
+            !t.is_complete() && (t.actual_start.is_some() || t.percent_complete > 0 || t.sched.percent_complete > 0.0)
+        }
+        TaskFilter::Slipping => !t.is_complete() && t.baseline.as_ref().zip(t.sched.finish).is_some_and(|(b, f)| f > b.finish),
+        TaskFilter::UsingResource(r) => p.assignments_for_task(t.id).any(|a| a.resource == r),
+        TaskFilter::DateRange(from, to) => {
+            t.sched.start.is_some_and(|s| s.date() <= to) && t.sched.finish.is_some_and(|f| f.date() >= from)
+        }
     }
 }
 
@@ -76,21 +84,29 @@ pub fn task_matches(p: &Project, st: &UiState, t: &Task) -> bool {
     matches_filter(p, t, st.filter) && (search.is_empty() || t.name.to_lowercase().contains(&search))
 }
 
-/// Orders task indices by the sort field (ties keep outline order; empty values stay last in
-/// either direction).
-fn sort_indices(p: &Project, items: &mut [usize], field: &Field, descending: bool) {
-    let keys: HashMap<usize, SortKey> = items.iter().map(|&i| (i, field.sort_key(p, i))).collect();
+/// Orders task indices by the sort fields, the first one first, then the next for ties (ties
+/// left keep outline order; empty values stay last in either direction).
+fn sort_indices(p: &Project, items: &mut [usize], sort: &[(Field, bool)]) {
+    let keys: HashMap<usize, Vec<SortKey>> = items.iter().map(|&i| (i, sort.iter().map(|(f, _)| f.sort_key(p, i)).collect())).collect();
+    let none = Vec::new();
     items.sort_by(|a, b| {
-        let (ka, kb) = (keys.get(a).unwrap_or(&SortKey::Missing), keys.get(b).unwrap_or(&SortKey::Missing));
-        let missing = (matches!(ka, SortKey::Missing), matches!(kb, SortKey::Missing));
-        let ord = match missing {
-            (true, false) => std::cmp::Ordering::Greater,
-            (false, true) => std::cmp::Ordering::Less,
-            _ if descending => kb.cmp(ka),
-            _ => ka.cmp(kb),
-        };
-        ord.then(a.cmp(b))
+        let (ka, kb) = (keys.get(a).unwrap_or(&none), keys.get(b).unwrap_or(&none));
+        let by_field = sort.iter().enumerate().map(|(n, (_, descending))| {
+            let (ka, kb) = (ka.get(n).unwrap_or(&SortKey::Missing), kb.get(n).unwrap_or(&SortKey::Missing));
+            match (matches!(ka, SortKey::Missing), matches!(kb, SortKey::Missing)) {
+                (true, false) => std::cmp::Ordering::Greater,
+                (false, true) => std::cmp::Ordering::Less,
+                _ if *descending => kb.cmp(ka),
+                _ => ka.cmp(kb),
+            }
+        });
+        by_field.fold(std::cmp::Ordering::Equal, std::cmp::Ordering::then).then(a.cmp(b))
     });
+}
+
+/// The view's sort fields (keys of fields no longer there are skipped).
+fn sort_fields(p: &Project, st: &UiState) -> Vec<(Field, bool)> {
+    st.sort.iter().filter_map(|(k, desc)| Field::from_key(p, k).map(|f| (f, *desc))).collect()
 }
 
 /// Rows shown in task views, honoring the filter and search text, the sort (within the outline:
@@ -100,14 +116,14 @@ pub fn visible_rows(p: &Project, st: &UiState) -> Vec<Row> {
     let search = st.search.trim().to_lowercase();
     let filtering = st.filter != TaskFilter::All || !search.is_empty();
     let matches = |t: &Task| matches_filter(p, t, st.filter) && (search.is_empty() || t.name.to_lowercase().contains(&search));
-    let sort = st.sort.as_ref().and_then(|(k, desc)| Field::from_key(p, k).map(|f| (f, *desc)));
+    let sort = sort_fields(p, st);
 
     if let Some(group) = st.group.as_ref().and_then(|k| Field::from_key(p, k)) {
         // Grouped: subtasks only, under one header per value.
         let mut tasks: Vec<usize> =
             p.tasks.iter().enumerate().filter(|(_, t)| !t.sched.is_summary && (!filtering || matches(t))).map(|(i, _)| i).collect();
-        if let Some((field, desc)) = &sort {
-            sort_indices(p, &mut tasks, field, *desc);
+        if !sort.is_empty() {
+            sort_indices(p, &mut tasks, &sort);
         }
         let mut groups: Vec<(SortKey, GroupRow)> = Vec::new();
         let mut by_label: HashMap<String, usize> = HashMap::new();
@@ -147,7 +163,7 @@ pub fn outline_rows(p: &Project, st: &UiState) -> Vec<Row> {
     let search = st.search.trim().to_lowercase();
     let filtering = st.filter != TaskFilter::All || !search.is_empty();
     let matches = |t: &Task| matches_filter(p, t, st.filter) && (search.is_empty() || t.name.to_lowercase().contains(&search));
-    let sort = st.sort.as_ref().and_then(|(k, desc)| Field::from_key(p, k).map(|f| (f, *desc)));
+    let sort = sort_fields(p, st);
     let mut keep: Vec<bool> = vec![!filtering; p.tasks.len()];
     if filtering {
         for (i, t) in p.tasks.iter().enumerate() {
@@ -178,10 +194,10 @@ pub fn outline_rows(p: &Project, st: &UiState) -> Vec<Row> {
         }
         stack.push((i, t.outline_level));
     }
-    if let Some((field, desc)) = &sort {
-        sort_indices(p, &mut roots, field, *desc);
+    if !sort.is_empty() {
+        sort_indices(p, &mut roots, &sort);
         for list in &mut children {
-            sort_indices(p, list, field, *desc);
+            sort_indices(p, list, &sort);
         }
     }
     let mut rows = Vec::with_capacity(p.tasks.len());
@@ -310,7 +326,7 @@ mod tests {
     #[test]
     fn sorting_keeps_subtasks_under_their_summary() {
         let p = demo();
-        let mut st = UiState { sort: Some(("duration".into(), true)), ..UiState::default() };
+        let mut st = UiState { sort: vec![("duration".into(), true)], ..UiState::default() };
         let rows = visible_rows(&p, &st);
         assert_eq!(rows.len(), p.tasks.len(), "sorting hides nothing");
         // Each subtask still follows its own summary, and siblings run longest first.
@@ -326,9 +342,125 @@ mod tests {
             let kids: Vec<usize> = order.iter().copied().filter(|&x| p.parent_index(x) == Some(parent)).collect();
             assert!(kids.windows(2).all(|w| p.tasks[w[0]].sched.duration >= p.tasks[w[1]].sched.duration), "{}", p.tasks[parent].name);
         }
-        st.sort = Some(("duration".into(), false));
+        st.sort = vec![("duration".into(), false)];
         let asc: Vec<usize> = visible_rows(&p, &st).iter().filter_map(Row::task).collect();
         assert_ne!(asc, order);
+    }
+
+    /// The filters added with Sort by several fields: In Progress, Slipping, Using Resource and
+    /// Date Range.
+    #[test]
+    fn the_newer_filters_pick_their_tasks() {
+        let mut p = demo();
+        let shown = |p: &Project, f: TaskFilter| -> Vec<usize> {
+            let st = UiState { filter: f, ..UiState::default() };
+            visible_rows(p, &st).iter().filter_map(Row::task).filter(|&i| matches_filter(p, &p.tasks[i], f)).collect()
+        };
+        // In progress: started, not done (the demo's research is 40 % done, its scope 100 %).
+        let in_progress = shown(&p, TaskFilter::InProgress);
+        assert!(!in_progress.is_empty());
+        assert!(in_progress.iter().all(|&i| !p.tasks[i].is_complete()));
+        assert!(
+            p.tasks
+                .iter()
+                .filter(|t| !t.sched.is_summary && t.percent_complete == 40)
+                .all(|t| in_progress.iter().any(|&i| p.tasks[i].id == t.id))
+        );
+        // Slipping: a baseline that finished earlier than the task does now.
+        assert!(shown(&p, TaskFilter::Slipping).is_empty(), "no baseline, nothing slips");
+        let all: Vec<TaskId> = p.tasks.iter().map(|t| t.id).collect();
+        p.set_baseline(&all);
+        assert!(shown(&p, TaskFilter::Slipping).is_empty(), "on its baseline");
+        let late = p.tasks.iter().position(|t| !t.sched.is_summary && !t.is_complete()).unwrap();
+        let done = p.tasks.iter().position(|t| t.is_complete()).unwrap();
+        for i in [late, done] {
+            let b = p.tasks[i].baseline.as_mut().unwrap();
+            b.finish = plancraft_core::dates::add_days(b.finish.date(), -3).unwrap().at(17, 0, 0, 0);
+        }
+        assert_eq!(shown(&p, TaskFilter::Slipping), vec![late], "a finished task no longer slips");
+        // Using a resource: exactly the tasks it is assigned to.
+        let r = p.assignments.first().unwrap().resource;
+        let using = shown(&p, TaskFilter::UsingResource(r));
+        let want: Vec<usize> = (0..p.tasks.len()).filter(|&i| p.assignments_for_task(p.tasks[i].id).any(|a| a.resource == r)).collect();
+        assert!(!want.is_empty());
+        assert_eq!(using, want);
+        // Between two days: every task running then, also one that starts before and ends after.
+        let t = &p.tasks[late];
+        let (s, f) = (t.sched.start.unwrap().date(), t.sched.finish.unwrap().date());
+        let inside = s;
+        let between = shown(&p, TaskFilter::DateRange(inside, inside));
+        assert!(between.contains(&late));
+        assert!(
+            between.iter().all(|&i| p.tasks[i].sched.start.unwrap().date() <= inside && p.tasks[i].sched.finish.unwrap().date() >= inside)
+        );
+        let after = plancraft_core::dates::add_days(f, 1).unwrap();
+        assert!(!shown(&p, TaskFilter::DateRange(after, plancraft_core::dates::add_days(after, 5).unwrap())).contains(&late));
+    }
+
+    #[test]
+    fn the_filter_window_checks_what_it_is_given() {
+        use crate::dialogs::view_options::{FilterAsk, FilterWindow};
+        let p = demo();
+        let st = UiState::default();
+        let mut w = FilterWindow::new(FilterAsk::Dates, &p, &st);
+        assert!(matches!(w.filter(&p), Ok(TaskFilter::DateRange(a, b)) if a < b), "two weeks from the status date or today");
+        w.to = "2026-01-01".into();
+        w.from = "2026-02-01".into();
+        assert!(w.filter(&p).unwrap_err().contains("after"));
+        w.from = "next week".into();
+        assert!(w.filter(&p).unwrap_err().contains("not a date"));
+        let mut w = FilterWindow::new(FilterAsk::Resource, &p, &st);
+        assert_eq!(w.filter(&p), Ok(TaskFilter::UsingResource(p.resources[0].id)));
+        w.resource = Some(ResourceId(9999));
+        assert!(w.filter(&p).is_err(), "a resource no longer in the plan");
+        // Opened again: starts from the filter in use.
+        let r = p.resources[1].id;
+        let st = UiState { filter: TaskFilter::UsingResource(r), ..UiState::default() };
+        assert_eq!(FilterWindow::new(FilterAsk::Resource, &p, &st).resource, Some(r));
+        assert_eq!(TaskFilter::UsingResource(r).describe(&p), format!("Using {}", p.resources[1].name));
+    }
+
+    /// Sorting by several fields: the first decides, the next ones break its ties.
+    #[test]
+    fn a_second_sort_field_orders_the_ties_of_the_first() {
+        let mut p = demo();
+        // Two priorities, so the first field has ties to break.
+        for (n, t) in p.tasks.iter_mut().enumerate() {
+            t.priority = if n % 3 == 0 { 700 } else { 500 };
+        }
+        let st = UiState { sort: vec![("priority".into(), true), ("duration".into(), false)], ..UiState::default() };
+        let order: Vec<usize> = visible_rows(&p, &st).iter().filter_map(Row::task).collect();
+        assert_eq!(order.len(), p.tasks.len());
+        let (priority, duration) = (Field::Builtin(TaskCol::Priority), Field::Builtin(TaskCol::Duration));
+        let mut ties = 0;
+        for parent in std::iter::once(None).chain((0..p.tasks.len()).filter(|&i| p.has_children(i)).map(Some)) {
+            let kids: Vec<usize> = order.iter().copied().filter(|&x| p.parent_index(x) == parent).collect();
+            for w in kids.windows(2) {
+                let (a, b) = (w[0], w[1]);
+                let first = priority.sort_key(&p, b).cmp(&priority.sort_key(&p, a));
+                assert_ne!(first, std::cmp::Ordering::Greater, "higher priority first: {} {}", p.tasks[a].name, p.tasks[b].name);
+                if first == std::cmp::Ordering::Equal {
+                    ties += 1;
+                    assert_ne!(duration.sort_key(&p, a).cmp(&duration.sort_key(&p, b)), std::cmp::Ordering::Greater, "then shortest first");
+                }
+            }
+        }
+        assert!(ties > 3, "the test needs ties to break");
+        // A field no longer in the plan is skipped, not an error.
+        let st = UiState { sort: vec![("custom:999".into(), false), ("duration".into(), false)], ..UiState::default() };
+        assert_eq!(visible_rows(&p, &st).len(), p.tasks.len());
+    }
+
+    #[test]
+    fn the_sort_window_skips_unused_and_repeated_fields() {
+        let st = UiState { sort: vec![("name".into(), true)], ..UiState::default() };
+        let mut w = crate::dialogs::view_options::SortWindow::new(&st);
+        assert_eq!(w.keys(), vec![("name".to_string(), true)]);
+        w.set(1, None, false);
+        w.set(2, Some("duration"), true);
+        assert_eq!(w.keys(), vec![("name".to_string(), true), ("duration".to_string(), true)]);
+        w.set(1, Some("name"), false);
+        assert_eq!(w.keys(), vec![("name".to_string(), true), ("duration".to_string(), true)], "a field sorts once");
     }
 
     #[test]

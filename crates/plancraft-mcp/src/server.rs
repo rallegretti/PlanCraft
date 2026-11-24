@@ -32,6 +32,9 @@ pub struct ServerOptions {
     /// with a new path and `add_external_project` are refused; saving an open
     /// document to its existing path is still allowed.
     pub allow_file_access: bool,
+    /// Offer only the tools that read (`readOnlyHint`): agents can look at the plans but not
+    /// change them, save them or write any file.
+    pub read_only: bool,
     /// Extra text appended to the `instructions` returned by `initialize`.
     pub extra_instructions: Option<String>,
 }
@@ -43,6 +46,7 @@ impl Default for ServerOptions {
             title: "PlanCraft".into(),
             version: env!("CARGO_PKG_VERSION").into(),
             allow_file_access: true,
+            read_only: false,
             extra_instructions: None,
         }
     }
@@ -100,6 +104,11 @@ impl McpServer {
     /// All tool definitions.
     pub fn tools(&self) -> &[Tool] {
         &self.tools
+    }
+
+    /// The tools this server offers: all of them, or only those that read when it is read-only.
+    pub fn offered_tools(&self) -> impl Iterator<Item = &Tool> {
+        self.tools.iter().filter(|t| t.read_only || !self.options.read_only)
     }
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, Workspace> {
@@ -208,7 +217,7 @@ impl McpServer {
         match method {
             "initialize" => Ok(self.initialize(params)),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": self.tools.iter().map(Tool::to_json).collect::<Vec<_>>() })),
+            "tools/list" => Ok(json!({ "tools": self.offered_tools().map(Tool::to_json).collect::<Vec<_>>() })),
             "tools/call" => self.call_tool_request(params),
             "resources/list" => Ok(crate::resources::list(self)),
             "resources/templates/list" => Ok(crate::resources::templates()),
@@ -230,6 +239,12 @@ impl McpServer {
         let mut instructions = crate::INSTRUCTIONS.to_string();
         if !self.options.allow_file_access {
             instructions.push_str("\nFile access is disabled on this server: work with the documents that are already open.\n");
+        }
+        if self.options.read_only {
+            instructions.push_str(
+                "\nThis server is read-only: you can look at the open plans (the tools listed) but not change, save or export them. \
+                 Say so if the user asks for a change.\n",
+            );
         }
         if let Some(extra) = &self.options.extra_instructions {
             instructions.push('\n');
@@ -275,6 +290,12 @@ impl McpServer {
         };
         let empty = Map::new();
         let map = arguments.as_object().unwrap_or(&empty);
+        if self.options.read_only && !tool.read_only {
+            return tool_error_result(format!(
+                "this server is read-only: '{name}' changes plans or writes files, so it is not offered (the person running \
+                 PlanCraft can turn read-only off)"
+            ));
+        }
         if let Err(e) = tool.validate(map) {
             return tool_error_result(e.0);
         }
