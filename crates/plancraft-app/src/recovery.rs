@@ -327,8 +327,15 @@ pub mod tests {
     }
 
     impl Drop for TempDir {
+        /// Removes the directory, trying again for a moment while a file in it is still open
+        /// (Windows refuses to delete those; a server or link thread may be closing it).
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            for _ in 0..40 {
+                if std::fs::remove_dir_all(&self.0).is_ok() || !self.0.exists() {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
         }
     }
 
