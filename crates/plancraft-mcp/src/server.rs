@@ -32,6 +32,9 @@ pub struct ServerOptions {
     /// with a new path and `add_external_project` are refused; saving an open
     /// document to its existing path is still allowed.
     pub allow_file_access: bool,
+    /// Offer only the tools that read (`readOnlyHint`): agents can look at the plans but not
+    /// change them, save them or write any file.
+    pub read_only: bool,
     /// Extra text appended to the `instructions` returned by `initialize`.
     pub extra_instructions: Option<String>,
 }
@@ -43,6 +46,7 @@ impl Default for ServerOptions {
             title: "PlanCraft".into(),
             version: env!("CARGO_PKG_VERSION").into(),
             allow_file_access: true,
+            read_only: false,
             extra_instructions: None,
         }
     }
@@ -100,6 +104,11 @@ impl McpServer {
     /// All tool definitions.
     pub fn tools(&self) -> &[Tool] {
         &self.tools
+    }
+
+    /// The tools this server offers: all of them, or only those that read when it is read-only.
+    pub fn offered_tools(&self) -> impl Iterator<Item = &Tool> {
+        self.tools.iter().filter(|t| t.read_only || !self.options.read_only)
     }
 
     pub(crate) fn lock(&self) -> MutexGuard<'_, Workspace> {
@@ -208,7 +217,7 @@ impl McpServer {
         match method {
             "initialize" => Ok(self.initialize(params)),
             "ping" => Ok(json!({})),
-            "tools/list" => Ok(json!({ "tools": self.tools.iter().map(Tool::to_json).collect::<Vec<_>>() })),
+            "tools/list" => Ok(json!({ "tools": self.offered_tools().map(Tool::to_json).collect::<Vec<_>>() })),
             "tools/call" => self.call_tool_request(params),
             "resources/list" => Ok(crate::resources::list(self)),
             "resources/templates/list" => Ok(crate::resources::templates()),
@@ -216,8 +225,8 @@ impl McpServer {
                 let uri = params.get("uri").and_then(Value::as_str).ok_or_else(|| RpcError::invalid_params("missing 'uri'"))?;
                 crate::resources::read(self, uri)
             }
-            "prompts/list" => Ok(crate::prompts::list()),
-            "prompts/get" => crate::prompts::get(params),
+            "prompts/list" => Ok(crate::prompts::list(self.options.read_only)),
+            "prompts/get" => crate::prompts::get(params, self.options.read_only),
             "logging/setLevel" => Ok(json!({})),
             "completion/complete" => Ok(json!({ "completion": { "values": [], "hasMore": false } })),
             other => Err(RpcError::method_not_found(other)),
@@ -230,6 +239,12 @@ impl McpServer {
         let mut instructions = crate::INSTRUCTIONS.to_string();
         if !self.options.allow_file_access {
             instructions.push_str("\nFile access is disabled on this server: work with the documents that are already open.\n");
+        }
+        if self.options.read_only {
+            instructions.push_str(
+                "\nThis server is read-only: you can look at the open plans (the tools listed) but not change, save or export them. \
+                 Say so if the user asks for a change.\n",
+            );
         }
         if let Some(extra) = &self.options.extra_instructions {
             instructions.push('\n');
@@ -275,6 +290,12 @@ impl McpServer {
         };
         let empty = Map::new();
         let map = arguments.as_object().unwrap_or(&empty);
+        if self.options.read_only && !tool.read_only {
+            return tool_error_result(format!(
+                "this server is read-only: '{name}' changes plans or writes files, so it is not offered (the person running \
+                 PlanCraft can turn read-only off)"
+            ));
+        }
         if let Err(e) = tool.validate(map) {
             return tool_error_result(e.0);
         }
@@ -497,6 +518,11 @@ impl Ctx<'_> {
         f: impl FnOnce(&mut Project, Option<&Path>) -> ToolResult<R>,
         view: impl FnOnce(&Document, R) -> ToolResult<Value>,
     ) -> ToolResult<Value> {
+        // A second guard behind the tool list: a tool marked read-only by mistake still cannot
+        // edit a plan here.
+        if self.server.options.read_only {
+            return err(format!("this server is read-only: '{label}' would change the plan"));
+        }
         let mut ws = self.server.lock();
         let i = match handle {
             Some(h) => ws.index_of(h).ok_or_else(|| ToolError("the document was closed while its linked files were being read".into()))?,
@@ -524,4 +550,28 @@ pub fn doc_at(ws: &Workspace, i: usize) -> ToolResult<&Document> {
 /// The open document at index `i`, mutably.
 pub fn doc_at_mut(ws: &mut Workspace, i: usize) -> ToolResult<&mut Document> {
     ws.docs.get_mut(i).ok_or_else(|| crate::args::missing("a document"))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
+    use super::*;
+
+    /// The second guard: a tool that edits, run on a read-only server even past the tool list
+    /// (as if it were marked read-only by mistake), changes nothing.
+    #[test]
+    fn a_read_only_server_refuses_edits_whatever_the_tool_says() {
+        let mut ws = Workspace::default();
+        ws.add(plancraft_core::sample::demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap()), None);
+        let server = McpServer::with_options(ws.shared(), ServerOptions { read_only: true, ..ServerOptions::default() });
+        let before = { server.lock().docs[0].revision };
+        let tool = server.tools().iter().find(|t| t.name == "update_task").unwrap();
+        let ctx = Ctx { server: &server, changed: Cell::new(false) };
+        let args = json!({ "task": 2, "name": "Renamed" });
+        let r = (tool.handler)(&ctx, &Args::new(args.as_object().unwrap()));
+        assert!(r.unwrap_err().0.contains("read-only"));
+        let ws = server.lock();
+        assert_eq!((ws.docs[0].revision, ws.docs[0].dirty), (before, false));
+        assert_ne!(ws.docs[0].project.tasks[1].name, "Renamed");
+    }
 }

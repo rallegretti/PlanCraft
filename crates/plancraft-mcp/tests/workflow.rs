@@ -513,6 +513,68 @@ fn file_access_can_be_disabled() {
     assert_eq!(r["isError"], false);
 }
 
+/// Read-only: only the tools that read are offered, the others are refused, and none of the
+/// offered ones changes a plan (whatever it is given).
+#[test]
+fn a_read_only_server_offers_only_tools_that_read() {
+    use plancraft_core::workspace::Workspace;
+    use plancraft_mcp::{McpServer, ServerOptions};
+    let mut ws = Workspace::default();
+    ws.add(plancraft_core::sample::demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap()), None);
+    let shared = ws.shared();
+    let server = McpServer::with_options(shared.clone(), ServerOptions { read_only: true, ..Default::default() });
+    let init = server
+        .handle_message(json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": { "name": "t", "version": "1" } } }))
+        .unwrap();
+    assert!(init["result"]["instructions"].as_str().unwrap().contains("read-only"));
+    let list = server.handle_message(json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" })).unwrap();
+    let names: Vec<&str> = list["result"]["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap()).collect();
+    assert!(names.contains(&"get_project") && names.contains(&"list_tasks"), "{names:?}");
+    assert!(!names.contains(&"update_task") && !names.contains(&"save_project") && !names.contains(&"export_csv"), "{names:?}");
+    assert!(list["result"]["tools"].as_array().unwrap().iter().all(|t| t["annotations"]["readOnlyHint"] == true));
+    assert!(names.len() < McpServer::new(Workspace::default().shared()).tools().len());
+
+    // The whole workspace: which plans are open, which is active, and each one's state.
+    let snapshot = || {
+        let w = shared.lock().unwrap();
+        let docs: Vec<(u64, u64, bool, usize)> = w.docs.iter().map(|d| (d.handle, d.revision, d.dirty, d.project.tasks.len())).collect();
+        (w.active, docs)
+    };
+    let before = snapshot();
+    let r = server.call_tool("update_task", &json!({ "task": 1, "name": "Renamed" }));
+    assert_eq!(r["isError"], true);
+    assert!(r["content"][0]["text"].as_str().unwrap().contains("read-only"), "{r}");
+    assert_eq!(server.call_tool("get_project", &json!({}))["isError"], false);
+    // Every offered tool, with each argument it requires given a value from the demo plan (so
+    // its handler runs), and with nothing: the workspace stays as it was.
+    let value = |name: &str| match name {
+        "task" => json!(2),
+        "resource" => json!(1),
+        "calendar" => json!(1),
+        "external_project" => json!("Platform"),
+        _ => json!("x"),
+    };
+    let tools = list["result"]["tools"].as_array().unwrap();
+    let mut ran = 0;
+    for t in tools {
+        let name = t["name"].as_str().unwrap();
+        let required: Vec<&str> =
+            t["inputSchema"]["required"].as_array().map(|r| r.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
+        let args: serde_json::Map<String, Value> = required.iter().map(|r| (r.to_string(), value(r))).collect();
+        let r = server.call_tool(name, &Value::Object(args));
+        if r["isError"] == false {
+            ran += 1;
+        }
+        server.call_tool(name, &json!({}));
+    }
+    assert!(ran + 2 >= tools.len(), "only {ran} of {} tools ran: the sweep does not reach their code", tools.len());
+    assert_eq!(snapshot(), before, "a tool offered as read-only changed the workspace");
+    // The planning prompt is not offered either.
+    let prompts = server.handle_message(json!({ "jsonrpc": "2.0", "id": 3, "method": "prompts/list" })).unwrap();
+    let names: Vec<&str> = prompts["result"]["prompts"].as_array().unwrap().iter().map(|p| p["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["status_report"]);
+}
+
 #[test]
 fn workspace_from_files_handles_new_and_existing() {
     let dir = tempfile::tempdir().unwrap();
@@ -1096,6 +1158,17 @@ fn spreadsheet_import_and_csv_export() {
     assert!(rows[0].contains("\"Design\"") && rows[1..].iter().all(|l| l.contains("\"Build\"")), "in task order: {text}");
     let wrong = c.call_err("export_csv", json!({ "path": dir.path().join("x.csv").to_str().unwrap(), "table": "people" }));
     assert!(wrong.contains("unknown table"), "{wrong}");
+    // Only some columns: in the table's order, whatever order they are named in.
+    let names = dir.path().join("names.csv");
+    let exported = c.call("export_csv", json!({ "path": names.to_str().unwrap(), "table": "resources", "columns": ["Name", "ID"] }));
+    assert_eq!(exported["rows"], 2);
+    let text = std::fs::read_to_string(&names).unwrap();
+    assert!(text.starts_with("\u{feff}ID,Name\n") && text.contains("\"Ana\""), "{text}");
+    let wrong = c.call_err("export_csv", json!({ "path": dir.path().join("y.csv").to_str().unwrap(), "columns": ["Salary"] }));
+    assert!(wrong.contains("no column 'Salary'") && wrong.contains("Duration"), "{wrong}");
+    assert!(!dir.path().join("y.csv").exists());
+    let wrong = c.call_err("export_csv", json!({ "path": dir.path().join("z.csv").to_str().unwrap(), "columns": [3] }));
+    assert!(wrong.contains("array of strings"), "{wrong}");
     let back = c.call("import_spreadsheet", json!({ "path": out.to_str().unwrap() }));
     assert_eq!(back["project"]["name"], "again");
     assert_eq!(task(&c.call("list_tasks", json!({})), "Build")["predecessors"], "1");

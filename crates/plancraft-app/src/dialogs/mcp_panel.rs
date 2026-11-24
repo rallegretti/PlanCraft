@@ -71,7 +71,7 @@ pub fn show(
                 }
                 ui.label(RichText::new("⚡ running").color(theme::pal().OK));
             } else if ui.add(egui::Button::new(RichText::new("▶ Start server").color(egui::Color32::WHITE)).fill(theme::pal().ACCENT)).clicked() {
-                host.start(ws.clone(), ctx.clone(), settings.mcp_port);
+                host.start(ws.clone(), ctx.clone(), settings.mcp_port, settings.mcp_read_only);
             }
             let mut auto = settings.mcp_autostart;
             if ui.checkbox(&mut auto, "Start automatically").changed() {
@@ -79,6 +79,22 @@ pub fn show(
                 settings.save();
             }
         });
+        let mut read_only = settings.mcp_read_only;
+        if ui
+            .add_enabled(!host.running(), egui::Checkbox::new(&mut read_only, "Read only: agents can look at the plans but not change them"))
+            .on_hover_text(
+                "Only the tools that read are offered. After changing this, reconnect the agent (in Claude Code: /mcp) so it sees \
+                 the new list.",
+            )
+            .on_disabled_hover_text("Stop the server to change this; it applies from the next start.")
+            .changed()
+        {
+            settings.mcp_read_only = read_only;
+            settings.save();
+        }
+        if host.running() && settings.mcp_read_only {
+            ui.label(RichText::new("Read only: agents cannot change, save or export your plans.").small().color(theme::pal().TEXT_WEAK));
+        }
         if let Some(e) = &host.error {
             ui.colored_label(theme::pal().ERROR, e);
         }

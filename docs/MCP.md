@@ -95,7 +95,7 @@ HTTP details (MCP "Streamable HTTP", JSON responses only):
 ### Command line
 
 ```text
-plancraft-mcp [FILE...] [--http [ADDR]] [--no-file-access]
+plancraft-mcp [FILE...] [--http [ADDR]] [--no-file-access] [--read-only]
 plancraft-mcp --attach
 
   FILE...             .plancraft documents to open
@@ -104,7 +104,11 @@ plancraft-mcp --attach
   --attach            serve stdio by relaying to the running desktop app
   --no-file-access    refuse tools that open/create/link arbitrary paths
                       (saving open documents to their own path still works)
+  --read-only         offer only the read-only tools (see below)
 ```
+
+`--attach` relays to the desktop app's own server, so it takes no `--read-only`: tick *Read only* in
+*Project › AI Agents* instead.
 
 ## Embedding (for the desktop app)
 
@@ -208,6 +212,15 @@ Example `create_tasks` call:
 All tools also accept the optional `document` argument (omitted below). Mutating tools return the updated
 entity; read-only tools are annotated with `readOnlyHint`.
 
+**Read-only mode** (`--read-only`, or *Read only* in the app's *AI Agents* window, `ServerOptions::read_only`):
+the server lists only the tools marked *(read-only)* below, refuses the others with an error that says
+why, and tells the agent in its `initialize` instructions. Agents can look at the open plans but not
+change, save or export them (exports write files); a second guard refuses any edit, so a tool marked
+read-only by mistake still cannot change a plan. Resources stay available, and of the prompts only
+`status_report` (`plan_project` builds a plan). An agent already connected keeps the tool list it was
+given: reconnect it after changing the setting. `plancraft-mcp --read-only FILE` still holds the plans'
+lock files while it runs, so PlanCraft says they are open elsewhere.
+
 ### Documents
 
 | Tool | Arguments (required in **bold**) | Description |
@@ -216,7 +229,7 @@ entity; read-only tools are annotated with `readOnlyHint`.
 | `new_project` | author, company, manager, **name**, notes, overwrite, path, start | Create a new empty project document and make it the active document. Optionally give a file path to save it immediately (required before it can be linked from other documents). |
 | `open_project` | **path** | Open a .plancraft project file (or activate it if it is already open) and make it the active document. A Microsoft Project XML file or a spreadsheet is imported as a new unsaved document instead ('import_notes' lists what could not be carried over). |
 | `import_spreadsheet` | columns, date_order, name, **path**, preview, sheet | Import a task list from `.csv`, `.tsv`, `.xlsx`, `.xlsm` or `.xlsb` as a new unsaved document. Columns are matched to task fields by their headings; `columns` corrects them (heading or column number → `name`, `duration`, `start`, `finish`, `predecessors`, `resources`, `percent_complete`, `outline_level`, `wbs`, `milestone`, `notes`, `id`, or null). `preview: true` shows the headings, guesses and first rows without importing. Needs file access. |
-| `export_csv` | overwrite, **path**, table | Save one of the plan's tables as CSV. `tasks` (default): ID, WBS, outline level, name, duration, dates, % complete, work, cost, predecessors, resources, custom fields; `import_spreadsheet` reads it back. `resources`: the resource sheet with work, actual work, cost and overallocation. `assignments`: a row per resource on a task (units, work, actual work, cost, contour, dates). `time`: logged time, a row per timesheet entry. Needs file access; replaces an existing file only with `overwrite`. |
+| `export_csv` | columns, overwrite, **path**, table | Save one of the plan's tables as CSV. `tasks` (default): ID, WBS, outline level, name, duration, dates, % complete, work, cost, predecessors, resources, custom fields; `import_spreadsheet` reads it back. `resources`: the resource sheet with work, actual work, cost and overallocation. `assignments`: a row per resource on a task (units, work, actual work, cost, contour, dates). `time`: logged time, a row per timesheet entry. `columns` writes only the headings named (in the table's order); a name the table lacks is refused with its headings. Needs file access; replaces an existing file only with `overwrite`. |
 | `save_project` | path, overwrite | Save the document to its file. With 'path', save as a new file (relative links to external projects are rewritten so they keep working). Fails when another program changed the file since it was opened or last saved, unless overwrite is true. A plan opened from a PlanCraft Server is saved by the server: 'path' writes a copy of it. |
 | `reload_project` | discard_changes | Read the document's file again and replace the open version with it, for example after another program, PlanCraft instance or git changed the file. One undoable step; `changes` summarizes how the file differed. Refused while the user has unsaved changes in PlanCraft (they choose in the app); unsaved changes made by agents are discarded only with discard_changes: true. |
 | `close_project` | discard_changes | Close a document. Fails when it has unsaved changes unless discard_changes is true. Unsaved changes the user made in the app are never discarded. |

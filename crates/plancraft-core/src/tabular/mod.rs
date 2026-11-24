@@ -27,7 +27,7 @@ use crate::io::{FileError, FileResult};
 use crate::limits::{MAX_FILE_BYTES, MAX_NOTES_CHARS, MAX_TASKS};
 
 pub use build::build;
-pub use export::{CsvTable, table_to_csv, to_csv};
+pub use export::{CsvTable, table_columns, table_to_csv, table_to_csv_columns, table_to_csv_kept, to_csv};
 
 /// File extensions read as CSV text.
 pub const TEXT_EXTENSIONS: [&str; 3] = ["csv", "tsv", "txt"];

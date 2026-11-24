@@ -283,3 +283,68 @@ fn resources_assignments_and_logged_time_export_as_csv() {
     assert_eq!(CsvTable::from_key(" Time "), Some(CsvTable::Time));
     assert_eq!(CsvTable::from_key("people"), None);
 }
+
+/// Exporting only some columns: written in the table's order, named in any case, the custom
+/// fields included; a name the table does not have is refused, and so is none at all.
+#[test]
+fn a_csv_export_writes_only_the_columns_chosen() {
+    use plancraft_core::tabular::CsvTable;
+    let mut p = plancraft_core::sample::demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap());
+    p.add_custom_field("Risk, \"high\"", plancraft_core::custom::CustomFieldKind::Text, &[]).unwrap();
+    plancraft_core::schedule::recalculate(&mut p);
+    let all = tabular::table_columns(&p, CsvTable::Tasks);
+    assert_eq!(all.first().map(String::as_str), Some("ID"));
+    assert_eq!(all.last().map(String::as_str), Some("Risk, \"high\""));
+    let full = tabular::table_to_csv(&p, CsvTable::Tasks);
+    assert_eq!(tabular::table_to_csv_columns(&p, CsvTable::Tasks, &all).unwrap(), full, "every column: the full export");
+
+    let chosen = ["finish".to_string(), "Name".into(), "Risk, \"high\"".into()];
+    let csv = tabular::table_to_csv_columns(&p, CsvTable::Tasks, &chosen).unwrap();
+    let g = tabular::read_bytes(csv.as_bytes(), "csv").unwrap().sheets[0].1.clone();
+    assert_eq!(g.headers, ["Name", "Finish", "Risk, \"high\""], "the table's order");
+    assert_eq!(g.rows.len(), p.tasks.len());
+    assert_eq!(g.cell(0, 0), p.tasks[0].name);
+
+    let why = tabular::table_to_csv_columns(&p, CsvTable::Resources, &["Name".into(), "Salary".into()]).unwrap_err();
+    assert!(why.contains("Salary") && why.contains("Max Units (%)"), "{why}");
+    assert!(tabular::table_to_csv_columns(&p, CsvTable::Time, &[]).is_err());
+    // Too many names is refused rather than searched.
+    assert!(tabular::table_to_csv_columns(&p, CsvTable::Tasks, &vec!["Name".to_string(); 1001]).is_err());
+    for table in CsvTable::ALL {
+        let first = tabular::table_columns(&p, table).into_iter().take(1).collect::<Vec<_>>();
+        let csv = tabular::table_to_csv_columns(&p, table, &first).unwrap();
+        assert!(csv.lines().all(|l| !l.contains(',') || l.starts_with('"')), "{table:?}: one column\n{csv}");
+    }
+}
+
+/// Regression (review): a custom field named like a fixed column ("Cost") was taken for that
+/// column, and with every column chosen its own column was left out. By position both are
+/// written; by name the clash is refused. A custom field named with spaces at its ends (from a
+/// file) is still found.
+#[test]
+fn a_custom_field_named_like_a_column_is_its_own_column() {
+    use plancraft_core::tabular::CsvTable;
+    let mut p = plancraft_core::sample::demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap());
+    let cost = p.add_custom_field("Cost", plancraft_core::custom::CustomFieldKind::Number, &[]).unwrap();
+    let owner = p.add_custom_field("Owner", plancraft_core::custom::CustomFieldKind::Text, &[]).unwrap();
+    p.custom_fields.iter_mut().find(|f| f.id == owner).unwrap().name = "Owner ".into();
+    let _ = cost;
+    plancraft_core::schedule::recalculate(&mut p);
+    let columns = tabular::table_columns(&p, CsvTable::Tasks);
+    assert_eq!(columns.iter().filter(|c| *c == "Cost").count(), 2);
+    let full = tabular::table_to_csv(&p, CsvTable::Tasks);
+    assert_eq!(tabular::table_to_csv_kept(&p, CsvTable::Tasks, &vec![true; columns.len()]).unwrap(), full);
+    // Only the custom one, by position.
+    let at = columns.iter().rposition(|c| c == "Cost").unwrap();
+    let keep: Vec<bool> = (0..columns.len()).map(|i| i == at).collect();
+    let csv = tabular::table_to_csv_kept(&p, CsvTable::Tasks, &keep).unwrap();
+    assert!(csv.starts_with("\u{feff}\"Cost\"\n"), "the custom field's heading (quoted, as text): {csv}");
+    assert!(!csv.contains("3740.00"), "not the fixed Cost column");
+    let why = tabular::table_to_csv_columns(&p, CsvTable::Tasks, &["cost".into()]).unwrap_err();
+    assert!(why.contains("2 columns") && why.contains("rename"), "{why}");
+    // As written, and without the spaces.
+    assert!(tabular::table_to_csv_columns(&p, CsvTable::Tasks, &["Owner ".into()]).is_ok());
+    assert!(tabular::table_to_csv_columns(&p, CsvTable::Tasks, &[" owner".into()]).is_ok());
+    // A list made for other columns is refused.
+    assert!(tabular::table_to_csv_kept(&p, CsvTable::Tasks, &[true]).unwrap_err().contains("changed"));
+}

@@ -4,7 +4,19 @@ use serde_json::{Value, json};
 
 use crate::protocol::RpcError;
 
-pub fn list() -> Value {
+/// Prompts that build or change a plan (left out on a read-only server).
+const CHANGING: [&str; 1] = ["plan_project"];
+
+/// The prompts offered: on a read-only server, only those that read.
+pub fn list(read_only: bool) -> Value {
+    let mut all = all();
+    if read_only && let Some(list) = all.get_mut("prompts").and_then(Value::as_array_mut) {
+        list.retain(|p| p.get("name").and_then(Value::as_str).is_none_or(|n| !CHANGING.contains(&n)));
+    }
+    all
+}
+
+fn all() -> Value {
     json!({
         "prompts": [
             {
@@ -33,8 +45,11 @@ fn arg<'a>(params: &'a Value, name: &str) -> Option<&'a str> {
     params.get("arguments").and_then(|a| a.get(name)).and_then(Value::as_str).filter(|s| !s.trim().is_empty())
 }
 
-pub fn get(params: &Value) -> Result<Value, RpcError> {
+pub fn get(params: &Value, read_only: bool) -> Result<Value, RpcError> {
     let name = params.get("name").and_then(Value::as_str).ok_or_else(|| RpcError::invalid_params("missing prompt 'name'"))?;
+    if read_only && CHANGING.contains(&name) {
+        return Err(RpcError::invalid_params(format!("this server is read-only: the prompt '{name}' changes plans")));
+    }
     let (description, text) = match name {
         "plan_project" => {
             let goal = arg(params, "goal").ok_or_else(|| RpcError::invalid_params("missing argument 'goal'"))?;

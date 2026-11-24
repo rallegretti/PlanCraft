@@ -36,12 +36,17 @@ pub fn tools() -> Vec<Tool> {
         Tool::new(
             "export_csv",
             "Export a table as CSV",
-            "Save one of the document's tables as a CSV file for spreadsheets. 'tasks' (the default): ID, WBS, outline level, name, milestone, duration, start, finish, % complete, work, cost, predecessors, resources, critical and custom fields; import_spreadsheet reads it back. 'resources': the resource sheet with each resource's work, actual work, cost and whether it is overallocated. 'assignments': a row per resource on a task, with units, work, actual work, cost, contour and the task's dates. 'time': logged time, a row per timesheet entry. Work is in hours. The document itself is not changed. A relative path is relative to the PlanCraft process's working folder.",
+            "Save one of the document's tables as a CSV file for spreadsheets. 'tasks' (the default): ID, WBS, outline level, name, milestone, duration, start, finish, % complete, work, cost, predecessors, resources, critical and custom fields; import_spreadsheet reads it back. 'resources': the resource sheet with each resource's work, actual work, cost and whether it is overallocated. 'assignments': a row per resource on a task, with units, work, actual work, cost, contour and the task's dates. 'time': logged time, a row per timesheet entry. Work is in hours. 'columns' keeps only the columns named (by heading, written in the table's order); without it every column is written. The document itself is not changed. A relative path is relative to the PlanCraft process's working folder.",
             schema(
                 json!({
                     "path": string("File path ending in .csv (added when missing)."),
                     "table": string_enum("Which table to export (default tasks).", &["tasks", "resources", "assignments", "time"]),
                     "overwrite": boolean("Replace an existing file at 'path' (default false). Check with the user first."),
+                    "columns": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Only these columns, by heading (e.g. [\"Name\", \"Start\", \"Finish\"]); a wrong name is refused with the table's headings. Default: every column."
+                    },
                 }),
                 &["path"],
             ),
@@ -229,8 +234,23 @@ fn export_csv(ctx: &Ctx, a: &Args) -> ToolResult {
     if path.exists() && !overwrite {
         return err(format!("{} already exists; pass overwrite: true to replace it (check with the user first)", path.display()));
     }
+    let columns: Option<Vec<String>> = match a.array("columns")? {
+        None => None,
+        Some(items) => Some(
+            items
+                .iter()
+                .map(|v| v.as_str().map(str::to_string).ok_or_else(|| ToolError("'columns' must be an array of strings".into())))
+                .collect::<ToolResult<Vec<_>>>()?,
+        ),
+    };
     // Make the text, then write without holding the workspace.
-    let (csv, rows) = ctx.read(a, |doc| Ok((tabular::table_to_csv(&doc.project, table), table.rows(&doc.project))))?;
+    let (csv, rows) = ctx.read(a, |doc| {
+        let csv = match &columns {
+            None => tabular::table_to_csv(&doc.project, table),
+            Some(c) => tabular::table_to_csv_columns(&doc.project, table, c).map_err(|e| ToolError(shown(&e)))?,
+        };
+        Ok((csv, table.rows(&doc.project)))
+    })?;
     plancraft_core::io::write_atomic(&path, csv.as_bytes(), plancraft_core::io::Privacy::KeepExisting)
         .map_err(|e| ToolError::from(format!("could not write {}: {e}", path.display())))?;
     Ok(json!({ "path": path.display().to_string(), "table": table.key(), "rows": rows }))

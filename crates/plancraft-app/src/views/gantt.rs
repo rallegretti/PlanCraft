@@ -63,7 +63,7 @@ pub fn task_table(
     let defs: Vec<grid::ColumnDef> = fields
         .iter()
         .map(|f| {
-            let desc = sort.as_ref().filter(|(k, _)| *k == f.key()).map(|(_, d)| *d);
+            let desc = sort.iter().find(|(k, _)| *k == f.key()).map(|(_, d)| *d);
             f.def(&doc.project).sorted(desc)
         })
         .collect();
@@ -74,7 +74,7 @@ pub fn task_table(
     let over_tasks = super::overallocated_tasks(&doc.project, &over_res);
     let blank = blank_rows(st);
     // Rows are dragged in the outline order only (not sorted or grouped).
-    let row_drag = st.sort.is_none() && st.group.is_none();
+    let row_drag = st.sort.is_empty() && st.group.is_none();
     let output = {
         let p = &doc.project;
         // Rows show the task's row number (what predecessors refer to), also when sorted or grouped.
@@ -217,9 +217,10 @@ pub fn task_table(
             GridEvent::HeaderClick { col } => {
                 // Ascending, then descending, then back to the outline order.
                 let Some(key) = fields.get(col).map(Field::key) else { continue };
-                let next = match &st.sort {
-                    Some((k, false)) if *k == key => Some((key, true)),
-                    Some((k, true)) if *k == key => None,
+                // A sort by more fields becomes one by this field alone.
+                let next = match st.sort.as_slice() {
+                    [(k, false)] if *k == key => Some((key, true)),
+                    [(k, true)] if *k == key => None,
                     _ => Some((key, false)),
                 };
                 out.push(Command::SortBy(next));
@@ -349,7 +350,7 @@ pub fn column_menu_popup(ctx: &egui::Context, p: &Project, st: &UiState, out: &m
         if ui.button("Sort Descending").clicked() {
             cmd = Some(Command::SortBy(Some((key.clone(), true))));
         }
-        if st.sort.is_some() && ui.button("Clear Sort").clicked() {
+        if !st.sort.is_empty() && ui.button("Clear Sort").clicked() {
             cmd = Some(Command::SortBy(None));
         }
         ui.separator();

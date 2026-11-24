@@ -21,6 +21,7 @@ use plancraft_core::model::ScheduleMode;
 
 use crate::columns::TaskTable;
 use crate::commands::Command;
+use crate::dialogs::view_options::FilterAsk;
 use crate::logo;
 use crate::settings::AppSettings;
 use crate::state::{MenuTab, TaskFilter, UiState, ViewKind};
@@ -40,6 +41,8 @@ pub struct MenuInfo {
     pub history_open: bool,
     /// Fields offered for sorting and grouping: (key, title), the table's columns first.
     pub fields: Vec<(String, String)>,
+    /// The sort in use, as (title, descending), first field first (fields gone are left out).
+    pub sort: Vec<(String, bool)>,
 }
 
 const TAB_ROW_H: f32 = 28.0;
@@ -476,6 +479,16 @@ fn toolbar(ui: &mut Ui, st: &mut UiState, info: &MenuInfo, settings: &AppSetting
                         push(Command::Filter(f));
                     }
                 }
+                ui.separator();
+                let asks = [
+                    (FilterAsk::Resource, "Using Resource…", matches!(st.filter, TaskFilter::UsingResource(_))),
+                    (FilterAsk::Dates, "Date Range…", matches!(st.filter, TaskFilter::DateRange(..))),
+                ];
+                for (ask, label, on) in asks {
+                    if ui.selectable_label(on, label).clicked() {
+                        push(Command::FilterWindow(ask));
+                    }
+                }
             });
             combo_label(ui, "Table");
             egui::ComboBox::from_id_salt("tb_table").width(100.0).selected_text(st.table.label()).show_ui(ui, |ui| {
@@ -489,17 +502,26 @@ fn toolbar(ui: &mut Ui, st: &mut UiState, info: &MenuInfo, settings: &AppSetting
                 key.as_ref().and_then(|k| info.fields.iter().find(|(fk, _)| fk == k)).map_or_else(|| none.to_string(), |(_, t)| t.clone())
             };
             combo_label(ui, "Sort");
-            let sort_key = st.sort.as_ref().map(|(k, _)| k.clone());
-            let sort_text = match &st.sort {
-                Some((_, desc)) => format!("{} ({})", title_of(&sort_key, "Outline"), if *desc { "desc" } else { "asc" }),
-                None => "Outline".to_string(),
+            let sort_text = match info.sort.as_slice() {
+                [] => "Outline".to_string(),
+                [(title, desc), more @ ..] => {
+                    let first = format!("{title} ({})", if *desc { "desc" } else { "asc" });
+                    if more.is_empty() { first } else { format!("{first} +{}", more.len()) }
+                }
             };
             egui::ComboBox::from_id_salt("tb_sort").width(120.0).selected_text(sort_text).show_ui(ui, |ui| {
-                if ui.selectable_label(st.sort.is_none(), "Outline (no sort)").clicked() {
+                if ui.selectable_label(st.sort.is_empty(), "Outline (no sort)").clicked() {
                     push(Command::SortBy(None));
                 }
+                if ui.selectable_label(st.sort.len() > 1, "Sort by Several Fields…").clicked() {
+                    push(Command::SortWindow);
+                }
+                ui.separator();
                 for (key, title) in &info.fields {
-                    let current = st.sort.as_ref().filter(|(k, _)| k == key).map(|(_, d)| *d);
+                    let current = match st.sort.as_slice() {
+                        [(k, d)] if k == key => Some(*d),
+                        _ => None,
+                    };
                     if ui.selectable_label(current == Some(false), format!("{title}, ascending")).clicked() {
                         push(Command::SortBy(Some((key.clone(), false))));
                     }
