@@ -224,7 +224,17 @@ pub mod test_server {
         pub fn address(&self) -> String {
             self.running.addr().to_string()
         }
+    }
 
+    /// Stops the server (every plan saved and closed) before its folder is removed: on Windows
+    /// a file still open cannot be deleted, and the folder was left in the temp dir.
+    impl Drop for TestServer {
+        fn drop(&mut self) {
+            self.running.stopper().stop();
+        }
+    }
+
+    impl TestServer {
         /// `user` opens Plan.plancraft.
         pub fn open(&self, user: &str) -> OpenedLink {
             let trust = Trust::Pinned(self.running.fingerprint().clone());
