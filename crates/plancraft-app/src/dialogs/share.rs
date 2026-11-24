@@ -16,6 +16,9 @@ use std::sync::mpsc;
 
 use egui::{Context, RichText};
 use plancraft_core::io::DiskStamp;
+use plancraft_server::background::{self, Background};
+use plancraft_server::cli::Ready;
+use plancraft_server::login;
 use plancraft_server::protocol::{DEFAULT_PORT, Role};
 use plancraft_server::server::users_path;
 use plancraft_server::sharing::{Program, Sharing, State, Wake};
@@ -43,7 +46,71 @@ pub struct ShareHost {
     /// A change to the users file still being made when the window closed: its answer is
     /// still told (and the window takes it back when reopened).
     pending: Option<(String, Answer)>,
+    /// The server's private folder, where a server kept sharing in the background says where it
+    /// is (`None`: nothing is looked for).
+    pub config: Option<PathBuf>,
+    /// That server as last looked at.
+    seen: Option<Seen>,
+    /// Starting or stopping it, on a thread: which, and where its answer arrives.
+    task: Option<(Task, mpsc::Receiver<Result<(), String>>)>,
+    /// Asked to keep sharing this folder at this moment: said to be starting until it says
+    /// where it listens.
+    asked_start: Option<(std::time::Instant, PathBuf)>,
+    /// How the server is started at login (tests stand in for the system's).
+    login: LoginItems,
+    /// What to tell once, window or not: the background server stopped on its own, or did not
+    /// start.
+    notice: Option<String>,
+    /// Cancel was clicked while the login item was being set: stop once that is done.
+    stop_after_start: bool,
+    /// The folder being stopped (for what is shown while it stops).
+    stopping: Option<PathBuf>,
 }
+
+/// Adjusts a command before it runs ([`Program::prepare`]).
+type Prepare = Option<fn(&mut std::process::Command)>;
+
+/// Starting the server at login: the system's ([`login`]), or a stand-in in tests.
+#[derive(Clone, Copy)]
+pub struct LoginItems {
+    pub enable: fn(&login::Entry) -> Result<(), String>,
+    pub disable: fn(Prepare) -> Result<(), String>,
+    pub enabled: fn() -> bool,
+}
+
+impl Default for LoginItems {
+    fn default() -> Self {
+        LoginItems { enable: login::enable, disable: login::disable, enabled: login::enabled }
+    }
+}
+
+/// A server kept sharing in the background, as last looked at.
+struct Seen {
+    at: std::time::Instant,
+    state: Background,
+    /// The system starts it at login.
+    at_login: bool,
+    /// It wrote a log.
+    has_log: bool,
+    /// Its last lines, read only while someone looks at them (`None`: not read).
+    log: Option<Vec<String>>,
+}
+
+/// What is being done to the server kept sharing in the background.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Task {
+    Start,
+    Stop,
+    /// Only taken out of the login items (it is not running).
+    Forget,
+}
+
+/// How often the server kept sharing in the background is looked at (it reads the disk).
+const BACKGROUND_LOOK: std::time::Duration = std::time::Duration::from_secs(1);
+/// How long a server asked to keep sharing may take to say where it listens.
+const BACKGROUND_START_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+/// Log lines shown.
+const LOG_SHOWN: usize = 200;
 
 /// How often the app is redrawn at most for new log lines while the log is shown.
 const LOG_REDRAW: std::time::Duration = std::time::Duration::from_millis(250);
@@ -59,8 +126,22 @@ fn share_waker(repaint: Context, log_shown: std::sync::Arc<std::sync::atomic::At
 }
 
 impl ShareHost {
-    /// Looks at the server. Returns why it stopped, once, when it stopped on its own.
+    /// A host that looks for a server kept sharing in the background in `config`.
+    pub fn looking_in(config: Option<PathBuf>) -> Self {
+        ShareHost { config, ..ShareHost::default() }
+    }
+
+    /// Looks at the servers. Returns what to tell, once: why sharing stopped when it stopped on
+    /// its own, or why keeping it shared failed.
     pub fn poll(&mut self) -> Option<String> {
+        if let Some(said) = self.poll_task() {
+            return Some(said);
+        }
+        // Seen by whichever looked first (the status bar, the window, here).
+        self.look(false);
+        if let Some(said) = self.notice.take() {
+            return Some(said);
+        }
         let state = self.sharing.as_mut()?.state();
         if matches!(state, State::Starting | State::Stopping)
             && let Some(ctx) = &self.ctx
@@ -76,17 +157,262 @@ impl ShareHost {
                 if let Some(ctx) = &self.ctx {
                     ctx.request_repaint();
                 }
-                why
+                self.error.clone()
             }
             _ => None,
         }
     }
 
+    /// Takes the answer of starting or stopping the background server, if it came.
+    fn poll_task(&mut self) -> Option<String> {
+        let (task, rx) = self.task.as_ref()?;
+        let task = *task;
+        let done = match rx.try_recv() {
+            Ok(d) => d,
+            Err(mpsc::TryRecvError::Empty) => return None,
+            Err(mpsc::TryRecvError::Disconnected) => Err("it stopped unexpectedly".into()),
+        };
+        // Looked at while the task still counts: a server it stopped did not stop on its own.
+        self.look(true);
+        self.task = None;
+        if task == Task::Stop {
+            self.stopping = None;
+        }
+        if let Some(ctx) = &self.ctx {
+            ctx.request_repaint();
+        }
+        let said = done.err().map(|e| match task {
+            Task::Start => {
+                self.asked_start = None;
+                format!("Could not keep sharing: {e}")
+            }
+            Task::Stop => format!("Stopping sharing: {e}"),
+            Task::Forget => format!("Could not stop sharing at login: {e}"),
+        });
+        if task == Task::Start && std::mem::take(&mut self.stop_after_start) {
+            self.stop_background();
+        }
+        if let Some(said) = &said {
+            self.error = Some(said.clone());
+        }
+        said
+    }
+
+    /// Looks at the server kept sharing in the background (at most once a second, unless `now`).
+    fn look(&mut self, now: bool) {
+        let Some(config) = self.config.clone() else { return };
+        if !now && self.seen.as_ref().is_some_and(|s| s.at.elapsed() < BACKGROUND_LOOK) {
+            return;
+        }
+        let state = background::status(&config);
+        let at_login = (self.login.enabled)();
+        let has_log = std::fs::metadata(background::log_path(&config)).is_ok_and(|m| m.len() > 0);
+        let log = (has_log && self.log_shown.load(std::sync::atomic::Ordering::Relaxed)).then(|| background::log_tail(&config, LOG_SHOWN));
+        if matches!(state, Background::Sharing(_)) {
+            self.asked_start = None;
+        }
+        let mut said = None;
+        if let Some((at, folder)) = &self.asked_start
+            && state == Background::NotRunning
+            && self.task.is_none()
+            && at.elapsed() >= BACKGROUND_START_WAIT
+        {
+            let log = if has_log { " File › Share Folder shows its log, which may say why." } else { "" };
+            said = Some(format!("Sharing {} in the background did not start.{log}", folder_name(folder)));
+            self.asked_start = None;
+        }
+        // It was sharing, and nobody here stopped it.
+        if let Some(Background::Sharing(before)) = self.seen.as_ref().map(|s| &s.state)
+            && state == Background::NotRunning
+            && self.task.is_none()
+        {
+            let name = folder_name(&before.folder);
+            said = Some(if at_login {
+                format!("Sharing {name} in the background stopped. It starts again at your next login; File › Share Folder shows its log.")
+            } else {
+                format!("Sharing {name} in the background stopped.")
+            });
+        }
+        if let Some(said) = said {
+            self.error = Some(said.clone());
+            self.notice = Some(said);
+        }
+        self.seen = Some(Seen { at: std::time::Instant::now(), state, at_login, has_log, log });
+    }
+
+    /// Whether the server (running, starting or stopping) is the one kept sharing in the
+    /// background.
+    pub fn in_background(&mut self) -> bool {
+        self.sharing.is_none() && self.background_status().is_some()
+    }
+
+    /// Whether the server running now is listed on the network.
+    pub fn announced(&mut self) -> bool {
+        if self.sharing.is_some() {
+            return self.announced;
+        }
+        self.look(false);
+        matches!(self.seen.as_ref().map(|s| &s.state), Some(Background::Sharing(s)) if s.announced)
+    }
+
+    /// Whether the system shares a folder at login.
+    pub fn at_login(&mut self) -> bool {
+        self.look(false);
+        self.seen.as_ref().is_some_and(|s| s.at_login)
+    }
+
+    /// The server kept sharing in the background, if it runs, starts or stops.
+    fn background_status(&mut self) -> Option<(PathBuf, State)> {
+        self.look(false);
+        let asked = self.asked_start.as_ref().map(|(_, f)| f.clone());
+        let task = self.task.as_ref().map(|(t, _)| *t);
+        match (task, self.seen.as_ref().map(|s| &s.state)) {
+            (Some(Task::Stop), Some(Background::Sharing(s))) => Some((s.folder.clone(), State::Stopping)),
+            (Some(Task::Stop), _) => Some((self.stopping.clone().or(asked).unwrap_or_default(), State::Stopping)),
+            (Some(Task::Start), _) if self.stop_after_start => Some((asked.unwrap_or_default(), State::Stopping)),
+            (_, Some(Background::Sharing(s))) => {
+                Some((s.folder.clone(), State::Sharing(Ready { addr: s.addr, fingerprint: s.fingerprint.clone() })))
+            }
+            (Some(Task::Start), _) | (_, Some(Background::Starting)) => Some((asked.unwrap_or_default(), State::Starting)),
+            _ => asked.map(|f| (f, State::Starting)),
+        }
+    }
+
     /// The folder being shared and where the server is.
     pub fn status(&mut self) -> Option<(PathBuf, State)> {
-        let s = self.sharing.as_mut()?;
-        let state = s.state();
-        Some((s.folder().to_path_buf(), state))
+        if let Some(s) = self.sharing.as_mut() {
+            let state = s.state();
+            return Some((s.folder().to_path_buf(), state));
+        }
+        self.background_status()
+    }
+
+    /// Whether there is a server log to show.
+    pub fn has_log(&mut self) -> bool {
+        if let Some(s) = &self.sharing {
+            return s.log_len() > 0;
+        }
+        self.look(false);
+        !self.last_log.is_empty() || self.seen.as_ref().is_some_and(|s| s.has_log)
+    }
+
+    /// The server's log (the one kept sharing in the background, or the last one this
+    /// PlanCraft ran), oldest first.
+    pub fn log(&mut self) -> Vec<String> {
+        if let Some(s) = &self.sharing {
+            return s.log();
+        }
+        self.look(false);
+        // Just unfolded: read now, not at the next look.
+        if self.seen.as_ref().is_some_and(|s| s.has_log && s.log.is_none()) && self.log_shown.load(std::sync::atomic::Ordering::Relaxed) {
+            self.look(true);
+        }
+        match self.seen.as_ref().and_then(|s| s.log.as_ref()) {
+            Some(log) if !log.is_empty() && self.last_log.is_empty() => log.clone(),
+            _ => self.last_log.clone(),
+        }
+    }
+
+    /// Keeps sharing `folder` in the background, from every login on (the system starts it).
+    pub fn start_background(&mut self, program: &Program, folder: &Path, config: &Path, port: u16, announce: bool, ctx: &Context) {
+        if self.task.is_some() {
+            self.error = Some("PlanCraft is still changing your login items: try again in a moment.".into());
+            return;
+        }
+        self.ctx = Some(ctx.clone());
+        self.error = None;
+        self.last_log.clear();
+        self.config = Some(config.to_path_buf());
+        self.asked_start = Some((std::time::Instant::now(), folder.to_path_buf()));
+        let enable = self.login.enable;
+        let (program, folder, config) = (program.clone(), folder.to_path_buf(), config.to_path_buf());
+        // Off the window's thread: the folder may be on a network that is slow to answer.
+        self.run_task(Task::Start, ctx, move || enable(&login::Entry::new(&program, &folder, &config, port, announce)?));
+    }
+
+    /// Stops the server kept sharing in the background (every plan saved), and starting it at
+    /// login.
+    fn stop_background(&mut self) {
+        let (Some(config), Some(ctx)) = (self.config.clone(), self.ctx.clone()) else { return };
+        match self.task.as_ref().map(|(t, _)| *t) {
+            // Still setting the login item: stopped once that is done.
+            Some(Task::Start) => {
+                self.stop_after_start = true;
+                return;
+            }
+            Some(_) => return,
+            None => {}
+        }
+        let prepare = server_program().ok().and_then(|p| p.prepare);
+        // Asked to start a moment ago: it may not have taken its folder yet, and would clear a
+        // stop request made before (it takes one left over to be stale).
+        let asked_start = self.asked_start.take();
+        let starting = asked_start.is_some();
+        self.stopping = asked_start.map(|(_, f)| f).or_else(|| match self.seen.as_ref().map(|s| &s.state) {
+            Some(Background::Sharing(s)) => Some(s.folder.clone()),
+            _ => None,
+        });
+        // Asked now (one small file), so it stops even if PlanCraft quits at once.
+        let asked = !starting && background::status(&config) != Background::NotRunning && background::request_stop(&config).is_ok();
+        let disable = self.login.disable;
+        self.run_task(Task::Stop, &ctx, move || {
+            // Not at login any more, whatever happens next; on macOS only once it has stopped,
+            // as taking a LaunchAgent away signals the server (launchd waits only so long).
+            let early = (!cfg!(target_os = "macos")).then(|| disable(prepare));
+            if starting {
+                let deadline = std::time::Instant::now() + BACKGROUND_START_WAIT;
+                while background::status(&config) == Background::NotRunning && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+            let mut stopped = Ok(());
+            if background::status(&config) != Background::NotRunning {
+                if !asked && let Err(e) = background::request_stop(&config) {
+                    stopped = Err(e);
+                } else if !background::wait_stopped(&config, std::time::Duration::from_secs(60)) {
+                    stopped = Err("it is still saving its plans after a minute; it stops once they are saved".into());
+                }
+            }
+            let forgotten = early.unwrap_or_else(|| disable(prepare));
+            stopped.and(forgotten)
+        });
+    }
+
+    /// Waits up to `limit` for a login item being set or taken away (PlanCraft is quitting).
+    pub fn finish_task(&mut self, limit: std::time::Duration) {
+        if let Some((_, rx)) = &self.task {
+            let _ = rx.recv_timeout(limit);
+        }
+    }
+
+    /// Stops sharing a folder at login (none is shared now).
+    pub fn forget_login(&mut self, ctx: &Context) {
+        if self.task.is_some() {
+            return;
+        }
+        self.ctx = Some(ctx.clone());
+        self.error = None;
+        let prepare = server_program().ok().and_then(|p| p.prepare);
+        let disable = self.login.disable;
+        self.run_task(Task::Forget, ctx, move || disable(prepare));
+    }
+
+    fn run_task(&mut self, task: Task, ctx: &Context, f: impl FnOnce() -> Result<(), String> + Send + 'static) {
+        let (tx, rx) = mpsc::channel();
+        let repaint = ctx.clone();
+        let started = std::thread::Builder::new().name("plancraft-share-background".into()).spawn(move || {
+            let done = plancraft_core::guard::catch("keeping a folder shared", f)
+                .unwrap_or_else(|p| Err(format!("PlanCraft hit an internal error ({})", p.message)));
+            let _ = tx.send(done);
+            repaint.request_repaint();
+        });
+        match started {
+            Ok(_) => self.task = Some((task, rx)),
+            Err(e) => {
+                self.asked_start = None;
+                self.error = Some(format!("Could not keep sharing: {e}"));
+            }
+        }
     }
 
     /// Starts sharing `folder`.
@@ -127,12 +453,38 @@ impl ShareHost {
         Some(done)
     }
 
-    /// Asks the server to stop (it saves every plan first).
+    /// Asks the server to stop (it saves every plan first). The one kept sharing in the
+    /// background is no longer started at login either.
     pub fn stop(&mut self) {
         if let Some(s) = self.sharing.as_mut() {
             s.stop();
+        } else {
+            self.stop_background();
         }
     }
+}
+
+/// `path` in at most `max` characters, its middle left out (the full path goes in a tooltip).
+fn short_path(path: &Path, max: usize) -> String {
+    let text = path.display().to_string();
+    let n = text.chars().count();
+    if n <= max {
+        return text;
+    }
+    let head = max / 3;
+    let tail = max.saturating_sub(head).saturating_sub(1);
+    let start: String = text.chars().take(head).collect();
+    let end: String = text.chars().skip(n.saturating_sub(tail)).collect();
+    format!("{start}…{end}")
+}
+
+/// A folder's name, as shown.
+pub fn folder_name(folder: &Path) -> String {
+    if folder.as_os_str().is_empty() {
+        // Not known yet (a server PlanCraft did not start, before it says what it shares).
+        return "the shared folder".into();
+    }
+    folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| folder.display().to_string())
 }
 
 /// The program that runs the server: this PlanCraft as `plancraft serve`. From an AppImage, the
@@ -454,6 +806,8 @@ impl ShareFolder {
         }
         self.collect();
         self.reload_users();
+        // To stop a server kept sharing in the background, started before this PlanCraft.
+        host.ctx = Some(ctx.clone());
         // Changes from the command line show up without waiting for the mouse.
         ctx.request_repaint_after(std::time::Duration::from_secs(2));
         // Set again below while the log is unfolded.
@@ -477,14 +831,15 @@ impl ShareFolder {
                     }
                     ui.add_space(6.0);
                     ui.separator();
-                    self.people(ui, ctx, host.sharing.is_some());
-                    let has_log = host.sharing.as_ref().map_or(!host.last_log.is_empty(), |s| s.log_len() > 0);
+                    let sharing_now = matches!(host.status(), Some((_, State::Sharing(_))));
+                    self.people(ui, ctx, sharing_now);
+                    let has_log = host.has_log();
                     if has_log {
                         ui.add_space(4.0);
                         egui::CollapsingHeader::new("Server log").id_salt("share_log").show(ui, |ui| {
                             // Unfolded: new lines redraw the app.
                             host.watch_log(true);
-                            let log = host.sharing.as_ref().map_or_else(|| host.last_log.clone(), Sharing::log);
+                            let log = host.log();
                             egui::ScrollArea::vertical().max_height(160.0).stick_to_bottom(true).show(ui, |ui| {
                                 for line in log.iter().rev().take(200).rev() {
                                     ui.label(RichText::new(line).monospace().size(11.0));
@@ -512,10 +867,12 @@ impl ShareFolder {
         open_here: &dyn Fn(&Path) -> Vec<String>,
     ) -> Option<Outcome> {
         let status = host.status();
+        let background = host.in_background();
+        let at_login = background && host.at_login();
         let mut outcome = None;
         match status {
             Some((folder, state)) if !matches!(state, State::Stopped(_)) => {
-                let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| folder.display().to_string());
+                let name = folder_name(&folder);
                 match &state {
                     State::Starting => {
                         ui.horizontal(|ui| {
@@ -554,7 +911,7 @@ impl ShareFolder {
                         for a in &addresses {
                             copy_box(ui, a);
                         }
-                        if host.announced {
+                        if host.announced() {
                             ui.label(
                                 RichText::new("It is also listed under On your network in their Open from Server window.")
                                     .small()
@@ -591,11 +948,21 @@ impl ShareFolder {
                                     fingerprint: ready.fingerprint.clone(),
                                 });
                             }
-                            if ui.button("Stop Sharing").on_hover_text("Saves every plan and tells everyone in them").clicked() {
+                            let hover = if at_login {
+                                "Saves every plan, tells everyone in them, and stops sharing at login"
+                            } else {
+                                "Saves every plan and tells everyone in them"
+                            };
+                            if ui.button("Stop Sharing").on_hover_text(hover).clicked() {
                                 host.stop();
                             }
                         });
-                        ui.label(RichText::new("Sharing stops when you quit PlanCraft.").small().color(theme::pal().TEXT_WEAK));
+                        let note = match (background, at_login) {
+                            (true, true) => "Sharing goes on when you quit PlanCraft, and starts again whenever you log in.",
+                            (true, false) => "Sharing goes on when you quit PlanCraft.",
+                            _ => "Sharing stops when you quit PlanCraft.",
+                        };
+                        ui.label(RichText::new(note).small().color(theme::pal().TEXT_WEAK));
                     }
                     State::Stopped(_) => {}
                 }
@@ -615,7 +982,8 @@ impl ShareFolder {
             ui.label("Folder:");
             ui.horizontal(|ui| {
                 match &self.folder {
-                    Some(f) => ui.label(RichText::new(f.display().to_string()).monospace()),
+                    // A long path would widen the window past the screen's edge.
+                    Some(f) => ui.label(RichText::new(short_path(f, 56)).monospace()).on_hover_text(f.display().to_string()),
                     None => ui.label(RichText::new("None chosen").color(theme::pal().TEXT_WEAK)),
                 };
                 if ui.button("Choose…").clicked()
@@ -640,6 +1008,11 @@ impl ShareFolder {
             });
             ui.end_row();
         });
+        let keep = ui.checkbox(&mut settings.share_background, "Keep sharing after PlanCraft quits, and whenever you log in");
+        if keep.changed() {
+            settings.save();
+        }
+        keep.on_hover_text(KEEP_SHARING_HELP);
         if let Some(f) = &self.folder {
             let n = self.plans.len();
             let text = match n {
@@ -660,6 +1033,14 @@ impl ShareFolder {
         if let Some(e) = &host.error {
             ui.colored_label(theme::pal().ERROR, e.as_str());
         }
+        if host.at_login() {
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(theme::pal().WARN, "PlanCraft is set to share a folder whenever you log in, but it is not sharing now.");
+                if ui.button("Don't Share at Login").clicked() {
+                    host.forget_login(ctx);
+                }
+            });
+        }
         ui.add_space(4.0);
         let ready = self.folder.is_some() && port.is_some() && self.users.as_ref().is_ok_and(|u| !u.is_empty());
         let start = egui::Button::new(RichText::new("Start Sharing").color(egui::Color32::WHITE)).fill(theme::pal().ACCENT);
@@ -667,6 +1048,9 @@ impl ShareFolder {
             && let (Some(folder), Some(port)) = (self.folder.clone(), port)
         {
             match server_program() {
+                Ok(program) if settings.share_background => {
+                    host.start_background(&program, &folder, &self.config, port, settings.share_announce, ctx);
+                }
                 Ok(program) => host.start(&program, &folder, &self.config, port, settings.share_announce, ctx),
                 Err(e) => host.error = Some(e),
             }
@@ -846,6 +1230,19 @@ impl ShareFolder {
         }
     }
 }
+
+/// What Keep sharing adds to the system, said where it is ticked.
+const KEEP_SHARING_HELP: &str = if cfg!(target_os = "macos") {
+    "The server runs on its own, so people can keep working while PlanCraft is closed. PlanCraft adds a login item for it \
+     (System Settings › General › Login Items) and nothing else; Stop Sharing takes it away again."
+} else if cfg!(windows) {
+    "The server runs on its own, so people can keep working while PlanCraft is closed. PlanCraft adds PlanCraft Server to \
+     the apps that start when you sign in (Task Manager › Startup apps) and nothing else; Stop Sharing takes it away again."
+} else {
+    "The server runs on its own, so people can keep working while PlanCraft is closed. PlanCraft adds a systemd user \
+     service for it (plancraft-server.service), which runs while you are logged in, and nothing else; Stop Sharing takes it \
+     away again."
+};
 
 /// How often the addresses shown are looked up again.
 const ADDRESSES_REFRESH: std::time::Duration = std::time::Duration::from_secs(5);
@@ -1059,5 +1456,213 @@ mod tests {
         assert!(h.query_by_label_contains("Added Ana").is_some());
         assert!(h.query_by_label_contains("Add at least one person").is_none());
         assert!(Users::load(&users_path(&config)).unwrap().get("ana").is_some());
+    }
+
+    /// Stands in for the system's login items: "starting at login" starts a server in this
+    /// process that holds the private folder and stops when asked, as the real one does.
+    static AT_LOGIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    fn fake_enable(e: &login::Entry) -> Result<(), String> {
+        AT_LOGIN.store(true, std::sync::atomic::Ordering::SeqCst);
+        fake_server(e);
+        Ok(())
+    }
+
+    /// A server started as the system would: it holds the private folder and stops when asked.
+    fn fake_server(e: &login::Entry) {
+        let config = e.config.clone();
+        let folder = PathBuf::from(e.args.last().unwrap());
+        assert!(e.args.iter().any(|a| a == "--background"));
+        std::thread::spawn(move || {
+            let claim = background::Claim::take(&config).unwrap().unwrap();
+            let status = background::Status {
+                folder,
+                addr: "0.0.0.0:47399".parse().unwrap(),
+                fingerprint: "aa bb cc".into(),
+                version: "0.0.0".into(),
+                announced: false,
+            };
+            claim.publish(&status).unwrap();
+            while !claim.stop_requested() {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        });
+    }
+
+    fn fake_disable(_: Prepare) -> Result<(), String> {
+        AT_LOGIN.store(false, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    fn fake_enabled() -> bool {
+        AT_LOGIN.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Keep sharing: the server goes on in the background, the window shows where it is (also
+    /// after PlanCraft restarts), and Stop Sharing stops it and takes it out of the login items.
+    #[test]
+    fn a_folder_kept_shared_runs_in_the_background_until_stopped() {
+        use egui_kittest::kittest::Queryable;
+        let dir = crate::recovery::tests::TempDir::new("share-background");
+        let config = dir.0.join("server");
+        let folder = dir.0.join("Team plans");
+        std::fs::create_dir_all(&folder).unwrap();
+        Users::change(&users_path(&config), |u| u.add_with("Ana", &NewPassword::new("correct horse").unwrap(), Role::Admin)).unwrap();
+        let settings = AppSettings { share_folder: Some(folder.clone()), ..AppSettings::default() };
+        let w = ShareFolder::new(&settings, config.clone(), None);
+        let mut host = ShareHost::looking_in(Some(config.clone()));
+        host.login = LoginItems { enable: fake_enable, disable: fake_disable, enabled: fake_enabled };
+        let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1000.0, 1400.0)).build_ui_state(
+            |ui, (w, settings, host): &mut (ShareFolder, AppSettings, ShareHost)| {
+                let _ = w.show(ui.ctx(), settings, host, &|_| Vec::new());
+                if let Some(said) = host.poll() {
+                    panic!("{said}");
+                }
+            },
+            (w, settings, host),
+        );
+        let until = |h: &mut egui_kittest::Harness<'_, (ShareFolder, AppSettings, ShareHost)>, what: &str| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while h.query_by_label_contains(what).is_none() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "never showed {what} (said: {:?}, seen {:?}, task {:?}, asked {:?}, keep {})",
+                    h.state().2.error,
+                    h.state().2.seen.as_ref().map(|s| s.state.clone()),
+                    h.state().2.task.as_ref().map(|t| t.0),
+                    h.state().2.asked_start,
+                    h.state().1.share_background
+                );
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                h.step();
+            }
+        };
+        h.run();
+        h.get_by_label("Keep sharing after PlanCraft quits, and whenever you log in").click();
+        h.run();
+        assert!(h.state().1.share_background);
+        h.get_by_label("Start Sharing").click();
+        until(&mut h, "Sharing Team plans");
+        until(&mut h, "starts again whenever you log in");
+        assert!(fake_enabled());
+        assert!(h.query_by_label_contains("aa bb cc").is_some(), "the fingerprint is the background server's");
+        assert!(
+            matches!(h.state_mut().2.status(), Some((f, State::Sharing(r))) if f == plancraft_core::io::canonical(&folder).unwrap() && r.addr.port() == 47399)
+        );
+
+        // PlanCraft quits and starts again: the window finds it.
+        let mut again = ShareHost::looking_in(Some(config.clone()));
+        again.login = h.state().2.login;
+        assert!(again.in_background());
+        h.state_mut().2 = again;
+        h.run();
+        until(&mut h, "Open a Plan from It");
+
+        h.get_by_label("Stop Sharing").click();
+        until(&mut h, "Start Sharing");
+        assert!(!fake_enabled(), "no longer started at login");
+        assert_eq!(background::status(&config), Background::NotRunning);
+        assert!(h.query_by_label_contains("set to share a folder whenever you log in").is_none());
+
+        // Set to start at login, but not running (it could not start, say): the window says so,
+        // and takes it out of the login items when asked.
+        AT_LOGIN.store(true, std::sync::atomic::Ordering::SeqCst);
+        until(&mut h, "set to share a folder whenever you log in");
+        h.get_by_label("Don't Share at Login").click();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while h.query_by_label_contains("set to share a folder whenever you log in").is_some() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            h.step();
+        }
+        assert!(!fake_enabled());
+    }
+
+    /// A server kept sharing in the background that stops on its own is told about once.
+    #[test]
+    fn a_background_server_that_stops_on_its_own_is_told() {
+        let dir = crate::recovery::tests::TempDir::new("share-background-stops");
+        let config = dir.0.join("server");
+        let mut host = ShareHost::looking_in(Some(config.clone()));
+        host.login = LoginItems { enable: fake_enable, disable: fake_disable, enabled: || false };
+        let claim = background::Claim::take(&config).unwrap().unwrap();
+        claim
+            .publish(&background::Status {
+                folder: dir.0.join("Plans"),
+                addr: "0.0.0.0:47398".parse().unwrap(),
+                fingerprint: "dd".into(),
+                version: "0.0.0".into(),
+                announced: true,
+            })
+            .unwrap();
+        assert_eq!(host.poll(), None);
+        assert!(host.in_background() && host.announced());
+        drop(claim);
+        // Looked at again a second later, first by the status bar (drawn before the poll).
+        host.seen.as_mut().unwrap().at -= BACKGROUND_LOOK;
+        assert!(host.status().is_none());
+        assert_eq!(host.poll().as_deref(), Some("Sharing Plans in the background stopped."));
+        assert_eq!(host.poll(), None);
+        assert!(host.status().is_none());
+    }
+
+    /// The login item for the Cancel test: set only once RELEASED (a slow systemctl).
+    static CANCEL_AT_LOGIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    static RELEASED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+    fn slow_enable(e: &login::Entry) -> Result<(), String> {
+        while !RELEASED.load(std::sync::atomic::Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        CANCEL_AT_LOGIN.store(true, std::sync::atomic::Ordering::SeqCst);
+        fake_server(e);
+        Ok(())
+    }
+
+    /// Regression: Cancel did nothing while the login item was being set; now it stops sharing
+    /// once that is done (and the login item is taken away again).
+    #[test]
+    fn cancel_while_the_login_item_is_set_stops_once_it_is() {
+        let dir = crate::recovery::tests::TempDir::new("share-background-cancel");
+        let config = dir.0.join("server");
+        let folder = dir.0.join("Plans");
+        std::fs::create_dir_all(&folder).unwrap();
+        let mut host = ShareHost::looking_in(Some(config.clone()));
+        host.login = LoginItems {
+            enable: slow_enable,
+            disable: |_| {
+                CANCEL_AT_LOGIN.store(false, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
+            },
+            enabled: || CANCEL_AT_LOGIN.load(std::sync::atomic::Ordering::SeqCst),
+        };
+        let program = Program { program: std::env::current_exe().unwrap(), args: vec!["serve".into()], prepare: None };
+        let ctx = Context::default();
+        host.start_background(&program, &folder, &config, 0, false, &ctx);
+        assert!(matches!(host.status(), Some((_, State::Starting))));
+        host.stop();
+        assert!(matches!(host.status(), Some((ref f, State::Stopping)) if *f == folder), "{:?}", host.status());
+        RELEASED.store(true, std::sync::atomic::Ordering::SeqCst);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while host.task.is_some() || host.status().is_some() {
+            assert_eq!(host.poll(), None, "nothing went wrong, and it did not stop on its own");
+            assert!(std::time::Instant::now() < deadline, "still {:?}", host.status());
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(!CANCEL_AT_LOGIN.load(std::sync::atomic::Ordering::SeqCst));
+        assert_eq!(background::status(&config), Background::NotRunning);
+        assert_eq!(host.error, None);
+    }
+
+    /// Regression: a long folder path widened the window past the screen's left edge, out of
+    /// reach of the mouse (Start Sharing too).
+    #[test]
+    fn long_paths_are_shortened_in_the_middle() {
+        let long = PathBuf::from(format!("/var/folders/{}/T/Team plans", "x".repeat(80)));
+        let short = short_path(&long, 56);
+        assert_eq!(short.chars().count(), 56);
+        assert!(short.starts_with("/var/folders/") && short.ends_with("/T/Team plans") && short.contains('…'), "{short}");
+        assert_eq!(short_path(Path::new("/srv/Plans"), 56), "/srv/Plans");
+        assert_eq!(short_path(Path::new("/ääääääääää/ö"), 5).chars().count(), 5);
     }
 }

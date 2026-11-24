@@ -1,5 +1,6 @@
 //! Windows packaging: a portable `.zip` with `PlanCraft.exe` (GUI, icon
-//! embedded by the app's build script) and the console `plancraft-mcp.exe`.
+//! embedded by the app's build script), the console `plancraft-mcp.exe` and the console
+//! `plancraft-server.exe`.
 
 use std::fs::File;
 use std::io::Write;
@@ -27,6 +28,13 @@ Live, in the running app: Project > AI Agents > Start server, then
 Headless, working on files:
     claude mcp add plancraft -- \"C:\\path\\to\\plancraft-mcp.exe\" \"C:\\path\\to\\project.plancraft\"
 
+Sharing plans (PlanCraft Server)
+--------------------------------
+File > Share Folder shares a folder of plans from PlanCraft itself. On a
+computer without anyone signed in to use PlanCraft, plancraft-server.exe runs
+the same server from a terminal:
+    plancraft-server.exe --help
+
 See README.md for everything else.
 ";
 
@@ -53,6 +61,7 @@ pub fn package() -> Result<Vec<PathBuf>> {
     let release = root.join("target/release");
     copy(&release.join("plancraft.exe"), &stage.join("PlanCraft.exe"), true)?;
     copy(&release.join("plancraft-mcp.exe"), &stage.join("plancraft-mcp.exe"), true)?;
+    copy(&release.join("plancraft-server.exe"), &stage.join("plancraft-server.exe"), true)?;
     copy(&root.join("README.md"), &stage.join("README.md"), false)?;
     copy(&root.join("LICENSE"), &stage.join("LICENSE.txt"), false)?;
     std::fs::write(stage.join("README-Windows.txt"), README.replace('\n', "\r\n"))?;

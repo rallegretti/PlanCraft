@@ -5,11 +5,11 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::Log;
 use crate::protocol::{DEFAULT_PORT, Role};
 use crate::server::{self, Options};
 use crate::users::{NewPassword, Users};
 use crate::wire::Keys;
+use crate::{Log, background};
 
 const HELP: &str = "\
 PlanCraft Server: shares a folder of plans so several people can edit them at once.
@@ -27,7 +27,14 @@ Usage:
       --watch-stdin    stop (saving every plan) when standard input closes, and
                        say on standard output when listening; PlanCraft's
                        File > Share Folder runs the server this way
+      --background     keep sharing in the background: log to the private
+                       folder's server.log, and stop when asked with
+                       'plancraft-server stop'; PlanCraft's Keep sharing
+                       (Share Folder) starts the server this way at login
       Put -- before FOLDER when its name starts with '-' or is a command word.
+
+  plancraft-server stop [--config DIR]
+      Stops the server sharing in the background from DIR (every plan saved).
 
   plancraft-server user add NAME [--role viewer|editor|admin] [--password-stdin]
   plancraft-server user passwd NAME [--password-stdin]
@@ -58,6 +65,7 @@ struct Args {
     password_stdin: bool,
     no_announce: bool,
     watch_stdin: bool,
+    background: bool,
 }
 
 fn parse(args: Vec<std::ffi::OsString>) -> Result<Args, String> {
@@ -73,6 +81,7 @@ fn parse(args: Vec<std::ffi::OsString>) -> Result<Args, String> {
         password_stdin: false,
         no_announce: false,
         watch_stdin: false,
+        background: false,
     };
     let mut it = args.into_iter();
     let mut options_end = false;
@@ -117,6 +126,10 @@ fn parse(args: Vec<std::ffi::OsString>) -> Result<Args, String> {
             }
             "--watch-stdin" => {
                 out.watch_stdin = true;
+                continue;
+            }
+            "--background" => {
+                out.background = true;
                 continue;
             }
             "--help" | "--version" => {}
@@ -200,6 +213,7 @@ fn run_inner(args: Vec<std::ffi::OsString>) -> Result<(), String> {
             Ok(())
         }
         Some("user") => user(&args),
+        Some("stop") if args.rest.len() == 1 => stop(&args),
         Some("fingerprint") => {
             let keys = Keys::load_or_create(&server::key_path(&config(&args)?))?;
             say(&keys.fingerprint().to_string());
@@ -337,15 +351,73 @@ fn serve(args: &Args) -> Result<(), String> {
         None => IpAddr::V4(Ipv4Addr::UNSPECIFIED),
     };
     plancraft_core::lock::set_app_name(format!("PlanCraft Server {}", env!("CARGO_PKG_VERSION")));
-    let log = stderr_log();
-    let mut options = Options::new(folder.clone(), config(args)?, SocketAddr::new(ip, port), log.clone());
+    let config = config(args)?;
+    let mut log = stderr_log();
+    // Held until the server has stopped: one background server per private folder.
+    let claim = if args.background {
+        match background::Claim::take(&config) {
+            Ok(Some(c)) => Some(c),
+            Err(e) => {
+                // Where PlanCraft's window looks (nobody reads a service's standard error).
+                background::file_log(&config, crate::quiet())(&format!("Could not start: {e}"));
+                return Err(e);
+            }
+            Ok(None) => {
+                // Not an error: a service manager would only start it again and again.
+                say(&format!("A server is already sharing in the background from {}.", config.display()));
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
+    if claim.is_some() {
+        log = background::file_log(&config, log);
+    }
+    let mut options = Options::new(folder.clone(), config.clone(), SocketAddr::new(ip, port), log.clone());
     options.announce = !args.no_announce;
-    let running = server::start(options)?;
+    let running = match server::start(options) {
+        Ok(r) => r,
+        Err(e) => {
+            if claim.is_some() {
+                // Why, for PlanCraft's window (nobody reads a service's standard error).
+                log(&format!("Could not start: {e}"));
+            }
+            return Err(e);
+        }
+    };
     log(&format!("PlanCraft Server {} is sharing {}", env!("CARGO_PKG_VERSION"), folder.display()));
     log(&format!("Listening on {}", running.addr()));
     log(&format!("Key fingerprint: {}  (people check this when they first connect)", running.fingerprint()));
     if args.watch_stdin {
         watch_stdin(&running, &log);
+    }
+    let mut failed = None;
+    if let Some(claim) = &claim {
+        let status = background::Status {
+            folder: plancraft_core::io::canonical(&folder).unwrap_or_else(|_| folder.clone()),
+            addr: running.addr(),
+            fingerprint: running.fingerprint().0.clone(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            announced: running.announced(),
+        };
+        if let Err(e) = claim.publish(&status) {
+            // Nobody could tell where it listens: stop, and fail, so the system tries again.
+            log(&format!("cannot say where it listens ({e}); stopping"));
+            running.stopper().stop();
+            failed = Some(e);
+        } else {
+            let stopper = running.stopper();
+            let on_stop = log.clone();
+            if let Err(e) = background::watch_stop(claim.config().to_path_buf(), move || {
+                on_stop("Stopping: asked to stop sharing; saving the shared plans");
+                stopper.stop();
+            }) {
+                // Nobody could stop it but by force: stop now instead.
+                log(&format!("cannot watch for a stop request ({e}); stopping"));
+                running.stopper().stop();
+            }
+        }
     }
     // Ctrl+C, or a service manager stopping the server: save every plan, tell everyone, give
     // back the lock files.
@@ -359,5 +431,23 @@ fn serve(args: &Args) -> Result<(), String> {
     }
     running.wait();
     log("Stopped");
-    Ok(())
+    // Given back only now: every plan is saved.
+    drop(claim);
+    failed.map_or(Ok(()), Err)
+}
+
+/// `stop`: asks the background server to stop, and waits for it.
+fn stop(args: &Args) -> Result<(), String> {
+    let config = config(args)?;
+    if background::status(&config) == background::Background::NotRunning {
+        say(&format!("No server is sharing in the background from {}.", config.display()));
+        return Ok(());
+    }
+    background::request_stop(&config)?;
+    if background::wait_stopped(&config, std::time::Duration::from_secs(60)) {
+        say("Stopped: every plan is saved.");
+        Ok(())
+    } else {
+        Err("the server is still stopping after a minute; see server.log in its private folder".into())
+    }
 }

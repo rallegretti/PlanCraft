@@ -10,13 +10,16 @@
 //! - [`journal`] and [`plan`]: one shared plan, kept safe on disk.
 //! - [`server`]: connections and requests; [`client`]: the other end.
 //! - [`sharing`]: a server run as a separate program for the app's *Share Folder*.
+//! - [`background`]: a server kept sharing after PlanCraft quits; [`login`]: starting it at login.
 //! - [`discovery`]: announcing a running server on the office network, and finding servers.
 
+pub mod background;
 pub mod cli;
 pub mod client;
 pub mod discovery;
 pub mod journal;
 pub mod link;
+pub mod login;
 pub mod mdns;
 pub mod plan;
 pub mod protocol;

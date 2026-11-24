@@ -460,7 +460,9 @@ impl PlanCraftApp {
             lock_dismissed: HashSet::new(),
             remotes: Default::default(),
             server_dialog: None,
-            share: Default::default(),
+            // Where a server kept sharing in the background says where it is (never the real
+            // one in tests).
+            share: dialogs::share::ShareHost::looking_in(if cfg!(test) { None } else { plancraft_server::server::default_config() }),
             share_dialog: None,
             share_suggest: None,
             open_dropped: None,
@@ -1682,8 +1684,12 @@ impl PlanCraftApp {
             ui.label(RichText::new(msg).size(12.0));
             // Stopped: about to be taken away this frame (and redrawn), not "stopping".
             if let Some((folder, state)) = self.share.status().filter(|(_, s)| !matches!(s, plancraft_server::sharing::State::Stopped(_))) {
+                if self.share.in_background() {
+                    // It may stop without this PlanCraft hearing of it.
+                    ui.ctx().request_repaint_after(StdDuration::from_secs(5));
+                }
                 ui.separator();
-                let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let name = dialogs::share::folder_name(&folder);
                 let (dot, text) = match state {
                     plancraft_server::sharing::State::Sharing(_) => (theme::pal().OK, format!("Sharing {name}")),
                     plancraft_server::sharing::State::Starting => (theme::pal().WARN, format!("Starting to share {name}")),
@@ -2263,6 +2269,8 @@ impl PlanCraftApp {
         // The server stops by itself once its input closes, saving every plan and telling
         // everyone; it finishes that after this PlanCraft is gone.
         self.share.sharing = None;
+        // A folder kept shared being stopped or started: its login item set or taken away.
+        self.share.finish_task(StdDuration::from_secs(10));
         self.disk.stop();
         lock(&self.ws).release_locks();
         self.rec().forget_all();
@@ -2949,7 +2957,7 @@ impl PlanCraftApp {
             self.share_suggest = None;
         }
         if let Some(why) = self.share.poll() {
-            self.st.toast(ToastKind::Error, format!("Sharing stopped: {why}"));
+            self.st.toast(ToastKind::Error, why);
         }
         // A change to who may sign in, made in a Share Folder window since closed.
         if self.share_dialog.is_none() {

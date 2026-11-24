@@ -120,7 +120,7 @@ const SMOKE_TEST: &str = r#"
 out=$1; image=$2; stage=$3; limit=$4; emulator=$5
 fail=0
 bundled=$(printf '%s:' "$stage"/lib/plancraft/*); bundled=${bundled%:}
-for lib in "$stage"/lib/plancraft/*/* "$stage"/bin/plancraft; do
+for lib in "$stage"/lib/plancraft/*/* "$stage"/bin/plancraft "$stage"/bin/plancraft-server; do
   missing=$(LD_LIBRARY_PATH="$bundled" ldd "$lib" | grep 'not found')
   if [ -n "$missing" ]; then echo "$lib needs a library a clean system lacks:"; echo "$missing"; fail=1; fi
 done
@@ -136,6 +136,10 @@ start() {
 }
 start appimage ${emulator:+"$emulator"} "$image"
 start tarball "$stage/bin/plancraft"
+# PlanCraft Server alone runs with no desktop at all.
+if ! ${emulator:+"$emulator"} "$stage/bin/plancraft-server" --version >"$out/server.log" 2>&1; then
+  echo "plancraft-server did not run on a clean system:"; cat "$out/server.log"; fail=1
+fi
 prefix=$(mktemp -d)/prefix
 if "$stage/install.sh" "$prefix" >"$out/install.log" 2>&1; then
   start installed "$prefix/bin/plancraft"
@@ -191,11 +195,22 @@ here=$(cd "$(dirname "$0")" && pwd)
 uninstall=0
 if [ "${1:-}" = "--uninstall" ]; then uninstall=1; shift; fi
 prefix=${1:-"$HOME/.local"}
+if [ "$uninstall" = 1 ]; then
+  # Kept sharing at login from this copy (File > Share Folder > Keep sharing): stopped, every
+  # plan saved, and taken out of the login items.
+  unit="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/plancraft-server.service"
+  if [ -f "$unit" ] && grep -qF "\"$prefix/bin/plancraft\"" "$unit"; then
+    "$prefix/bin/plancraft" serve stop || true
+    systemctl --user disable plancraft-server.service >/dev/null 2>&1 || true
+    rm -f "$unit"
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+  fi
+fi
 # The libraries' folder belongs to PlanCraft alone: replaced whole on install (so none from an
 # older version stays behind), removed whole on uninstall.
 rm -rf "$prefix/lib/plancraft"
 
-files="bin/plancraft bin/plancraft-mcp share/applications/plancraft.desktop share/mime/packages/plancraft.xml"
+files="bin/plancraft bin/plancraft-mcp bin/plancraft-server share/applications/plancraft.desktop share/mime/packages/plancraft.xml"
 for icon in "$here"/share/icons/hicolor/*/apps/plancraft.*; do
   files="$files ${icon#"$here"/}"
 done
@@ -210,11 +225,14 @@ for f in $files; do
     rm -f "$prefix/$f"
   else
     mkdir -p "$(dirname "$prefix/$f")"
-    cp "$here/$f" "$prefix/$f"
+    # Copied beside it, then renamed over it: a program still running (a folder kept shared)
+    # cannot be written over, but can be replaced.
+    cp "$here/$f" "$prefix/$f.new.$$"
+    mv -f "$prefix/$f.new.$$" "$prefix/$f"
   fi
 done
 if [ "$uninstall" = 0 ]; then
-  chmod 755 "$prefix/bin/plancraft" "$prefix/bin/plancraft-mcp"
+  chmod 755 "$prefix/bin/plancraft" "$prefix/bin/plancraft-mcp" "$prefix/bin/plancraft-server"
   # Readable by everyone, writable only by the owner (whatever the umask): PlanCraft trusts the
   # libraries only then.
   find "$prefix/lib/plancraft" -type d -exec chmod 755 {} +
@@ -302,6 +320,9 @@ fn package_arch(root: &Path, out: &Path, version: &str, arch: &Arch, release: &P
     step(format!("staging files ({})", arch.name));
     copy(&release.join("plancraft"), &stage.join("bin/plancraft"), true)?;
     copy(&release.join("plancraft-mcp"), &stage.join("bin/plancraft-mcp"), true)?;
+    // PlanCraft Server on its own, for a computer with no desktop (the app runs it as
+    // `plancraft serve`).
+    copy(&release.join("plancraft-server"), &stage.join("bin/plancraft-server"), true)?;
     bundle_libs(root, arch, &stage.join("lib/plancraft"))?;
     copy(&root.join("README.md"), &stage.join("README.md"), false)?;
     copy(&root.join("LICENSE"), &stage.join("LICENSE"), false)?;
@@ -372,7 +393,7 @@ fn build_binaries(root: &Path) -> Result<Vec<(&'static Arch, PathBuf)>> {
         .arg(format!("{0}:{0}:ro", toolchain.display()))
         .arg(BUILD_IMAGE.tag)
         .arg(&cargo)
-        .args(["build", "--release", "--locked", "-p", "plancraft-app", "-p", "plancraft-mcp"]);
+        .args(["build", "--release", "--locked", "-p", "plancraft-app", "-p", "plancraft-mcp", "-p", "plancraft-server"]);
     for arch in &ARCHES {
         c.args(["--target", arch.triple]);
     }
