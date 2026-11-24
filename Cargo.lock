@@ -2756,7 +2756,7 @@ checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
 
 [[package]]
 name = "plancraft-app"
-version = "0.8.0"
+version = "0.8.5"
 dependencies = [
  "anyhow",
  "eframe",
@@ -2778,7 +2778,7 @@ dependencies = [
 
 [[package]]
 name = "plancraft-core"
-version = "0.8.0"
+version = "0.8.5"
 dependencies = [
  "calamine",
  "encoding_rs",
@@ -2802,7 +2802,7 @@ dependencies = [
 
 [[package]]
 name = "plancraft-mcp"
-version = "0.8.0"
+version = "0.8.5"
 dependencies = [
  "plancraft-core",
  "proptest",
@@ -2816,7 +2816,7 @@ dependencies = [
 
 [[package]]
 name = "plancraft-server"
-version = "0.8.0"
+version = "0.8.5"
 dependencies = [
  "argon2",
  "blake2 0.11.0",
@@ -4650,7 +4650,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "0.8.0"
+version = "0.8.5"
 dependencies = [
  "anyhow",
  "flate2",
