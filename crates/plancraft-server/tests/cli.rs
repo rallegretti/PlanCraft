@@ -176,6 +176,15 @@ fn a_background_server_says_where_it_is_and_stops_when_asked() {
     assert!(background::log_tail(&config, 5).iter().any(|l| l.contains("Could not start") && l.contains("user add")));
     assert_eq!(background::status(&config), Background::NotRunning);
 
+    // Nor when it cannot take its lock: the log says so too.
+    let lock = config.join("background.lock");
+    std::fs::remove_file(&lock).unwrap();
+    std::fs::create_dir(&lock).unwrap();
+    let (ok, _, _) = run(&config, &serve, "");
+    assert!(!ok);
+    assert!(background::log_tail(&config, 1).iter().any(|l| l.contains("Could not start")), "{:?}", background::log_tail(&config, 5));
+    std::fs::remove_dir(&lock).unwrap();
+
     run(&config, &["user", "add", "ana", "--password-stdin"], "correct horse\n");
     let (ok, out, _) = run(&config, &["stop"], "");
     assert!(ok && out.contains("No server"), "{out}");

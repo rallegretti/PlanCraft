@@ -355,9 +355,14 @@ fn serve(args: &Args) -> Result<(), String> {
     let mut log = stderr_log();
     // Held until the server has stopped: one background server per private folder.
     let claim = if args.background {
-        match background::Claim::take(&config)? {
-            Some(c) => Some(c),
-            None => {
+        match background::Claim::take(&config) {
+            Ok(Some(c)) => Some(c),
+            Err(e) => {
+                // Where PlanCraft's window looks (nobody reads a service's standard error).
+                background::file_log(&config, crate::quiet())(&format!("Could not start: {e}"));
+                return Err(e);
+            }
+            Ok(None) => {
                 // Not an error: a service manager would only start it again and again.
                 say(&format!("A server is already sharing in the background from {}.", config.display()));
                 return Ok(());
@@ -387,26 +392,31 @@ fn serve(args: &Args) -> Result<(), String> {
     if args.watch_stdin {
         watch_stdin(&running, &log);
     }
+    let mut failed = None;
     if let Some(claim) = &claim {
         let status = background::Status {
             folder: plancraft_core::io::canonical(&folder).unwrap_or_else(|_| folder.clone()),
             addr: running.addr(),
             fingerprint: running.fingerprint().0.clone(),
             version: env!("CARGO_PKG_VERSION").to_string(),
-            announced: !args.no_announce && !running.addr().ip().is_loopback(),
+            announced: running.announced(),
         };
         if let Err(e) = claim.publish(&status) {
-            log(&e);
-        }
-        let stopper = running.stopper();
-        let on_stop = log.clone();
-        if let Err(e) = background::watch_stop(claim.config().to_path_buf(), move || {
-            on_stop("Stopping: asked to stop sharing; saving the shared plans");
-            stopper.stop();
-        }) {
-            // Nobody could stop it but by force: stop now instead.
-            log(&format!("cannot watch for a stop request ({e}); stopping"));
+            // Nobody could tell where it listens: stop, and fail, so the system tries again.
+            log(&format!("cannot say where it listens ({e}); stopping"));
             running.stopper().stop();
+            failed = Some(e);
+        } else {
+            let stopper = running.stopper();
+            let on_stop = log.clone();
+            if let Err(e) = background::watch_stop(claim.config().to_path_buf(), move || {
+                on_stop("Stopping: asked to stop sharing; saving the shared plans");
+                stopper.stop();
+            }) {
+                // Nobody could stop it but by force: stop now instead.
+                log(&format!("cannot watch for a stop request ({e}); stopping"));
+                running.stopper().stop();
+            }
         }
     }
     // Ctrl+C, or a service manager stopping the server: save every plan, tell everyone, give
@@ -423,7 +433,7 @@ fn serve(args: &Args) -> Result<(), String> {
     log("Stopped");
     // Given back only now: every plan is saved.
     drop(claim);
-    Ok(())
+    failed.map_or(Ok(()), Err)
 }
 
 /// `stop`: asks the background server to stop, and waits for it.

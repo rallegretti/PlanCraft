@@ -541,7 +541,8 @@ fn plain_windows_path(s: &str) -> Option<String> {
         }
         rest.to_string()
     };
-    (plain.chars().count() < 260).then_some(plain)
+    // The limit counts UTF-16 units, as Windows does.
+    (plain.encode_utf16().count() < 260).then_some(plain)
 }
 
 /// `path` made absolute against the current directory.

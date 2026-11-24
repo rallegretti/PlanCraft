@@ -195,6 +195,17 @@ here=$(cd "$(dirname "$0")" && pwd)
 uninstall=0
 if [ "${1:-}" = "--uninstall" ]; then uninstall=1; shift; fi
 prefix=${1:-"$HOME/.local"}
+if [ "$uninstall" = 1 ]; then
+  # Kept sharing at login from this copy (File > Share Folder > Keep sharing): stopped, every
+  # plan saved, and taken out of the login items.
+  unit="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/plancraft-server.service"
+  if [ -f "$unit" ] && grep -qF "\"$prefix/bin/plancraft\"" "$unit"; then
+    "$prefix/bin/plancraft" serve stop || true
+    systemctl --user disable plancraft-server.service >/dev/null 2>&1 || true
+    rm -f "$unit"
+    systemctl --user daemon-reload >/dev/null 2>&1 || true
+  fi
+fi
 # The libraries' folder belongs to PlanCraft alone: replaced whole on install (so none from an
 # older version stays behind), removed whole on uninstall.
 rm -rf "$prefix/lib/plancraft"
@@ -214,7 +225,10 @@ for f in $files; do
     rm -f "$prefix/$f"
   else
     mkdir -p "$(dirname "$prefix/$f")"
-    cp "$here/$f" "$prefix/$f"
+    # Copied beside it, then renamed over it: a program still running (a folder kept shared)
+    # cannot be written over, but can be replaced.
+    cp "$here/$f" "$prefix/$f.new.$$"
+    mv -f "$prefix/$f.new.$$" "$prefix/$f"
   fi
 done
 if [ "$uninstall" = 0 ]; then

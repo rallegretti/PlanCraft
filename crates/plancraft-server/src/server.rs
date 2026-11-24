@@ -333,6 +333,11 @@ impl Running {
         self.addr
     }
 
+    /// Whether it is announced on the network (asked for, and the announcement started).
+    pub fn announced(&self) -> bool {
+        lock(&self.shared.announcer).is_some()
+    }
+
     pub fn fingerprint(&self) -> &Fingerprint {
         &self.fingerprint
     }

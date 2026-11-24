@@ -23,7 +23,9 @@ fn the_system_starts_the_server_which_stops_when_asked() {
         u.add_with("ana", &password, plancraft_server::protocol::Role::Editor)
     })
     .unwrap();
-    let program = Program { program: env!("CARGO_BIN_EXE_plancraft-server").into(), args: Vec::new(), prepare: None };
+    // Only on this computer while the test runs.
+    let program =
+        Program { program: env!("CARGO_BIN_EXE_plancraft-server").into(), args: vec!["--bind".into(), "127.0.0.1".into()], prepare: None };
     let entry = login::Entry::new(&program, &folder, &config, 0, false).unwrap();
 
     login::enable(&entry).unwrap();
@@ -43,18 +45,17 @@ fn the_system_starts_the_server_which_stops_when_asked() {
     assert_eq!(c.login("ana", "correct horse").unwrap(), "ana");
     drop(c);
 
-    // What Stop Sharing does.
-    login::disable(None).unwrap();
-    assert!(!login::enabled());
+    // What Stop Sharing does: asks the server to stop and waits, then takes the login item away.
     background::request_stop(&config).unwrap();
     assert!(background::wait_stopped(&config, Duration::from_secs(60)), "{}", background::log_tail(&config, 20).join("\n"));
-    // Stopped cleanly: nothing starts it again.
+    // Stopped cleanly: the system does not start it again.
     std::thread::sleep(Duration::from_secs(3));
     assert_eq!(background::status(&config), Background::NotRunning);
-    // Stopped cleanly, every plan saved: by the stop request, or (macOS) by the termination
-    // signal launchd sends as the login item is taken away.
+    login::disable(None).unwrap();
+    assert!(!login::enabled());
+    // Stopped by the request (not by a signal), every plan saved.
     let log = background::log_tail(&config, 50);
-    assert!(log.iter().any(|l| l.contains("asked to stop sharing") || l.contains("Stopping: saving the shared plans")), "{log:?}");
+    assert!(log.iter().any(|l| l.contains("asked to stop sharing")), "{log:?}");
     assert!(log.last().is_some_and(|l| l.ends_with("  Stopped")), "{log:?}");
     drop(cleanup);
 }

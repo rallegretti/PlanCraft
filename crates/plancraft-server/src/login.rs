@@ -9,8 +9,9 @@
 //!   administrator).
 //!
 //! Each is the person's own, and nothing else is installed. [`disable`] takes it away again.
-//! Stopping goes through the server's stop request, the same everywhere; systemd and launchd
-//! start it again only after a failure, never after a clean stop.
+//! Stopping goes through the server's stop request, the same everywhere, before the login item
+//! is taken away (taking a LaunchAgent away signals the server); systemd and launchd start it
+//! again only after a failure, never after a clean stop, and systemd gives up after a few.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -33,6 +34,14 @@ const MAC_BUNDLE_ID: &str = "dev.plancraft.PlanCraft";
 const RESTART_SECS: u32 = 30;
 /// How long a service manager's command may take.
 const TOOL_WAIT: Duration = Duration::from_secs(30);
+/// Failed starts within [`START_LIMIT_SECS`] after which systemd stops trying (a server that
+/// cannot start, or a program that was removed).
+const START_LIMIT: u32 = 5;
+const START_LIMIT_SECS: u32 = 600;
+/// Seconds launchd gives a server it stops (logging out) to save its plans.
+const EXIT_SECS: u32 = 60;
+/// The longest command line Windows runs from the `Run` key.
+const RUN_LINE_MAX: usize = 260;
 
 /// The command that keeps a folder shared: the server program and everything it is given.
 #[derive(Clone, Debug)]
@@ -58,13 +67,12 @@ impl Entry {
             return Err(why.into());
         }
         let mut args = program.args.clone();
-        args.extend([
-            "--background".into(),
-            "--config".into(),
-            config.as_os_str().to_os_string(),
-            "--port".into(),
-            port.to_string().into(),
-        ]);
+        args.push("--background".into());
+        // Windows runs at most 260 characters from the Run key: the usual folder goes unsaid.
+        if !(cfg!(windows) && crate::server::default_config().as_deref() == Some(config)) {
+            args.extend(["--config".into(), config.as_os_str().to_os_string()]);
+        }
+        args.extend(["--port".into(), port.to_string().into()]);
         if !announce {
             args.push("--no-announce".into());
         }
@@ -97,12 +105,26 @@ fn temporary_place(program: &Path) -> Option<&'static str> {
             "PlanCraft is running from the disk image or a temporary place: move it into Applications, open it from there, and try again",
         );
     }
-    if program.starts_with(std::env::temp_dir()) {
+    if in_folder(program, &std::env::temp_dir()) {
         return Some(
             "PlanCraft is running from a temporary folder (unzipped by the system?): put it in a folder of its own, open it from there, and try again",
         );
     }
     None
+}
+
+/// Whether `path` is in `folder`, also by their real names (a Windows short name such as
+/// `C:\Users\ROBERT~1`, macOS's `/private/var`), with Windows' names in any case.
+fn in_folder(path: &Path, folder: &Path) -> bool {
+    let real = |p: &Path| plancraft_core::io::canonical(p).unwrap_or_else(|_| p.to_path_buf());
+    let inside = |p: &Path, f: &Path| {
+        if cfg!(windows) {
+            Path::new(&p.to_string_lossy().to_lowercase()).starts_with(Path::new(&f.to_string_lossy().to_lowercase()))
+        } else {
+            p.starts_with(f)
+        }
+    };
+    inside(path, folder) || inside(&real(path), &real(folder))
 }
 
 /// One word of a systemd command line: quoted, with systemd's specifiers (`%`) and variables
@@ -132,6 +154,8 @@ pub fn systemd_unit(entry: &Entry) -> Result<String, String> {
         "# Written by PlanCraft (File > Share Folder > Keep sharing); Stop Sharing there removes it.\n\
          [Unit]\n\
          Description=PlanCraft Server sharing {name}\n\
+         StartLimitIntervalSec={START_LIMIT_SECS}\n\
+         StartLimitBurst={START_LIMIT}\n\
          \n\
          [Service]\n\
          Type=simple\n\
@@ -188,6 +212,8 @@ pub fn launchd_plist(entry: &Entry) -> Result<String, String> {
          \x20   </dict>\n\
          \x20   <key>ThrottleInterval</key>\n\
          \x20   <integer>{RESTART_SECS}</integer>\n\
+         \x20   <key>ExitTimeOut</key>\n\
+         \x20   <integer>{EXIT_SECS}</integer>\n\
          \x20   <key>AssociatedBundleIdentifiers</key>\n\
          \x20   <string>{MAC_BUNDLE_ID}</string>\n\
          </dict>\n\
@@ -235,7 +261,19 @@ pub fn windows_command_line(entry: &Entry) -> Result<String, String> {
     let mut line = it.next().map(|p| format!("\"{p}\"")).unwrap_or_default();
     for w in it {
         line.push(' ');
-        line.push_str(&windows_arg(w));
+        // Plain words (`serve`, `--port`, its number) go as they are: the line is kept short.
+        if !w.is_empty() && w.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) {
+            line.push_str(w);
+        } else {
+            line.push_str(&windows_arg(w));
+        }
+    }
+    let length = line.encode_utf16().count();
+    if length > RUN_LINE_MAX {
+        return Err(format!(
+            "the folder's path is too long to share at login on Windows (the command would be {length} characters, and Windows \
+             runs at most {RUN_LINE_MAX}): share a folder with a shorter path"
+        ));
     }
     Ok(line)
 }
@@ -317,8 +355,9 @@ fn launch_agent_path() -> Option<PathBuf> {
     Some(home.join("Library").join("LaunchAgents").join(format!("{LAUNCHD_LABEL}.plist")))
 }
 
-/// Has the system start the server of `entry` at every login, and starts it now (one that runs
-/// already is stopped first, saving its plans).
+/// Has the system start the server of `entry` at every login, and starts it now. One the
+/// system started before is stopped first (saving its plans); stop any other one first
+/// ([`crate::background::request_stop`]), or the new one finds it sharing and leaves.
 pub fn enable(entry: &Entry) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
@@ -334,6 +373,7 @@ pub fn enable(entry: &Entry) -> Result<(), String> {
             .and_then(|_| systemctl(&["enable", SYSTEMD_UNIT]))
             .and_then(|_| systemctl(&["restart", SYSTEMD_UNIT]));
         if let Err(e) = started {
+            let _ = systemctl(&["disable", SYSTEMD_UNIT]);
             let _ = std::fs::remove_file(&path);
             let _ = systemctl(&["daemon-reload"]);
             return Err(format!("Keeping a folder shared needs systemd's user services, which did not take it ({e})"));
@@ -419,7 +459,9 @@ fn start_detached(entry: &Entry) -> Result<(), String> {
 }
 
 /// Stops starting the server at login. It does not stop one running now: ask it to stop first
-/// ([`crate::background::request_stop`]).
+/// ([`crate::background::request_stop`], then [`crate::background::wait_stopped`]); on macOS,
+/// one still running is sent the termination signal, which also stops it saving its plans, but
+/// only for as long as launchd waits.
 pub fn disable(prepare: Option<fn(&mut Command)>) -> Result<(), String> {
     #[cfg(target_os = "linux")]
     {
@@ -443,8 +485,7 @@ pub fn disable(prepare: Option<fn(&mut Command)>) -> Result<(), String> {
         use std::os::unix::fs::MetadataExt;
         let Some(path) = launch_agent_path() else { return Ok(()) };
         let Ok(meta) = std::fs::symlink_metadata(&path) else { return Ok(()) };
-        // Taken out of launchd too; a server still running gets the termination signal, which
-        // stops it cleanly (every plan saved).
+        // Taken out of launchd too (a server still running gets the termination signal).
         let _ = run_tool(launchctl_cmd(&["bootout", &format!("gui/{}/{LAUNCHD_LABEL}", meta.uid())]), prepare);
         std::fs::remove_file(&path).map_err(|e| format!("cannot remove {}: {e}", path.display()))
     }
@@ -599,6 +640,8 @@ mod tests {
         want.extend(e.args.iter().map(|a| a.to_string_lossy().into_owned()));
         assert_eq!(systemd_read(exec), want);
         assert!(unit.contains("Restart=on-failure") && unit.contains("WantedBy=default.target"));
+        // A server that cannot start (or a program removed) is not started every 30 s forever.
+        assert!(unit.contains("StartLimitIntervalSec=600\nStartLimitBurst=5\n"), "{unit}");
         // A folder named with a specifier is not expanded in the description either.
         let mut e = entry("/p");
         e.name = "50% done\nExecStart=/bin/false".into();
@@ -622,6 +665,8 @@ mod tests {
         assert!(plist.contains(&format!("<string>{LAUNCHD_LABEL}</string>")));
         assert_eq!(plist.matches("<string>").count(), e.args.len() + 1 + 3);
         assert!(plist.contains("<key>SuccessfulExit</key>"));
+        // Time to save the plans when launchd stops it.
+        assert!(plist.contains("<key>ExitTimeOut</key>\n    <integer>60</integer>"), "{plist}");
     }
 
     /// The standard library's (and the C runtime's) reading of a Windows command line's
@@ -676,6 +721,34 @@ mod tests {
             assert_eq!(program, r"C:\Program Files\PlanCraft\plancraft.exe");
             let want: Vec<String> = e.args.iter().map(|a| a.to_string_lossy().into_owned()).collect();
             assert_eq!(windows_read(rest), want, "{line}");
+            // Plain words are not quoted, to keep the line short.
+            assert!(rest.starts_with("serve --background --config "), "{line}");
+        }
+    }
+
+    #[test]
+    fn a_windows_command_line_too_long_to_run_at_login_is_refused() {
+        let mut e = entry(&format!(r"C:\Users\Ana\{}", "Plans ".repeat(20)));
+        e.program = PathBuf::from(r"C:\Program Files\PlanCraft\plancraft.exe");
+        assert!(windows_command_line(&e).is_ok());
+        let mut e = entry(&format!(r"C:\Users\Ana\{}", "Plans ".repeat(30)));
+        e.program = PathBuf::from(r"C:\Program Files\PlanCraft\plancraft.exe");
+        let why = windows_command_line(&e).unwrap_err();
+        assert!(why.contains("too long") && why.contains("260"), "{why}");
+    }
+
+    #[test]
+    fn a_program_in_the_temporary_folder_is_seen_by_any_name() {
+        let temp = std::env::temp_dir();
+        assert!(in_folder(&temp.join("Temp1_PlanCraft.zip").join("plancraft"), &temp));
+        assert!(!in_folder(Path::new("/opt/plancraft/plancraft"), &temp));
+        // By its real name too (macOS: /var is /private/var).
+        let dir = tempfile::tempdir().unwrap();
+        let real = plancraft_core::io::canonical(dir.path()).unwrap();
+        assert!(in_folder(&real.join("plancraft"), &temp), "{} in {}", real.display(), temp.display());
+        if cfg!(windows) {
+            let upper = PathBuf::from(temp.to_string_lossy().to_uppercase()).join("plancraft.exe");
+            assert!(in_folder(&upper, &temp));
         }
     }
 

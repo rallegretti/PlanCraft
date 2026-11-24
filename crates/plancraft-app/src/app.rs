@@ -1689,7 +1689,7 @@ impl PlanCraftApp {
                     ui.ctx().request_repaint_after(StdDuration::from_secs(5));
                 }
                 ui.separator();
-                let name = folder.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                let name = dialogs::share::folder_name(&folder);
                 let (dot, text) = match state {
                     plancraft_server::sharing::State::Sharing(_) => (theme::pal().OK, format!("Sharing {name}")),
                     plancraft_server::sharing::State::Starting => (theme::pal().WARN, format!("Starting to share {name}")),
@@ -2269,6 +2269,8 @@ impl PlanCraftApp {
         // The server stops by itself once its input closes, saving every plan and telling
         // everyone; it finishes that after this PlanCraft is gone.
         self.share.sharing = None;
+        // A folder kept shared being stopped or started: its login item set or taken away.
+        self.share.finish_task(StdDuration::from_secs(10));
         self.disk.stop();
         lock(&self.ws).release_locks();
         self.rec().forget_all();

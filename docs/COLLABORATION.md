@@ -778,22 +778,33 @@ the system start it at every login. It runs as the person, with their own privat
     standard error. Why it could not start is written there too.
 - The login item (`plancraft_server::login`) is the person's own and the only thing installed:
   - Linux: a systemd user unit, `~/.config/systemd/user/plancraft-server.service`
-    (`Restart=on-failure`, 30 seconds apart; enabled and started with `systemctl --user`). It runs
-    while the person is logged in; `loginctl enable-linger` keeps it running after they log out.
-    Every word of its command line is quoted, with `%` and `$` doubled.
+    (`Restart=on-failure`, 30 seconds apart, given up after 5 failures in 10 minutes; enabled and
+    started with `systemctl --user`). It runs while the person is logged in; `loginctl
+    enable-linger` keeps it running after they log out. Every word of its command line is quoted,
+    with `%` and `$` doubled. `install.sh --uninstall` stops a server kept sharing from the copy
+    it removes and takes its unit away.
   - macOS: a LaunchAgent, `~/Library/LaunchAgents/dev.plancraft.server.plist` (`RunAtLoad`,
-    `KeepAlive` only after a failure, 30-second throttle; loaded with `launchctl bootstrap`). It
-    shows under PlanCraft in System Settings › Login Items.
+    `KeepAlive` only after a failure, 30-second throttle, a minute to save its plans when launchd
+    stops it; loaded with `launchctl bootstrap`). It shows under PlanCraft in System Settings ›
+    Login Items. launchd has no limit on starts after failures: a server that can never start
+    is tried every 30 seconds until *Don't Share at Login*.
   - Windows: a value named *PlanCraft Server* in the person's `Run` key (Task Scheduler's logon
     tasks need an administrator), started now as a detached process with no window. It shows in
-    Task Manager › Startup apps, where it can also be turned off.
+    Task Manager › Startup apps, where it can also be turned off. Windows runs at most 260
+    characters from the `Run` key, so plain words go unquoted, the usual private folder goes
+    unsaid, and a folder whose path would make the line longer is refused. Logging off ends the
+    server without a stop request (it has no window to be told): its plans are recovered from
+    their journals when it next starts.
   - Names that a command line cannot carry are refused rather than mangled: line breaks and
     other control characters, names that are not valid text, and `%` on Windows. PlanCraft
-    running from a disk image, a translocated copy or the temporary folder is refused too (it
-    would be gone by the next login).
-- *Stop Sharing* takes the login item away, then asks the server to stop and waits for it (a
-  minute at most) while the window says it is saving. A server asked to start a moment ago is
-  first given time to take its folder, so the request is not cleared as stale.
+    running from a disk image, a translocated copy or the temporary folder (by any of its names)
+    is refused too: it would be gone by the next login.
+- *Stop Sharing* asks the server to stop at once (so it stops even if PlanCraft quits next), takes
+  the login item away, and waits for it (a minute at most) while the window says it is saving; on
+  macOS the login item goes only once the server has stopped, as taking a LaunchAgent away
+  signals it. A server asked to start a moment ago is first given time to take its folder, so
+  the request is not cleared as stale; *Cancel* while the login item is still being set stops it
+  once that is done. Quitting PlanCraft waits up to 10 seconds for that to finish.
 - PlanCraft says when a server it saw sharing in the background stops by itself, and when one is
   set to start at login but is not running (with its log, and a *Don't Share at Login* button).
 - The folder, port and listing are fixed while it runs: stop, change them and start again.
