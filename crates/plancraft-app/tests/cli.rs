@@ -61,5 +61,10 @@ fn share_folder_runs_the_server_from_plancraft_itself() {
         assert!(Instant::now() < deadline, "the server is still running");
         std::thread::sleep(Duration::from_millis(50));
     }
-    let _ = std::fs::remove_dir_all(&dir);
+    // The server process may still hold a file in its folder while it exits, and Windows deletes
+    // no open file: try again for a moment, or the folder is left in the temp dir.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while std::fs::remove_dir_all(&dir).is_err() && dir.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
