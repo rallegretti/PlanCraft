@@ -47,9 +47,14 @@ impl McpHost {
         let options = ServerOptions {
             read_only,
             extra_instructions: Some(
-                "You are connected to the PlanCraft desktop app. Edits appear live in the user's window and can be undone there; \
-                 call save_project when the user wants changes written to disk."
-                    .into(),
+                if read_only {
+                    "You are connected to the PlanCraft desktop app in read-only mode: you can look at the plans open in the user's \
+                     window; the user makes any changes there."
+                } else {
+                    "You are connected to the PlanCraft desktop app. Edits appear live in the user's window and can be undone there; \
+                     call save_project when the user wants changes written to disk."
+                }
+                .into(),
             ),
             ..ServerOptions::default()
         };

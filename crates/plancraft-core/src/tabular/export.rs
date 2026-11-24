@@ -82,23 +82,56 @@ pub fn table_columns(p: &Project, table: CsvTable) -> Vec<String> {
     }
 }
 
-/// One of the plan's tables as CSV text with only the `columns` named (by heading, in any case;
-/// written in the table's own order). Every name must be one of [`table_columns`].
+/// The most column names one export takes.
+const MAX_COLUMN_NAMES: usize = 1_000;
+
+/// One of the plan's tables as CSV text with only the `columns` named, written in the table's
+/// own order. A name is a heading of [`table_columns`]: as written, else in any case and without
+/// spaces at its ends. A name two columns share (a custom field named like a fixed column) is
+/// refused, as it cannot tell which one is meant.
 pub fn table_to_csv_columns(p: &Project, table: CsvTable, columns: &[String]) -> Result<String, String> {
+    if columns.len() > MAX_COLUMN_NAMES {
+        return Err(format!("name at most {MAX_COLUMN_NAMES} columns"));
+    }
     let all = table_columns(p, table);
     let mut keep = vec![false; all.len()];
     for c in columns {
-        let c = c.trim();
-        let found = all.iter().position(|h| h.eq_ignore_ascii_case(c));
-        match found.and_then(|i| keep.get_mut(i)) {
-            Some(k) => *k = true,
-            None => return Err(format!("the {} table has no column '{c}'; its columns are: {}", table.key(), all.join(", "))),
+        let at = |same: &dyn Fn(&str) -> bool| -> Vec<usize> { all.iter().enumerate().filter(|(_, h)| same(h)).map(|(i, _)| i).collect() };
+        let mut found = at(&|h| h == c);
+        if found.is_empty() {
+            found = at(&|h| h.trim().eq_ignore_ascii_case(c.trim()));
         }
+        match found.as_slice() {
+            [i] => {
+                if let Some(k) = keep.get_mut(*i) {
+                    *k = true;
+                }
+            }
+            [] => return Err(format!("the {} table has no column '{}'; its columns are: {}", table.key(), c.trim(), all.join(", "))),
+            _ => {
+                return Err(format!(
+                    "{} columns of the {} table are named '{}' (a custom field named like another column): rename the custom field to \
+                     choose one of them",
+                    found.len(),
+                    table.key(),
+                    c.trim()
+                ));
+            }
+        }
+    }
+    table_to_csv_kept(p, table, &keep)
+}
+
+/// One of the plan's tables as CSV text with the columns `keep` marks, one mark per heading of
+/// [`table_columns`] (a list made for another set of columns is refused).
+pub fn table_to_csv_kept(p: &Project, table: CsvTable, keep: &[bool]) -> Result<String, String> {
+    if keep.len() != table_columns(p, table).len() {
+        return Err("the table's columns changed (a custom field was added or removed): choose them again".into());
     }
     if !keep.contains(&true) {
         return Err("choose at least one column".into());
     }
-    Ok(write(&build(p, table), Some(&keep)))
+    Ok(write(&build(p, table), Some(keep)))
 }
 
 /// A cell: text, written quoted (and kept from running as a formula), or a plain value (a

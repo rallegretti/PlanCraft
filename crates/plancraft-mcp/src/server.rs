@@ -225,8 +225,8 @@ impl McpServer {
                 let uri = params.get("uri").and_then(Value::as_str).ok_or_else(|| RpcError::invalid_params("missing 'uri'"))?;
                 crate::resources::read(self, uri)
             }
-            "prompts/list" => Ok(crate::prompts::list()),
-            "prompts/get" => crate::prompts::get(params),
+            "prompts/list" => Ok(crate::prompts::list(self.options.read_only)),
+            "prompts/get" => crate::prompts::get(params, self.options.read_only),
             "logging/setLevel" => Ok(json!({})),
             "completion/complete" => Ok(json!({ "completion": { "values": [], "hasMore": false } })),
             other => Err(RpcError::method_not_found(other)),
@@ -518,6 +518,11 @@ impl Ctx<'_> {
         f: impl FnOnce(&mut Project, Option<&Path>) -> ToolResult<R>,
         view: impl FnOnce(&Document, R) -> ToolResult<Value>,
     ) -> ToolResult<Value> {
+        // A second guard behind the tool list: a tool marked read-only by mistake still cannot
+        // edit a plan here.
+        if self.server.options.read_only {
+            return err(format!("this server is read-only: '{label}' would change the plan"));
+        }
         let mut ws = self.server.lock();
         let i = match handle {
             Some(h) => ws.index_of(h).ok_or_else(|| ToolError("the document was closed while its linked files were being read".into()))?,
@@ -545,4 +550,28 @@ pub fn doc_at(ws: &Workspace, i: usize) -> ToolResult<&Document> {
 /// The open document at index `i`, mutably.
 pub fn doc_at_mut(ws: &mut Workspace, i: usize) -> ToolResult<&mut Document> {
     ws.docs.get_mut(i).ok_or_else(|| crate::args::missing("a document"))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::indexing_slicing)]
+    use super::*;
+
+    /// The second guard: a tool that edits, run on a read-only server even past the tool list
+    /// (as if it were marked read-only by mistake), changes nothing.
+    #[test]
+    fn a_read_only_server_refuses_edits_whatever_the_tool_says() {
+        let mut ws = Workspace::default();
+        ws.add(plancraft_core::sample::demo_project(plancraft_core::dates::ymd(2026, 10, 19).unwrap()), None);
+        let server = McpServer::with_options(ws.shared(), ServerOptions { read_only: true, ..ServerOptions::default() });
+        let before = { server.lock().docs[0].revision };
+        let tool = server.tools().iter().find(|t| t.name == "update_task").unwrap();
+        let ctx = Ctx { server: &server, changed: Cell::new(false) };
+        let args = json!({ "task": 2, "name": "Renamed" });
+        let r = (tool.handler)(&ctx, &Args::new(args.as_object().unwrap()));
+        assert!(r.unwrap_err().0.contains("read-only"));
+        let ws = server.lock();
+        assert_eq!((ws.docs[0].revision, ws.docs[0].dirty), (before, false));
+        assert_ne!(ws.docs[0].project.tasks[1].name, "Renamed");
+    }
 }

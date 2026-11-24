@@ -82,7 +82,10 @@ pub fn show(
         let mut read_only = settings.mcp_read_only;
         if ui
             .add_enabled(!host.running(), egui::Checkbox::new(&mut read_only, "Read only: agents can look at the plans but not change them"))
-            .on_hover_text("Only the tools that read are offered. Stop the server to change this.")
+            .on_hover_text(
+                "Only the tools that read are offered. After changing this, reconnect the agent (in Claude Code: /mcp) so it sees \
+                 the new list.",
+            )
             .on_disabled_hover_text("Stop the server to change this; it applies from the next start.")
             .changed()
         {

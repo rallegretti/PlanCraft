@@ -534,22 +534,45 @@ fn a_read_only_server_offers_only_tools_that_read() {
     assert!(list["result"]["tools"].as_array().unwrap().iter().all(|t| t["annotations"]["readOnlyHint"] == true));
     assert!(names.len() < McpServer::new(Workspace::default().shared()).tools().len());
 
-    let revision = || {
+    // The whole workspace: which plans are open, which is active, and each one's state.
+    let snapshot = || {
         let w = shared.lock().unwrap();
-        (w.docs[0].revision, w.docs[0].dirty, w.docs[0].project.tasks.len())
+        let docs: Vec<(u64, u64, bool, usize)> = w.docs.iter().map(|d| (d.handle, d.revision, d.dirty, d.project.tasks.len())).collect();
+        (w.active, docs)
     };
-    let before = revision();
+    let before = snapshot();
     let r = server.call_tool("update_task", &json!({ "task": 1, "name": "Renamed" }));
     assert_eq!(r["isError"], true);
     assert!(r["content"][0]["text"].as_str().unwrap().contains("read-only"), "{r}");
     assert_eq!(server.call_tool("get_project", &json!({}))["isError"], false);
-    // Every offered tool, with nothing and with a task: the plan stays as it was.
-    for name in &names {
-        for args in [json!({}), json!({ "task": 2 }), json!({ "resource": 1, "task": 3 })] {
-            server.call_tool(name, &args);
+    // Every offered tool, with each argument it requires given a value from the demo plan (so
+    // its handler runs), and with nothing: the workspace stays as it was.
+    let value = |name: &str| match name {
+        "task" => json!(2),
+        "resource" => json!(1),
+        "calendar" => json!(1),
+        "external_project" => json!("Platform"),
+        _ => json!("x"),
+    };
+    let tools = list["result"]["tools"].as_array().unwrap();
+    let mut ran = 0;
+    for t in tools {
+        let name = t["name"].as_str().unwrap();
+        let required: Vec<&str> =
+            t["inputSchema"]["required"].as_array().map(|r| r.iter().filter_map(|v| v.as_str()).collect()).unwrap_or_default();
+        let args: serde_json::Map<String, Value> = required.iter().map(|r| (r.to_string(), value(r))).collect();
+        let r = server.call_tool(name, &Value::Object(args));
+        if r["isError"] == false {
+            ran += 1;
         }
+        server.call_tool(name, &json!({}));
     }
-    assert_eq!(revision(), before, "a tool offered as read-only changed the plan");
+    assert!(ran + 2 >= tools.len(), "only {ran} of {} tools ran: the sweep does not reach their code", tools.len());
+    assert_eq!(snapshot(), before, "a tool offered as read-only changed the workspace");
+    // The planning prompt is not offered either.
+    let prompts = server.handle_message(json!({ "jsonrpc": "2.0", "id": 3, "method": "prompts/list" })).unwrap();
+    let names: Vec<&str> = prompts["result"]["prompts"].as_array().unwrap().iter().map(|p| p["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["status_report"]);
 }
 
 #[test]

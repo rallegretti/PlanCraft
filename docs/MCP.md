@@ -215,7 +215,11 @@ entity; read-only tools are annotated with `readOnlyHint`.
 **Read-only mode** (`--read-only`, or *Read only* in the app's *AI Agents* window, `ServerOptions::read_only`):
 the server lists only the tools marked *(read-only)* below, refuses the others with an error that says
 why, and tells the agent in its `initialize` instructions. Agents can look at the open plans but not
-change, save or export them (exports write files). Resources and prompts stay available.
+change, save or export them (exports write files); a second guard refuses any edit, so a tool marked
+read-only by mistake still cannot change a plan. Resources stay available, and of the prompts only
+`status_report` (`plan_project` builds a plan). An agent already connected keeps the tool list it was
+given: reconnect it after changing the setting. `plancraft-mcp --read-only FILE` still holds the plans'
+lock files while it runs, so PlanCraft says they are open elsewhere.
 
 ### Documents
 

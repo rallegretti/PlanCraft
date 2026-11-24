@@ -47,10 +47,11 @@ impl SortWindow {
     /// Returns false when the window should close. It sorts the views of `doc`, which is the
     /// active plan (the window closes when another one becomes active).
     pub fn show(&mut self, ctx: &Context, doc: &Document, st: &mut UiState) -> bool {
-        let choices = crate::fields::sort_choices(&doc.project, st.table);
-        let title = |key: &Option<String>| match key {
-            Some(k) => choices.iter().find(|(c, _)| c == k).map_or_else(|| k.clone(), |(_, t)| t.clone()),
-            None => "(none)".to_string(),
+        let p = &doc.project;
+        let choices = crate::fields::sort_choices(p, st.table);
+        // A field the table does not show is still named; one removed is "(none)".
+        let title = |key: &Option<String>| {
+            key.as_ref().and_then(|k| crate::fields::Field::from_key(p, k)).map_or_else(|| "(none)".to_string(), |f| f.title(p))
         };
         let mut open = true;
         let mut close = false;
@@ -93,7 +94,7 @@ impl SortWindow {
                 ui.separator();
                 ui.horizontal(|ui| {
                     if ui.button("Sort").clicked() {
-                        st.sort = self.keys();
+                        st.sort = self.keys().into_iter().filter(|(k, _)| crate::fields::Field::from_key(p, k).is_some()).collect();
                         close = true;
                     }
                     if ui.button("Reset").on_hover_text("Back to the outline order").clicked() {

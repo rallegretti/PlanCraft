@@ -134,11 +134,13 @@ impl AppSettings {
             short(&mut k.name);
         }
         self.servers.retain(|k| !k.address.is_empty());
-        self.csv_left_out.retain(|k, _| plancraft_core::tabular::CsvTable::from_key(k).is_some());
+        // Only the tables' own keys (the only ones read).
+        self.csv_left_out.retain(|k, _| plancraft_core::tabular::CsvTable::from_key(k).is_some_and(|t| t.key() == k));
         for names in self.csv_left_out.values_mut() {
             names.truncate(MAX_CSV_LEFT_OUT);
             for n in names.iter_mut() {
-                short(n);
+                // As long as a custom field's name may be, so a long one still matches.
+                *n = n.chars().filter(|c| !c.is_control()).take(plancraft_core::limits::MAX_NAME_CHARS).collect();
             }
         }
         self

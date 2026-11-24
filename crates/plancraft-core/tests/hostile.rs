@@ -1345,21 +1345,27 @@ fn check_csv_tables(p: &Project) -> Result<(), TestCaseError> {
         prop_assert_eq!(panics(), before, "exporting {:?} panicked", table);
         let sheets = tabular::read_bytes(csv.as_bytes(), "csv");
         prop_assert!(sheets.is_ok(), "{:?} doesn't read back", table);
-        let Ok(sheets) = sheets else { return Ok(()) };
+        let Ok(sheets) = sheets else { continue };
         let grid = &sheets.sheets[0].1;
         prop_assert_eq!(grid.rows.len(), table.rows(p), "{:?}: one row per item", table);
         let width = grid.headers.len();
         prop_assert!(grid.rows.iter().all(|r| r.len() <= width), "{:?}: a row wider than the headings", table);
-        // Every other column (the plan's own headings, whatever they hold): as many rows, and
-        // only those columns.
-        let chosen: Vec<String> = tabular::table_columns(p, table).into_iter().step_by(2).collect();
-        let csv = tabular::table_to_csv_columns(p, table, &chosen);
+        // Every column, by position: the full export. Every other column: as many rows, and as
+        // many headings (whatever the plan's own headings hold).
+        let columns = tabular::table_columns(p, table);
+        let all = tabular::table_to_csv_kept(p, table, &vec![true; columns.len()]);
         prop_assert_eq!(panics(), before, "exporting {:?} columns panicked", table);
-        let Ok(csv) = csv else { return Ok(()) };
-        let Ok(sheets) = tabular::read_bytes(csv.as_bytes(), "csv") else { return Ok(()) };
+        prop_assert_eq!(all.as_deref(), Ok(csv.as_str()), "{:?}: every column is the full export", table);
+        let every_other: Vec<bool> = (0..columns.len()).map(|i| i % 2 == 0).collect();
+        let chosen = tabular::table_to_csv_kept(p, table, &every_other);
+        prop_assert!(chosen.is_ok(), "{:?}: columns of the table refused", table);
+        let Ok(chosen) = chosen else { continue };
+        let sheets = tabular::read_bytes(chosen.as_bytes(), "csv");
+        prop_assert!(sheets.is_ok(), "{:?} with columns chosen doesn't read back", table);
+        let Ok(sheets) = sheets else { continue };
         let grid = &sheets.sheets[0].1;
         prop_assert_eq!(grid.rows.len(), table.rows(p), "{:?}: one row per item with columns chosen", table);
-        prop_assert!(grid.headers.len() <= chosen.len(), "{:?}: more columns than chosen", table);
+        prop_assert!(grid.rows.iter().all(|r| r.len() <= every_other.iter().filter(|k| **k).count()), "{:?}: a row wider", table);
     }
     Ok(())
 }

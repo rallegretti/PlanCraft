@@ -41,6 +41,8 @@ pub struct MenuInfo {
     pub history_open: bool,
     /// Fields offered for sorting and grouping: (key, title), the table's columns first.
     pub fields: Vec<(String, String)>,
+    /// The sort in use, as (title, descending), first field first (fields gone are left out).
+    pub sort: Vec<(String, bool)>,
 }
 
 const TAB_ROW_H: f32 = 28.0;
@@ -500,10 +502,10 @@ fn toolbar(ui: &mut Ui, st: &mut UiState, info: &MenuInfo, settings: &AppSetting
                 key.as_ref().and_then(|k| info.fields.iter().find(|(fk, _)| fk == k)).map_or_else(|| none.to_string(), |(_, t)| t.clone())
             };
             combo_label(ui, "Sort");
-            let sort_text = match st.sort.as_slice() {
+            let sort_text = match info.sort.as_slice() {
                 [] => "Outline".to_string(),
-                [(k, desc), more @ ..] => {
-                    let first = format!("{} ({})", title_of(&Some(k.clone()), "Outline"), if *desc { "desc" } else { "asc" });
+                [(title, desc), more @ ..] => {
+                    let first = format!("{title} ({})", if *desc { "desc" } else { "asc" });
                     if more.is_empty() { first } else { format!("{first} +{}", more.len()) }
                 }
             };

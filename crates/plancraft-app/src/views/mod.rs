@@ -57,24 +57,37 @@ pub fn row_of_task(rows: &[Row], idx: usize) -> Option<usize> {
     rows.iter().position(|r| r.task() == Some(idx))
 }
 
+/// Whether a task is finished: a summary task by its subtasks' progress (its own % complete is
+/// not kept), any other by its own.
+fn done(t: &Task) -> bool {
+    if t.sched.is_summary { t.sched.percent_complete >= 100.0 } else { t.is_complete() }
+}
+
+/// The last day a task works: one ending at midnight (an end of day on a round-the-clock
+/// calendar) ends the day before.
+fn last_day(t: &Task) -> Option<plancraft_core::dates::Date> {
+    let f = t.sched.finish?;
+    let at_midnight = f == plancraft_core::dates::midnight(f.date()) && t.sched.start.is_some_and(|s| s < f);
+    Some(if at_midnight { plancraft_core::dates::add_days(f.date(), -1).unwrap_or(f.date()) } else { f.date() })
+}
+
 fn matches_filter(p: &Project, t: &Task, f: TaskFilter) -> bool {
     match f {
         TaskFilter::All => true,
         TaskFilter::Critical => t.sched.critical,
-        TaskFilter::Incomplete => !t.is_complete(),
-        TaskFilter::Completed => t.is_complete(),
+        TaskFilter::Incomplete => !done(t),
+        TaskFilter::Completed => done(t),
         TaskFilter::Milestones => t.is_milestone(),
         TaskFilter::Late => columns::is_late(p, t),
         TaskFilter::Summary => t.sched.is_summary,
         TaskFilter::Unassigned => !t.sched.is_summary && !t.is_milestone() && p.assignments_for_task(t.id).next().is_none(),
+        // Inactive tasks are left out, as Late leaves them out: nothing to act on.
         TaskFilter::InProgress => {
-            !t.is_complete() && (t.actual_start.is_some() || t.percent_complete > 0 || t.sched.percent_complete > 0.0)
+            t.active && !done(t) && (t.actual_start.is_some() || t.percent_complete > 0 || t.sched.percent_complete > 0.0)
         }
-        TaskFilter::Slipping => !t.is_complete() && t.baseline.as_ref().zip(t.sched.finish).is_some_and(|(b, f)| f > b.finish),
+        TaskFilter::Slipping => t.active && !done(t) && t.baseline.as_ref().zip(t.sched.finish).is_some_and(|(b, f)| f > b.finish),
         TaskFilter::UsingResource(r) => p.assignments_for_task(t.id).any(|a| a.resource == r),
-        TaskFilter::DateRange(from, to) => {
-            t.sched.start.is_some_and(|s| s.date() <= to) && t.sched.finish.is_some_and(|f| f.date() >= from)
-        }
+        TaskFilter::DateRange(from, to) => t.sched.start.is_some_and(|s| s.date() <= to) && last_day(t).is_some_and(|d| d >= from),
     }
 }
 
@@ -395,6 +408,59 @@ mod tests {
         );
         let after = plancraft_core::dates::add_days(f, 1).unwrap();
         assert!(!shown(&p, TaskFilter::DateRange(after, plancraft_core::dates::add_days(after, 5).unwrap())).contains(&late));
+    }
+
+    /// Regression (review): a finished summary task (its subtasks all done; its own % complete is
+    /// not kept) was listed as In Progress and Slipping, and inactive tasks were listed too.
+    #[test]
+    fn finished_summaries_and_inactive_tasks_are_not_in_progress_or_slipping() {
+        let mut p = demo();
+        let planning = p.tasks.iter().position(|t| t.name == "Planning").unwrap();
+        let kids: Vec<TaskId> =
+            p.tasks.iter().enumerate().filter(|(i, _)| p.parent_index(*i) == Some(planning)).map(|(_, t)| t.id).collect();
+        for id in &kids {
+            p.set_percent_complete(*id, 100).unwrap();
+        }
+        // One task elsewhere started.
+        let started = p.tasks.iter().position(|t| !t.sched.is_summary && !t.is_milestone() && t.percent_complete == 0).unwrap();
+        let started_id = p.tasks[started].id;
+        p.set_percent_complete(started_id, 30).unwrap();
+        let all: Vec<TaskId> = p.tasks.iter().map(|t| t.id).collect();
+        p.set_baseline(&all);
+        // Every task finishes later than its baseline says.
+        for t in p.tasks.iter_mut() {
+            if let Some(b) = t.baseline.as_mut() {
+                b.finish = plancraft_core::dates::add_days(b.finish.date(), -3).unwrap().at(17, 0, 0, 0);
+            }
+        }
+        plancraft_core::schedule::recalculate(&mut p);
+        assert!(p.tasks[planning].sched.percent_complete >= 100.0);
+        let rows = |p: &Project, f: TaskFilter| -> Vec<usize> {
+            visible_rows(p, &UiState { filter: f, ..UiState::default() }).iter().filter_map(Row::task).collect()
+        };
+        for f in [TaskFilter::InProgress, TaskFilter::Slipping, TaskFilter::Incomplete] {
+            assert!(!rows(&p, f).contains(&planning), "{f:?} lists the finished summary");
+        }
+        assert!(rows(&p, TaskFilter::Completed).contains(&planning));
+        // A task started, then made inactive: not in progress, not slipping.
+        assert!(rows(&p, TaskFilter::InProgress).contains(&started) && rows(&p, TaskFilter::Slipping).contains(&started));
+        p.tasks[started].active = false;
+        plancraft_core::schedule::recalculate(&mut p);
+        assert!(!rows(&p, TaskFilter::InProgress).contains(&started) && !rows(&p, TaskFilter::Slipping).contains(&started));
+    }
+
+    /// A task ending at midnight (the end of a day on a round-the-clock calendar) does not run on
+    /// the day that midnight begins.
+    #[test]
+    fn a_task_ending_at_midnight_is_not_in_the_next_days_range() {
+        let mut p = demo();
+        let i = p.tasks.iter().position(|t| !t.sched.is_summary && !t.is_milestone()).unwrap();
+        let start = p.tasks[i].sched.start.unwrap().date();
+        let next = plancraft_core::dates::add_days(start, 1).unwrap();
+        p.tasks[i].sched.finish = Some(plancraft_core::dates::midnight(next));
+        let t = &p.tasks[i];
+        assert!(matches_filter(&p, t, TaskFilter::DateRange(start, start)));
+        assert!(!matches_filter(&p, t, TaskFilter::DateRange(next, next)));
     }
 
     #[test]

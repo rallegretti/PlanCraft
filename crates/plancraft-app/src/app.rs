@@ -893,12 +893,20 @@ impl PlanCraftApp {
         }
     }
 
-    /// Writes `table` of the plan `handle` with these `columns` to a file the person picks.
-    fn export_csv(&mut self, handle: u64, table: plancraft_core::tabular::CsvTable, columns: &[String]) {
+    /// Writes `table` of the plan `handle` with the columns ticked (every heading, in order) to a
+    /// file the person picks.
+    fn export_csv(&mut self, handle: u64, table: plancraft_core::tabular::CsvTable, columns: &[(String, bool)]) {
         let made = {
             let ws = lock(&self.ws);
             let Some(doc) = ws.index_of(handle).and_then(|i| ws.docs.get(i)) else { return };
-            plancraft_core::tabular::table_to_csv_columns(&doc.project, table, columns).map(|csv| (doc.project.name.clone(), csv))
+            let p = &doc.project;
+            let same = plancraft_core::tabular::table_columns(p, table).iter().eq(columns.iter().map(|(h, _)| h));
+            let keep: Vec<bool> = columns.iter().map(|(_, on)| *on).collect();
+            if same {
+                plancraft_core::tabular::table_to_csv_kept(p, table, &keep).map(|csv| (p.name.clone(), csv))
+            } else {
+                Err("the plan's columns changed meanwhile: choose them again".to_string())
+            }
         };
         let (name, csv) = match made {
             Ok(m) => m,
@@ -1612,6 +1620,12 @@ impl PlanCraftApp {
         let doc = ws.active_doc();
         // Sort/group choices: the table's columns, then custom fields not shown.
         let fields = doc.map(|d| crate::fields::sort_choices(&d.project, self.st.table)).unwrap_or_default();
+        let sort = doc
+            .map(|d| {
+                let p = &d.project;
+                self.st.sort.iter().filter_map(|(k, desc)| crate::fields::Field::from_key(p, k).map(|f| (f.title(p), *desc))).collect()
+            })
+            .unwrap_or_default();
         MenuInfo {
             has_doc: doc.is_some(),
             title: doc.map(|d| d.title()).unwrap_or_default(),
@@ -1624,6 +1638,7 @@ impl PlanCraftApp {
             mcp_url: self.mcp.url(),
             history_open: self.dialogs.history,
             fields,
+            sort,
         }
     }
 
@@ -2882,10 +2897,11 @@ impl PlanCraftApp {
             dialogs::show_bound(&mut self.dialogs.set_baseline, &mut ws, |d, doc| d.show(&ctx, doc, st));
             dialogs::show_bound(&mut self.dialogs.clear_baseline, &mut ws, |d, doc| d.show(&ctx, doc, st));
             dialogs::show_bound(&mut self.dialogs.recurring, &mut ws, |d, doc| d.show(&ctx, doc, st));
-            dialogs::show_bound(&mut self.dialogs.find, &mut ws, |d, doc| d.show(&ctx, doc, st));
-            dialogs::show_bound(&mut self.dialogs.goto, &mut ws, |d, doc| d.show(&ctx, doc, st));
-            // Sorts the active plan's views: closes when another plan becomes active.
+            // These follow the active plan's views (its filter, sort and selection): each closes
+            // when another plan becomes active.
             let active = ws.active_doc().map(|d| d.handle);
+            dialogs::show_bound(&mut self.dialogs.find, &mut ws, |d, doc| Some(doc.handle) == active && d.show(&ctx, doc, st));
+            dialogs::show_bound(&mut self.dialogs.goto, &mut ws, |d, doc| Some(doc.handle) == active && d.show(&ctx, doc, st));
             dialogs::show_bound(&mut self.dialogs.sort, &mut ws, |d, doc| Some(doc.handle) == active && d.show(&ctx, doc, st));
             dialogs::show_bound(&mut self.dialogs.filter_ask, &mut ws, |d, doc| Some(doc.handle) == active && d.show(&ctx, doc, st));
             let st = &*st;
@@ -3393,6 +3409,10 @@ mod ui_tests {
         // A filter naming one plan's resource does not carry over to another plan.
         let r = h.state().ws.lock().unwrap().active_doc().unwrap().project.resources[0].id;
         h.state_mut().exec(&ctx, Command::Filter(crate::state::TaskFilter::UsingResource(r)));
+        // Find works on the views of its plan: it closes when another plan becomes active.
+        h.state_mut().exec(&ctx, Command::Find(true));
+        h.run_steps(1);
+        assert!(h.state().dialogs.find.is_some());
         let activate = |h: &mut Harness<'static, PlanCraftApp>, handle: u64| {
             {
                 let mut ws = h.state().ws.lock().unwrap();
@@ -3403,6 +3423,7 @@ mod ui_tests {
         activate(&mut h, b);
         assert_eq!((h.state().st.sort.clone(), h.state().st.group.clone()), (Vec::new(), None), "the other plan starts unsorted");
         assert_eq!(h.state().st.filter, crate::state::TaskFilter::All);
+        assert!(h.state().dialogs.find.is_none(), "Find closed with its plan's views");
         activate(&mut h, a);
         assert_eq!(h.state().st.sort, vec![("start".into(), true)]);
         assert_eq!(h.state().st.group.as_deref(), Some("custom:1"));
